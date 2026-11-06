@@ -72,6 +72,10 @@ jobs:
                 # The release branch no longer carries the Groovy script expected by
                 # this Telegram tree; use its Telegram-compatible Media3 fork branch.
                 git clone --depth 1 --branch telegram-v1.10.1-ffmpeg --recurse-submodules --shallow-submodules "$url" "$path"
+              elif [ "$path" = "TMessagesProj/jni/third_party/absl" ]; then
+                # This WebRTC snapshot uses the Abseil absl::Nonnull template aliases,
+                # removed from newer Abseil releases; keep the compatible 20250127.1 tag.
+                git clone --depth 1 --branch 20250127.1 --recurse-submodules --shallow-submodules "$url" "$path"
               else
                 git clone --depth 1 --recurse-submodules --shallow-submodules "$url" "$path"
               fi
