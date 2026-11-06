@@ -1,0 +1,3 @@
+[submodule "Telegram"]
+	path = Telegram
+	url = https://github.com/DrKLO/Telegram.git
