@@ -6,6 +6,7 @@ on:
     branches: [main]
     paths:
       - ".gitmodules"
+      - "Telegram"
       - ".github/workflows/build-apk.yml"
 
 permissions:
