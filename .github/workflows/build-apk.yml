@@ -154,6 +154,32 @@ jobs:
             cp "$CRYPTO_LIB" "$ABI_DIR/libcrypto.a"
             cp "$SSL_LIB" "$ABI_DIR/libssl.a"
 
+            # The archive's prebuilt TDLib utility objects still call the legacy
+            # OpenSSL SHA256/SHA512 one-shot API. BoringSSL's current API exposes
+            # EVP_Digest instead, so provide tiny ABI-compatible wrappers.
+            cat > "/tmp/waysgram-boringssl-$ABI/legacy_sha.cc" <<'EOF'
+          #include <cstddef>
+          #include <openssl/evp.h>
+          extern "C" __attribute__((visibility("default")))
+          unsigned char *SHA256(const unsigned char *data, size_t len, unsigned char *out) {
+            unsigned int written = 0;
+            if (EVP_Digest(data, len, out, &written, EVP_sha256(), nullptr) != 1 || written != 32) return nullptr;
+            return out;
+          }
+          extern "C" __attribute__((visibility("default")))
+          unsigned char *SHA512(const unsigned char *data, size_t len, unsigned char *out) {
+            unsigned int written = 0;
+            if (EVP_Digest(data, len, out, &written, EVP_sha512(), nullptr) != 1 || written != 64) return nullptr;
+            return out;
+          }
+          EOF
+            "$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/clang++" \
+              --target="$([ "$ABI" = "arm64-v8a" ] && echo aarch64 || ([ "$ABI" = "armeabi-v7a" ] && echo armv7a || ([ "$ABI" = "x86" ] && echo i686 || echo x86_64)))-none-linux-android23" \
+              --sysroot="$NDK/toolchains/llvm/prebuilt/linux-x86_64/sysroot" \
+              -fPIC -I"$BORING/include" -c "/tmp/waysgram-boringssl-$ABI/legacy_sha.cc" \
+              -o "/tmp/waysgram-boringssl-$ABI/legacy_sha.o"
+            "$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ar" rcs "$ABI_DIR/libcrypto.a" "/tmp/waysgram-boringssl-$ABI/legacy_sha.o"
+
             PRISMA_BUILD="/tmp/waysgram-prisma-$ABI"
             cmake -S /tmp/waysgram-prisma-wrapper -B "$PRISMA_BUILD" -G Ninja               -DCMAKE_TOOLCHAIN_FILE="$NDK/build/cmake/android.toolchain.cmake"               -DANDROID_ABI="$ABI"               -DANDROID_PLATFORM=android-23               -DCMAKE_BUILD_TYPE=Release               -DCMAKE_POSITION_INDEPENDENT_CODE=ON
             cmake --build "$PRISMA_BUILD" --target prisma --parallel 2
