@@ -76,6 +76,9 @@ jobs:
                 # This WebRTC snapshot uses the Abseil absl::Nonnull template aliases,
                 # removed from newer Abseil releases; keep the compatible 20250127.1 tag.
                 git clone --depth 1 --branch 20250127.1 --recurse-submodules --shallow-submodules "$url" "$path"
+              elif [ "$path" = "TMessagesProj/jni/tgcalls" ]; then
+                # Match AndroidInterface to this Telegram tree's bundled WebRTC API.
+                git clone --depth 1 --branch dev/android --recurse-submodules --shallow-submodules "$url" "$path"
               else
                 git clone --depth 1 --recurse-submodules --shallow-submodules "$url" "$path"
               fi
