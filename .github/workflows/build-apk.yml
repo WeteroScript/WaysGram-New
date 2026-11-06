@@ -107,6 +107,65 @@ jobs:
             "ndk;27.2.12479018" \
             "cmake;3.22.1"
 
+      - name: Rebuild native static libraries against source dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          ROOT="$GITHUB_WORKSPACE/TMessagesProj/jni"
+          NDK="$ANDROID_HOME/ndk/27.2.12479018"
+          PREBUILT="$ROOT/prebuild/lib"
+          BORING="$ROOT/third_party/boringssl"
+          BOOST_REGEX="$ROOT/third_party/boost-regex"
+          PRISMA="$ROOT/third_party/libprisma"
+
+          test -d "$BORING"
+          test -d "$BOOST_REGEX"
+          test -f "$PRISMA/CMakeLists.txt"
+          test -d "$PREBUILT"
+
+          mkdir -p /tmp/waysgram-prisma-wrapper
+          cat > /tmp/waysgram-prisma-wrapper/CMakeLists.txt <<EOF
+          cmake_minimum_required(VERSION 3.22)
+          project(WaysGramPrisma LANGUAGES CXX)
+          set(BOOST_REGEX_STANDALONE ON CACHE BOOL "" FORCE)
+          add_subdirectory("$BOOST_REGEX" boost-regex)
+          add_subdirectory("$PRISMA" prisma)
+          EOF
+
+          found_abi=0
+          for ABI_DIR in "$PREBUILT"/*; do
+            [ -d "$ABI_DIR" ] || continue
+            ABI="$(basename "$ABI_DIR")"
+            case "$ABI" in
+              arm64-v8a|armeabi-v7a|x86|x86_64) ;;
+              *) echo "Skipping unsupported prebuilt ABI directory: $ABI"; continue ;;
+            esac
+            found_abi=1
+            echo "::group::Rebuilding BoringSSL and Prisma for $ABI"
+
+            BSSL_BUILD="/tmp/waysgram-boringssl-$ABI"
+            cmake -S "$BORING" -B "$BSSL_BUILD" -G Ninja               -DCMAKE_TOOLCHAIN_FILE="$NDK/build/cmake/android.toolchain.cmake"               -DANDROID_ABI="$ABI"               -DANDROID_PLATFORM=android-23               -DCMAKE_BUILD_TYPE=Release               -DBUILD_TESTING=OFF               -DBUILD_SHARED_LIBS=OFF               -DCMAKE_POSITION_INDEPENDENT_CODE=ON
+            cmake --build "$BSSL_BUILD" --target crypto ssl --parallel 2
+
+            CRYPTO_LIB="$(find "$BSSL_BUILD" -type f -name libcrypto.a -print -quit)"
+            SSL_LIB="$(find "$BSSL_BUILD" -type f -name libssl.a -print -quit)"
+            test -s "$CRYPTO_LIB"
+            test -s "$SSL_LIB"
+            cp "$CRYPTO_LIB" "$ABI_DIR/libcrypto.a"
+            cp "$SSL_LIB" "$ABI_DIR/libssl.a"
+
+            PRISMA_BUILD="/tmp/waysgram-prisma-$ABI"
+            cmake -S /tmp/waysgram-prisma-wrapper -B "$PRISMA_BUILD" -G Ninja               -DCMAKE_TOOLCHAIN_FILE="$NDK/build/cmake/android.toolchain.cmake"               -DANDROID_ABI="$ABI"               -DANDROID_PLATFORM=android-23               -DCMAKE_BUILD_TYPE=Release               -DCMAKE_POSITION_INDEPENDENT_CODE=ON
+            cmake --build "$PRISMA_BUILD" --target prisma --parallel 2
+
+            PRISMA_LIB="$(find "$PRISMA_BUILD" -type f -name libprisma.a -print -quit)"
+            test -s "$PRISMA_LIB"
+            cp "$PRISMA_LIB" "$ABI_DIR/libprisma.a"
+            echo "Updated native libraries for $ABI"
+            echo "::endgroup::"
+          done
+          test "$found_abi" -eq 1
+
       - name: Build release APK
         run: |
           chmod +x gradlew
