@@ -5,6 +5,7 @@ on:
   push:
     branches: [main]
     paths:
+      - "Telegram-master.part*"
       - ".gitmodules"
       - "gradlew"
       - "settings.gradle"
@@ -35,12 +36,27 @@ jobs:
         with:
           fetch-depth: 1
 
-      - name: Check source snapshot is present
+      - name: Reconstruct and extract uploaded source archive
+        shell: bash
         run: |
-          if [ ! -f gradlew ] || [ ! -f settings.gradle ]; then
-            echo "::error::The Telegram-master source tree has not been imported into the repository root yet."
+          set -euo pipefail
+          cat Telegram-master.part01 Telegram-master.part02 Telegram-master.part03 Telegram-master.part04 Telegram-master.part05 > /tmp/Telegram-master.zip
+          unzip -tq /tmp/Telegram-master.zip
+          mkdir -p /tmp/waysgram-source
+          unzip -q /tmp/Telegram-master.zip -d /tmp/waysgram-source
+          source_dir="/tmp/waysgram-source/Telegram-master"
+          if [ ! -d "$source_dir" ]; then
+            echo "::error::Expected Telegram-master directory was not found in reconstructed archive."
+            find /tmp/waysgram-source -maxdepth 2 -type f | head -50
             exit 1
           fi
+          rsync -a --exclude='.git' --exclude='.github' "$source_dir/" ./
+
+      - name: Check source snapshot is present
+        run: |
+          test -f gradlew
+          test -f settings.gradle
+          test -f TMessagesProj_App/build.gradle
 
       - name: Fetch dependencies listed in the archive .gitmodules
         shell: bash
