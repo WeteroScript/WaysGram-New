@@ -178,7 +178,13 @@ jobs:
               --sysroot="$NDK/toolchains/llvm/prebuilt/linux-x86_64/sysroot" \
               -fPIC -I"$BORING/include" -c "/tmp/waysgram-boringssl-$ABI/legacy_sha.cc" \
               -o "/tmp/waysgram-boringssl-$ABI/legacy_sha.o"
-            "$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ar" rcs "$ABI_DIR/libcrypto.a" "/tmp/waysgram-boringssl-$ABI/legacy_sha.o"
+            # TDLib calls legacy SHA256/SHA512 entry points from libtdutils.a.
+            # Put the compatibility object in that same archive so its unresolved
+            # references are satisfied while the linker scans libtdutils.a.
+            "$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ar" rcs "$ABI_DIR/libtdutils.a" "/tmp/waysgram-boringssl-$ABI/legacy_sha.o"
+            LLVM_NM="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-nm"
+            "$LLVM_NM" --defined-only "$ABI_DIR/libtdutils.a" | grep -Eq " [Tt] SHA256$"
+            "$LLVM_NM" --defined-only "$ABI_DIR/libtdutils.a" | grep -Eq " [Tt] SHA512$"
 
             PRISMA_BUILD="/tmp/waysgram-prisma-$ABI"
             cmake -S /tmp/waysgram-prisma-wrapper -B "$PRISMA_BUILD" -G Ninja               -DCMAKE_TOOLCHAIN_FILE="$NDK/build/cmake/android.toolchain.cmake"               -DANDROID_ABI="$ABI"               -DANDROID_PLATFORM=android-23               -DCMAKE_BUILD_TYPE=Release               -DCMAKE_POSITION_INDEPENDENT_CODE=ON
