@@ -6,7 +6,18 @@ on:
     branches: [main]
     paths:
       - ".gitmodules"
-      - "Telegram"
+      - "gradlew"
+      - "settings.gradle"
+      - "build.gradle"
+      - "gradle.properties"
+      - "TMessagesProj/**"
+      - "TMessagesProj_App/**"
+      - "TMessagesProj_AppHuawei/**"
+      - "TMessagesProj_AppStandalone/**"
+      - "TMessagesProj_AppHockeyApp/**"
+      - "TMessagesProj_AppTests/**"
+      - "TMessagesProj_Modules/**"
+      - "buildSrc/**"
       - ".github/workflows/build-apk.yml"
 
 permissions:
@@ -14,31 +25,49 @@ permissions:
 
 jobs:
   build:
-    name: Build universal APK
+    name: Build Afat release APK
     runs-on: ubuntu-latest
     timeout-minutes: 240
 
     steps:
-      - name: Checkout source and recursive submodules
-        uses: actions/checkout@v7
+      - name: Checkout repository
+        uses: actions/checkout@v4
         with:
-          submodules: recursive
           fetch-depth: 1
 
+      - name: Check source snapshot is present
+        run: |
+          if [ ! -f gradlew ] || [ ! -f settings.gradle ]; then
+            echo "::error::The Telegram-master source tree has not been imported into the repository root yet."
+            exit 1
+          fi
+
+      - name: Fetch dependencies listed in the archive .gitmodules
+        shell: bash
+        run: |
+          while read -r key path; do
+            name="${key#submodule.}"
+            name="${name%.path}"
+            url="$(git config -f .gitmodules --get "submodule.${name}.url")"
+            mkdir -p "$(dirname "$path")"
+            if [ ! -d "$path/.git" ]; then
+              git clone --depth 1 --recurse-submodules --shallow-submodules "$url" "$path"
+            fi
+          done < <(git config -f .gitmodules --get-regexp '^submodule\..*\.path$')
+
       - name: Set up JDK 17
-        uses: actions/setup-java@v6
+        uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: "17"
           cache: gradle
 
       - name: Set up Android SDK
-        uses: android-actions/setup-android@v4
-        with:
-          packages: ""
+        uses: android-actions/setup-android@v3
 
-      - name: Install required Android SDK packages
+      - name: Install Android SDK packages
         run: |
+          yes | sdkmanager --licenses >/dev/null || true
           sdkmanager --install \
             "platforms;android-36" \
             "build-tools;36.0.0" \
@@ -46,7 +75,6 @@ jobs:
             "cmake;3.22.1"
 
       - name: Build release APK
-        working-directory: Telegram
         run: |
           chmod +x gradlew
           ./gradlew --no-daemon --stacktrace --max-workers=2 \
@@ -54,12 +82,12 @@ jobs:
             :TMessagesProj_App:assembleAfatRelease
 
       - name: Verify APK
-        run: test -s Telegram/TMessagesProj_App/build/outputs/apk/afat/release/app.apk
+        run: test -s TMessagesProj_App/build/outputs/apk/afat/release/app.apk
 
       - name: Upload APK artifact
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@v4
         with:
           name: WaysGram-New-APK-${{ github.run_number }}
-          path: Telegram/TMessagesProj_App/build/outputs/apk/afat/release/app.apk
+          path: TMessagesProj_App/build/outputs/apk/afat/release/app.apk
           if-no-files-found: error
           retention-days: 14

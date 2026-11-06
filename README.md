@@ -1,21 +1,29 @@
 # WaysGram-New
 
-Этот репозиторий подключает Android-исходники из архива как Git-подмодуль `Telegram` и запускает сборку APK через GitHub Actions.
+Репозиторий подготовлен для исходного снимка из архива `Telegram-master.zip`.
 
-## Зафиксированный исходный код
+## Структура проекта
 
-Подмодуль `Telegram` закреплён на коммите [DrKLO/Telegram@3de37c8](https://github.com/DrKLO/Telegram/commit/3de37c8cfb039452be7398909461da6288babf15) от 25 октября 2026 года (версия 13.1.1, build 7237). Контрольные файлы архива совпали с файлами этого коммита. Код подмодуля не изменялся. В `WaysGram-New` хранится Git-ссылка на этот коммит, а не дублируются все исходные файлы; при клонировании с `--recurse-submodules` они загружаются из указанного репозитория.
+В архиве Gradle-проект расположен в корне каталога `Telegram-master/`. Основные модули:
+- `:TMessagesProj`
+- `:TMessagesProj_App`
+- `:TMessagesProj_AppHuawei`
+- `:TMessagesProj_AppStandalone`
+- `:TMessagesProj_AppHockeyApp`
+- `:TMessagesProj_AppTests`
 
-Для получения исходников вместе со всеми вложенными подмодулями:
+Архив содержит 14 086 файлов и `.gitmodules` с 19 внешними зависимостями. Каталоги зависимостей в ZIP пустые, поэтому CI должен получать их отдельно.
 
-```bash
-git clone --recurse-submodules https://github.com/WeteroScript/WaysGram-New.git
-```
+**Важно:** настройка репозитория и workflow ещё не означает, что полный снимок исходников уже импортирован. Для сборки файлы проекта должны находиться в корне репозитория рядом с `gradlew` и `settings.gradle`.
 
 ## Сборка APK
 
-Откройте **Actions → Build Android APK → Run workflow**. Сборка использует JDK 17, Android SDK 36, NDK 27.2.12479018 и CMake 3.22.1.
+Используемая по конфигурации проекта задача:
 
-Задача Gradle: `:TMessagesProj_App:assembleAfatRelease`.
+```bash
+./gradlew :TMessagesProj_App:assembleAfatRelease
+```
 
-Готовый APK появится в артефактах успешного запуска workflow. Исходные файлы внутри подмодуля остаются неизменёнными.
+Требуемые версии: JDK 17, Android SDK / Build Tools 36, NDK 27.2.12479018, CMake 3.22.1.
+
+После импорта исходников workflow **Build Android APK** соберёт APK и прикрепит его к запуску Actions как artifact.
