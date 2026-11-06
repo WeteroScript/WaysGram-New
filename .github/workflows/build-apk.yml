@@ -76,7 +76,7 @@ jobs:
                 git clone --depth 1 --recurse-submodules --shallow-submodules "$url" "$path"
               fi
             fi
-          done < <(git config -f .gitmodules --get-regexp '^submodule\..*\.path)
+          done < <(git config -f .gitmodules --get-regexp '^submodule[.].*[.]path')
           test -s TMessagesProj_Modules/media/core_settings.gradle
 
       - name: Set up JDK 17
