@@ -5,7 +5,7 @@ on:
   push:
     branches: [main]
     paths:
-      - "Telegram-master.part*"
+      - "WaysGram-Android.zip.part*"
       - ".gitmodules"
       - "gradlew"
       - "settings.gradle"
@@ -40,10 +40,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          cat Telegram-master.part01 Telegram-master.part02 Telegram-master.part03 Telegram-master.part04 Telegram-master.part05 > /tmp/Telegram-master.zip
-          unzip -tq /tmp/Telegram-master.zip
+          cat WaysGram-Android.zip.part1 WaysGram-Android.zip.part2 WaysGram-Android.zip.part3 WaysGram-Android.zip.part4 WaysGram-Android.zip.part5 > /tmp/WaysGram-Android.zip
+          unzip -tq /tmp/WaysGram-Android.zip
           mkdir -p /tmp/waysgram-source
-          unzip -q /tmp/Telegram-master.zip -d /tmp/waysgram-source
+          unzip -q /tmp/WaysGram-Android.zip -d /tmp/waysgram-source
           source_dir="/tmp/waysgram-source/Telegram-master"
           if [ ! -d "$source_dir" ]; then
             echo "::error::Expected Telegram-master directory was not found in reconstructed archive."
