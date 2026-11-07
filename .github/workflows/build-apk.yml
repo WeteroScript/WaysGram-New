@@ -69,15 +69,10 @@ jobs:
             mkdir -p "$(dirname "$path")"
             if [ ! -d "$path/.git" ]; then
               if [ "$path" = "TMessagesProj_Modules/media" ]; then
-                # The release branch no longer carries the Groovy script expected by
-                # this Telegram tree; use its Telegram-compatible Media3 fork branch.
                 git clone --depth 1 --branch telegram-v1.10.1-ffmpeg --recurse-submodules --shallow-submodules "$url" "$path"
               elif [ "$path" = "TMessagesProj/jni/third_party/absl" ]; then
-                # This WebRTC snapshot uses the Abseil absl::Nonnull template aliases,
-                # removed from newer Abseil releases; keep the compatible 20250127.1 tag.
                 git clone --depth 1 --branch 20250127.1 --recurse-submodules --shallow-submodules "$url" "$path"
               elif [ "$path" = "TMessagesProj/jni/tgcalls" ]; then
-                # Match AndroidInterface to this Telegram tree's bundled WebRTC API.
                 git clone --depth 1 --branch dev/android --recurse-submodules --shallow-submodules "$url" "$path"
               else
                 git clone --depth 1 --recurse-submodules --shallow-submodules "$url" "$path"
@@ -144,7 +139,14 @@ jobs:
             echo "::group::Rebuilding BoringSSL and Prisma for $ABI"
 
             BSSL_BUILD="/tmp/waysgram-boringssl-$ABI"
-            cmake -S "$BORING" -B "$BSSL_BUILD" -G Ninja               -DCMAKE_TOOLCHAIN_FILE="$NDK/build/cmake/android.toolchain.cmake"               -DANDROID_ABI="$ABI"               -DANDROID_PLATFORM=android-23               -DCMAKE_BUILD_TYPE=Release               -DBUILD_TESTING=OFF               -DBUILD_SHARED_LIBS=OFF               -DCMAKE_POSITION_INDEPENDENT_CODE=ON
+            cmake -S "$BORING" -B "$BSSL_BUILD" -G Ninja \
+              -DCMAKE_TOOLCHAIN_FILE="$NDK/build/cmake/android.toolchain.cmake" \
+              -DANDROID_ABI="$ABI" \
+              -DANDROID_PLATFORM=android-23 \
+              -DCMAKE_BUILD_TYPE=Release \
+              -DBUILD_TESTING=OFF \
+              -DBUILD_SHARED_LIBS=OFF \
+              -DCMAKE_POSITION_INDEPENDENT_CODE=ON
             cmake --build "$BSSL_BUILD" --target crypto ssl --parallel 2
 
             CRYPTO_LIB="$(find "$BSSL_BUILD" -type f -name libcrypto.a -print -quit)"
@@ -154,9 +156,6 @@ jobs:
             cp "$CRYPTO_LIB" "$ABI_DIR/libcrypto.a"
             cp "$SSL_LIB" "$ABI_DIR/libssl.a"
 
-            # The archive's prebuilt TDLib utility objects still call the legacy
-            # OpenSSL SHA256/SHA512 one-shot API. BoringSSL's current API exposes
-            # EVP_Digest instead, so provide tiny ABI-compatible wrappers.
             cat > "/tmp/waysgram-boringssl-$ABI/legacy_sha.cc" <<'EOF'
           #include <cstddef>
           #include <openssl/evp.h>
@@ -178,16 +177,18 @@ jobs:
               --sysroot="$NDK/toolchains/llvm/prebuilt/linux-x86_64/sysroot" \
               -fPIC -I"$BORING/include" -c "/tmp/waysgram-boringssl-$ABI/legacy_sha.cc" \
               -o "/tmp/waysgram-boringssl-$ABI/legacy_sha.o"
-            # TDLib calls legacy SHA256/SHA512 entry points from libtdutils.a.
-            # Put the compatibility object in that same archive so its unresolved
-            # references are satisfied while the linker scans libtdutils.a.
             "$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ar" rcs "$ABI_DIR/libtdutils.a" "/tmp/waysgram-boringssl-$ABI/legacy_sha.o"
             LLVM_NM="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-nm"
             "$LLVM_NM" --defined-only "$ABI_DIR/libtdutils.a" | grep -Eq " [Tt] SHA256$"
             "$LLVM_NM" --defined-only "$ABI_DIR/libtdutils.a" | grep -Eq " [Tt] SHA512$"
 
             PRISMA_BUILD="/tmp/waysgram-prisma-$ABI"
-            cmake -S /tmp/waysgram-prisma-wrapper -B "$PRISMA_BUILD" -G Ninja               -DCMAKE_TOOLCHAIN_FILE="$NDK/build/cmake/android.toolchain.cmake"               -DANDROID_ABI="$ABI"               -DANDROID_PLATFORM=android-23               -DCMAKE_BUILD_TYPE=Release               -DCMAKE_POSITION_INDEPENDENT_CODE=ON
+            cmake -S /tmp/waysgram-prisma-wrapper -B "$PRISMA_BUILD" -G Ninja \
+              -DCMAKE_TOOLCHAIN_FILE="$NDK/build/cmake/android.toolchain.cmake" \
+              -DANDROID_ABI="$ABI" \
+              -DANDROID_PLATFORM=android-23 \
+              -DCMAKE_BUILD_TYPE=Release \
+              -DCMAKE_POSITION_INDEPENDENT_CODE=ON
             cmake --build "$PRISMA_BUILD" --target prisma --parallel 2
 
             PRISMA_LIB="$(find "$PRISMA_BUILD" -type f -name libprisma.a -print -quit)"
@@ -197,6 +198,19 @@ jobs:
             echo "::endgroup::"
           done
           test "$found_abi" -eq 1
+
+      - name: Configure Firebase
+        env:
+          FIREBASE_CONFIG: ${{ secrets.FIREBASE_CONFIG }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -z "${FIREBASE_CONFIG:-}" ]; then
+            echo "::error::Add the FIREBASE_CONFIG repository secret containing the complete google-services.json file."
+            exit 1
+          fi
+          printf '%s' "$FIREBASE_CONFIG" > TMessagesProj_App/google-services.json
+          python3 -c 'import json; d=json.load(open("TMessagesProj_App/google-services.json")); clients=d.get("client", []); assert any(c.get("client_info", {}).get("android_client_info", {}).get("package_name") == "org.waysgram.messenger" for c in clients), "Firebase package name mismatch"'
 
       - name: Build release APK
         run: |
