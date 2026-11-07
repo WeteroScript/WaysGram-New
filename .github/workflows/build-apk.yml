@@ -44,9 +44,9 @@ jobs:
           unzip -tq /tmp/WaysGram-Android.zip
           mkdir -p /tmp/waysgram-source
           unzip -q /tmp/WaysGram-Android.zip -d /tmp/waysgram-source
-          source_dir="/tmp/waysgram-source/Telegram-master"
+          source_dir="/tmp/waysgram-source/WaysGram-Android"
           if [ ! -d "$source_dir" ]; then
-            echo "::error::Expected Telegram-master directory was not found in reconstructed archive."
+            echo "::error::Expected WaysGram-Android directory was not found in reconstructed archive."
             find /tmp/waysgram-source -maxdepth 2 -type f | head -50
             exit 1
           fi
