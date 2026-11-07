@@ -58,6 +58,22 @@ jobs:
           test -f settings.gradle
           test -f TMessagesProj_App/build.gradle
 
+      - name: Apply Java type compatibility fix
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          path = Path("TMessagesProj/src/main/java/org/telegram/tgnet/WaysGramMapper.java")
+          source = path.read_text()
+          old = "message.id = id;"
+          new = "message.id = Math.toIntExact(id);"
+          if source.count(old) != 1:
+              raise SystemExit("Expected exactly one WaysGramMapper assignment to patch")
+          path.write_text(source.replace(old, new, 1))
+          PY
+          grep -Fq 'message.id = Math.toIntExact(id);' TMessagesProj/src/main/java/org/telegram/tgnet/WaysGramMapper.java
+
       - name: Fetch dependencies listed in the archive .gitmodules
         shell: bash
         run: |
