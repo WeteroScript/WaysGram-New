@@ -229,3 +229,5 @@ jobs:
           path: TMessagesProj_App/build/outputs/apk/afat/release/app.apk
           if-no-files-found: error
           retention-days: 14
+
+# Trigger a fresh build after Firebase configuration was added.
