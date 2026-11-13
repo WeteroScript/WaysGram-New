@@ -69,6 +69,7 @@ public final class WaysGramChatFragment extends BaseFragment {
     private static final int REQUEST_SAVE_DOCUMENT = 7103;
     private final long peerId;
     private final String peerTitle;
+    private final boolean savedMessages;
 
     private WaysGramApiClient apiClient;
     private WaysGramCloudDraftSync cloudDraftSync;
@@ -113,11 +114,16 @@ public final class WaysGramChatFragment extends BaseFragment {
     private String pendingSaveMediaId;
 
     public WaysGramChatFragment(long peerId, String peerTitle) {
+        this(peerId, peerTitle, false);
+    }
+
+    public WaysGramChatFragment(long peerId, String peerTitle, boolean savedMessages) {
         if (peerId <= 0) {
             throw new IllegalArgumentException("Invalid WaysGram peer ID");
         }
         this.peerId = peerId;
         this.peerTitle = peerTitle == null ? "" : peerTitle;
+        this.savedMessages = savedMessages;
     }
 
     @Override
@@ -186,9 +192,11 @@ public final class WaysGramChatFragment extends BaseFragment {
         messageInput.setText(WaysGramDraftStore.load(context, "dm", peerId));
         cloudDraftSync = new WaysGramCloudDraftSync(context, apiClient, "dm", peerId, messageInput);
         cloudDraftSync.start();
-        typingIndicatorController = new WaysGramTypingIndicatorController(
-                apiClient, "dm", peerId, messageInput, typingView
-        );
+        if (!savedMessages) {
+            typingIndicatorController = new WaysGramTypingIndicatorController(
+                    apiClient, "dm", peerId, messageInput, typingView
+            );
+        }
         composer.addView(messageInput, new LinearLayout.LayoutParams(
                 0,
                 ViewGroup.LayoutParams.WRAP_CONTENT,
