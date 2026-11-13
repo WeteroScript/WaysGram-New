@@ -1,6 +1,7 @@
 package org.telegram.messenger.waysgram;
 
 import android.app.Activity;
+import android.app.AlertDialog;
 import android.content.ContentResolver;
 import android.content.Intent;
 import android.graphics.Bitmap;
@@ -235,6 +236,7 @@ public final class WaysGramSharedMediaFragment extends BaseFragment {
                 @Override
                 public void onSuccess(Bitmap bitmap) {
                     image.setImageBitmap(bitmap);
+                    image.setOnClickListener(view -> showImagePreview(bitmap));
                 }
 
                 @Override
@@ -242,7 +244,11 @@ public final class WaysGramSharedMediaFragment extends BaseFragment {
                     image.setContentDescription("Изображение недоступно");
                 }
             });
-            image.setOnClickListener(view -> saveMedia(mediaId, name, mediaType));
+            Button saveImage = new Button(getParentActivity());
+            saveImage.setAllCaps(false);
+            saveImage.setText("Сохранить изображение");
+            card.addView(saveImage, matchWrap());
+            saveImage.setOnClickListener(view -> saveMedia(mediaId, name, mediaType));
         } else {
             Button download = new Button(getParentActivity());
             download.setAllCaps(false);
@@ -254,6 +260,22 @@ public final class WaysGramSharedMediaFragment extends BaseFragment {
         LinearLayout.LayoutParams cardParams = matchWrap();
         cardParams.bottomMargin = AndroidUtilities.dp(6);
         mediaList.addView(card, cardParams);
+    }
+
+    private void showImagePreview(Bitmap bitmap) {
+        if (getParentActivity() == null || bitmap == null) {
+            return;
+        }
+        ImageView preview = new ImageView(getParentActivity());
+        preview.setImageBitmap(bitmap);
+        preview.setAdjustViewBounds(true);
+        preview.setScaleType(ImageView.ScaleType.FIT_CENTER);
+        preview.setMaxWidth(AndroidUtilities.dp(360));
+        preview.setMaxHeight(AndroidUtilities.dp(520));
+        new AlertDialog.Builder(getParentActivity())
+                .setView(preview)
+                .setPositiveButton("Закрыть", null)
+                .show();
     }
 
     private String formatDate(long timestamp) {
