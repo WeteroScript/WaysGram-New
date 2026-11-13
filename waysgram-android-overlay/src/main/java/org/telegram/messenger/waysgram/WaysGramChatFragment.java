@@ -29,6 +29,7 @@ import org.telegram.ui.ActionBar.BaseFragment;
 import org.telegram.ui.ActionBar.Theme;
 
 import java.text.DateFormat;
+import java.util.ArrayList;
 import java.util.Date;
 import java.util.HashMap;
 import java.util.Iterator;
@@ -47,6 +48,8 @@ public final class WaysGramChatFragment extends BaseFragment {
     private WaysGramCloudDraftSync cloudDraftSync;
     private WaysGramTypingIndicatorController typingIndicatorController;
     private LinearLayout messagesContainer;
+    private ScrollView messageScrollView;
+    private Button loadOlderButton;
     private EditText messageInput;
     private Button sendButton;
     private TextView statusView;
@@ -61,6 +64,8 @@ public final class WaysGramChatFragment extends BaseFragment {
         }
     };
     private long lastMessageId = 0;
+    private long oldestMessageId = 0;
+    private boolean historyLoading = false;
     private long peerReadMessageId = 0;
     private final Map<String, String> forwardIdempotencyKeys = new HashMap<>();
     private boolean pollInFlight = false;
@@ -118,14 +123,24 @@ public final class WaysGramChatFragment extends BaseFragment {
                 ViewGroup.LayoutParams.WRAP_CONTENT
         ));
 
-        ScrollView scroll = new ScrollView(context);
-        messagesContainer = new LinearLayout(context);
-        messagesContainer.setOrientation(LinearLayout.VERTICAL);
-        scroll.addView(messagesContainer, new ScrollView.LayoutParams(
+        loadOlderButton = new Button(context);
+        loadOlderButton.setText("Загрузить предыдущие сообщения");
+        loadOlderButton.setAllCaps(false);
+        loadOlderButton.setVisibility(View.GONE);
+        root.addView(loadOlderButton, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT
         ));
-        root.addView(scroll, new LinearLayout.LayoutParams(
+        loadOlderButton.setOnClickListener(view -> loadOlderMessages());
+
+        messageScrollView = new ScrollView(context);
+        messagesContainer = new LinearLayout(context);
+        messagesContainer.setOrientation(LinearLayout.VERTICAL);
+        messageScrollView.addView(messagesContainer, new ScrollView.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+        ));
+        root.addView(messageScrollView, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 0,
                 1
@@ -425,6 +440,12 @@ public final class WaysGramChatFragment extends BaseFragment {
                     }
                 }
                 lastMessageId = newestId;
+                oldestMessageId = response.optLong("next_before_id", 0);
+                if (loadOlderButton != null) {
+                    loadOlderButton.setVisibility(count >= 100 && oldestMessageId > 0
+                            ? View.VISIBLE : View.GONE);
+                    loadOlderButton.setEnabled(true);
+                }
                 statusView.setText(count == 0 ? "История пока пуста" : "Сообщений: " + count);
                 markMessagesRead();
                 scheduleNextPoll();
@@ -441,6 +462,81 @@ public final class WaysGramChatFragment extends BaseFragment {
                 }
             }
         });
+    }
+
+    private void loadOlderMessages() {
+        if (apiClient == null || historyLoading || oldestMessageId <= 0
+                || messageScrollView == null || messagesContainer == null) {
+            return;
+        }
+        historyLoading = true;
+        loadOlderButton.setEnabled(false);
+        loadOlderButton.setText("Загружаю…");
+
+        final long beforeId = oldestMessageId;
+        final int oldContentHeight = messagesContainer.getHeight();
+        final int oldScrollY = messageScrollView.getScrollY();
+        apiClient.get("/api/messages?with=" + peerId + "&before_id=" + beforeId,
+                new WaysGramApiClient.Callback() {
+                    @Override
+                    public void onSuccess(JSONObject response) {
+                        historyLoading = false;
+                        JSONArray messages = response.optJSONArray("messages");
+                        int count = messages == null ? 0 : messages.length();
+                        if (count == 0) {
+                            oldestMessageId = 0;
+                            loadOlderButton.setVisibility(View.GONE);
+                            statusView.setText("Более ранних сообщений нет");
+                            loadOlderButton.setEnabled(true);
+                            loadOlderButton.setText("Загрузить предыдущие сообщения");
+                            return;
+                        }
+
+                        int firstNewIndex = messagesContainer.getChildCount();
+                        for (int i = 0; i < count; i++) {
+                            JSONObject message = messages.optJSONObject(i);
+                            if (message != null) {
+                                addMessage(message);
+                            }
+                        }
+
+                        ArrayList<View> olderViews = new ArrayList<>();
+                        while (messagesContainer.getChildCount() > firstNewIndex) {
+                            View child = messagesContainer.getChildAt(firstNewIndex);
+                            messagesContainer.removeViewAt(firstNewIndex);
+                            olderViews.add(child);
+                        }
+                        for (int i = 0; i < olderViews.size(); i++) {
+                            messagesContainer.addView(olderViews.get(i), i);
+                        }
+
+                        oldestMessageId = response.optLong("next_before_id", 0);
+                        loadOlderButton.setVisibility(count >= 100 && oldestMessageId > 0
+                                ? View.VISIBLE : View.GONE);
+                        loadOlderButton.setEnabled(true);
+                        loadOlderButton.setText("Загрузить предыдущие сообщения");
+                        statusView.setText("Загружено предыдущих сообщений: " + count);
+
+                        messageScrollView.post(() -> {
+                            int insertedHeight = Math.max(
+                                    0, messagesContainer.getHeight() - oldContentHeight
+                            );
+                            messageScrollView.scrollTo(0, oldScrollY + insertedHeight);
+                        });
+                    }
+
+                    @Override
+                    public void onError(String message, int statusCode) {
+                        historyLoading = false;
+                        loadOlderButton.setEnabled(true);
+                        loadOlderButton.setText("Загрузить предыдущие сообщения");
+                        statusView.setText(message);
+                        if (statusCode == 401 && getParentActivity() != null) {
+                            WaysGramSessionStore.getInstance(getParentActivity()).clearSession();
+                            presentFragment(new WaysGramLoginFragment(), true);
+                        }
+                    }
+                });
     }
 
     private void markMessagesRead() {
