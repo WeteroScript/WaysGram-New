@@ -11,6 +11,8 @@ import android.content.Intent;
 import android.graphics.Bitmap;
 import android.graphics.drawable.GradientDrawable;
 import android.net.Uri;
+import android.media.AudioAttributes;
+import android.media.MediaPlayer;
 import android.os.Handler;
 import android.os.Looper;
 import android.text.Spannable;
@@ -27,8 +29,10 @@ import android.widget.CheckBox;
 import android.widget.EditText;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
+import android.widget.MediaController;
 import android.widget.ScrollView;
 import android.widget.TextView;
+import android.widget.VideoView;
 
 import com.google.mlkit.nl.languageid.LanguageIdentifier;
 import com.google.mlkit.nl.languageid.LanguageIdentification;
@@ -98,6 +102,8 @@ public final class WaysGramChatFragment extends BaseFragment {
     private final Map<String, String> forwardIdempotencyKeys = new HashMap<>();
     private final Map<String, String> messageIdempotencyKeys = new HashMap<>();
     private final Map<Long, View> messageViews = new HashMap<>();
+    private final ArrayList<MediaPlayer> activeAudioPlayers = new ArrayList<>();
+    private final ArrayList<VideoView> activeVideoViews = new ArrayList<>();
     private long pendingJumpMessageId = 0;
     private boolean pollInFlight = false;
     private boolean eventPollInFlight = false;
@@ -1764,6 +1770,7 @@ public final class WaysGramChatFragment extends BaseFragment {
 
         String mediaId = message.optString("media_id", "");
         String mediaType = message.optString("media_type", "");
+        String mediaName = message.optString("media_name", "Вложение");
         if (mediaId.matches("[a-f0-9]{32}") && mediaType.startsWith("image/")) {
             ImageView image = new ImageView(getParentActivity());
             image.setAdjustViewBounds(true);
@@ -1787,15 +1794,14 @@ public final class WaysGramChatFragment extends BaseFragment {
                     image.setContentDescription("Изображение недоступно");
                 }
             });
+        } else if (mediaId.matches("[a-f0-9]{32}") && mediaType.startsWith("video/")) {
+            addVideoMessage(mediaId, mediaName);
+        } else if (mediaId.matches("[a-f0-9]{32}") && mediaType.startsWith("audio/")) {
+            addAudioMessage(mediaId, mediaName);
         } else if (mediaId.matches("[a-f0-9]{32}") && !mediaType.isEmpty()) {
-            String mediaName = message.optString("media_name", "document");
-            Button fileButton = new Button(getParentActivity());
-            fileButton.setAllCaps(false);
-            fileButton.setText("Сохранить документ: " + mediaName);
-            messagesContainer.addView(fileButton, new LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
-            fileButton.setOnClickListener(view -> saveDocument(mediaId, mediaName, mediaType));
+            addMediaSaveButton(mediaId, mediaName, mediaType);
         }
+
     }
 
     private void showMessageActions(JSONObject message) {
@@ -2386,6 +2392,149 @@ public final class WaysGramChatFragment extends BaseFragment {
         statusView.setText("Ответ отменён");
     }
 
+    private Uri mediaStreamUri(String mediaId) {
+        if (mediaId == null || !mediaId.matches("[a-f0-9]{32}")
+                || getParentActivity() == null) {
+            return null;
+        }
+        WaysGramSessionStore store = WaysGramSessionStore.getInstance(getParentActivity());
+        String baseUrl = store.getApiBaseUrl();
+        if (baseUrl == null || baseUrl.trim().isEmpty()) {
+            return null;
+        }
+        return Uri.parse(baseUrl.replaceAll("/+$", "") + "/api/media/" + mediaId);
+    }
+
+    private Map<String, String> mediaAuthorizationHeaders() {
+        HashMap<String, String> headers = new HashMap<>();
+        if (getParentActivity() != null) {
+            String token = WaysGramSessionStore.getInstance(getParentActivity())
+                    .getWaysGramSessionToken();
+            if (token != null && !token.isEmpty()) {
+                headers.put("Authorization", "Bearer " + token);
+            }
+        }
+        return headers;
+    }
+
+    private void addMediaSaveButton(String mediaId, String mediaName, String mediaType) {
+        Button saveButton = new Button(getParentActivity());
+        saveButton.setAllCaps(false);
+        saveButton.setText("Сохранить файл: " + mediaName);
+        messagesContainer.addView(saveButton, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
+        ));
+        saveButton.setOnClickListener(view -> saveDocument(mediaId, mediaName, mediaType));
+    }
+
+    private void addVideoMessage(String mediaId, String mediaName) {
+        Context context = getParentActivity();
+        Uri uri = mediaStreamUri(mediaId);
+        if (context == null || uri == null) {
+            addMediaSaveButton(mediaId, mediaName, "video/mp4");
+            return;
+        }
+        TextView label = new TextView(context);
+        label.setText("Видео · " + mediaName);
+        label.setTextSize(12);
+        label.setTextColor(Theme.getColor(Theme.key_windowBackgroundWhiteGrayText));
+        messagesContainer.addView(label, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
+        ));
+
+        VideoView videoView = new VideoView(context);
+        videoView.setVideoURI(uri, mediaAuthorizationHeaders());
+        MediaController controller = new MediaController(context);
+        controller.setAnchorView(videoView);
+        videoView.setMediaController(controller);
+        videoView.setOnErrorListener((player, what, extra) -> {
+            statusView.setText("Этот формат видео не поддерживается устройством. Сохраните файл для открытия в другом приложении.");
+            return true;
+        });
+        activeVideoViews.add(videoView);
+        LinearLayout.LayoutParams videoParams = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                AndroidUtilities.dp(210)
+        );
+        videoParams.bottomMargin = AndroidUtilities.dp(5);
+        messagesContainer.addView(videoView, videoParams);
+        addMediaSaveButton(mediaId, mediaName, "video/mp4");
+    }
+
+    private void addAudioMessage(String mediaId, String mediaName) {
+        Context context = getParentActivity();
+        Uri uri = mediaStreamUri(mediaId);
+        if (context == null || uri == null) {
+            addMediaSaveButton(mediaId, mediaName, "audio/mpeg");
+            return;
+        }
+        Button playButton = new Button(context);
+        playButton.setAllCaps(false);
+        playButton.setText("▶ Воспроизвести аудио: " + mediaName);
+        messagesContainer.addView(playButton, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
+        ));
+
+        final MediaPlayer[] playerHolder = new MediaPlayer[1];
+        final boolean[] prepared = {false};
+        playButton.setOnClickListener(view -> {
+            MediaPlayer player = playerHolder[0];
+            if (player == null) {
+                MediaPlayer created = new MediaPlayer();
+                playerHolder[0] = created;
+                activeAudioPlayers.add(created);
+                try {
+                    created.setAudioAttributes(new AudioAttributes.Builder()
+                            .setUsage(AudioAttributes.USAGE_MEDIA)
+                            .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
+                            .build());
+                    created.setDataSource(context, uri, mediaAuthorizationHeaders());
+                    created.setOnPreparedListener(preparedPlayer -> {
+                        prepared[0] = true;
+                        preparedPlayer.start();
+                        playButton.setText("⏸ Пауза: " + mediaName);
+                    });
+                    created.setOnCompletionListener(completedPlayer -> {
+                        completedPlayer.seekTo(0);
+                        playButton.setText("▶ Повторить: " + mediaName);
+                    });
+                    created.setOnErrorListener((errorPlayer, what, extra) -> {
+                        prepared[0] = false;
+                        playButton.setText("Не удалось воспроизвести аудио");
+                        statusView.setText("Формат аудио не поддерживается устройством. Сохраните файл для открытия в другом приложении.");
+                        return true;
+                    });
+                    playButton.setText("Загрузка аудио…");
+                    created.prepareAsync();
+                } catch (Exception exception) {
+                    activeAudioPlayers.remove(created);
+                    try {
+                        created.release();
+                    } catch (Exception ignored) {
+                    }
+                    playerHolder[0] = null;
+                    playButton.setText("Не удалось открыть аудио");
+                }
+                return;
+            }
+            if (!prepared[0]) {
+                return;
+            }
+            try {
+                if (player.isPlaying()) {
+                    player.pause();
+                    playButton.setText("▶ Продолжить: " + mediaName);
+                } else {
+                    player.start();
+                    playButton.setText("⏸ Пауза: " + mediaName);
+                }
+            } catch (IllegalStateException exception) {
+                playButton.setText("Не удалось воспроизвести аудио");
+            }
+        });
+        addMediaSaveButton(mediaId, mediaName, "audio/mpeg");
+    }
+
     private void saveDocument(String mediaId, String mediaName, String mediaType) {
         if (mediaId == null || !mediaId.matches("[a-f0-9]{32}")) {
             statusView.setText("Некорректный ID документа.");
@@ -2547,6 +2696,26 @@ public final class WaysGramChatFragment extends BaseFragment {
     public void onFragmentDestroy() {
         isScreenResumed = false;
         pollHandler.removeCallbacks(pollRunnable);
+        for (VideoView videoView : activeVideoViews) {
+            try {
+                videoView.stopPlayback();
+            } catch (Exception ignored) {
+            }
+        }
+        activeVideoViews.clear();
+        for (MediaPlayer player : activeAudioPlayers) {
+            try {
+                if (player.isPlaying()) {
+                    player.stop();
+                }
+            } catch (Exception ignored) {
+            }
+            try {
+                player.release();
+            } catch (Exception ignored) {
+            }
+        }
+        activeAudioPlayers.clear();
         if (typingIndicatorController != null) {
             typingIndicatorController.close();
             typingIndicatorController = null;
