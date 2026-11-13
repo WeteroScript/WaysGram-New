@@ -119,10 +119,13 @@ public final class WaysGramChatFragment extends BaseFragment {
     };
     private String pendingSaveMediaId;
     private final ArrayList<Uri> pendingAttachments = new ArrayList<>();
+    private final ArrayList<String> pendingAttachmentMediaIds = new ArrayList<>();
     private String pendingAttachmentCaption = "";
     private boolean pendingAttachmentSilent = false;
+    private boolean pendingAttachmentMakeAlbum = false;
     private int pendingAttachmentIndex = 0;
     private int pendingAttachmentSent = 0;
+    private final Map<String, LinearLayout> mediaAlbumContainers = new HashMap<>();
 
     public WaysGramChatFragment(long peerId, String peerTitle) {
         this(peerId, peerTitle, false);
@@ -1132,6 +1135,7 @@ public final class WaysGramChatFragment extends BaseFragment {
                 JSONArray messages = response.optJSONArray("messages");
                 messagesContainer.removeAllViews();
                 messageViews.clear();
+                mediaAlbumContainers.clear();
                 int count = messages == null ? 0 : messages.length();
                 long newestId = lastMessageId;
                 for (int i = 0; i < count; i++) {
@@ -1437,10 +1441,21 @@ public final class WaysGramChatFragment extends BaseFragment {
         }
         pendingAttachments.clear();
         pendingAttachments.addAll(selectedUris);
+        pendingAttachmentMediaIds.clear();
         pendingAttachmentCaption = messageInput.getText() == null
                 ? ""
                 : messageInput.getText().toString().trim();
         pendingAttachmentSilent = isSilentSendEnabled();
+        pendingAttachmentMakeAlbum = selectedUris.size() >= 2 && selectedUris.size() <= 10;
+        if (pendingAttachmentMakeAlbum && getParentActivity() != null) {
+            for (Uri uri : selectedUris) {
+                String type = getParentActivity().getContentResolver().getType(uri);
+                if (type == null || !(type.startsWith("image/") || type.startsWith("video/"))) {
+                    pendingAttachmentMakeAlbum = false;
+                    break;
+                }
+            }
+        }
         pendingAttachmentIndex = 0;
         pendingAttachmentSent = 0;
         setMessageSendInFlight(true);
@@ -1491,6 +1506,18 @@ public final class WaysGramChatFragment extends BaseFragment {
             return;
         }
 
+        if (pendingAttachmentMakeAlbum) {
+            pendingAttachmentMediaIds.add(mediaId);
+            pendingAttachmentSent++;
+            pendingAttachmentIndex++;
+            if (pendingAttachmentIndex >= pendingAttachments.size()) {
+                sendAttachmentAlbum();
+            } else {
+                uploadNextAttachment();
+            }
+            return;
+        }
+
         JSONObject payload = new JSONObject();
         String body = index == 0 ? pendingAttachmentCaption : "";
         if (body.isEmpty() && mimeType != null && mimeType.startsWith("image/")) {
@@ -1526,16 +1553,68 @@ public final class WaysGramChatFragment extends BaseFragment {
         });
     }
 
+    private void sendAttachmentAlbum() {
+        if (pendingAttachmentMediaIds.size() < 2 || pendingAttachmentMediaIds.size() > 10) {
+            failAttachmentBatch("Некорректное количество файлов для альбома.");
+            return;
+        }
+        JSONObject payload = new JSONObject();
+        try {
+            payload.put("recipient_id", peerId);
+            payload.put("body", pendingAttachmentCaption);
+            payload.put("silent", pendingAttachmentSilent);
+            JSONArray mediaIds = new JSONArray();
+            for (String mediaId : pendingAttachmentMediaIds) {
+                mediaIds.put(mediaId);
+            }
+            payload.put("media_ids", mediaIds);
+        } catch (Exception exception) {
+            failAttachmentBatch("Не удалось подготовить медиаальбом к отправке.");
+            return;
+        }
+
+        String requestFingerprint = payload.toString();
+        String idempotencyKey = messageIdempotencyKey(requestFingerprint);
+        statusView.setText("Отправляю альбом из " + pendingAttachmentMediaIds.size() + " файлов…");
+        apiClient.post("/api/messages/album", payload, idempotencyKey,
+                new WaysGramApiClient.Callback() {
+                    @Override
+                    public void onSuccess(JSONObject response) {
+                        messageIdempotencyKeys.remove(requestFingerprint);
+                        int sentCount = pendingAttachmentMediaIds.size();
+                        resetAttachmentBatchState();
+                        setMessageSendInFlight(false);
+                        clearChatDraft();
+                        resetSilentSendMode();
+                        replyToMessageId = 0;
+                        statusView.setOnClickListener(null);
+                        statusView.setText("Медиаальбом отправлен · " + sentCount + " файлов");
+                        loadMessages();
+                    }
+
+                    @Override
+                    public void onError(String message, int statusCode) {
+                        failAttachmentBatch(message);
+                    }
+                });
+    }
+
+    private void resetAttachmentBatchState() {
+        pendingAttachments.clear();
+        pendingAttachmentMediaIds.clear();
+        pendingAttachmentCaption = "";
+        pendingAttachmentSilent = false;
+        pendingAttachmentMakeAlbum = false;
+        pendingAttachmentIndex = 0;
+        pendingAttachmentSent = 0;
+    }
+
     private void finishAttachmentBatch() {
         int sentCount = pendingAttachmentSent;
         String sentCaption = pendingAttachmentCaption;
         boolean canClearDraft = messageInput == null || messageInput.getText() == null
                 || messageInput.getText().toString().trim().equals(sentCaption);
-        pendingAttachments.clear();
-        pendingAttachmentCaption = "";
-        pendingAttachmentSilent = false;
-        pendingAttachmentIndex = 0;
-        pendingAttachmentSent = 0;
+        resetAttachmentBatchState();
         setMessageSendInFlight(false);
         if (canClearDraft) {
             clearChatDraft();
@@ -1550,11 +1629,7 @@ public final class WaysGramChatFragment extends BaseFragment {
     private void failAttachmentBatch(String message) {
         int sentCount = pendingAttachmentSent;
         int totalCount = pendingAttachments.size();
-        pendingAttachments.clear();
-        pendingAttachmentCaption = "";
-        pendingAttachmentSilent = false;
-        pendingAttachmentIndex = 0;
-        pendingAttachmentSent = 0;
+        resetAttachmentBatchState();
         setMessageSendInFlight(false);
         if (sentCount > 0) {
             statusView.setText("Отправлено " + sentCount + " из " + totalCount
@@ -1725,6 +1800,37 @@ public final class WaysGramChatFragment extends BaseFragment {
     }
 
     private void addMessage(JSONObject message) {
+        String albumId = message.optString("media_album_id", "");
+        boolean isAlbum = albumId.matches("[a-f0-9]{32}");
+        LinearLayout messageTarget = messagesContainer;
+        if (isAlbum) {
+            messageTarget = mediaAlbumContainers.get(albumId);
+            if (messageTarget == null) {
+                messageTarget = new LinearLayout(getParentActivity());
+                messageTarget.setOrientation(LinearLayout.VERTICAL);
+                messageTarget.setPadding(AndroidUtilities.dp(8), AndroidUtilities.dp(8),
+                        AndroidUtilities.dp(8), AndroidUtilities.dp(8));
+                GradientDrawable albumBackground = new GradientDrawable();
+                albumBackground.setColor(Theme.getColor(Theme.key_windowBackgroundWhite));
+                albumBackground.setCornerRadius(AndroidUtilities.dp(14));
+                messageTarget.setBackground(albumBackground);
+                TextView albumLabel = new TextView(getParentActivity());
+                albumLabel.setText("Медиаальбом · " + message.optInt("media_album_count", 0) + " файлов");
+                albumLabel.setTextSize(11);
+                albumLabel.setTextColor(Theme.getColor(Theme.key_windowBackgroundWhiteGrayText));
+                messageTarget.addView(albumLabel, new LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
+                ));
+                LinearLayout.LayoutParams albumParams = new LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
+                );
+                albumParams.bottomMargin = AndroidUtilities.dp(8);
+                messagesContainer.addView(messageTarget, albumParams);
+                mediaAlbumContainers.put(albumId, messageTarget);
+            }
+        }
+        boolean showMessageHeader = !isAlbum
+                || message.optInt("media_album_index", 0) == 0;
         TextView row = new TextView(getParentActivity());
         long sender = message.optLong("sender_id", 0);
         long recipient = message.optLong("recipient_id", 0);
@@ -1823,9 +1929,11 @@ public final class WaysGramChatFragment extends BaseFragment {
                 ViewGroup.LayoutParams.WRAP_CONTENT
         );
         params.bottomMargin = AndroidUtilities.dp(4);
-        messagesContainer.addView(row, params);
+        if (showMessageHeader) {
+            messageTarget.addView(row, params);
+        }
         if (messageId > 0) {
-            messageViews.put(messageId, row);
+            messageViews.put(messageId, isAlbum ? messageTarget : row);
         }
 
         String giftSerial = message.optString("gift_serial_number", "");
@@ -1901,7 +2009,7 @@ public final class WaysGramChatFragment extends BaseFragment {
                     ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
             );
             giftParams.bottomMargin = AndroidUtilities.dp(8);
-            messagesContainer.addView(giftCard, giftParams);
+            messageTarget.addView(giftCard, giftParams);
         }
 
         String mediaId = message.optString("media_id", "");
@@ -1918,7 +2026,7 @@ public final class WaysGramChatFragment extends BaseFragment {
                     ViewGroup.LayoutParams.WRAP_CONTENT
             );
             imageParams.bottomMargin = AndroidUtilities.dp(8);
-            messagesContainer.addView(image, imageParams);
+            messageTarget.addView(image, imageParams);
             apiClient.downloadImage(mediaId, new WaysGramApiClient.ImageCallback() {
                 @Override
                 public void onSuccess(Bitmap bitmap) {
@@ -1931,11 +2039,11 @@ public final class WaysGramChatFragment extends BaseFragment {
                     image.setContentDescription("Изображение недоступно");
                 }
             });
-            addMediaSaveButton(mediaId, mediaName, mediaType);
+            addMediaSaveButton(messageTarget, mediaId, mediaName, mediaType);
         } else if (mediaId.matches("[a-f0-9]{32}") && mediaType.startsWith("video/")) {
-            addVideoMessage(mediaId, mediaName, mediaType);
+            addVideoMessage(messageTarget, mediaId, mediaName, mediaType);
         } else if (mediaId.matches("[a-f0-9]{32}") && mediaType.startsWith("audio/")) {
-            addAudioMessage(mediaId, mediaName, mediaType);
+            addAudioMessage(messageTarget, mediaId, mediaName, mediaType);
         } else if (mediaId.matches("[a-f0-9]{32}") && !mediaType.isEmpty()) {
             addMediaSaveButton(mediaId, mediaName, mediaType);
         }
@@ -2572,21 +2680,21 @@ public final class WaysGramChatFragment extends BaseFragment {
         return headers;
     }
 
-    private void addMediaSaveButton(String mediaId, String mediaName, String mediaType) {
+    private void addMediaSaveButton(LinearLayout target, String mediaId, String mediaName, String mediaType) {
         Button saveButton = new Button(getParentActivity());
         saveButton.setAllCaps(false);
         saveButton.setText("Сохранить файл: " + mediaName);
-        messagesContainer.addView(saveButton, new LinearLayout.LayoutParams(
+        target.addView(saveButton, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
         ));
         saveButton.setOnClickListener(view -> saveDocument(mediaId, mediaName, mediaType));
     }
 
-    private void addVideoMessage(String mediaId, String mediaName, String mediaType) {
+    private void addVideoMessage(LinearLayout target, String mediaId, String mediaName, String mediaType) {
         Context context = getParentActivity();
         Uri uri = mediaStreamUri(mediaId);
         if (context == null || uri == null) {
-            addMediaSaveButton(mediaId, mediaName, mediaType);
+            addMediaSaveButton(target, mediaId, mediaName, mediaType);
             return;
         }
         TextView label = new TextView(context);
@@ -2616,7 +2724,7 @@ public final class WaysGramChatFragment extends BaseFragment {
         addMediaSaveButton(mediaId, mediaName, mediaType);
     }
 
-    private void addAudioMessage(String mediaId, String mediaName, String mediaType) {
+    private void addAudioMessage(LinearLayout target, String mediaId, String mediaName, String mediaType) {
         Context context = getParentActivity();
         Uri uri = mediaStreamUri(mediaId);
         if (context == null || uri == null) {
