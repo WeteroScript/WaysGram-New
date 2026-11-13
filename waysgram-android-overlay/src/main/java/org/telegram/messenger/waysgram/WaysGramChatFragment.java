@@ -1993,11 +1993,18 @@ public final class WaysGramChatFragment extends BaseFragment {
                     ).format(new Date(upgradedAt * 1000L));
                     giftInfo.append("\nДата улучшения: ").append(upgradedAtText);
                 }
+                JSONObject collectibleTraits = giftAttributes.optJSONObject("collectible_traits");
+                if (collectibleTraits != null) {
+                    giftInfo.append("\nРедкость: ").append(collectibleTraits.optString("rarity", "—"));
+                    giftInfo.append("\nМодель: ").append(collectibleTraits.optString("model", "—"));
+                    giftInfo.append("\nСимвол: ").append(collectibleTraits.optString("symbol", "—"));
+                    giftInfo.append("\nФон: ").append(collectibleTraits.optString("backdrop", "—"));
+                }
                 Iterator<String> attributeKeys = giftAttributes.keys();
                 while (attributeKeys.hasNext()) {
                     String key = attributeKeys.next();
                     if ("upgrade_level".equals(key) || "last_upgraded_at".equals(key)
-                            || "upgrade_source".equals(key)) {
+                            || "upgrade_source".equals(key) || "collectible_traits".equals(key)) {
                         continue;
                     }
                     Object value = giftAttributes.opt(key);
