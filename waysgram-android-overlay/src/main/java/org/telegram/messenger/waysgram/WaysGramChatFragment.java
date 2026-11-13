@@ -1894,7 +1894,7 @@ public final class WaysGramChatFragment extends BaseFragment {
                         body = body.substring(0, 160) + "…";
                     }
                     labels[i] = "#" + messageId + " · " + author
-                            + (body.isEmpty() ? "" : "\\n" + body);
+                            + (body.isEmpty() ? "" : "\n" + body);
                 }
                 statusView.setText("Закреплённых сообщений: " + count);
                 new AlertDialog.Builder(getParentActivity())
