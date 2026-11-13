@@ -326,6 +326,52 @@ def configure_debug_application_id_suffix(android_root: Path) -> None:
     build_file.write_text(content, encoding="utf-8")
 
 
+def configure_mlkit_translation_dependencies(android_root: Path) -> None:
+    """Add ML Kit language detection and translation to the module compiling WaysGram chat."""
+    build_file = android_root / "TMessagesProj/build.gradle"
+    if not build_file.is_file():
+        raise FileNotFoundError(f"Telegram project Gradle file not found: {build_file}")
+
+    content = build_file.read_text(encoding="utf-8")
+    dependency_lines = (
+        "    implementation 'com.google.mlkit:language-id:17.0.6'",
+        "    implementation 'com.google.mlkit:translate:17.0.3'",
+    )
+    if all(line in content for line in dependency_lines):
+        return
+
+    block = re.search(r"(?m)^dependencies\\s*\\{", content)
+    if block is None:
+        raise ValueError("TMessagesProj/build.gradle has no dependencies block")
+
+    opening = content.find("{", block.start())
+    depth = 0
+    closing = -1
+    for index in range(opening, len(content)):
+        character = content[index]
+        if character == "{":
+            depth += 1
+        elif character == "}":
+            depth -= 1
+            if depth == 0:
+                closing = index
+                break
+    if closing < 0:
+        raise ValueError("TMessagesProj/build.gradle dependencies block is unbalanced")
+
+    dependencies_block = content[opening:closing + 1]
+    missing = [line for line in dependency_lines if line.split(":")[1] not in dependencies_block]
+    if missing:
+        insertion = "\\n" + "\\n".join(missing) + "\\n"
+        content = content[:closing] + insertion + content[closing:]
+        build_file.write_text(content, encoding="utf-8")
+
+    updated = build_file.read_text(encoding="utf-8")
+    for line in dependency_lines:
+        if line not in updated:
+            raise ValueError(f"Failed to add ML Kit dependency: {line}")
+
+
 def configure_android_root(android_root: Path) -> None:
     if not (android_root / "gradlew").is_file():
         raise FileNotFoundError(f"Android Gradle wrapper not found in {android_root}")
@@ -340,6 +386,7 @@ def configure_android_root(android_root: Path) -> None:
     )
     gradle_properties.write_text(content, encoding="utf-8")
     configure_debug_application_id_suffix(android_root)
+    configure_mlkit_translation_dependencies(android_root)
     configure_default_api_base_url(android_root)
     firebase_configured = configure_waysgram_firebase(android_root)
     patch_string_resources(android_root)
