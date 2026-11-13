@@ -233,6 +233,15 @@ public final class WaysGramChatFragment extends BaseFragment {
         mediaButton.setOnClickListener(view ->
                 presentFragment(new WaysGramSharedMediaFragment("dm", peerId, peerTitle), false));
 
+        Button exportButton = new Button(context);
+        exportButton.setText("Экспорт переписки");
+        exportButton.setAllCaps(false);
+        root.addView(exportButton, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+        ));
+        exportButton.setOnClickListener(view -> exportChatHistory());
+
         Button pinnedButton = new Button(context);
         pinnedButton.setText("Закреплённые сообщения");
         pinnedButton.setAllCaps(false);
@@ -254,6 +263,53 @@ public final class WaysGramChatFragment extends BaseFragment {
         fragmentView = root;
         initializeMessageEventCursor();
         return root;
+    }
+
+    private void exportChatHistory() {
+        if (apiClient == null || getParentActivity() == null) {
+            return;
+        }
+        statusView.setText("Подготавливаю экспорт переписки…");
+        apiClient.get("/api/messages/export?with=" + peerId,
+                new WaysGramApiClient.Callback() {
+                    @Override
+                    public void onSuccess(JSONObject response) {
+                        String exportedText = response.optString("text", "");
+                        if (exportedText.isEmpty()) {
+                            statusView.setText("В переписке нет сообщений для экспорта.");
+                            return;
+                        }
+                        Intent shareIntent = new Intent(Intent.ACTION_SEND);
+                        shareIntent.setType("text/plain");
+                        shareIntent.putExtra(
+                                Intent.EXTRA_SUBJECT,
+                                "WaysGram — " + peerTitle
+                        );
+                        shareIntent.putExtra(Intent.EXTRA_TEXT, exportedText);
+                        try {
+                            getParentActivity().startActivity(
+                                    Intent.createChooser(shareIntent, "Экспорт переписки")
+                            );
+                            String suffix = response.optBoolean("truncated")
+                                    ? " Экспорт ограничен последними сообщениями."
+                                    : "";
+                            statusView.setText(
+                                    "Подготовлено сообщений: " + response.optInt("count", 0) + "." + suffix
+                            );
+                        } catch (Exception exception) {
+                            statusView.setText("Не удалось открыть меню отправки экспорта.");
+                        }
+                    }
+
+                    @Override
+                    public void onError(String message, int statusCode) {
+                        statusView.setText(message);
+                        if (statusCode == 401 && getParentActivity() != null) {
+                            WaysGramSessionStore.getInstance(getParentActivity()).clearSession();
+                            presentFragment(new WaysGramLoginFragment(), true);
+                        }
+                    }
+                });
     }
 
     private void showMessageSearchDialog() {
