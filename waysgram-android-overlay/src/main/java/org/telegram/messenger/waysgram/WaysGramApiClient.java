@@ -32,6 +32,7 @@ public final class WaysGramApiClient implements AutoCloseable {
     private static final int READ_TIMEOUT_MS = 30000;
     private static final int MAX_RESPONSE_BYTES = 2 * 1024 * 1024;
     private static final int MAX_IMAGE_BYTES = 10 * 1024 * 1024;
+    private static final int MAX_IMAGE_DOWNLOAD_BYTES = 25 * 1024 * 1024;
     private static final int MAX_DOCUMENT_BYTES = 25 * 1024 * 1024;
 
     public interface Callback {
@@ -446,7 +447,7 @@ public final class WaysGramApiClient implements AutoCloseable {
                 JSONObject errorJson = parseJsonResponse(errorBytes);
                 throw new ApiException(status, safeApiMessage(errorJson, status));
             }
-            byte[] bytes = readLimited(connection.getInputStream(), MAX_IMAGE_BYTES);
+            byte[] bytes = readLimited(connection.getInputStream(), MAX_IMAGE_DOWNLOAD_BYTES);
             BitmapFactory.Options bounds = new BitmapFactory.Options();
             bounds.inJustDecodeBounds = true;
             BitmapFactory.decodeByteArray(bytes, 0, bytes.length, bounds);
