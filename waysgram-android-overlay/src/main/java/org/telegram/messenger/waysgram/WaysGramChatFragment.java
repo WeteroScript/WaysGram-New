@@ -609,7 +609,7 @@ public final class WaysGramChatFragment extends BaseFragment {
                                     ).format(new Date(createdAt * 1000L))
                                     : "";
                             if (results.length() > 0) {
-                                results.append("\\n\\n");
+                                results.append("\n\n");
                             }
                             results.append(author);
                             if (!time.isEmpty()) {
@@ -619,11 +619,11 @@ public final class WaysGramChatFragment extends BaseFragment {
                             if (body.length() > 600) {
                                 body = body.substring(0, 600) + "…";
                             }
-                            results.append("\\n").append(body);
+                            results.append("\n").append(body);
                         }
                         statusView.setText("Найдено сообщений: " + count);
                         if (count > displayCount) {
-                            results.append("\\n\\nПоказаны первые ")
+                            results.append("\n\nПоказаны первые ")
                                     .append(displayCount).append(" из ")
                                     .append(count).append(" совпадений.");
                         }
