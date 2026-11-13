@@ -118,6 +118,11 @@ public final class WaysGramChatFragment extends BaseFragment {
         }
     };
     private String pendingSaveMediaId;
+    private final ArrayList<Uri> pendingAttachments = new ArrayList<>();
+    private String pendingAttachmentCaption = "";
+    private boolean pendingAttachmentSilent = false;
+    private int pendingAttachmentIndex = 0;
+    private int pendingAttachmentSent = 0;
 
     public WaysGramChatFragment(long peerId, String peerTitle) {
         this(peerId, peerTitle, false);
@@ -1356,9 +1361,14 @@ public final class WaysGramChatFragment extends BaseFragment {
     }
 
     private void pickAttachment() {
+        if (messageSendInFlight) {
+            statusView.setText("Дождитесь завершения текущей отправки.");
+            return;
+        }
         Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
         intent.addCategory(Intent.CATEGORY_OPENABLE);
         intent.setType("*/*");
+        intent.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true);
         intent.putExtra(Intent.EXTRA_MIME_TYPES, new String[]{
                 "image/*", "video/mp4", "video/webm", "video/quicktime",
                 "video/x-matroska", "audio/mpeg", "audio/mp4", "audio/ogg",
@@ -1399,39 +1409,156 @@ public final class WaysGramChatFragment extends BaseFragment {
         if (requestCode != REQUEST_ATTACHMENT || resultCode != Activity.RESULT_OK || data == null) {
             return;
         }
-        Uri uri = data.getData();
-        if (uri == null) {
-            statusView.setText("Не удалось получить выбранный файл.");
+        ArrayList<Uri> selectedUris = new ArrayList<>();
+        ClipData selectedItems = data.getClipData();
+        if (selectedItems != null && selectedItems.getItemCount() > 0) {
+            for (int i = 0; i < selectedItems.getItemCount(); i++) {
+                Uri selectedUri = selectedItems.getItemAt(i).getUri();
+                if (selectedUri != null && !selectedUris.contains(selectedUri)) {
+                    selectedUris.add(selectedUri);
+                }
+            }
+        } else {
+            Uri selectedUri = data.getData();
+            if (selectedUri != null) {
+                selectedUris.add(selectedUri);
+            }
+        }
+        if (selectedUris.isEmpty()) {
+            statusView.setText("Не удалось получить выбранные файлы.");
             return;
         }
+        startAttachmentBatch(selectedUris);
+    }
+
+    private void startAttachmentBatch(ArrayList<Uri> selectedUris) {
+        if (messageSendInFlight || selectedUris == null || selectedUris.isEmpty()) {
+            return;
+        }
+        pendingAttachments.clear();
+        pendingAttachments.addAll(selectedUris);
+        pendingAttachmentCaption = messageInput.getText() == null
+                ? ""
+                : messageInput.getText().toString().trim();
+        pendingAttachmentSilent = isSilentSendEnabled();
+        pendingAttachmentIndex = 0;
+        pendingAttachmentSent = 0;
+        setMessageSendInFlight(true);
+        statusView.setText(selectedUris.size() == 1
+                ? "Подготавливаю вложение…"
+                : "Подготавливаю вложения: " + selectedUris.size());
+        uploadNextAttachment();
+    }
+
+    private void uploadNextAttachment() {
+        if (pendingAttachmentIndex >= pendingAttachments.size()) {
+            finishAttachmentBatch();
+            return;
+        }
+        if (getParentActivity() == null || apiClient == null) {
+            failAttachmentBatch("Не удалось продолжить отправку вложений.");
+            return;
+        }
+
+        Uri uri = pendingAttachments.get(pendingAttachmentIndex);
         String mimeType = getParentActivity().getContentResolver().getType(uri);
-        statusView.setText("Загружаю вложение…");
+        int currentIndex = pendingAttachmentIndex;
+        int total = pendingAttachments.size();
+        statusView.setText("Загружаю вложение " + (currentIndex + 1) + " из " + total + "…");
+
+        WaysGramApiClient.Callback uploadCallback = new WaysGramApiClient.Callback() {
+            @Override
+            public void onSuccess(JSONObject response) {
+                sendUploadedAttachment(response, mimeType, currentIndex);
+            }
+
+            @Override
+            public void onError(String message, int statusCode) {
+                failAttachmentBatch(message);
+            }
+        };
         if (mimeType != null && mimeType.startsWith("image/")) {
-            apiClient.uploadImage(getParentActivity().getContentResolver(), uri,
-                    new WaysGramApiClient.Callback() {
-                        @Override
-                        public void onSuccess(JSONObject response) {
-                            sendImage(response.optString("id", ""));
-                        }
-
-                        @Override
-                        public void onError(String message, int statusCode) {
-                            statusView.setText(message);
-                        }
-                    });
+            apiClient.uploadImage(getParentActivity().getContentResolver(), uri, uploadCallback);
         } else {
-            apiClient.uploadDocument(getParentActivity().getContentResolver(), uri,
-                    new WaysGramApiClient.Callback() {
-                        @Override
-                        public void onSuccess(JSONObject response) {
-                            sendDocument(response.optString("id", ""));
-                        }
+            apiClient.uploadDocument(getParentActivity().getContentResolver(), uri, uploadCallback);
+        }
+    }
 
-                        @Override
-                        public void onError(String message, int statusCode) {
-                            statusView.setText(message);
-                        }
-                    });
+    private void sendUploadedAttachment(JSONObject response, String mimeType, int index) {
+        String mediaId = response == null ? "" : response.optString("id", "");
+        if (!mediaId.matches("[a-f0-9]{32}")) {
+            failAttachmentBatch("Сервер вернул некорректный ID вложения.");
+            return;
+        }
+
+        JSONObject payload = new JSONObject();
+        String body = index == 0 ? pendingAttachmentCaption : "";
+        if (body.isEmpty() && mimeType != null && mimeType.startsWith("image/")) {
+            body = "Изображение";
+        }
+        try {
+            payload.put("recipient_id", peerId);
+            payload.put("body", body);
+            payload.put("media_id", mediaId);
+            payload.put("silent", pendingAttachmentSilent);
+        } catch (Exception exception) {
+            failAttachmentBatch("Не удалось подготовить вложение к отправке.");
+            return;
+        }
+
+        String requestFingerprint = payload.toString();
+        String idempotencyKey = messageIdempotencyKey(requestFingerprint);
+        statusView.setText("Отправляю вложение " + (index + 1) + " из "
+                + pendingAttachments.size() + "…");
+        apiClient.post("/api/messages", payload, idempotencyKey, new WaysGramApiClient.Callback() {
+            @Override
+            public void onSuccess(JSONObject sentMessage) {
+                messageIdempotencyKeys.remove(requestFingerprint);
+                pendingAttachmentSent++;
+                pendingAttachmentIndex++;
+                uploadNextAttachment();
+            }
+
+            @Override
+            public void onError(String message, int statusCode) {
+                failAttachmentBatch(message);
+            }
+        });
+    }
+
+    private void finishAttachmentBatch() {
+        int sentCount = pendingAttachmentSent;
+        pendingAttachments.clear();
+        pendingAttachmentCaption = "";
+        pendingAttachmentSilent = false;
+        pendingAttachmentIndex = 0;
+        pendingAttachmentSent = 0;
+        setMessageSendInFlight(false);
+        clearChatDraft();
+        resetSilentSendMode();
+        statusView.setText(sentCount == 1
+                ? "Вложение отправлено."
+                : "Отправлено вложений: " + sentCount);
+        loadMessages();
+    }
+
+    private void failAttachmentBatch(String message) {
+        int sentCount = pendingAttachmentSent;
+        int totalCount = pendingAttachments.size();
+        pendingAttachments.clear();
+        pendingAttachmentCaption = "";
+        pendingAttachmentSilent = false;
+        pendingAttachmentIndex = 0;
+        pendingAttachmentSent = 0;
+        setMessageSendInFlight(false);
+        if (sentCount > 0) {
+            statusView.setText("Отправлено " + sentCount + " из " + totalCount
+                    + ". Остальные файлы не отправлены: " + message);
+            loadMessages();
+        } else {
+            statusView.setText(message == null || message.trim().isEmpty()
+                    ? "Не удалось отправить вложения."
+                    : message);
         }
     }
 
