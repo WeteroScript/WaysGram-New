@@ -1802,7 +1802,8 @@ public final class WaysGramChatFragment extends BaseFragment {
     }
 
     private void showTranslationTargets(String originalText) {
-        String text = originalText == null ? "" : originalText.trim();
+        String rawText = originalText == null ? "" : originalText.trim();
+        String text = formatInlineMarkup(rawText).toString().trim();
         if (text.isEmpty()) {
             statusView.setText("В сообщении нет текста для перевода.");
             return;
