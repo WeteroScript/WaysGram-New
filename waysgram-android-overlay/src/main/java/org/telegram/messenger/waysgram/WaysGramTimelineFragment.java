@@ -2,12 +2,16 @@ package org.telegram.messenger.waysgram;
 
 import android.app.Activity;
 import android.app.AlertDialog;
+import android.media.AudioAttributes;
+import android.media.MediaPlayer;
+import android.media.PlaybackParams;
 import android.content.ClipData;
 import android.content.ClipboardManager;
 import android.content.Context;
 import android.content.Intent;
 import android.graphics.Bitmap;
 import android.net.Uri;
+import android.os.Build;
 import android.os.Handler;
 import android.os.Looper;
 import android.text.InputType;
@@ -88,6 +92,7 @@ public final class WaysGramTimelineFragment extends BaseFragment {
     private final ArrayList<Uri> pendingAttachments = new ArrayList<>();
     private final ArrayList<String> pendingAttachmentMediaIds = new ArrayList<>();
     private final ArrayList<VideoView> activeVideoViews = new ArrayList<>();
+    private final ArrayList<MediaPlayer> activeAudioPlayers = new ArrayList<>();
     private final Map<String, LinearLayout> mediaAlbumContainers = new HashMap<>();
     private String pendingAttachmentCaption = "";
     private boolean pendingAttachmentMakeAlbum = false;
@@ -853,6 +858,7 @@ public final class WaysGramTimelineFragment extends BaseFragment {
             public void onSuccess(JSONObject response) {
                 JSONArray messages = response.optJSONArray("messages");
                 stopActiveVideoViews();
+                stopActiveAudioPlayers();
                 messagesContainer.removeAllViews();
                 mediaAlbumContainers.clear();
                 int count = messages == null ? 0 : messages.length();
@@ -1679,6 +1685,8 @@ public final class WaysGramTimelineFragment extends BaseFragment {
             addMediaSaveButton(messageTarget, mediaId, mediaName, mediaType);
         } else if (mediaId.matches("[a-f0-9]{32}") && mediaType.startsWith("video/")) {
             addVideoMessage(messageTarget, mediaId, mediaName, mediaType);
+        } else if (mediaId.matches("[a-f0-9]{32}") && mediaType.startsWith("audio/")) {
+            addAudioMessage(messageTarget, mediaId, mediaName, mediaType);
         } else if (mediaId.matches("[a-f0-9]{32}") && !mediaType.isEmpty()) {
             addMediaSaveButton(messageTarget, mediaId, mediaName, mediaType);
         }
@@ -1994,22 +2002,178 @@ public final class WaysGramTimelineFragment extends BaseFragment {
         target.addView(label, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
         ));
+
+        final float[] speeds = {1.0f, 1.25f, 1.5f, 2.0f};
+        final String[] speedLabels = {"1×", "1.25×", "1.5×", "2×"};
+        final int[] speedIndex = {0};
+        final MediaPlayer[] preparedPlayer = new MediaPlayer[1];
         VideoView videoView = new VideoView(context);
+        videoView.setOnPreparedListener(player -> {
+            preparedPlayer[0] = player;
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                applyMediaPlaybackSpeed(player, speeds[speedIndex[0]]);
+            }
+        });
+        videoView.setOnErrorListener((player, what, extra) -> {
+            preparedPlayer[0] = null;
+            statusView.setText("Этот формат видео не поддерживается устройством. Сохраните файл для открытия в другом приложении.");
+            return true;
+        });
         videoView.setVideoURI(uri, mediaAuthorizationHeaders());
         MediaController controller = new MediaController(context);
         controller.setAnchorView(videoView);
         videoView.setMediaController(controller);
-        videoView.setOnErrorListener((player, what, extra) -> {
-            statusView.setText("Этот формат видео не поддерживается устройством. Сохраните файл для открытия в другом приложении.");
-            return true;
-        });
         activeVideoViews.add(videoView);
         LinearLayout.LayoutParams videoParams = new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, AndroidUtilities.dp(210)
         );
         videoParams.bottomMargin = AndroidUtilities.dp(5);
         target.addView(videoView, videoParams);
+
+        Button speedButton = new Button(context);
+        speedButton.setAllCaps(false);
+        speedButton.setText("Скорость " + speedLabels[0]);
+        speedButton.setEnabled(Build.VERSION.SDK_INT >= Build.VERSION_CODES.M);
+        speedButton.setOnClickListener(view -> {
+            speedIndex[0] = (speedIndex[0] + 1) % speeds.length;
+            speedButton.setText("Скорость " + speedLabels[speedIndex[0]]);
+            if (preparedPlayer[0] != null) {
+                applyMediaPlaybackSpeed(preparedPlayer[0], speeds[speedIndex[0]]);
+            }
+        });
+        target.addView(speedButton, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT
+        ));
         addMediaSaveButton(target, mediaId, mediaName, mediaType);
+    }
+
+    private void addAudioMessage(LinearLayout target, String mediaId, String mediaName, String mediaType) {
+        Context context = getParentActivity();
+        Uri uri = mediaStreamUri(mediaId);
+        if (context == null || uri == null) {
+            addMediaSaveButton(target, mediaId, mediaName, mediaType);
+            return;
+        }
+        Button playButton = new Button(context);
+        playButton.setAllCaps(false);
+        playButton.setText("▶ Воспроизвести аудио: " + mediaName);
+        target.addView(playButton, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
+        ));
+
+        final float[] speeds = {1.0f, 1.25f, 1.5f, 2.0f};
+        final String[] speedLabels = {"1×", "1.25×", "1.5×", "2×"};
+        final int[] speedIndex = {0};
+        Button speedButton = new Button(context);
+        speedButton.setAllCaps(false);
+        speedButton.setText("Скорость " + speedLabels[0]);
+        speedButton.setEnabled(Build.VERSION.SDK_INT >= Build.VERSION_CODES.M);
+        target.addView(speedButton, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT
+        ));
+
+        final MediaPlayer[] playerHolder = new MediaPlayer[1];
+        final boolean[] prepared = {false};
+        speedButton.setOnClickListener(view -> {
+            speedIndex[0] = (speedIndex[0] + 1) % speeds.length;
+            speedButton.setText("Скорость " + speedLabels[speedIndex[0]]);
+            MediaPlayer current = playerHolder[0];
+            if (current != null && prepared[0]) {
+                applyMediaPlaybackSpeed(current, speeds[speedIndex[0]]);
+            }
+        });
+        playButton.setOnClickListener(view -> {
+            MediaPlayer player = playerHolder[0];
+            if (player == null) {
+                MediaPlayer created = new MediaPlayer();
+                playerHolder[0] = created;
+                activeAudioPlayers.add(created);
+                try {
+                    created.setAudioAttributes(new AudioAttributes.Builder()
+                            .setUsage(AudioAttributes.USAGE_MEDIA)
+                            .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
+                            .build());
+                    created.setDataSource(context, uri, mediaAuthorizationHeaders());
+                    created.setOnPreparedListener(preparedPlayer -> {
+                        prepared[0] = true;
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                            applyMediaPlaybackSpeed(preparedPlayer, speeds[speedIndex[0]]);
+                        }
+                        preparedPlayer.start();
+                        playButton.setText("⏸ Пауза: " + mediaName);
+                    });
+                    created.setOnCompletionListener(completedPlayer -> {
+                        completedPlayer.seekTo(0);
+                        playButton.setText("▶ Повторить: " + mediaName);
+                    });
+                    created.setOnErrorListener((errorPlayer, what, extra) -> {
+                        prepared[0] = false;
+                        activeAudioPlayers.remove(errorPlayer);
+                        try {
+                            errorPlayer.release();
+                        } catch (Exception ignored) {
+                        }
+                        playerHolder[0] = null;
+                        playButton.setText("Не удалось воспроизвести аудио");
+                        statusView.setText("Формат аудио не поддерживается устройством. Сохраните файл для открытия в другом приложении.");
+                        return true;
+                    });
+                    playButton.setText("Загрузка аудио…");
+                    created.prepareAsync();
+                } catch (Exception exception) {
+                    activeAudioPlayers.remove(created);
+                    try {
+                        created.release();
+                    } catch (Exception ignored) {
+                    }
+                    playerHolder[0] = null;
+                    playButton.setText("Не удалось открыть аудио");
+                }
+                return;
+            }
+            if (!prepared[0]) {
+                return;
+            }
+            try {
+                if (player.isPlaying()) {
+                    player.pause();
+                    playButton.setText("▶ Продолжить: " + mediaName);
+                } else {
+                    player.start();
+                    playButton.setText("⏸ Пауза: " + mediaName);
+                }
+            } catch (IllegalStateException exception) {
+                playButton.setText("Не удалось воспроизвести аудио");
+            }
+        });
+        addMediaSaveButton(target, mediaId, mediaName, mediaType);
+    }
+
+    private void applyMediaPlaybackSpeed(MediaPlayer player, float speed) {
+        if (player == null || Build.VERSION.SDK_INT < Build.VERSION_CODES.M) {
+            return;
+        }
+        try {
+            player.setPlaybackParams(new PlaybackParams().setSpeed(speed));
+        } catch (Exception exception) {
+            statusView.setText("Не удалось изменить скорость воспроизведения.");
+        }
+    }
+
+    private void stopActiveAudioPlayers() {
+        for (MediaPlayer player : activeAudioPlayers) {
+            try {
+                if (player.isPlaying()) {
+                    player.stop();
+                }
+            } catch (Exception ignored) {
+            }
+            try {
+                player.release();
+            } catch (Exception ignored) {
+            }
+        }
+        activeAudioPlayers.clear();
     }
 
     private void stopActiveVideoViews() {
@@ -2158,6 +2322,7 @@ public final class WaysGramTimelineFragment extends BaseFragment {
         isScreenResumed = false;
         pollHandler.removeCallbacks(pollRunnable);
         stopActiveVideoViews();
+        stopActiveAudioPlayers();
         if (typingIndicatorController != null) {
             typingIndicatorController.close();
             typingIndicatorController = null;
