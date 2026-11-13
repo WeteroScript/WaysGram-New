@@ -190,9 +190,9 @@ def patch_notification_permissions(android_root: Path) -> None:
     anchor = '    <uses-permission android:name="com.google.android.c2dm.permission.RECEIVE" />\n'
     permissions = (
         ('    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />\n',
-         f"{variant} notification permission"),
+         "notification permission"),
         ('    <uses-permission android:name="android.permission.RECORD_AUDIO" />\n',
-         f"{variant} microphone permission"),
+         "microphone permission"),
     )
     for variant in ("debug", "release"):
         manifest = android_root / f"TMessagesProj/config/{variant}/AndroidManifest.xml"
@@ -206,7 +206,7 @@ def patch_notification_permissions(android_root: Path) -> None:
                     updated,
                     anchor,
                     anchor + permission,
-                    label,
+                    f"{variant} {label}",
                 )
         if updated != content:
             manifest.write_text(updated, encoding="utf-8")
