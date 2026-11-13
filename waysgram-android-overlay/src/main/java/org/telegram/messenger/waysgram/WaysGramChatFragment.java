@@ -2733,21 +2733,21 @@ public final class WaysGramChatFragment extends BaseFragment {
                 AndroidUtilities.dp(210)
         );
         videoParams.bottomMargin = AndroidUtilities.dp(5);
-        messagesContainer.addView(videoView, videoParams);
-        addMediaSaveButton(mediaId, mediaName, mediaType);
+        target.addView(videoView, videoParams);
+        addMediaSaveButton(target, mediaId, mediaName, mediaType);
     }
 
     private void addAudioMessage(LinearLayout target, String mediaId, String mediaName, String mediaType) {
         Context context = getParentActivity();
         Uri uri = mediaStreamUri(mediaId);
         if (context == null || uri == null) {
-            addMediaSaveButton(mediaId, mediaName, mediaType);
+            addMediaSaveButton(target, mediaId, mediaName, mediaType);
             return;
         }
         Button playButton = new Button(context);
         playButton.setAllCaps(false);
         playButton.setText("▶ Воспроизвести аудио: " + mediaName);
-        messagesContainer.addView(playButton, new LinearLayout.LayoutParams(
+        target.addView(playButton, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
         ));
 
@@ -2814,7 +2814,7 @@ public final class WaysGramChatFragment extends BaseFragment {
                 playButton.setText("Не удалось воспроизвести аудио");
             }
         });
-        addMediaSaveButton(mediaId, mediaName, mediaType);
+        addMediaSaveButton(target, mediaId, mediaName, mediaType);
     }
 
     private void saveDocument(String mediaId, String mediaName, String mediaType) {
