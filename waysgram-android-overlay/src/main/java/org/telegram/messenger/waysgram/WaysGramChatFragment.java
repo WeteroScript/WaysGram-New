@@ -1811,18 +1811,27 @@ public final class WaysGramChatFragment extends BaseFragment {
             statusView.setText("Сообщение слишком длинное для перевода.");
             return;
         }
-        String[] labels = {
-                "Русский", "English", "Nederlands", "Deutsch", "Français",
-                "Español", "Italiano", "Português", "中文", "日本語", "Türkçe"
-        };
-        String[] languageTags = {
-                "ru", "en", "nl", "de", "fr", "es", "it", "pt", "zh", "ja", "tr"
-        };
+        ArrayList<String> languageTags = new ArrayList<>(
+                TranslateLanguage.getAllLanguages()
+        );
+        languageTags.sort((first, second) ->
+                Locale.forLanguageTag(first).getDisplayLanguage(Locale.getDefault())
+                        .compareToIgnoreCase(
+                                Locale.forLanguageTag(second).getDisplayLanguage(Locale.getDefault())
+                        )
+        );
+        String[] labels = new String[languageTags.size()];
+        for (int i = 0; i < languageTags.size(); i++) {
+            String code = languageTags.get(i);
+            String displayName = Locale.forLanguageTag(code)
+                    .getDisplayLanguage(Locale.getDefault());
+            labels[i] = (displayName.isEmpty() ? code : displayName) + " (" + code + ")";
+        }
         new AlertDialog.Builder(getParentActivity())
                 .setTitle("Перевести сообщение на")
                 .setItems(labels, (dialog, which) -> {
                     if (which >= 0 && which < labels.length) {
-                        String targetCode = TranslateLanguage.fromLanguageTag(languageTags[which]);
+                        String targetCode = TranslateLanguage.fromLanguageTag(languageTags.get(which));
                         if (targetCode == null) {
                             statusView.setText("Выбранный язык не поддерживается переводчиком.");
                             return;
