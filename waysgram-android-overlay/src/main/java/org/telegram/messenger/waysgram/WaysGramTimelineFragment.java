@@ -1217,7 +1217,8 @@ public final class WaysGramTimelineFragment extends BaseFragment {
                 failAttachmentBatch(message);
             }
         };
-        if (mimeType != null && mimeType.startsWith("image/") && !pendingAttachmentUncompressed) {
+        if (mimeType != null && mimeType.startsWith("image/")
+                && !"image/gif".equalsIgnoreCase(mimeType) && !pendingAttachmentUncompressed) {
             apiClient.uploadImage(getParentActivity().getContentResolver(), uri, uploadCallback);
         } else {
             apiClient.uploadDocument(getParentActivity().getContentResolver(), uri, uploadCallback);
