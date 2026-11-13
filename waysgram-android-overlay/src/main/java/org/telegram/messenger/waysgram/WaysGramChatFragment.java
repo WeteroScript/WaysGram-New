@@ -1130,7 +1130,7 @@ public final class WaysGramChatFragment extends BaseFragment {
                     loadOlderButton.setEnabled(true);
                 }
                 statusView.setText(count == 0 ? "История пока пуста" : "Сообщений: " + count);
-                messageScrollView.post(this::continuePendingMessageJump);
+                messageScrollView.post(() -> continuePendingMessageJump());
                 markMessagesRead();
                 scheduleNextPoll();
             }
