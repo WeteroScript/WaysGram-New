@@ -1634,7 +1634,7 @@ public final class WaysGramChatFragment extends BaseFragment {
         if (repliedToId > 0) {
             String renderedText = renderedMessage.toString();
             int quoteStart = renderedText.indexOf("Цитата: ");
-            int quoteEnd = quoteStart < 0 ? -1 : renderedText.indexOf("\\n", quoteStart);
+            int quoteEnd = quoteStart < 0 ? -1 : renderedText.indexOf("\n", quoteStart);
             if (quoteStart >= 0 && quoteEnd > quoteStart) {
                 renderedMessage.setSpan(new ClickableSpan() {
                     @Override
