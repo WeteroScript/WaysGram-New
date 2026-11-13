@@ -1923,6 +1923,7 @@ public final class WaysGramChatFragment extends BaseFragment {
                 @Override
                 public void onSuccess(Bitmap bitmap) {
                     image.setImageBitmap(bitmap);
+                    image.setOnClickListener(view -> showImagePreview(bitmap));
                 }
 
                 @Override
@@ -1930,6 +1931,7 @@ public final class WaysGramChatFragment extends BaseFragment {
                     image.setContentDescription("Изображение недоступно");
                 }
             });
+            addMediaSaveButton(mediaId, mediaName, mediaType);
         } else if (mediaId.matches("[a-f0-9]{32}") && mediaType.startsWith("video/")) {
             addVideoMessage(mediaId, mediaName, mediaType);
         } else if (mediaId.matches("[a-f0-9]{32}") && mediaType.startsWith("audio/")) {
@@ -1938,6 +1940,23 @@ public final class WaysGramChatFragment extends BaseFragment {
             addMediaSaveButton(mediaId, mediaName, mediaType);
         }
 
+    }
+
+    private void showImagePreview(Bitmap bitmap) {
+        Context context = getParentActivity();
+        if (context == null || bitmap == null) {
+            return;
+        }
+        ImageView preview = new ImageView(context);
+        preview.setImageBitmap(bitmap);
+        preview.setAdjustViewBounds(true);
+        preview.setScaleType(ImageView.ScaleType.FIT_CENTER);
+        preview.setMaxWidth(AndroidUtilities.dp(360));
+        preview.setMaxHeight(AndroidUtilities.dp(520));
+        new AlertDialog.Builder(context)
+                .setView(preview)
+                .setPositiveButton("Закрыть", null)
+                .show();
     }
 
     private void showMessageActions(JSONObject message) {
