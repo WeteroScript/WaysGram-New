@@ -32,6 +32,7 @@ import org.telegram.ui.ActionBar.Theme;
 
 import java.text.DateFormat;
 import java.util.Date;
+import java.util.Iterator;
 
 /** WaysGram-only home screen backed by AuthBot's REST API. */
 public final class WaysGramHomeFragment extends BaseFragment {
@@ -42,6 +43,7 @@ public final class WaysGramHomeFragment extends BaseFragment {
     private TextView walletView;
     private TextView statusView;
     private TextView inboxSummaryView;
+    private LinearLayout giftsContainer;
     private ImageView avatarView;
     private final Handler eventHandler = new Handler(Looper.getMainLooper());
     private final Runnable eventRetryRunnable = new Runnable() {
@@ -106,6 +108,15 @@ public final class WaysGramHomeFragment extends BaseFragment {
         walletView = addLabel(context, content, "Баланс загружается…", 14, false);
         statusView = addLabel(context, content, "", 13, false);
         inboxSummaryView = addLabel(context, content, "Непрочитанные сообщения загружаются…", 13, true);
+        addLabel(context, content, "Мои подарки WaysGram", 15, true);
+        giftsContainer = new LinearLayout(context);
+        giftsContainer.setOrientation(LinearLayout.VERTICAL);
+        content.addView(giftsContainer, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
+        ));
+        addButton(context, content, "Открыть инвентарь подарков", () ->
+                new WaysGramGiftCatalogSheet(context, sessionStore, resourceProvider, this::loadProfile).show()
+        );
 
         addButton(context, content, "Редактировать профиль", this::showProfileEditor);
         addButton(context, content, "Фото профиля", this::showAvatarActions);
@@ -233,6 +244,24 @@ public final class WaysGramHomeFragment extends BaseFragment {
                 }
             }
         });
+        apiClient.get("/api/me/gifts", new WaysGramApiClient.Callback() {
+            @Override
+            public void onSuccess(JSONObject response) {
+                renderMyGifts(response.optJSONArray("gifts"));
+            }
+
+            @Override
+            public void onError(String message, int statusCode) {
+                if (giftsContainer != null) {
+                    giftsContainer.removeAllViews();
+                    addLabel(getParentActivity(), giftsContainer, "Не удалось загрузить подарки: " + message, 12, false);
+                }
+                if (statusCode == 401 && getParentActivity() != null) {
+                    sessionStore.clearSession();
+                    presentFragment(new WaysGramLoginFragment(), true);
+                }
+            }
+        });
         apiClient.get("/api/me/wallet", new WaysGramApiClient.Callback() {
             @Override
             public void onSuccess(JSONObject response) {
@@ -247,6 +276,104 @@ public final class WaysGramHomeFragment extends BaseFragment {
                 walletView.setText(message);
             }
         });
+    }
+
+    private void renderMyGifts(JSONArray gifts) {
+        if (giftsContainer == null || getParentActivity() == null) {
+            return;
+        }
+        giftsContainer.removeAllViews();
+        int count = gifts == null ? 0 : gifts.length();
+        if (count == 0) {
+            addLabel(getParentActivity(), giftsContainer,
+                    "У вас пока нет подарков. Откройте каталог, чтобы посмотреть доступные варианты.",
+                    12, false);
+            return;
+        }
+
+        addLabel(getParentActivity(), giftsContainer,
+                "В инвентаре: " + count + " подарков", 12, false);
+        int visible = Math.min(count, 50);
+        for (int i = 0; i < visible; i++) {
+            JSONObject gift = gifts.optJSONObject(i);
+            if (gift == null) {
+                continue;
+            }
+            JSONObject attributes = gift.optJSONObject("attributes");
+            if (attributes == null) {
+                attributes = new JSONObject();
+            }
+            String title = gift.optString("gift_name", "Подарок WaysGram");
+            String serial = gift.optString("serial_number", "");
+            String telegramId = gift.optString("telegram_gift_id", "");
+            int level = Math.max(
+                    gift.optInt("upgrade_level", 0),
+                    attributes.optInt("upgrade_level", 0)
+            );
+
+            LinearLayout card = new LinearLayout(getParentActivity());
+            card.setOrientation(LinearLayout.VERTICAL);
+            card.setPadding(AndroidUtilities.dp(12), AndroidUtilities.dp(10),
+                    AndroidUtilities.dp(12), AndroidUtilities.dp(10));
+            GradientDrawable background = new GradientDrawable();
+            background.setColor(Theme.getColor(Theme.key_windowBackgroundWhite));
+            background.setCornerRadius(AndroidUtilities.dp(12));
+            card.setBackground(background);
+
+            addLabel(getParentActivity(), card, "🎁  " + title, 16, true);
+            addLabel(getParentActivity(), card, "Уровень WaysGram: " + level, 13, true);
+            if (!serial.isEmpty()) {
+                addLabel(getParentActivity(), card, "Серийный номер: " + serial, 12, false);
+            }
+            if (!telegramId.isEmpty()) {
+                addLabel(getParentActivity(), card, "Telegram Gift ID: " + telegramId, 12, false);
+            }
+            String upgradeSource = attributes.optString("upgrade_source", "");
+            if ("waysgram_internal".equals(upgradeSource)) {
+                addLabel(getParentActivity(), card,
+                        "Улучшение выполнено внутри WaysGram", 12, false);
+            }
+            long upgradedAt = attributes.optLong("last_upgraded_at", 0);
+            if (upgradedAt > 0) {
+                String upgradedAtText = DateFormat.getDateTimeInstance(
+                        DateFormat.SHORT, DateFormat.SHORT
+                ).format(new Date(upgradedAt * 1000L));
+                addLabel(getParentActivity(), card, "Дата улучшения: " + upgradedAtText, 12, false);
+            }
+            Iterator<String> attributeKeys = attributes.keys();
+            while (attributeKeys.hasNext()) {
+                String key = attributeKeys.next();
+                if ("upgrade_level".equals(key) || "last_upgraded_at".equals(key)
+                        || "upgrade_source".equals(key)) {
+                    continue;
+                }
+                Object value = attributes.opt(key);
+                if (value == null || value == JSONObject.NULL) {
+                    continue;
+                }
+                String valueText = value.toString();
+                if (valueText.length() > 100) {
+                    valueText = valueText.substring(0, 100) + "…";
+                }
+                addLabel(getParentActivity(), card,
+                        "Характеристика · " + key + ": " + valueText, 12, false);
+            }
+            if (gift.optInt("is_listed", 0) == 1) {
+                addLabel(getParentActivity(), card, "Выставлен на маркетплейсе", 12, false);
+            }
+
+            LinearLayout.LayoutParams cardParams = new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
+            );
+            cardParams.bottomMargin = AndroidUtilities.dp(8);
+            giftsContainer.addView(card, cardParams);
+        }
+        if (count > visible) {
+            addLabel(getParentActivity(), giftsContainer,
+                    "Показаны последние " + visible + " из " + count
+                            + ". Полный список доступен в инвентаре.",
+                    12, false);
+        }
     }
 
     private void updateUnreadSummary() {
