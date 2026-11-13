@@ -186,23 +186,30 @@ def patch_push_listener_controller_source(original: str) -> str:
 
 
 def patch_notification_permissions(android_root: Path) -> None:
-    """Declare Android 13+ notification permission in both app manifests."""
+    """Declare notification and microphone permissions in both app manifests."""
     anchor = '    <uses-permission android:name="com.google.android.c2dm.permission.RECEIVE" />\n'
-    permission = '    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />\n'
+    permissions = (
+        ('    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />\n',
+         f"{variant} notification permission"),
+        ('    <uses-permission android:name="android.permission.RECORD_AUDIO" />\n',
+         f"{variant} microphone permission"),
+    )
     for variant in ("debug", "release"):
         manifest = android_root / f"TMessagesProj/config/{variant}/AndroidManifest.xml"
         if not manifest.is_file():
             raise FileNotFoundError(f"Required {variant} manifest not found: {manifest}")
         content = manifest.read_text(encoding="utf-8")
-        if permission in content:
-            continue
-        updated = replace_exactly_once(
-            content,
-            anchor,
-            anchor + permission,
-            f"{variant} notification permission",
-        )
-        manifest.write_text(updated, encoding="utf-8")
+        updated = content
+        for permission, label in permissions:
+            if permission not in updated:
+                updated = replace_exactly_once(
+                    updated,
+                    anchor,
+                    anchor + permission,
+                    label,
+                )
+        if updated != content:
+            manifest.write_text(updated, encoding="utf-8")
 
 
 def patch_translation_dependencies(android_root: Path) -> None:
