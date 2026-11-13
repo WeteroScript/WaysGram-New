@@ -80,6 +80,16 @@ public final class WaysGramUserProfileFragment extends BaseFragment {
         messageButton.setOnClickListener(view ->
                 presentFragment(new WaysGramChatFragment(userId, "Диалог"), false));
 
+        Button giftsButton = new Button(context);
+        giftsButton.setText("Подарки");
+        giftsButton.setAllCaps(false);
+        root.addView(giftsButton, matchWrap());
+        giftsButton.setOnClickListener(view -> {
+            if (giftsContainer != null) {
+                scroll.smoothScrollTo(0, giftsContainer.getTop());
+            }
+        });
+
         addSection(context, root, "Общие группы");
         groupsContainer = new LinearLayout(context);
         groupsContainer.setOrientation(LinearLayout.VERTICAL);
