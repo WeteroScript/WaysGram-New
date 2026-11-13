@@ -1528,13 +1528,18 @@ public final class WaysGramChatFragment extends BaseFragment {
 
     private void finishAttachmentBatch() {
         int sentCount = pendingAttachmentSent;
+        String sentCaption = pendingAttachmentCaption;
+        boolean canClearDraft = messageInput == null || messageInput.getText() == null
+                || messageInput.getText().toString().trim().equals(sentCaption);
         pendingAttachments.clear();
         pendingAttachmentCaption = "";
         pendingAttachmentSilent = false;
         pendingAttachmentIndex = 0;
         pendingAttachmentSent = 0;
         setMessageSendInFlight(false);
-        clearChatDraft();
+        if (canClearDraft) {
+            clearChatDraft();
+        }
         resetSilentSendMode();
         statusView.setText(sentCount == 1
                 ? "Вложение отправлено."
@@ -2749,6 +2754,9 @@ public final class WaysGramChatFragment extends BaseFragment {
         messageSendInFlight = inFlight;
         if (sendButton != null) {
             sendButton.setEnabled(!inFlight);
+        }
+        if (silentSendCheckBox != null) {
+            silentSendCheckBox.setEnabled(!inFlight);
         }
     }
 
