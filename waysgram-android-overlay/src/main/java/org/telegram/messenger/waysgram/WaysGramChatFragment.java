@@ -602,18 +602,23 @@ public final class WaysGramChatFragment extends BaseFragment {
                 "Спойлер",
                 "Моноширинный"
         };
-        String[] markers = {"**", "*", "--", "~~", "||", "`"};
+        String[] opening = {
+                "<b>", "<i>", "<u>", "<s>", "<tg-spoiler>", "<code>"
+        };
+        String[] closing = {
+                "</b>", "</i>", "</u>", "</s>", "</tg-spoiler>", "</code>"
+        };
         new AlertDialog.Builder(getParentActivity())
                 .setTitle("Форматирование текста")
                 .setItems(labels, (dialog, which) -> {
-                    if (which >= 0 && which < markers.length) {
-                        wrapSelectedText(markers[which]);
+                    if (which >= 0 && which < opening.length) {
+                        wrapSelectedText(opening[which], closing[which]);
                     }
                 })
                 .show();
     }
 
-    private void wrapSelectedText(String marker) {
+    private void wrapSelectedText(String opening, String closing) {
         if (messageInput == null) {
             return;
         }
@@ -629,14 +634,13 @@ public final class WaysGramChatFragment extends BaseFragment {
         }
         android.text.Editable editable = messageInput.getText();
         String selected = editable.subSequence(start, end).toString();
-        String wrapped = marker + selected + marker;
-        editable.replace(start, end, wrapped);
+        editable.replace(start, end, opening + selected + closing);
         if (selected.isEmpty()) {
-            messageInput.setSelection(start + marker.length());
+            messageInput.setSelection(start + opening.length());
         } else {
             messageInput.setSelection(
-                    start + marker.length(),
-                    start + marker.length() + selected.length()
+                    start + opening.length(),
+                    start + opening.length() + selected.length()
             );
         }
         messageInput.requestFocus();
@@ -646,15 +650,96 @@ public final class WaysGramChatFragment extends BaseFragment {
         SpannableStringBuilder formatted = new SpannableStringBuilder(
                 source == null ? "" : source
         );
+        applyTagMarkup(formatted, "<b>", "</b>", 0);
+        applyTagMarkup(formatted, "<i>", "</i>", 1);
+        applyTagMarkup(formatted, "<u>", "</u>", 2);
+        applyTagMarkup(formatted, "<s>", "</s>", 3);
+        applyTagMarkup(formatted, "<tg-spoiler>", "</tg-spoiler>", 4);
+        applyTagMarkup(formatted, "<code>", "</code>", 5);
+
+        // Keep messages created by earlier WaysGram builds readable.
         applyInlineMarkup(formatted, "**", 0);
         applyInlineMarkup(formatted, "*", 1);
         applyInlineMarkup(formatted, "--", 2);
         applyInlineMarkup(formatted, "~~", 3);
         applyInlineMarkup(formatted, "||", 4);
         applyInlineMarkup(formatted, "`", 5);
-        applyMentionLinks(formatted);
-        applyHashtagLinks(formatted);
         return formatted;
+    }
+
+    private void applyTagMarkup(
+            SpannableStringBuilder text,
+            String opening,
+            String closing,
+            int style
+    ) {
+        Pattern pattern = Pattern.compile(
+                Pattern.quote(opening) + "(.+?)" + Pattern.quote(closing),
+                Pattern.DOTALL
+        );
+        Matcher matcher = pattern.matcher(text);
+        ArrayList<int[]> ranges = new ArrayList<>();
+        while (matcher.find()) {
+            ranges.add(new int[]{matcher.start(1), matcher.end(1)});
+        }
+        for (int i = ranges.size() - 1; i >= 0; i--) {
+            int start = ranges.get(i)[0];
+            int end = ranges.get(i)[1];
+            Object span;
+            switch (style) {
+                case 0:
+                    span = new StyleSpan(android.graphics.Typeface.BOLD);
+                    break;
+                case 1:
+                    span = new StyleSpan(android.graphics.Typeface.ITALIC);
+                    break;
+                case 2:
+                    span = new UnderlineSpan();
+                    break;
+                case 3:
+                    span = new StrikethroughSpan();
+                    break;
+                case 4:
+                    int spoilerColor = Theme.getColor(
+                            Theme.key_windowBackgroundWhiteGrayText
+                    );
+                    span = new ClickableSpan() {
+                        @Override
+                        public void updateDrawState(android.text.TextPaint paint) {
+                            paint.setColor(spoilerColor);
+                            paint.bgColor = spoilerColor;
+                            paint.setUnderlineText(false);
+                        }
+
+                        @Override
+                        public void onClick(View widget) {
+                            Spannable visibleText = (Spannable) ((TextView) widget).getText();
+                            int spoilerStart = visibleText.getSpanStart(this);
+                            int spoilerEnd = visibleText.getSpanEnd(this);
+                            visibleText.removeSpan(this);
+                            if (spoilerStart >= 0 && spoilerEnd > spoilerStart) {
+                                visibleText.setSpan(
+                                        new ForegroundColorSpan(
+                                                Theme.getColor(Theme.key_windowBackgroundWhiteBlackText)
+                                        ),
+                                        spoilerStart,
+                                        spoilerEnd,
+                                        Spannable.SPAN_EXCLUSIVE_EXCLUSIVE
+                                );
+                            }
+                        }
+                    };
+                    break;
+                case 5:
+                    span = new TypefaceSpan("monospace");
+                    break;
+                default:
+                    continue;
+            }
+            text.setSpan(span, start, end, Spannable.SPAN_EXCLUSIVE_EXCLUSIVE);
+            text.delete(end, end + closing.length());
+            text.delete(start - opening.length(), start);
+        }
     }
 
     private void applyInlineMarkup(
@@ -730,6 +815,7 @@ public final class WaysGramChatFragment extends BaseFragment {
             text.delete(start - marker.length(), start);
         }
     }
+
 
     private void applyMentionLinks(SpannableStringBuilder text) {
         Pattern pattern = Pattern.compile(
