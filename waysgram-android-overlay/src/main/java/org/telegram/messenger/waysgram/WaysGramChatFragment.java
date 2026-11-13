@@ -379,7 +379,9 @@ public final class WaysGramChatFragment extends BaseFragment {
                                 selected.set(Calendar.MINUTE, minute);
                                 selected.set(Calendar.SECOND, 0);
                                 selected.set(Calendar.MILLISECOND, 0);
-                                scheduleMessage(selected.getTimeInMillis() / 1000L);
+                                showScheduleRepeatOptions(
+                                        selected.getTimeInMillis() / 1000L
+                                );
                             },
                             current.get(Calendar.HOUR_OF_DAY),
                             current.get(Calendar.MINUTE),
@@ -396,7 +398,21 @@ public final class WaysGramChatFragment extends BaseFragment {
         dateDialog.show();
     }
 
-    private void scheduleMessage(long scheduledAt) {
+    private void showScheduleRepeatOptions(long scheduledAt) {
+        String[] labels = {"Не повторять", "Каждый день", "Каждую неделю"};
+        long[] intervals = {0, 86400, 604800};
+        new AlertDialog.Builder(getParentActivity())
+                .setTitle("Повторять отправку?")
+                .setItems(labels, (dialog, which) -> {
+                    if (which >= 0 && which < intervals.length) {
+                        scheduleMessage(scheduledAt, intervals[which]);
+                    }
+                })
+                .setNegativeButton("Отмена", null)
+                .show();
+    }
+
+    private void scheduleMessage(long scheduledAt, long repeatIntervalSeconds) {
         if (apiClient == null || messageInput == null) {
             return;
         }
@@ -416,6 +432,7 @@ public final class WaysGramChatFragment extends BaseFragment {
             payload.put("recipient_id", peerId);
             payload.put("body", body);
             payload.put("scheduled_at", scheduledAt);
+            payload.put("repeat_interval_seconds", repeatIntervalSeconds);
             payload.put("silent", isSilentSendEnabled());
         } catch (Exception exception) {
             statusView.setText("Не удалось подготовить отложенное сообщение.");
@@ -437,7 +454,11 @@ public final class WaysGramChatFragment extends BaseFragment {
                         String formatted = DateFormat.getDateTimeInstance(
                                 DateFormat.SHORT, DateFormat.SHORT, Locale.getDefault()
                         ).format(scheduledDate);
-                        statusView.setText("Сообщение запланировано на " + formatted);
+                        String repeatText = repeatIntervalSeconds == 86400
+                                ? " · ежедневно"
+                                : repeatIntervalSeconds == 604800
+                                    ? " · еженедельно" : "";
+                        statusView.setText("Сообщение запланировано на " + formatted + repeatText);
                     }
 
                     @Override
@@ -490,8 +511,12 @@ public final class WaysGramChatFragment extends BaseFragment {
                             if (body.length() > 70) {
                                 body = body.substring(0, 70) + "…";
                             }
+                            long repeatInterval = item.optLong("repeat_interval_seconds", 0);
+                            String repeatLabel = repeatInterval == 86400
+                                    ? " · ежедневно"
+                                    : repeatInterval == 604800 ? " · еженедельно" : "";
                             labels[i] = (pending[i] ? "Ожидает · " : "Ошибка · ")
-                                    + dateText + "\n" + body;
+                                    + dateText + repeatLabel + "\n" + body;
                             String error = item.optString("error", "");
                             if (!pending[i] && !error.isEmpty()) {
                                 labels[i] += "\n" + error;
