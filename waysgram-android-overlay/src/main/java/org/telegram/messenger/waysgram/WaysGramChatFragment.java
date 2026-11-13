@@ -15,6 +15,7 @@ import android.graphics.Outline;
 import android.graphics.SurfaceTexture;
 import android.graphics.drawable.GradientDrawable;
 import android.net.Uri;
+import android.provider.MediaStore;
 import android.view.Surface;
 import android.view.TextureView;
 import android.view.ViewOutlineProvider;
@@ -83,6 +84,7 @@ import java.util.UUID;
 public final class WaysGramChatFragment extends BaseFragment {
     private static final int REQUEST_ATTACHMENT = 7101;
     private static final int REQUEST_SAVE_DOCUMENT = 7103;
+    private static final int REQUEST_VIDEO_NOTE = 7112;
     private final long peerId;
     private final String peerTitle;
     private final boolean savedMessages;
@@ -96,6 +98,7 @@ public final class WaysGramChatFragment extends BaseFragment {
     private EditText messageInput;
     private CheckBox silentSendCheckBox;
     private Button voiceRecordButton;
+    private Button videoNoteButton;
     private MediaRecorder voiceRecorder;
     private File pendingVoiceFile;
     private Button sendButton;
@@ -250,6 +253,14 @@ public final class WaysGramChatFragment extends BaseFragment {
                 ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT
         ));
         voiceRecordButton.setOnClickListener(view -> toggleVoiceRecording());
+
+        videoNoteButton = new Button(context);
+        videoNoteButton.setText("Кружок");
+        videoNoteButton.setAllCaps(false);
+        composer.addView(videoNoteButton, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT
+        ));
+        videoNoteButton.setOnClickListener(view -> pickVideoNote());
 
         Button giftButton = new Button(context);
         giftButton.setText("Подарок");
@@ -1391,6 +1402,85 @@ public final class WaysGramChatFragment extends BaseFragment {
                 });
     }
 
+    private void pickVideoNote() {
+        Activity activity = getParentActivity();
+        if (activity == null || messageSendInFlight) {
+            return;
+        }
+        Intent intent = new Intent(MediaStore.ACTION_VIDEO_CAPTURE);
+        intent.putExtra(MediaStore.EXTRA_DURATION_LIMIT, 60);
+        intent.putExtra(MediaStore.EXTRA_VIDEO_QUALITY, 0);
+        if (intent.resolveActivity(activity.getPackageManager()) == null) {
+            statusView.setText("На устройстве нет доступной камеры для записи видео.");
+            return;
+        }
+        startActivityForResult(intent, REQUEST_VIDEO_NOTE);
+    }
+
+    private void uploadVideoNote(Uri videoUri) {
+        if (messageSendInFlight || apiClient == null || getParentActivity() == null) {
+            return;
+        }
+        final long replyTarget = replyToMessageId;
+        final boolean silent = isSilentSendEnabled();
+        setMessageSendInFlight(true);
+        statusView.setText("Загружаю видеосообщение…");
+        apiClient.uploadDocument(getParentActivity().getContentResolver(), videoUri,
+                new WaysGramApiClient.Callback() {
+                    @Override
+                    public void onSuccess(JSONObject uploaded) {
+                        String mediaId = uploaded == null ? "" : uploaded.optString("id", "");
+                        if (!mediaId.matches("[a-f0-9]{32}")) {
+                            setMessageSendInFlight(false);
+                            statusView.setText("Сервер вернул некорректный ID видеосообщения.");
+                            return;
+                        }
+                        JSONObject payload = new JSONObject();
+                        try {
+                            payload.put("recipient_id", peerId);
+                            payload.put("body", "Видеосообщение");
+                            payload.put("media_id", mediaId);
+                            payload.put("silent", silent);
+                            if (replyTarget > 0) {
+                                payload.put("reply_to_id", replyTarget);
+                            }
+                        } catch (Exception exception) {
+                            setMessageSendInFlight(false);
+                            statusView.setText("Не удалось подготовить видеосообщение.");
+                            return;
+                        }
+                        String key = messageIdempotencyKey(payload.toString());
+                        apiClient.post("/api/messages", payload, key,
+                                new WaysGramApiClient.Callback() {
+                                    @Override
+                                    public void onSuccess(JSONObject response) {
+                                        messageIdempotencyKeys.remove(payload.toString());
+                                        setMessageSendInFlight(false);
+                                        resetSilentSendMode();
+                                        if (replyToMessageId == replyTarget) {
+                                            replyToMessageId = 0;
+                                            statusView.setOnClickListener(null);
+                                        }
+                                        statusView.setText("Видеосообщение отправлено.");
+                                        loadMessages();
+                                    }
+
+                                    @Override
+                                    public void onError(String message, int statusCode) {
+                                        setMessageSendInFlight(false);
+                                        statusView.setText(message);
+                                    }
+                                });
+                    }
+
+                    @Override
+                    public void onError(String message, int statusCode) {
+                        setMessageSendInFlight(false);
+                        statusView.setText(message);
+                    }
+                });
+    }
+
     private void toggleVoiceRecording() {
         if (voiceRecorder != null) {
             finishVoiceRecordingAndSend();
@@ -1618,6 +1708,14 @@ public final class WaysGramChatFragment extends BaseFragment {
                             statusView.setText(message);
                         }
                     });
+            return;
+        }
+        if (requestCode == REQUEST_VIDEO_NOTE) {
+            if (resultCode == Activity.RESULT_OK && data != null && data.getData() != null) {
+                uploadVideoNote(data.getData());
+            } else if (resultCode == Activity.RESULT_OK) {
+                statusView.setText("Камера не вернула видеофайл.");
+            }
             return;
         }
         if (requestCode != REQUEST_ATTACHMENT || resultCode != Activity.RESULT_OK || data == null) {
