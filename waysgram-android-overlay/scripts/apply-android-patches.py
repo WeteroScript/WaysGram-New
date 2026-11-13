@@ -205,6 +205,35 @@ def patch_notification_permissions(android_root: Path) -> None:
         manifest.write_text(updated, encoding="utf-8")
 
 
+def patch_translation_dependencies(android_root: Path) -> None:
+    """Add on-device translation and language-identification libraries to WaysGram."""
+    gradle_file = android_root / "TMessagesProj/build.gradle"
+    if not gradle_file.is_file():
+        raise FileNotFoundError(f"Telegram Android module Gradle file not found: {gradle_file}")
+    content = gradle_file.read_text(encoding="utf-8")
+    dependencies = (
+        "implementation 'com.google.mlkit:language-id:17.0.6'",
+        "implementation 'com.google.mlkit:translate:17.0.3'",
+    )
+    present = [dependency in content for dependency in dependencies]
+    if all(present):
+        return
+    if any(present):
+        raise ValueError("TMessagesProj/build.gradle contains a partial ML Kit translation dependency patch")
+
+    addition = (
+        "\n\n// WaysGram on-device message translation.\n"
+        "repositories {\n"
+        "    google()\n"
+        "}\n"
+        "dependencies {\n"
+        "    implementation 'com.google.mlkit:language-id:17.0.6'\n"
+        "    implementation 'com.google.mlkit:translate:17.0.3'\n"
+        "}\n"
+    )
+    gradle_file.write_text(content.rstrip() + addition, encoding="utf-8")
+
+
 def verify_source(android_root: Path) -> None:
     gift_sheet = android_root / "TMessagesProj/src/main/java/org/telegram/ui/Gifts/GiftSheet.java"
     launch_activity = android_root / "TMessagesProj/src/main/java/org/telegram/ui/LaunchActivity.java"
@@ -249,6 +278,14 @@ def verify_source(android_root: Path) -> None:
     if patched_push_listener != push_listener_source:
         push_listener.write_text(patched_push_listener, encoding="utf-8")
     patch_notification_permissions(android_root)
+    patch_translation_dependencies(android_root)
+
+    translation_gradle = (android_root / "TMessagesProj/build.gradle").read_text(encoding="utf-8")
+    if (
+        "com.google.mlkit:language-id:17.0.6" not in translation_gradle
+        or "com.google.mlkit:translate:17.0.3" not in translation_gradle
+    ):
+        raise ValueError("WaysGram on-device translation dependencies are missing")
 
     final_settings = settings_activity.read_text(encoding="utf-8")
     if WAYS_GRAM_SETTINGS_ROW not in final_settings or "presentSettingFragment(new WaysGramHomeFragment())" not in final_settings:
