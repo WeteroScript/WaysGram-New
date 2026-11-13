@@ -57,6 +57,7 @@ import java.util.HashMap;
 import java.util.Iterator;
 import java.util.Locale;
 import java.util.Map;
+import java.util.TimeZone;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.UUID;
@@ -441,6 +442,7 @@ public final class WaysGramChatFragment extends BaseFragment {
             payload.put("body", body);
             payload.put("scheduled_at", scheduledAt);
             payload.put("repeat_interval_seconds", repeatIntervalSeconds);
+            payload.put("time_zone", TimeZone.getDefault().getID());
             payload.put("silent", isSilentSendEnabled());
         } catch (Exception exception) {
             statusView.setText("Не удалось подготовить отложенное сообщение.");
