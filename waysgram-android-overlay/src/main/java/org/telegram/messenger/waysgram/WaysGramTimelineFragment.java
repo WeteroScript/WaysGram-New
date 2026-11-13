@@ -11,11 +11,16 @@ import android.content.ClipboardManager;
 import android.content.Context;
 import android.content.Intent;
 import android.content.pm.PackageManager;
+import android.database.Cursor;
+import android.location.Location;
+import android.location.LocationListener;
+import android.location.LocationManager;
 import android.graphics.Bitmap;
 import android.graphics.Outline;
 import android.graphics.SurfaceTexture;
 import android.net.Uri;
 import android.provider.MediaStore;
+import android.provider.ContactsContract;
 import android.view.Surface;
 import android.view.TextureView;
 import android.view.ViewOutlineProvider;
@@ -23,6 +28,7 @@ import android.media.MediaRecorder;
 import android.os.Build;
 import android.os.Handler;
 import android.os.Looper;
+import android.os.Bundle;
 import android.text.InputType;
 import android.view.Gravity;
 import android.view.View;
@@ -58,6 +64,9 @@ public final class WaysGramTimelineFragment extends BaseFragment {
     private static final int REQUEST_ATTACHMENT = 7102;
     private static final int REQUEST_SAVE_DOCUMENT = 7104;
     private static final int REQUEST_VIDEO_NOTE = 7113;
+    private static final int REQUEST_CONTACT_PICK = 7117;
+    private static final int REQUEST_CONTACT_PERMISSION = 7118;
+    private static final int REQUEST_LOCATION_PERMISSION = 7119;
     public static final int TYPE_GROUP = 1;
     public static final int TYPE_CHANNEL = 2;
 
@@ -79,6 +88,14 @@ public final class WaysGramTimelineFragment extends BaseFragment {
     private Button attachButton;
     private Button voiceRecordButton;
     private Button videoNoteButton;
+    private Button extraAttachmentButton;
+    private Button stopLiveLocationButton;
+    private LocationManager liveLocationManager;
+    private LocationListener liveLocationListener;
+    private long liveLocationMessageId = 0;
+    private long liveLocationExpiresAt = 0;
+    private final Handler liveLocationHandler = new Handler(Looper.getMainLooper());
+    private Runnable liveLocationExpiryRunnable;
     private MediaRecorder voiceRecorder;
     private File pendingVoiceFile;
     private final Handler pollHandler = new Handler(Looper.getMainLooper());
@@ -225,6 +242,23 @@ public final class WaysGramTimelineFragment extends BaseFragment {
         ));
         videoNoteButton.setOnClickListener(view -> pickVideoNote());
 
+        extraAttachmentButton = new Button(context);
+        extraAttachmentButton.setText("Ещё");
+        extraAttachmentButton.setAllCaps(false);
+        composer.addView(extraAttachmentButton, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT
+        ));
+        extraAttachmentButton.setOnClickListener(view -> showExtraAttachmentMenu());
+
+        stopLiveLocationButton = new Button(context);
+        stopLiveLocationButton.setText("Остановить геопозицию");
+        stopLiveLocationButton.setAllCaps(false);
+        stopLiveLocationButton.setVisibility(View.GONE);
+        composer.addView(stopLiveLocationButton, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT
+        ));
+        stopLiveLocationButton.setOnClickListener(view -> stopLiveLocation(true));
+
         sendButton = new Button(context);
         sendButton.setText(type == TYPE_GROUP ? "Отправить" : "Опубликовать");
         sendButton.setAllCaps(false);
@@ -362,6 +396,410 @@ public final class WaysGramTimelineFragment extends BaseFragment {
         return type == TYPE_GROUP
                 ? "/api/groups/" + targetId + "/messages"
                 : "/api/channels/" + targetId + "/messages";
+    }
+
+    private void showExtraAttachmentMenu() {
+        String[] options = liveLocationMessageId > 0
+                ? new String[]{"Отправить контакт", "Отправить геопозицию", "Трансляция геопозиции", "Остановить трансляцию"}
+                : new String[]{"Отправить контакт", "Отправить геопозицию", "Трансляция геопозиции"};
+        new AlertDialog.Builder(getParentActivity())
+                .setTitle("Дополнительные вложения")
+                .setItems(options, (dialog, which) -> {
+                    if (which == 0) {
+                        pickContact();
+                    } else if (which == 1) {
+                        requestCurrentLocation(false, 0);
+                    } else if (which == 2) {
+                        showLiveLocationDurationPicker();
+                    } else if (which == 3) {
+                        stopLiveLocation(true);
+                    }
+                })
+                .show();
+    }
+
+    private void showLiveLocationDurationPicker() {
+        String[] labels = {"15 минут", "1 час", "8 часов"};
+        int[] seconds = {900, 3600, 28800};
+        new AlertDialog.Builder(getParentActivity())
+                .setTitle("Длительность трансляции")
+                .setItems(labels, (dialog, which) -> requestCurrentLocation(true, seconds[which]))
+                .show();
+    }
+
+    private void pickContact() {
+        Activity activity = getParentActivity();
+        if (activity == null) {
+            return;
+        }
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.M
+                && activity.checkSelfPermission(Manifest.permission.READ_CONTACTS)
+                != PackageManager.PERMISSION_GRANTED) {
+            activity.requestPermissions(new String[]{Manifest.permission.READ_CONTACTS}, REQUEST_CONTACT_PERMISSION);
+            statusView.setText("Разрешите доступ к контактам, затем выберите контакт повторно.");
+            return;
+        }
+        Intent intent = new Intent(Intent.ACTION_PICK, ContactsContract.Contacts.CONTENT_URI);
+        if (intent.resolveActivity(activity.getPackageManager()) == null) {
+            statusView.setText("На устройстве нет приложения для выбора контактов.");
+            return;
+        }
+        startActivityForResult(intent, REQUEST_CONTACT_PICK);
+    }
+
+    private void handlePickedContact(Uri contactUri) {
+        Activity activity = getParentActivity();
+        if (activity == null || contactUri == null) {
+            return;
+        }
+        String contactId = null;
+        String displayName = "";
+        try (Cursor cursor = activity.getContentResolver().query(
+                contactUri,
+                new String[]{ContactsContract.Contacts._ID, ContactsContract.Contacts.DISPLAY_NAME},
+                null, null, null
+        )) {
+            if (cursor != null && cursor.moveToFirst()) {
+                contactId = cursor.getString(0);
+                displayName = cursor.getString(1);
+            }
+        } catch (Exception exception) {
+            statusView.setText("Не удалось прочитать выбранный контакт.");
+            return;
+        }
+        if (contactId == null || displayName == null || displayName.trim().isEmpty()) {
+            statusView.setText("В выбранном контакте нет имени.");
+            return;
+        }
+        String phone = "";
+        String email = "";
+        try (Cursor phones = activity.getContentResolver().query(
+                ContactsContract.CommonDataKinds.Phone.CONTENT_URI,
+                new String[]{ContactsContract.CommonDataKinds.Phone.NUMBER},
+                ContactsContract.CommonDataKinds.Phone.CONTACT_ID + "=?",
+                new String[]{contactId}, null
+        )) {
+            if (phones != null && phones.moveToFirst()) {
+                phone = phones.getString(0);
+            }
+        } catch (Exception ignored) {
+        }
+        try (Cursor emails = activity.getContentResolver().query(
+                ContactsContract.CommonDataKinds.Email.CONTENT_URI,
+                new String[]{ContactsContract.CommonDataKinds.Email.ADDRESS},
+                ContactsContract.CommonDataKinds.Email.CONTACT_ID + "=?",
+                new String[]{contactId}, null
+        )) {
+            if (emails != null && emails.moveToFirst()) {
+                email = emails.getString(0);
+            }
+        } catch (Exception ignored) {
+        }
+        if ((phone == null || phone.trim().isEmpty()) && (email == null || email.trim().isEmpty())) {
+            statusView.setText("У выбранного контакта нет телефона или почты.");
+            return;
+        }
+        JSONObject attachment = new JSONObject();
+        try {
+            attachment.put("type", "contact");
+            attachment.put("name", displayName.trim());
+            attachment.put("phone", phone == null ? "" : phone.trim());
+            attachment.put("email", email == null ? "" : email.trim());
+        } catch (Exception exception) {
+            statusView.setText("Не удалось подготовить карточку контакта.");
+            return;
+        }
+        sendStructuredAttachment(attachment, "Контакт: " + displayName.trim());
+    }
+
+    private void sendStructuredAttachment(JSONObject attachment, String body) {
+        if (sendInFlight || apiClient == null) {
+            return;
+        }
+        JSONObject payload = new JSONObject();
+        try {
+            payload.put("body", body);
+            payload.put("attachment", attachment);
+            if (replyToMessageId > 0) {
+                payload.put("reply_to_id", replyToMessageId);
+            }
+        } catch (Exception exception) {
+            statusView.setText("Не удалось подготовить вложение.");
+            return;
+        }
+        String key = "waysgram-attachment-" + UUID.randomUUID();
+        setSendInFlight(true);
+        statusView.setText(type == TYPE_GROUP ? "Отправляю вложение…" : "Публикую вложение…");
+        apiClient.post(basePath(), payload, key, new WaysGramApiClient.Callback() {
+            @Override
+            public void onSuccess(JSONObject response) {
+                setSendInFlight(false);
+                if (replyToMessageId > 0) {
+                    replyToMessageId = 0;
+                    statusView.setOnClickListener(null);
+                }
+                statusView.setText("Вложение отправлено.");
+                loadMessages();
+            }
+
+            @Override
+            public void onError(String message, int statusCode) {
+                setSendInFlight(false);
+                statusView.setText(message);
+            }
+        });
+    }
+
+    private void requestCurrentLocation(boolean live, int livePeriodSeconds) {
+        Activity activity = getParentActivity();
+        if (activity == null || sendInFlight) {
+            return;
+        }
+        boolean fine = android.os.Build.VERSION.SDK_INT < android.os.Build.VERSION_CODES.M
+                || activity.checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION)
+                == PackageManager.PERMISSION_GRANTED;
+        boolean coarse = android.os.Build.VERSION.SDK_INT < android.os.Build.VERSION_CODES.M
+                || activity.checkSelfPermission(Manifest.permission.ACCESS_COARSE_LOCATION)
+                == PackageManager.PERMISSION_GRANTED;
+        if (!fine && !coarse) {
+            activity.requestPermissions(
+                    new String[]{Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION},
+                    REQUEST_LOCATION_PERMISSION
+            );
+            statusView.setText("Разрешите доступ к геопозиции, затем отправьте её повторно.");
+            return;
+        }
+        LocationManager manager = (LocationManager) activity.getSystemService(Context.LOCATION_SERVICE);
+        if (manager == null) {
+            statusView.setText("Служба геопозиции недоступна.");
+            return;
+        }
+        liveLocationManager = manager;
+        String provider = fine && manager.isProviderEnabled(LocationManager.GPS_PROVIDER)
+                ? LocationManager.GPS_PROVIDER : LocationManager.NETWORK_PROVIDER;
+        if (!manager.isProviderEnabled(provider)) {
+            statusView.setText("Включите службы геопозиции на устройстве.");
+            return;
+        }
+        try {
+            Location cached = manager.getLastKnownLocation(provider);
+            long ageMillis = cached == null ? Long.MAX_VALUE
+                    : Math.max(0, System.currentTimeMillis() - cached.getTime());
+            if (cached != null && ageMillis < 120000) {
+                sendLocationAttachment(cached, live, livePeriodSeconds);
+                return;
+            }
+            statusView.setText("Получаю текущую геопозицию…");
+            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
+                manager.getCurrentLocation(provider, null, activity.getMainExecutor(), location -> {
+                    if (location != null) {
+                        sendLocationAttachment(location, live, livePeriodSeconds);
+                    } else {
+                        statusView.setText("Не удалось получить геопозицию. Проверьте сигнал GPS.");
+                    }
+                });
+            } else {
+                manager.requestSingleUpdate(provider, new LocationListener() {
+                    @Override
+                    public void onLocationChanged(Location location) {
+                        manager.removeUpdates(this);
+                        sendLocationAttachment(location, live, livePeriodSeconds);
+                    }
+
+                    @Override
+                    public void onStatusChanged(String providerName, int status, Bundle extras) {
+                    }
+
+                    @Override
+                    public void onProviderEnabled(String providerName) {
+                    }
+
+                    @Override
+                    public void onProviderDisabled(String providerName) {
+                    }
+                }, Looper.getMainLooper());
+            }
+        } catch (SecurityException exception) {
+            statusView.setText("Нет разрешения на получение геопозиции.");
+        } catch (Exception exception) {
+            statusView.setText("Не удалось получить геопозицию.");
+        }
+    }
+
+    private void sendLocationAttachment(Location location, boolean live, int livePeriodSeconds) {
+        if (location == null || sendInFlight) {
+            return;
+        }
+        JSONObject attachment = new JSONObject();
+        try {
+            attachment.put("type", "location");
+            attachment.put("latitude", location.getLatitude());
+            attachment.put("longitude", location.getLongitude());
+            attachment.put("live_period", live ? livePeriodSeconds : 0);
+        } catch (Exception exception) {
+            statusView.setText("Не удалось подготовить геопозицию.");
+            return;
+        }
+        JSONObject payload = new JSONObject();
+        try {
+            payload.put("body", live ? "Трансляция геопозиции" : "Геопозиция");
+            payload.put("attachment", attachment);
+            if (replyToMessageId > 0) {
+                payload.put("reply_to_id", replyToMessageId);
+            }
+        } catch (Exception exception) {
+            statusView.setText("Не удалось подготовить сообщение с геопозицией.");
+            return;
+        }
+        String key = "waysgram-location-" + UUID.randomUUID();
+        setSendInFlight(true);
+        statusView.setText(type == TYPE_GROUP ? "Отправляю геопозицию…" : "Публикую геопозицию…");
+        apiClient.post(basePath(), payload, key, new WaysGramApiClient.Callback() {
+            @Override
+            public void onSuccess(JSONObject response) {
+                setSendInFlight(false);
+                long messageId = response.optLong("id", 0);
+                if (replyToMessageId > 0) {
+                    replyToMessageId = 0;
+                    statusView.setOnClickListener(null);
+                }
+                statusView.setText(live ? "Трансляция геопозиции запущена." : "Геопозиция отправлена.");
+                if (live && messageId > 0) {
+                    startLiveLocationUpdates(messageId, livePeriodSeconds);
+                }
+                loadMessages();
+            }
+
+            @Override
+            public void onError(String message, int statusCode) {
+                setSendInFlight(false);
+                statusView.setText(message);
+            }
+        });
+    }
+
+    private void startLiveLocationUpdates(long messageId, int livePeriodSeconds) {
+        stopLocalLiveLocationUpdates();
+        liveLocationMessageId = messageId;
+        liveLocationExpiresAt = System.currentTimeMillis() / 1000 + livePeriodSeconds;
+        if (stopLiveLocationButton != null) {
+            stopLiveLocationButton.setVisibility(View.VISIBLE);
+        }
+        if (liveLocationExpiryRunnable != null) {
+            liveLocationHandler.removeCallbacks(liveLocationExpiryRunnable);
+        }
+        liveLocationExpiryRunnable = () -> stopLiveLocation(true);
+        liveLocationHandler.postDelayed(liveLocationExpiryRunnable, livePeriodSeconds * 1000L);
+        resumeActiveLiveLocationUpdates();
+    }
+
+    private void resumeActiveLiveLocationUpdates() {
+        if (liveLocationMessageId <= 0 || liveLocationListener != null
+                || System.currentTimeMillis() / 1000 >= liveLocationExpiresAt) {
+            return;
+        }
+        Activity activity = getParentActivity();
+        if (activity == null) {
+            return;
+        }
+        boolean fine = android.os.Build.VERSION.SDK_INT < android.os.Build.VERSION_CODES.M
+                || activity.checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION)
+                == PackageManager.PERMISSION_GRANTED;
+        try {
+            if (liveLocationManager == null) {
+                liveLocationManager = (LocationManager) activity.getSystemService(Context.LOCATION_SERVICE);
+            }
+            String provider = fine ? LocationManager.GPS_PROVIDER : LocationManager.NETWORK_PROVIDER;
+            if (!liveLocationManager.isProviderEnabled(provider)) {
+                provider = LocationManager.NETWORK_PROVIDER;
+            }
+            LocationManager manager = liveLocationManager;
+            String selectedProvider = provider;
+            liveLocationListener = new LocationListener() {
+                @Override
+                public void onLocationChanged(Location location) {
+                    if (liveLocationMessageId <= 0
+                            || System.currentTimeMillis() / 1000 >= liveLocationExpiresAt) {
+                        stopLiveLocation(true);
+                        return;
+                    }
+                    JSONObject payload = new JSONObject();
+                    try {
+                        payload.put("latitude", location.getLatitude());
+                        payload.put("longitude", location.getLongitude());
+                    } catch (Exception ignored) {
+                        return;
+                    }
+                    apiClient.put(basePath() + "/" + liveLocationMessageId + "/location",
+                            payload, new WaysGramApiClient.Callback() {
+                                @Override
+                                public void onSuccess(JSONObject response) {
+                                }
+
+                                @Override
+                                public void onError(String message, int statusCode) {
+                                    if (statusCode == 409) {
+                                        stopLiveLocation(false);
+                                    }
+                                }
+                            });
+                }
+
+                @Override
+                public void onStatusChanged(String providerName, int status, Bundle extras) {
+                }
+
+                @Override
+                public void onProviderEnabled(String providerName) {
+                }
+
+                @Override
+                public void onProviderDisabled(String providerName) {
+                }
+            };
+            manager.requestLocationUpdates(selectedProvider, 30000L, 15f,
+                    liveLocationListener, Looper.getMainLooper());
+        } catch (SecurityException | IllegalArgumentException exception) {
+            statusView.setText("Не удалось продолжить трансляцию геопозиции.");
+        }
+    }
+
+    private void stopLocalLiveLocationUpdates() {
+        if (liveLocationManager != null && liveLocationListener != null) {
+            try {
+                liveLocationManager.removeUpdates(liveLocationListener);
+            } catch (Exception ignored) {
+            }
+        }
+        liveLocationListener = null;
+    }
+
+    private void stopLiveLocation(boolean notifyServer) {
+        long messageId = liveLocationMessageId;
+        liveLocationMessageId = 0;
+        liveLocationExpiresAt = 0;
+        stopLocalLiveLocationUpdates();
+        if (liveLocationExpiryRunnable != null) {
+            liveLocationHandler.removeCallbacks(liveLocationExpiryRunnable);
+            liveLocationExpiryRunnable = null;
+        }
+        if (stopLiveLocationButton != null) {
+            stopLiveLocationButton.setVisibility(View.GONE);
+        }
+        if (notifyServer && messageId > 0 && apiClient != null) {
+            apiClient.post("/api/groups/" + targetId + "/messages/" + messageId + "/location/stop",
+                    new JSONObject(), new WaysGramApiClient.Callback() {
+                        @Override
+                        public void onSuccess(JSONObject response) {
+                            statusView.setText("Трансляция геопозиции остановлена.");
+                        }
+
+                        @Override
+                        public void onError(String message, int statusCode) {
+                            statusView.setText(message);
+                        }
+                    });
+        }
     }
 
     private void pickVideoNote() {
@@ -657,6 +1095,12 @@ public final class WaysGramTimelineFragment extends BaseFragment {
                             statusView.setText(message);
                         }
                     });
+            return;
+        }
+        if (requestCode == REQUEST_CONTACT_PICK) {
+            if (resultCode == Activity.RESULT_OK && data != null && data.getData() != null) {
+                handlePickedContact(data.getData());
+            }
             return;
         }
         if (requestCode == REQUEST_VIDEO_NOTE) {
@@ -2749,6 +3193,7 @@ private void addVideoNoteMessage(LinearLayout target, String mediaId, String med
     public void onResume() {
         super.onResume();
         isScreenResumed = true;
+        resumeActiveLiveLocationUpdates();
         if (typingIndicatorController != null) {
             typingIndicatorController.startPolling();
         }
@@ -2765,6 +3210,7 @@ private void addVideoNoteMessage(LinearLayout target, String mediaId, String med
     @Override
     public void onPause() {
         cancelVoiceRecording();
+        stopLocalLiveLocationUpdates();
         isScreenResumed = false;
         pollHandler.removeCallbacks(pollRunnable);
         pollHandler.removeCallbacks(eventPollRetryRunnable);
@@ -2780,6 +3226,7 @@ private void addVideoNoteMessage(LinearLayout target, String mediaId, String med
     @Override
     public void onFragmentDestroy() {
         cancelVoiceRecording();
+        stopLiveLocation(false);
         isScreenResumed = false;
         pollHandler.removeCallbacks(pollRunnable);
         stopActiveVideoNotePlayers();
