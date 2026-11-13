@@ -242,6 +242,15 @@ public final class WaysGramChatFragment extends BaseFragment {
         ));
         pinnedButton.setOnClickListener(view -> showPinnedMessages());
 
+        Button clearHistoryButton = new Button(context);
+        clearHistoryButton.setText("Очистить историю у себя");
+        clearHistoryButton.setAllCaps(false);
+        root.addView(clearHistoryButton, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+        ));
+        clearHistoryButton.setOnClickListener(view -> confirmClearHistory());
+
         fragmentView = root;
         initializeMessageEventCursor();
         return root;
@@ -1374,6 +1383,33 @@ public final class WaysGramChatFragment extends BaseFragment {
                         }
                     });
                 })
+                .show();
+    }
+
+    private void confirmClearHistory() {
+        new AlertDialog.Builder(getParentActivity())
+                .setTitle("Очистить историю у себя?")
+                .setMessage("Все сообщения исчезнут только из вашей истории. У собеседника они останутся.")
+                .setNegativeButton("Отмена", null)
+                .setPositiveButton("Очистить", (dialog, which) ->
+                        apiClient.delete("/api/conversations/" + peerId + "/messages?for=me",
+                                new WaysGramApiClient.Callback() {
+                                    @Override
+                                    public void onSuccess(JSONObject response) {
+                                        long count = response.optLong("deleted_count", 0);
+                                        statusView.setText("Удалено из вашей истории: " + count);
+                                        loadMessages();
+                                    }
+
+                                    @Override
+                                    public void onError(String message, int statusCode) {
+                                        statusView.setText(message);
+                                        if (statusCode == 401 && getParentActivity() != null) {
+                                            WaysGramSessionStore.getInstance(getParentActivity()).clearSession();
+                                            presentFragment(new WaysGramLoginFragment(), true);
+                                        }
+                                    }
+                                }))
                 .show();
     }
 
