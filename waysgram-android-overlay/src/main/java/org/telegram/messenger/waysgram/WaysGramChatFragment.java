@@ -2,6 +2,8 @@ package org.telegram.messenger.waysgram;
 
 import android.app.Activity;
 import android.app.AlertDialog;
+import android.app.DatePickerDialog;
+import android.app.TimePickerDialog;
 import android.content.ClipData;
 import android.content.ClipboardManager;
 import android.content.Context;
@@ -41,6 +43,7 @@ import org.telegram.ui.ActionBar.Theme;
 
 import java.text.DateFormat;
 import java.util.ArrayList;
+import java.util.Calendar;
 import java.util.Date;
 import java.util.HashMap;
 import java.util.Iterator;
@@ -227,6 +230,24 @@ public final class WaysGramChatFragment extends BaseFragment {
                 ViewGroup.LayoutParams.WRAP_CONTENT
         ));
 
+        Button scheduleButton = new Button(context);
+        scheduleButton.setText("Отложить отправку");
+        scheduleButton.setAllCaps(false);
+        root.addView(scheduleButton, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+        ));
+        scheduleButton.setOnClickListener(view -> showScheduleMessagePicker());
+
+        Button scheduledListButton = new Button(context);
+        scheduledListButton.setText("Отложенные сообщения");
+        scheduledListButton.setAllCaps(false);
+        root.addView(scheduledListButton, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+        ));
+        scheduledListButton.setOnClickListener(view -> loadScheduledMessages());
+
         Button refreshButton = new Button(context);
         refreshButton.setText("Обновить историю");
         root.addView(refreshButton, new LinearLayout.LayoutParams(
@@ -331,6 +352,199 @@ public final class WaysGramChatFragment extends BaseFragment {
                         }
                     }
                 });
+    }
+
+    private void showScheduleMessagePicker() {
+        String body = messageInput == null || messageInput.getText() == null
+                ? "" : messageInput.getText().toString().trim();
+        if (body.isEmpty() || body.length() > 4000) {
+            statusView.setText("Для отложенной отправки введите текст длиной до 4000 символов.");
+            return;
+        }
+        Calendar now = Calendar.getInstance();
+        Calendar maximum = (Calendar) now.clone();
+        maximum.add(Calendar.DAY_OF_YEAR, 30);
+        DatePickerDialog dateDialog = new DatePickerDialog(
+                getParentActivity(),
+                (picker, year, month, day) -> {
+                    Calendar selected = Calendar.getInstance();
+                    selected.set(Calendar.YEAR, year);
+                    selected.set(Calendar.MONTH, month);
+                    selected.set(Calendar.DAY_OF_MONTH, day);
+                    Calendar current = Calendar.getInstance();
+                    TimePickerDialog timeDialog = new TimePickerDialog(
+                            getParentActivity(),
+                            (timePicker, hour, minute) -> {
+                                selected.set(Calendar.HOUR_OF_DAY, hour);
+                                selected.set(Calendar.MINUTE, minute);
+                                selected.set(Calendar.SECOND, 0);
+                                selected.set(Calendar.MILLISECOND, 0);
+                                scheduleMessage(selected.getTimeInMillis() / 1000L);
+                            },
+                            current.get(Calendar.HOUR_OF_DAY),
+                            current.get(Calendar.MINUTE),
+                            true
+                    );
+                    timeDialog.show();
+                },
+                now.get(Calendar.YEAR),
+                now.get(Calendar.MONTH),
+                now.get(Calendar.DAY_OF_MONTH)
+        );
+        dateDialog.getDatePicker().setMinDate(now.getTimeInMillis());
+        dateDialog.getDatePicker().setMaxDate(maximum.getTimeInMillis());
+        dateDialog.show();
+    }
+
+    private void scheduleMessage(long scheduledAt) {
+        if (apiClient == null || messageInput == null) {
+            return;
+        }
+        String body = messageInput.getText() == null
+                ? "" : messageInput.getText().toString().trim();
+        if (body.isEmpty() || body.length() > 4000) {
+            statusView.setText("Сообщение должно содержать от 1 до 4000 символов.");
+            return;
+        }
+        long now = System.currentTimeMillis() / 1000L;
+        if (scheduledAt < now + 10 || scheduledAt > now + 30L * 24L * 60L * 60L) {
+            statusView.setText("Выберите время не раньше чем через 10 секунд и не позже чем через 30 дней.");
+            return;
+        }
+        JSONObject payload = new JSONObject();
+        try {
+            payload.put("recipient_id", peerId);
+            payload.put("body", body);
+            payload.put("scheduled_at", scheduledAt);
+            payload.put("silent", isSilentSendEnabled());
+        } catch (Exception exception) {
+            statusView.setText("Не удалось подготовить отложенное сообщение.");
+            return;
+        }
+        String fingerprint = payload.toString();
+        String idempotencyKey = messageIdempotencyKey(fingerprint);
+        statusView.setText("Сохраняю отложенное сообщение…");
+        apiClient.post("/api/messages/schedule", payload, idempotencyKey,
+                new WaysGramApiClient.Callback() {
+                    @Override
+                    public void onSuccess(JSONObject response) {
+                        messageIdempotencyKeys.remove(fingerprint);
+                        clearChatDraft();
+                        resetSilentSendMode();
+                        Date scheduledDate = new Date(
+                                response.optLong("scheduled_at", scheduledAt) * 1000L
+                        );
+                        String formatted = DateFormat.getDateTimeInstance(
+                                DateFormat.SHORT, DateFormat.SHORT, Locale.getDefault()
+                        ).format(scheduledDate);
+                        statusView.setText("Сообщение запланировано на " + formatted);
+                    }
+
+                    @Override
+                    public void onError(String message, int statusCode) {
+                        statusView.setText(message);
+                        if (statusCode == 401 && getParentActivity() != null) {
+                            WaysGramSessionStore.getInstance(getParentActivity()).clearSession();
+                            presentFragment(new WaysGramLoginFragment(), true);
+                        }
+                    }
+                });
+    }
+
+    private void loadScheduledMessages() {
+        if (apiClient == null) {
+            return;
+        }
+        statusView.setText("Загружаю отложенные сообщения…");
+        apiClient.get("/api/messages/scheduled?with=" + peerId,
+                new WaysGramApiClient.Callback() {
+                    @Override
+                    public void onSuccess(JSONObject response) {
+                        JSONArray items = response.optJSONArray("scheduled_messages");
+                        int count = items == null ? 0 : items.length();
+                        if (count == 0) {
+                            statusView.setText("Отложенных сообщений нет.");
+                            new AlertDialog.Builder(getParentActivity())
+                                    .setTitle("Отложенные сообщения")
+                                    .setMessage("Для этой переписки нет ожидающих или неотправленных сообщений.")
+                                    .setPositiveButton("Закрыть", null)
+                                    .show();
+                            return;
+                        }
+                        String[] labels = new String[count];
+                        long[] ids = new long[count];
+                        boolean[] pending = new boolean[count];
+                        for (int i = 0; i < count; i++) {
+                            JSONObject item = items.optJSONObject(i);
+                            if (item == null) {
+                                labels[i] = "Недоступная запись";
+                                continue;
+                            }
+                            ids[i] = item.optLong("id", 0);
+                            pending[i] = "pending".equals(item.optString("status", ""));
+                            Date date = new Date(item.optLong("scheduled_at", 0) * 1000L);
+                            String dateText = DateFormat.getDateTimeInstance(
+                                    DateFormat.SHORT, DateFormat.SHORT, Locale.getDefault()
+                            ).format(date);
+                            String body = item.optString("body", "");
+                            if (body.length() > 70) {
+                                body = body.substring(0, 70) + "…";
+                            }
+                            labels[i] = (pending[i] ? "Ожидает · " : "Ошибка · ")
+                                    + dateText + "\\n" + body;
+                            String error = item.optString("error", "");
+                            if (!pending[i] && !error.isEmpty()) {
+                                labels[i] += "\\n" + error;
+                            }
+                        }
+                        new AlertDialog.Builder(getParentActivity())
+                                .setTitle("Отложенные сообщения")
+                                .setItems(labels, (dialog, which) -> {
+                                    if (which >= 0 && which < ids.length && ids[which] > 0) {
+                                        if (pending[which]) {
+                                            confirmCancelScheduledMessage(ids[which]);
+                                        } else {
+                                            statusView.setText("Отправка не выполнена: "
+                                                    + items.optJSONObject(which).optString("error", ""));
+                                        }
+                                    }
+                                })
+                                .setPositiveButton("Закрыть", null)
+                                .show();
+                        statusView.setText("Отложенных сообщений: " + count);
+                    }
+
+                    @Override
+                    public void onError(String message, int statusCode) {
+                        statusView.setText(message);
+                        if (statusCode == 401 && getParentActivity() != null) {
+                            WaysGramSessionStore.getInstance(getParentActivity()).clearSession();
+                            presentFragment(new WaysGramLoginFragment(), true);
+                        }
+                    }
+                });
+    }
+
+    private void confirmCancelScheduledMessage(long scheduledId) {
+        new AlertDialog.Builder(getParentActivity())
+                .setTitle("Отменить отправку?")
+                .setMessage("Запланированное сообщение не будет отправлено.")
+                .setNegativeButton("Назад", null)
+                .setPositiveButton("Отменить", (dialog, which) ->
+                        apiClient.delete("/api/messages/scheduled/" + scheduledId,
+                                new WaysGramApiClient.Callback() {
+                                    @Override
+                                    public void onSuccess(JSONObject response) {
+                                        statusView.setText("Отложенная отправка отменена.");
+                                        loadScheduledMessages();
+                                    }
+
+                                    @Override
+                                    public void onError(String message, int statusCode) {
+                                        statusView.setText(message);
+                                    }
+                                }))
+                .show();
     }
 
     private void showFormattingOptions() {
