@@ -340,7 +340,7 @@ def configure_mlkit_translation_dependencies(android_root: Path) -> None:
     if all(line in content for line in dependency_lines):
         return
 
-    block = re.search(r"(?m)^dependencies\\s*\\{", content)
+    block = re.search(r"(?m)^dependencies\s*\{", content)
     if block is None:
         raise ValueError("TMessagesProj/build.gradle has no dependencies block")
 
@@ -362,7 +362,7 @@ def configure_mlkit_translation_dependencies(android_root: Path) -> None:
     dependencies_block = content[opening:closing + 1]
     missing = [line for line in dependency_lines if line.split(":")[1] not in dependencies_block]
     if missing:
-        insertion = "\\n" + "\\n".join(missing) + "\\n"
+        insertion = "\n" + "\n".join(missing) + "\n"
         content = content[:closing] + insertion + content[closing:]
         build_file.write_text(content, encoding="utf-8")
 
