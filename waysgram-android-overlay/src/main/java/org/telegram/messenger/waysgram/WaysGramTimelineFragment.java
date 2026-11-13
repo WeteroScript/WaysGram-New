@@ -12,7 +12,12 @@ import android.content.Context;
 import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.graphics.Bitmap;
+import android.graphics.Outline;
+import android.graphics.SurfaceTexture;
 import android.net.Uri;
+import android.view.Surface;
+import android.view.TextureView;
+import android.view.ViewOutlineProvider;
 import android.media.MediaRecorder;
 import android.os.Build;
 import android.os.Handler;
@@ -22,6 +27,7 @@ import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
 import android.widget.Button;
+import android.widget.FrameLayout;
 import android.widget.CheckBox;
 import android.widget.EditText;
 import android.widget.ImageView;
@@ -99,6 +105,7 @@ public final class WaysGramTimelineFragment extends BaseFragment {
     private final ArrayList<Uri> pendingAttachments = new ArrayList<>();
     private final ArrayList<String> pendingAttachmentMediaIds = new ArrayList<>();
     private final ArrayList<VideoView> activeVideoViews = new ArrayList<>();
+    private final ArrayList<VideoNotePlayback> activeVideoNotePlayers = new ArrayList<>();
     private final ArrayList<MediaPlayer> activeAudioPlayers = new ArrayList<>();
     private final Map<String, LinearLayout> mediaAlbumContainers = new HashMap<>();
     private String pendingAttachmentCaption = "";
@@ -1050,6 +1057,7 @@ public final class WaysGramTimelineFragment extends BaseFragment {
             @Override
             public void onSuccess(JSONObject response) {
                 JSONArray messages = response.optJSONArray("messages");
+                stopActiveVideoNotePlayers();
                 stopActiveVideoViews();
                 stopActiveAudioPlayers();
                 messagesContainer.removeAllViews();
@@ -1876,6 +1884,9 @@ public final class WaysGramTimelineFragment extends BaseFragment {
                 }
             });
             addMediaSaveButton(messageTarget, mediaId, mediaName, mediaType);
+        } else if (mediaId.matches("[a-f0-9]{32}") && mediaType.startsWith("video/")
+                && "Видеосообщение".equals(message.optString("body", "").trim())) {
+            addVideoNoteMessage(messageTarget, mediaId, mediaName);
         } else if (mediaId.matches("[a-f0-9]{32}") && mediaType.startsWith("video/")) {
             addVideoMessage(messageTarget, mediaId, mediaName, mediaType);
         } else if (mediaId.matches("[a-f0-9]{32}") && mediaType.startsWith("audio/")) {
@@ -2369,6 +2380,163 @@ public final class WaysGramTimelineFragment extends BaseFragment {
         activeAudioPlayers.clear();
     }
 
+private void addVideoNoteMessage(LinearLayout target, String mediaId, String mediaName) {
+        Context context = getParentActivity();
+        Uri uri = mediaStreamUri(mediaId);
+        if (context == null || uri == null) {
+            addMediaSaveButton(target, mediaId, mediaName, "video/mp4");
+            return;
+        }
+
+        FrameLayout frame = new FrameLayout(context);
+        frame.setClipToOutline(true);
+        frame.setOutlineProvider(new ViewOutlineProvider() {
+            @Override
+            public void getOutline(View view, Outline outline) {
+                outline.setOval(0, 0, view.getWidth(), view.getHeight());
+            }
+        });
+        int diameter = AndroidUtilities.dp(224);
+        LinearLayout.LayoutParams frameParams = new LinearLayout.LayoutParams(diameter, diameter);
+        frameParams.gravity = Gravity.CENTER_HORIZONTAL;
+        frameParams.bottomMargin = AndroidUtilities.dp(6);
+        target.addView(frame, frameParams);
+
+        TextureView texture = new TextureView(context);
+        frame.addView(texture, new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT
+        ));
+        Button playButton = new Button(context);
+        playButton.setAllCaps(false);
+        playButton.setText("Загрузка видеосообщения…");
+        playButton.setEnabled(false);
+        target.addView(playButton, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
+        ));
+
+        final VideoNotePlayback[] playbackHolder = new VideoNotePlayback[1];
+        final boolean[] prepared = {false};
+        texture.setSurfaceTextureListener(new TextureView.SurfaceTextureListener() {
+            @Override
+            public void onSurfaceTextureAvailable(SurfaceTexture surfaceTexture, int width, int height) {
+                Surface surface = new Surface(surfaceTexture);
+                MediaPlayer player = new MediaPlayer();
+                VideoNotePlayback playback = new VideoNotePlayback(player, surface);
+                playbackHolder[0] = playback;
+                activeVideoNotePlayers.add(playback);
+                try {
+                    player.setAudioAttributes(new AudioAttributes.Builder()
+                            .setUsage(AudioAttributes.USAGE_MEDIA)
+                            .setContentType(AudioAttributes.CONTENT_TYPE_MOVIE)
+                            .build());
+                    player.setLooping(true);
+                    player.setSurface(surface);
+                    player.setDataSource(context, uri, mediaAuthorizationHeaders());
+                    player.setOnPreparedListener(preparedPlayer -> {
+                        prepared[0] = true;
+                        playButton.setEnabled(true);
+                        playButton.setText("▶ Воспроизвести кружок");
+                    });
+                    player.setOnErrorListener((errorPlayer, what, extra) -> {
+                        prepared[0] = false;
+                        playButton.setEnabled(false);
+                        playButton.setText("Не удалось открыть кружок");
+                        playback.release();
+                        activeVideoNotePlayers.remove(playback);
+                        playbackHolder[0] = null;
+                        statusView.setText("Не удалось воспроизвести видеосообщение.");
+                        return true;
+                    });
+                    player.prepareAsync();
+                } catch (Exception exception) {
+                    prepared[0] = false;
+                    playButton.setEnabled(false);
+                    playButton.setText("Не удалось открыть кружок");
+                    playback.release();
+                    activeVideoNotePlayers.remove(playback);
+                    playbackHolder[0] = null;
+                }
+            }
+
+            @Override
+            public void onSurfaceTextureSizeChanged(SurfaceTexture surfaceTexture, int width, int height) {
+            }
+
+            @Override
+            public boolean onSurfaceTextureDestroyed(SurfaceTexture surfaceTexture) {
+                VideoNotePlayback playback = playbackHolder[0];
+                playbackHolder[0] = null;
+                prepared[0] = false;
+                if (playback != null) {
+                    activeVideoNotePlayers.remove(playback);
+                    playback.release();
+                }
+                return true;
+            }
+
+            @Override
+            public void onSurfaceTextureUpdated(SurfaceTexture surfaceTexture) {
+            }
+        });
+        playButton.setOnClickListener(view -> {
+            VideoNotePlayback playback = playbackHolder[0];
+            if (playback == null || !prepared[0]) {
+                return;
+            }
+            try {
+                if (playback.player.isPlaying()) {
+                    playback.player.pause();
+                    playButton.setText("▶ Продолжить кружок");
+                } else {
+                    playback.player.start();
+                    playButton.setText("⏸ Пауза кружка");
+                }
+            } catch (Exception exception) {
+                statusView.setText("Не удалось управлять воспроизведением кружка.");
+            }
+        });
+        addMediaSaveButton(target, mediaId, mediaName, "video/mp4");
+    }
+
+    private final class VideoNotePlayback {
+        final MediaPlayer player;
+        final Surface surface;
+        private boolean released;
+
+        VideoNotePlayback(MediaPlayer player, Surface surface) {
+            this.player = player;
+            this.surface = surface;
+        }
+
+        void release() {
+            if (released) {
+                return;
+            }
+            released = true;
+            try {
+                if (player.isPlaying()) {
+                    player.stop();
+                }
+            } catch (Exception ignored) {
+            }
+            try {
+                player.release();
+            } catch (Exception ignored) {
+            }
+            try {
+                surface.release();
+            } catch (Exception ignored) {
+            }
+        }
+    }
+
+    private void stopActiveVideoNotePlayers() {
+        for (VideoNotePlayback playback : new ArrayList<>(activeVideoNotePlayers)) {
+            playback.release();
+        }
+        activeVideoNotePlayers.clear();
+    }
+
     private void stopActiveVideoViews() {
         for (VideoView videoView : activeVideoViews) {
             try {
@@ -2516,6 +2684,7 @@ public final class WaysGramTimelineFragment extends BaseFragment {
         cancelVoiceRecording();
         isScreenResumed = false;
         pollHandler.removeCallbacks(pollRunnable);
+        stopActiveVideoNotePlayers();
         stopActiveVideoViews();
         stopActiveAudioPlayers();
         if (typingIndicatorController != null) {
