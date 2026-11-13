@@ -74,6 +74,20 @@ jobs:
           PY
           grep -Fq 'message.id = Math.toIntExact(id);' TMessagesProj/src/main/java/org/telegram/tgnet/WaysGramMapper.java
 
+      - name: Import WaysGram source overlay and gift integration
+        shell: bash
+        run: |
+          set -euo pipefail
+          SOURCE_COMMIT="ce8c1ce2db4832c6d1a29947ad64d9320927d53d"
+          OVERLAY="$RUNNER_TEMP/waysgram-source"
+          git init "$OVERLAY"
+          git -C "$OVERLAY" remote add origin https://github.com/WeteroScript/WaysGram-source.git
+          git -C "$OVERLAY" fetch --depth=1 origin "$SOURCE_COMMIT"
+          git -C "$OVERLAY" checkout --detach FETCH_HEAD
+          test "$(git -C "$OVERLAY" rev-parse HEAD)" = "$SOURCE_COMMIT"
+          rsync -a "$OVERLAY/android/overlay/TMessagesProj/src/main/java/" "$GITHUB_WORKSPACE/TMessagesProj/src/main/java/"
+          python3 "$OVERLAY/scripts/apply-android-patches.py" --android-root "$GITHUB_WORKSPACE"
+
       - name: Fetch dependencies listed in the archive .gitmodules
         shell: bash
         run: |
@@ -215,18 +229,30 @@ jobs:
           done
           test "$found_abi" -eq 1
 
-      - name: Configure Firebase
+      - name: Configure WaysGram app, API and Firebase
         env:
           FIREBASE_CONFIG: ${{ secrets.FIREBASE_CONFIG }}
+          WAYSGRAM_REQUIRE_FIREBASE_CONFIG: "1"
+          WAYSGRAM_API_BASE_URL: ${{ secrets.PUBLIC_API_BASE_URL }}
         shell: bash
         run: |
           set -euo pipefail
-          if [ -z "${FIREBASE_CONFIG:-}" ]; then
-            echo "::error::Add the FIREBASE_CONFIG repository secret containing the complete google-services.json file."
-            exit 1
-          fi
-          printf '%s' "$FIREBASE_CONFIG" > TMessagesProj_App/google-services.json
-          python3 -c 'import json; d=json.load(open("TMessagesProj_App/google-services.json")); clients=d.get("client", []); assert any(c.get("client_info", {}).get("android_client_info", {}).get("package_name") == "org.waysgram.messenger" for c in clients), "Firebase package name mismatch"'
+          python3 "$RUNNER_TEMP/waysgram-source/scripts/prepare_android_dev_build.py" --android-root "$GITHUB_WORKSPACE"
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          config = json.loads(Path("TMessagesProj_App/google-services.json").read_text(encoding="utf-8"))
+          clients = config.get("client", [])
+          assert any(
+              client.get("client_info", {}).get("android_client_info", {}).get("package_name")
+              == "org.waysgram.messenger"
+              for client in clients
+          ), "Firebase package name mismatch"
+          for name in ("TelegramFirebaseConfig.java", "WaysGramFirebaseConfig.java"):
+              path = Path("TMessagesProj/src/main/java/org/telegram/messenger/waysgram") / name
+              assert path.is_file(), f"Missing generated Firebase config: {path}"
+          PY
 
       - name: Build release APK
         run: |

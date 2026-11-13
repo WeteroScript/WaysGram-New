@@ -27,3 +27,7 @@
 Требуемые версии: JDK 17, Android SDK / Build Tools 36, NDK 27.2.12479018, CMake 3.22.1.
 
 После импорта исходников workflow **Build Android APK** соберёт APK и прикрепит его к запуску Actions как artifact.
+
+## WaysGram Android-функциональность
+
+Перед сборкой workflow загружает overlay из [WaysGram-source](https://github.com/WeteroScript/WaysGram-source) на закреплённом коммите `ce8c1ce2db4832c6d1a29947ad64d9320927d53d` и встраивает его в распакованный Android-проект. Это включает отдельный вход WaysGram, каталог и инвентарь подарков, покупки за внутренние Stars, переводы, внутренний маркетплейс, детерминированные улучшения, подарки в профилях и личных чатах. Telegram Gift ID используется только как источник метаданных; внутренние операции не передают реальные Telegram NFT.
