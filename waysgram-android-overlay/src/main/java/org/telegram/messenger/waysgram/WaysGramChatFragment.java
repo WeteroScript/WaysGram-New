@@ -50,6 +50,7 @@ import org.telegram.ui.ActionBar.BaseFragment;
 import org.telegram.ui.ActionBar.Theme;
 
 import java.text.DateFormat;
+import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Calendar;
 import java.util.Date;
@@ -514,17 +515,27 @@ public final class WaysGramChatFragment extends BaseFragment {
                             ids[i] = item.optLong("id", 0);
                             pending[i] = "pending".equals(item.optString("status", ""));
                             Date date = new Date(item.optLong("scheduled_at", 0) * 1000L);
-                            String dateText = DateFormat.getDateTimeInstance(
+                            long repeatInterval = item.optLong("repeat_interval_seconds", 0);
+                            String timeZoneId = item.optString("time_zone", "UTC");
+                            DateFormat dateFormatter = DateFormat.getDateTimeInstance(
                                     DateFormat.SHORT, DateFormat.SHORT, Locale.getDefault()
-                            ).format(date);
+                            );
+                            if (repeatInterval > 0 && dateFormatter instanceof SimpleDateFormat) {
+                                ((SimpleDateFormat) dateFormatter).setTimeZone(
+                                        TimeZone.getTimeZone(timeZoneId)
+                                );
+                            }
+                            String dateText = dateFormatter.format(date);
                             String body = item.optString("body", "");
                             if (body.length() > 70) {
                                 body = body.substring(0, 70) + "…";
                             }
-                            long repeatInterval = item.optLong("repeat_interval_seconds", 0);
                             String repeatLabel = repeatInterval == 86400
                                     ? " · ежедневно"
                                     : repeatInterval == 604800 ? " · еженедельно" : "";
+                            if (repeatInterval > 0 && !timeZoneId.isEmpty()) {
+                                repeatLabel += " · " + timeZoneId;
+                            }
                             labels[i] = (pending[i] ? "Ожидает · " : "Ошибка · ")
                                     + dateText + repeatLabel + "\n" + body;
                             String error = item.optString("error", "");
