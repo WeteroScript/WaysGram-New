@@ -2,17 +2,20 @@ package org.telegram.messenger.waysgram;
 
 import android.app.Activity;
 import android.app.AlertDialog;
+import android.Manifest;
 import android.app.DatePickerDialog;
 import android.app.TimePickerDialog;
 import android.content.ClipData;
 import android.content.ClipboardManager;
 import android.content.Context;
 import android.content.Intent;
+import android.content.pm.PackageManager;
 import android.graphics.Bitmap;
 import android.graphics.drawable.GradientDrawable;
 import android.net.Uri;
 import android.media.AudioAttributes;
 import android.media.MediaPlayer;
+import android.media.MediaRecorder;
 import android.media.PlaybackParams;
 import android.os.Build;
 import android.os.Handler;
@@ -57,6 +60,7 @@ import org.telegram.ui.ActionBar.Theme;
 
 import java.text.DateFormat;
 import java.text.SimpleDateFormat;
+import java.io.File;
 import java.util.ArrayList;
 import java.util.Calendar;
 import java.util.Date;
@@ -85,6 +89,9 @@ public final class WaysGramChatFragment extends BaseFragment {
     private Button loadOlderButton;
     private EditText messageInput;
     private CheckBox silentSendCheckBox;
+    private Button voiceRecordButton;
+    private MediaRecorder voiceRecorder;
+    private File pendingVoiceFile;
     private Button sendButton;
     private TextView statusView;
     private TextView typingView;
@@ -228,6 +235,14 @@ public final class WaysGramChatFragment extends BaseFragment {
                 ViewGroup.LayoutParams.WRAP_CONTENT
         ));
         attachButton.setOnClickListener(view -> pickAttachment());
+
+        voiceRecordButton = new Button(context);
+        voiceRecordButton.setText("Голосовое");
+        voiceRecordButton.setAllCaps(false);
+        composer.addView(voiceRecordButton, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT
+        ));
+        voiceRecordButton.setOnClickListener(view -> toggleVoiceRecording());
 
         Button giftButton = new Button(context);
         giftButton.setText("Подарок");
@@ -1366,6 +1381,189 @@ public final class WaysGramChatFragment extends BaseFragment {
                         }
                     }
                 });
+    }
+
+    private void toggleVoiceRecording() {
+        if (voiceRecorder != null) {
+            finishVoiceRecordingAndSend();
+        } else {
+            startVoiceRecording();
+        }
+    }
+
+    private void startVoiceRecording() {
+        Activity activity = getParentActivity();
+        if (activity == null || apiClient == null || messageSendInFlight) {
+            return;
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M
+                && activity.checkSelfPermission(Manifest.permission.RECORD_AUDIO)
+                != PackageManager.PERMISSION_GRANTED) {
+            activity.requestPermissions(
+                    new String[]{Manifest.permission.RECORD_AUDIO}, 7110
+            );
+            statusView.setText("Разрешите доступ к микрофону, затем нажмите «Голосовое» ещё раз.");
+            return;
+        }
+
+        File output = new File(activity.getCacheDir(),
+                "waysgram_voice_" + UUID.randomUUID().toString().replace("-", "") + ".m4a");
+        MediaRecorder recorder = new MediaRecorder();
+        try {
+            recorder.setAudioSource(MediaRecorder.AudioSource.MIC);
+            recorder.setOutputFormat(MediaRecorder.OutputFormat.MPEG_4);
+            recorder.setAudioEncoder(MediaRecorder.AudioEncoder.AAC);
+            recorder.setAudioEncodingBitRate(64000);
+            recorder.setAudioSamplingRate(44100);
+            recorder.setMaxDuration(5 * 60 * 1000);
+            recorder.setOutputFile(output.getAbsolutePath());
+            recorder.setOnInfoListener((mediaRecorder, what, extra) -> {
+                if (what == MediaRecorder.MEDIA_RECORDER_INFO_MAX_DURATION_REACHED) {
+                    finishVoiceRecordingAndSend();
+                }
+            });
+            recorder.prepare();
+            recorder.start();
+            voiceRecorder = recorder;
+            pendingVoiceFile = output;
+            voiceRecordButton.setText("Остановить и отправить");
+            statusView.setText("Запись голосового сообщения… Максимум 5 минут.");
+        } catch (Exception exception) {
+            try {
+                recorder.release();
+            } catch (Exception ignored) {
+            }
+            output.delete();
+            voiceRecorder = null;
+            pendingVoiceFile = null;
+            voiceRecordButton.setText("Голосовое");
+            statusView.setText("Не удалось начать запись голосового сообщения.");
+        }
+    }
+
+    private void finishVoiceRecordingAndSend() {
+        MediaRecorder recorder = voiceRecorder;
+        File audioFile = pendingVoiceFile;
+        voiceRecorder = null;
+        pendingVoiceFile = null;
+        if (recorder != null) {
+            try {
+                recorder.stop();
+            } catch (Exception exception) {
+                if (audioFile != null) {
+                    audioFile.delete();
+                }
+                try {
+                    recorder.release();
+                } catch (Exception ignored) {
+                }
+                voiceRecordButton.setText("Голосовое");
+                statusView.setText("Запись слишком короткая или не завершилась.");
+                return;
+            }
+            try {
+                recorder.release();
+            } catch (Exception ignored) {
+            }
+        }
+        if (audioFile == null || !audioFile.isFile() || audioFile.length() < 512) {
+            if (audioFile != null) {
+                audioFile.delete();
+            }
+            voiceRecordButton.setText("Голосовое");
+            statusView.setText("Голосовое сообщение получилось слишком коротким.");
+            return;
+        }
+        final long replyTarget = replyToMessageId;
+        final boolean silent = isSilentSendEnabled();
+        setMessageSendInFlight(true);
+        voiceRecordButton.setText("Загружаю голосовое…");
+        apiClient.uploadDocument(getParentActivity().getContentResolver(), Uri.fromFile(audioFile),
+                new WaysGramApiClient.Callback() {
+                    @Override
+                    public void onSuccess(JSONObject uploaded) {
+                        String mediaId = uploaded == null ? "" : uploaded.optString("id", "");
+                        if (!mediaId.matches("[a-f0-9]{32}")) {
+                            audioFile.delete();
+                            setMessageSendInFlight(false);
+                            voiceRecordButton.setText("Голосовое");
+                            statusView.setText("Сервер вернул некорректный ID голосового сообщения.");
+                            return;
+                        }
+                        JSONObject payload = new JSONObject();
+                        try {
+                            payload.put("recipient_id", peerId);
+                            payload.put("body", "Голосовое сообщение");
+                            payload.put("media_id", mediaId);
+                            payload.put("silent", silent);
+                            if (replyTarget > 0) {
+                                payload.put("reply_to_id", replyTarget);
+                            }
+                        } catch (Exception exception) {
+                            audioFile.delete();
+                            setMessageSendInFlight(false);
+                            voiceRecordButton.setText("Голосовое");
+                            statusView.setText("Не удалось подготовить голосовое сообщение.");
+                            return;
+                        }
+                        String key = messageIdempotencyKey(payload.toString());
+                        apiClient.post("/api/messages", payload, key, new WaysGramApiClient.Callback() {
+                            @Override
+                            public void onSuccess(JSONObject response) {
+                                audioFile.delete();
+                                messageIdempotencyKeys.remove(payload.toString());
+                                setMessageSendInFlight(false);
+                                voiceRecordButton.setText("Голосовое");
+                                resetSilentSendMode();
+                                if (replyToMessageId == replyTarget) {
+                                    replyToMessageId = 0;
+                                    statusView.setOnClickListener(null);
+                                }
+                                statusView.setText("Голосовое сообщение отправлено.");
+                                loadMessages();
+                            }
+
+                            @Override
+                            public void onError(String message, int statusCode) {
+                                audioFile.delete();
+                                setMessageSendInFlight(false);
+                                voiceRecordButton.setText("Голосовое");
+                                statusView.setText(message);
+                            }
+                        });
+                    }
+
+                    @Override
+                    public void onError(String message, int statusCode) {
+                        audioFile.delete();
+                        setMessageSendInFlight(false);
+                        voiceRecordButton.setText("Голосовое");
+                        statusView.setText(message);
+                    }
+                });
+    }
+
+    private void cancelVoiceRecording() {
+        MediaRecorder recorder = voiceRecorder;
+        File audioFile = pendingVoiceFile;
+        voiceRecorder = null;
+        pendingVoiceFile = null;
+        if (recorder != null) {
+            try {
+                recorder.stop();
+            } catch (Exception ignored) {
+            }
+            try {
+                recorder.release();
+            } catch (Exception ignored) {
+            }
+        }
+        if (audioFile != null) {
+            audioFile.delete();
+        }
+        if (voiceRecordButton != null) {
+            voiceRecordButton.setText("Голосовое");
+        }
     }
 
     private void pickAttachment() {
@@ -3053,6 +3251,7 @@ public final class WaysGramChatFragment extends BaseFragment {
 
     @Override
     public void onPause() {
+        cancelVoiceRecording();
         isScreenResumed = false;
         pollHandler.removeCallbacks(pollRunnable);
         pollHandler.removeCallbacks(eventPollRetryRunnable);
@@ -3067,6 +3266,7 @@ public final class WaysGramChatFragment extends BaseFragment {
 
     @Override
     public void onFragmentDestroy() {
+        cancelVoiceRecording();
         isScreenResumed = false;
         pollHandler.removeCallbacks(pollRunnable);
         for (VideoView videoView : activeVideoViews) {
