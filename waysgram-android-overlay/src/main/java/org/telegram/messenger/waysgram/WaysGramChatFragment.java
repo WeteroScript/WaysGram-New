@@ -30,6 +30,14 @@ import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.TextView;
 
+import com.google.mlkit.nl.languageid.LanguageIdentifier;
+import com.google.mlkit.nl.languageid.LanguageIdentification;
+import com.google.mlkit.nl.translate.DownloadConditions;
+import com.google.mlkit.nl.translate.TranslateLanguage;
+import com.google.mlkit.nl.translate.Translation;
+import com.google.mlkit.nl.translate.Translator;
+import com.google.mlkit.nl.translate.TranslatorOptions;
+
 import android.text.style.StrikethroughSpan;
 import android.text.style.StyleSpan;
 import android.text.style.TypefaceSpan;
@@ -1640,6 +1648,8 @@ public final class WaysGramChatFragment extends BaseFragment {
         actionCodes.add(1);
         labels.add("Копировать");
         actionCodes.add(2);
+        labels.add("Перевести");
+        actionCodes.add(9);
         if (ownMessage) {
             labels.add("Редактировать");
             actionCodes.add(3);
@@ -1669,6 +1679,8 @@ public final class WaysGramChatFragment extends BaseFragment {
                         showReactionPicker(messageId);
                     } else if (action == 2) {
                         copyMessageText(message.optString("body", ""));
+                    } else if (action == 9) {
+                        showTranslationTargets(message.optString("body", ""));
                     } else if (action == 3) {
                         editMessage(messageId, message.optString("body", ""));
                     } else if (action == 4) {
@@ -1787,6 +1799,164 @@ public final class WaysGramChatFragment extends BaseFragment {
         }
         clipboard.setPrimaryClip(ClipData.newPlainText("WaysGram message", body));
         statusView.setText("Текст сообщения скопирован");
+    }
+
+    private void showTranslationTargets(String originalText) {
+        String text = originalText == null ? "" : originalText.trim();
+        if (text.isEmpty()) {
+            statusView.setText("В сообщении нет текста для перевода.");
+            return;
+        }
+        if (text.length() > 4000) {
+            statusView.setText("Сообщение слишком длинное для перевода.");
+            return;
+        }
+        String[] labels = {
+                "Русский", "English", "Nederlands", "Deutsch", "Français",
+                "Español", "Italiano", "Português", "中文", "日本語", "Türkçe"
+        };
+        String[] languageTags = {
+                "ru", "en", "nl", "de", "fr", "es", "it", "pt", "zh", "ja", "tr"
+        };
+        new AlertDialog.Builder(getParentActivity())
+                .setTitle("Перевести сообщение на")
+                .setItems(labels, (dialog, which) -> {
+                    if (which >= 0 && which < labels.length) {
+                        String targetCode = TranslateLanguage.fromLanguageTag(languageTags[which]);
+                        if (targetCode == null) {
+                            statusView.setText("Выбранный язык не поддерживается переводчиком.");
+                            return;
+                        }
+                        translateMessage(text, targetCode, labels[which], false);
+                    }
+                })
+                .setNegativeButton("Отмена", null)
+                .show();
+    }
+
+    private void translateMessage(
+            String originalText,
+            String targetLanguage,
+            String targetLabel,
+            boolean allowMobileData
+    ) {
+        LanguageIdentifier identifier = LanguageIdentification.getClient();
+        statusView.setText("Определяю язык сообщения…");
+        identifier.identifyLanguage(originalText)
+                .addOnSuccessListener(sourceTag -> {
+                    String sourceCode = TranslateLanguage.fromLanguageTag(sourceTag);
+                    if ("und".equals(sourceTag) || sourceCode == null) {
+                        identifier.close();
+                        statusView.setText("Не удалось определить исходный язык.");
+                        return;
+                    }
+                    String sourceName = Locale.forLanguageTag(sourceTag)
+                            .getDisplayLanguage(Locale.getDefault());
+                    if (sourceCode.equals(targetLanguage)) {
+                        identifier.close();
+                        showTranslatedMessage(
+                                originalText,
+                                originalText,
+                                sourceName,
+                                targetLabel,
+                                true
+                        );
+                        return;
+                    }
+
+                    TranslatorOptions options = new TranslatorOptions.Builder()
+                            .setSourceLanguage(sourceCode)
+                            .setTargetLanguage(targetLanguage)
+                            .build();
+                    Translator translator = Translation.getClient(options);
+                    DownloadConditions.Builder conditions = new DownloadConditions.Builder();
+                    if (!allowMobileData) {
+                        conditions.requireWifi();
+                    }
+                    statusView.setText("Проверяю модель перевода…");
+                    translator.downloadModelIfNeeded(conditions.build())
+                            .addOnSuccessListener(ignored -> {
+                                statusView.setText("Перевожу сообщение…");
+                                translator.translate(originalText)
+                                        .addOnSuccessListener(translated -> {
+                                            translator.close();
+                                            identifier.close();
+                                            showTranslatedMessage(
+                                                    originalText,
+                                                    translated,
+                                                    sourceName,
+                                                    targetLabel,
+                                                    false
+                                            );
+                                        })
+                                        .addOnFailureListener(error -> {
+                                            translator.close();
+                                            identifier.close();
+                                            statusView.setText(
+                                                    "Не удалось перевести сообщение: "
+                                                            + error.getLocalizedMessage()
+                                            );
+                                        });
+                            })
+                            .addOnFailureListener(error -> {
+                                translator.close();
+                                identifier.close();
+                                if (!allowMobileData) {
+                                    confirmMobileTranslationDownload(
+                                            originalText, targetLanguage, targetLabel
+                                    );
+                                } else {
+                                    statusView.setText(
+                                            "Не удалось загрузить языковую модель. "
+                                                    + "Проверьте интернет-соединение."
+                                    );
+                                }
+                            });
+                })
+                .addOnFailureListener(error -> {
+                    identifier.close();
+                    statusView.setText("Не удалось определить язык сообщения.");
+                });
+    }
+
+    private void confirmMobileTranslationDownload(
+            String originalText,
+            String targetLanguage,
+            String targetLabel
+    ) {
+        new AlertDialog.Builder(getParentActivity())
+                .setTitle("Нужна языковая модель")
+                .setMessage(
+                        "Модель перевода может занимать около 30 МБ. "
+                                + "Загрузка по Wi-Fi не удалась. Разрешить загрузку через мобильную сеть?"
+                )
+                .setNegativeButton("Отмена", null)
+                .setPositiveButton("Продолжить", (dialog, which) ->
+                        translateMessage(
+                                originalText, targetLanguage, targetLabel, true
+                        ))
+                .show();
+    }
+
+    private void showTranslatedMessage(
+            String originalText,
+            String translatedText,
+            String sourceLanguage,
+            String targetLanguage,
+            boolean sameLanguage
+    ) {
+        String message = "Исходный язык: " + sourceLanguage
+                + "\\n\\nОригинал:\\n" + originalText
+                + "\\n\\n" + (sameLanguage ? "Текст уже на выбранном языке." : "Перевод (" + targetLanguage + "):")
+                + (sameLanguage ? "" : "\\n" + translatedText);
+        new AlertDialog.Builder(getParentActivity())
+                .setTitle("Перевод сообщения")
+                .setMessage(message)
+                .setNegativeButton("Закрыть", null)
+                .setPositiveButton("Копировать перевод", (dialog, which) ->
+                        copyMessageText(translatedText))
+                .show();
+        statusView.setText("Перевод готов.");
     }
 
     private void showReactionPicker(long messageId) {
