@@ -1,33 +1,46 @@
 # WaysGram-New
 
-Репозиторий подготовлен для исходного снимка из архива `Telegram-master.zip`.
+Основной репозиторий Android-клиента WaysGram.
 
-## Структура проекта
+## Структура
 
-В архиве Gradle-проект расположен в корне каталога `Telegram-master/`. Основные модули:
-- `:TMessagesProj`
-- `:TMessagesProj_App`
-- `:TMessagesProj_AppHuawei`
-- `:TMessagesProj_AppStandalone`
-- `:TMessagesProj_AppHockeyApp`
-- `:TMessagesProj_AppTests`
+- `WaysGram-Android.zip.part1` — `part5`: пять частей исходного Android-архива.
+- `waysgram-android-overlay/src/main/java/`: Android-классы WaysGram.
+- `waysgram-android-overlay/scripts/`: интеграционные патчи и конфигурация сборки.
+- `.github/workflows/build-apk.yml`: восстановление проекта, наложение WaysGram-кода и сборка APK.
 
-Архив содержит 14 086 файлов и `.gitmodules` с 19 внешними зависимостями. Каталоги зависимостей в ZIP пустые, поэтому CI должен получать их отдельно.
+Исходный Gradle-проект не хранится распакованными файлами в корне Git. Workflow объединяет части архива в `WaysGram-Android.zip`, распаковывает каталог `WaysGram-Android/` во временную рабочую директорию, затем копирует туда локальный overlay из этого репозитория.
 
-**Важно:** настройка репозитория и workflow ещё не означает, что полный снимок исходников уже импортирован. Для сборки файлы проекта должны находиться в корне репозитория рядом с `gradlew` и `settings.gradle`.
+## WaysGram Android overlay
+
+Overlay перенесён из [WaysGram-source](https://github.com/WeteroScript/WaysGram-source), revision `ce8c1ce2db4832c6d1a29947ad64d9320927d53d`, и хранится в этом репозитории независимо от исходного.
+
+Он содержит:
+- отдельный WaysGram-вход, сессию и REST-клиент;
+- домашний экран и собственный инвентарь подарков;
+- публичные профили с карточками подарков, серийными номерами, уровнями и атрибутами;
+- каталог, покупки за внутренние WaysGram Stars и стикеры каталога;
+- передачу подарков в личных чатах с карточкой в истории сообщений;
+- внутренний маркетплейс: размещение, снятие объявления и покупку;
+- детерминированное улучшение с сохранением уровня и атрибутов.
+
+Telegram Gift ID служит источником метаданных каталога. Владение, внутренняя передача, продажа и улучшения выполняются на стороне WaysGram; эти операции не передают реальные Telegram или blockchain NFT. Передача подарков в групповых чатах не реализована.
 
 ## Сборка APK
 
-Используемая по конфигурации проекта задача:
+Workflow **Build Android APK** выполняет следующие действия:
 
-```bash
-./gradlew :TMessagesProj_App:assembleAfatRelease
-```
+1. Восстанавливает Android-архив из пяти частей и проверяет его целостность.
+2. Копирует WaysGram overlay и применяет патчи входа в Settings и изоляции push/Firebase.
+3. Получает Gradle-зависимости и устанавливает JDK 17, Android SDK 36, NDK 27.2.12479018 и CMake 3.22.1.
+4. Настраивает package ID `org.waysgram.messenger`, имя `WaysGram`, API origin и Firebase.
+5. Собирает ` :TMessagesProj_App:assembleAfatRelease ` и проверяет package ID и подпись APK.
+6. Загружает APK как artifact запуска GitHub Actions.
 
-Требуемые версии: JDK 17, Android SDK / Build Tools 36, NDK 27.2.12479018, CMake 3.22.1.
+Откройте [GitHub Actions](https://github.com/WeteroScript/WaysGram-New/actions), чтобы просмотреть состояние сборок и скачать артефакт после успешного завершения.
 
-После импорта исходников workflow **Build Android APK** соберёт APK и прикрепит его к запуску Actions как artifact.
+## Backend
 
-## WaysGram Android-функциональность
+REST backend: [WaysGram-AuthBot](https://github.com/WeteroScript/WaysGram-AuthBot).
 
-Перед сборкой workflow применяет локально версионируемый overlay из `waysgram-android-overlay/`, перенесённый из [WaysGram-source](https://github.com/WeteroScript/WaysGram-source) на коммите `ce8c1ce2db4832c6d1a29947ad64d9320927d53d`, и встраивает его в распакованный Android-проект. Это включает отдельный вход WaysGram, каталог и инвентарь подарков, покупки за внутренние Stars, переводы, внутренний маркетплейс, детерминированные улучшения, подарки в профилях и личных чатах. Telegram Gift ID используется только как источник метаданных; внутренние операции не передают реальные Telegram NFT.
+Клиент использует Bearer-сессию WaysGram. Firebase-конфигурация и адрес API передаются через GitHub Actions secrets; секреты не хранятся в исходном Android overlay.

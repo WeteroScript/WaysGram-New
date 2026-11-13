@@ -139,7 +139,7 @@ public final class WaysGramHomeFragment extends BaseFragment {
         addButton(context, content, "BotFather · Мои боты", () ->
                 presentFragment(new WaysGramBotsFragment(), false)
         );
-        addButton(context, content, "Подарки Telegram", () ->
+        addButton(context, content, "Подарки WaysGram", () ->
                 new WaysGramGiftCatalogSheet(context, sessionStore, resourceProvider, this::loadProfile).show()
         );
         addButton(context, content, "Обновить профиль и баланс", this::loadProfile);
