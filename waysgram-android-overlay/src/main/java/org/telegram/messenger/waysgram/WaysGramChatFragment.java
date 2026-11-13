@@ -1946,9 +1946,9 @@ public final class WaysGramChatFragment extends BaseFragment {
             boolean sameLanguage
     ) {
         String message = "Исходный язык: " + sourceLanguage
-                + "\\n\\nОригинал:\\n" + originalText
-                + "\\n\\n" + (sameLanguage ? "Текст уже на выбранном языке." : "Перевод (" + targetLanguage + "):")
-                + (sameLanguage ? "" : "\\n" + translatedText);
+                + "\n\nОригинал:\n" + originalText
+                + "\n\n" + (sameLanguage ? "Текст уже на выбранном языке." : "Перевод (" + targetLanguage + "):")
+                + (sameLanguage ? "" : "\n" + translatedText);
         new AlertDialog.Builder(getParentActivity())
                 .setTitle("Перевод сообщения")
                 .setMessage(message)
