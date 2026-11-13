@@ -123,6 +123,7 @@ public final class WaysGramChatFragment extends BaseFragment {
     private String pendingAttachmentCaption = "";
     private boolean pendingAttachmentSilent = false;
     private boolean pendingAttachmentMakeAlbum = false;
+    private long pendingAttachmentReplyToMessageId = 0;
     private int pendingAttachmentIndex = 0;
     private int pendingAttachmentSent = 0;
     private final Map<String, LinearLayout> mediaAlbumContainers = new HashMap<>();
@@ -1446,6 +1447,7 @@ public final class WaysGramChatFragment extends BaseFragment {
                 ? ""
                 : messageInput.getText().toString().trim();
         pendingAttachmentSilent = isSilentSendEnabled();
+        pendingAttachmentReplyToMessageId = replyToMessageId;
         pendingAttachmentMakeAlbum = selectedUris.size() >= 2 && selectedUris.size() <= 10;
         if (pendingAttachmentMakeAlbum && getParentActivity() != null) {
             for (Uri uri : selectedUris) {
@@ -1508,7 +1510,6 @@ public final class WaysGramChatFragment extends BaseFragment {
 
         if (pendingAttachmentMakeAlbum) {
             pendingAttachmentMediaIds.add(mediaId);
-            pendingAttachmentSent++;
             pendingAttachmentIndex++;
             if (pendingAttachmentIndex >= pendingAttachments.size()) {
                 sendAttachmentAlbum();
@@ -1563,6 +1564,9 @@ public final class WaysGramChatFragment extends BaseFragment {
             payload.put("recipient_id", peerId);
             payload.put("body", pendingAttachmentCaption);
             payload.put("silent", pendingAttachmentSilent);
+            if (pendingAttachmentReplyToMessageId > 0) {
+                payload.put("reply_to_id", pendingAttachmentReplyToMessageId);
+            }
             JSONArray mediaIds = new JSONArray();
             for (String mediaId : pendingAttachmentMediaIds) {
                 mediaIds.put(mediaId);
@@ -1582,12 +1586,20 @@ public final class WaysGramChatFragment extends BaseFragment {
                     public void onSuccess(JSONObject response) {
                         messageIdempotencyKeys.remove(requestFingerprint);
                         int sentCount = pendingAttachmentMediaIds.size();
+                        String sentCaption = pendingAttachmentCaption;
+                        boolean canClearDraft = messageInput == null || messageInput.getText() == null
+                                || messageInput.getText().toString().trim().equals(sentCaption);
+                        long sentReplyTarget = pendingAttachmentReplyToMessageId;
                         resetAttachmentBatchState();
                         setMessageSendInFlight(false);
-                        clearChatDraft();
+                        if (canClearDraft) {
+                            clearChatDraft();
+                        }
                         resetSilentSendMode();
-                        replyToMessageId = 0;
-                        statusView.setOnClickListener(null);
+                        if (replyToMessageId == sentReplyTarget) {
+                            replyToMessageId = 0;
+                            statusView.setOnClickListener(null);
+                        }
                         statusView.setText("Медиаальбом отправлен · " + sentCount + " файлов");
                         loadMessages();
                     }
@@ -1605,6 +1617,7 @@ public final class WaysGramChatFragment extends BaseFragment {
         pendingAttachmentCaption = "";
         pendingAttachmentSilent = false;
         pendingAttachmentMakeAlbum = false;
+        pendingAttachmentReplyToMessageId = 0;
         pendingAttachmentIndex = 0;
         pendingAttachmentSent = 0;
     }
@@ -2045,7 +2058,7 @@ public final class WaysGramChatFragment extends BaseFragment {
         } else if (mediaId.matches("[a-f0-9]{32}") && mediaType.startsWith("audio/")) {
             addAudioMessage(messageTarget, mediaId, mediaName, mediaType);
         } else if (mediaId.matches("[a-f0-9]{32}") && !mediaType.isEmpty()) {
-            addMediaSaveButton(mediaId, mediaName, mediaType);
+            addMediaSaveButton(messageTarget, mediaId, mediaName, mediaType);
         }
 
     }
@@ -2701,7 +2714,7 @@ public final class WaysGramChatFragment extends BaseFragment {
         label.setText("Видео · " + mediaName);
         label.setTextSize(12);
         label.setTextColor(Theme.getColor(Theme.key_windowBackgroundWhiteGrayText));
-        messagesContainer.addView(label, new LinearLayout.LayoutParams(
+        target.addView(label, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
         ));
 
