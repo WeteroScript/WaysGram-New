@@ -6,7 +6,6 @@ import android.content.ClipData;
 import android.content.ClipboardManager;
 import android.content.Context;
 import android.content.Intent;
-import android.graphics.Color;
 import android.graphics.Bitmap;
 import android.graphics.drawable.GradientDrawable;
 import android.net.Uri;
@@ -14,6 +13,8 @@ import android.os.Handler;
 import android.os.Looper;
 import android.text.Spannable;
 import android.text.SpannableStringBuilder;
+import android.text.method.LinkMovementMethod;
+import android.text.style.ClickableSpan;
 import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
@@ -27,7 +28,6 @@ import android.widget.ScrollView;
 import android.widget.TextView;
 
 import android.text.style.BackgroundColorSpan;
-import android.text.style.ForegroundColorSpan;
 import android.text.style.StrikethroughSpan;
 import android.text.style.StyleSpan;
 import android.text.style.TypefaceSpan;
@@ -430,13 +430,32 @@ public final class WaysGramChatFragment extends BaseFragment {
                     int spoilerColor = Theme.getColor(
                             Theme.key_windowBackgroundWhiteGrayText
                     );
-                    span = new BackgroundColorSpan(spoilerColor);
-                    text.setSpan(
-                            new ForegroundColorSpan(spoilerColor),
-                            start,
-                            end,
-                            Spannable.SPAN_EXCLUSIVE_EXCLUSIVE
-                    );
+                    span = new ClickableSpan() {
+                        @Override
+                        public void updateDrawState(android.text.TextPaint paint) {
+                            paint.setColor(spoilerColor);
+                            paint.bgColor = spoilerColor;
+                            paint.setUnderlineText(false);
+                        }
+
+                        @Override
+                        public void onClick(View widget) {
+                            Spannable visibleText = (Spannable) ((TextView) widget).getText();
+                            int spoilerStart = visibleText.getSpanStart(this);
+                            int spoilerEnd = visibleText.getSpanEnd(this);
+                            visibleText.removeSpan(this);
+                            if (spoilerStart >= 0 && spoilerEnd > spoilerStart) {
+                                visibleText.setSpan(
+                                        new ForegroundColorSpan(
+                                                Theme.getColor(Theme.key_windowBackgroundWhiteBlackText)
+                                        ),
+                                        spoilerStart,
+                                        spoilerEnd,
+                                        Spannable.SPAN_EXCLUSIVE_EXCLUSIVE
+                                );
+                            }
+                        }
+                    };
                     break;
                 case 5:
                     span = new TypefaceSpan("monospace");
@@ -1126,7 +1145,14 @@ public final class WaysGramChatFragment extends BaseFragment {
             }
             displayText += mine.toString();
         }
-        row.setText(formatInlineMarkup(displayText));
+        CharSequence renderedMessage = formatInlineMarkup(displayText);
+        row.setText(renderedMessage);
+        if (renderedMessage instanceof Spannable
+                && ((Spannable) renderedMessage).getSpans(
+                        0, renderedMessage.length(), ClickableSpan.class
+                ).length > 0) {
+            row.setMovementMethod(LinkMovementMethod.getInstance());
+        }
         row.setContentDescription("Удерживайте сообщение, чтобы ответить или поставить реакцию");
         if (messageId > 0) {
             row.setOnLongClickListener(view -> {
