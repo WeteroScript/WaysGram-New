@@ -7,6 +7,7 @@ on:
     paths:
       - "WaysGram-Android.zip.part*"
       - ".gitmodules"
+      - "waysgram-android-overlay/**"
       - "gradlew"
       - "settings.gradle"
       - "build.gradle"
@@ -74,18 +75,15 @@ jobs:
           PY
           grep -Fq 'message.id = Math.toIntExact(id);' TMessagesProj/src/main/java/org/telegram/tgnet/WaysGramMapper.java
 
-      - name: Import WaysGram source overlay and gift integration
+      - name: Import WaysGram Android overlay and gift integration
         shell: bash
         run: |
           set -euo pipefail
-          SOURCE_COMMIT="ce8c1ce2db4832c6d1a29947ad64d9320927d53d"
-          OVERLAY="$RUNNER_TEMP/waysgram-source"
-          git init "$OVERLAY"
-          git -C "$OVERLAY" remote add origin https://github.com/WeteroScript/WaysGram-source.git
-          git -C "$OVERLAY" fetch --depth=1 origin "$SOURCE_COMMIT"
-          git -C "$OVERLAY" checkout --detach FETCH_HEAD
-          test "$(git -C "$OVERLAY" rev-parse HEAD)" = "$SOURCE_COMMIT"
-          rsync -a "$OVERLAY/android/overlay/TMessagesProj/src/main/java/" "$GITHUB_WORKSPACE/TMessagesProj/src/main/java/"
+          OVERLAY="$GITHUB_WORKSPACE/waysgram-android-overlay"
+          test -d "$OVERLAY/src/main/java/org/telegram/messenger/waysgram"
+          test -s "$OVERLAY/scripts/apply-android-patches.py"
+          test -s "$OVERLAY/scripts/prepare_android_dev_build.py"
+          rsync -a "$OVERLAY/src/main/java/" "$GITHUB_WORKSPACE/TMessagesProj/src/main/java/"
           python3 "$OVERLAY/scripts/apply-android-patches.py" --android-root "$GITHUB_WORKSPACE"
 
       - name: Fetch dependencies listed in the archive .gitmodules
@@ -237,7 +235,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          python3 "$RUNNER_TEMP/waysgram-source/scripts/prepare_android_dev_build.py" --android-root "$GITHUB_WORKSPACE"
+          python3 "$GITHUB_WORKSPACE/waysgram-android-overlay/scripts/prepare_android_dev_build.py" --android-root "$GITHUB_WORKSPACE"
           python3 - <<'PY'
           import json
           from pathlib import Path
