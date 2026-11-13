@@ -91,6 +91,7 @@ public final class WaysGramTimelineFragment extends BaseFragment {
     private final Map<String, LinearLayout> mediaAlbumContainers = new HashMap<>();
     private String pendingAttachmentCaption = "";
     private boolean pendingAttachmentMakeAlbum = false;
+    private boolean pendingAttachmentUncompressed = false;
     private long pendingAttachmentReplyToMessageId = 0;
     private int pendingAttachmentIndex = 0;
     private int pendingAttachmentSent = 0;
@@ -382,10 +383,33 @@ public final class WaysGramTimelineFragment extends BaseFragment {
             statusView.setText("Не удалось получить выбранные файлы.");
             return;
         }
-        startAttachmentBatch(selectedUris);
+        chooseAttachmentUploadMode(selectedUris);
     }
 
-    private void startAttachmentBatch(ArrayList<Uri> selectedUris) {
+    private void chooseAttachmentUploadMode(ArrayList<Uri> selectedUris) {
+        boolean hasImage = false;
+        if (getParentActivity() != null) {
+            for (Uri uri : selectedUris) {
+                String mimeType = getParentActivity().getContentResolver().getType(uri);
+                if (mimeType != null && mimeType.startsWith("image/")) {
+                    hasImage = true;
+                    break;
+                }
+            }
+        }
+        if (!hasImage || getParentActivity() == null) {
+            startAttachmentBatch(selectedUris, false);
+            return;
+        }
+        new AlertDialog.Builder(getParentActivity())
+                .setTitle("Способ отправки фотографий")
+                .setItems(new String[]{"Как фото", "Как файл без сжатия"}, (dialog, which) ->
+                        startAttachmentBatch(selectedUris, which == 1))
+                .setOnCancelListener(dialog -> statusView.setText("Выбор отправки отменён."))
+                .show();
+    }
+
+    private void startAttachmentBatch(ArrayList<Uri> selectedUris, boolean sendImagesUncompressed) {
         if (sendInFlight || selectedUris == null || selectedUris.isEmpty()) {
             return;
         }
@@ -400,6 +424,7 @@ public final class WaysGramTimelineFragment extends BaseFragment {
                 ? ""
                 : messageInput.getText().toString().trim();
         pendingAttachmentReplyToMessageId = replyToMessageId;
+        pendingAttachmentUncompressed = sendImagesUncompressed;
         pendingAttachmentMakeAlbum = selectedUris.size() >= 2 && selectedUris.size() <= 10;
         if (pendingAttachmentMakeAlbum && getParentActivity() != null) {
             for (Uri uri : selectedUris) {
@@ -413,9 +438,10 @@ public final class WaysGramTimelineFragment extends BaseFragment {
         pendingAttachmentIndex = 0;
         pendingAttachmentSent = 0;
         setSendInFlight(true);
-        statusView.setText(pendingAttachmentMakeAlbum
-                ? "Подготавливаю медиаальбом из " + selectedUris.size() + " файлов…"
-                : "Подготавливаю вложения: " + selectedUris.size());
+        statusView.setText(pendingAttachmentUncompressed
+                ? "Подготавливаю файлы без сжатия…"
+                : (pendingAttachmentMakeAlbum ? "Подготавливаю медиаальбом из " + selectedUris.size() + " файлов…"
+                : "Подготавливаю вложения: " + selectedUris.size()));
         uploadNextAttachment();
     }
 
@@ -444,7 +470,7 @@ public final class WaysGramTimelineFragment extends BaseFragment {
                 failAttachmentBatch(message);
             }
         };
-        if (mimeType != null && mimeType.startsWith("image/")) {
+        if (mimeType != null && mimeType.startsWith("image/") && !pendingAttachmentUncompressed) {
             apiClient.uploadImage(getParentActivity().getContentResolver(), uri, uploadCallback);
         } else {
             apiClient.uploadDocument(getParentActivity().getContentResolver(), uri, uploadCallback);
@@ -593,6 +619,7 @@ public final class WaysGramTimelineFragment extends BaseFragment {
         pendingAttachmentMediaIds.clear();
         pendingAttachmentCaption = "";
         pendingAttachmentMakeAlbum = false;
+        pendingAttachmentUncompressed = false;
         pendingAttachmentReplyToMessageId = 0;
         pendingAttachmentIndex = 0;
         pendingAttachmentSent = 0;
