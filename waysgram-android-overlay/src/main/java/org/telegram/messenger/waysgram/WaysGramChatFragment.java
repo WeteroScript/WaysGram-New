@@ -16,6 +16,7 @@ import android.view.View;
 import android.view.ViewGroup;
 import android.view.inputmethod.InputMethodManager;
 import android.widget.Button;
+import android.widget.CheckBox;
 import android.widget.EditText;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
@@ -51,6 +52,7 @@ public final class WaysGramChatFragment extends BaseFragment {
     private ScrollView messageScrollView;
     private Button loadOlderButton;
     private EditText messageInput;
+    private CheckBox silentSendCheckBox;
     private Button sendButton;
     private TextView statusView;
     private TextView typingView;
@@ -194,6 +196,14 @@ public final class WaysGramChatFragment extends BaseFragment {
                 ViewGroup.LayoutParams.WRAP_CONTENT
         ));
         sendButton.setOnClickListener(view -> sendMessage());
+
+        silentSendCheckBox = new CheckBox(context);
+        silentSendCheckBox.setText("Отправить без звука");
+        silentSendCheckBox.setTextSize(12);
+        root.addView(silentSendCheckBox, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+        ));
 
         Button refreshButton = new Button(context);
         refreshButton.setText("Обновить историю");
@@ -714,6 +724,7 @@ public final class WaysGramChatFragment extends BaseFragment {
             payload.put("recipient_id", peerId);
             payload.put("body", caption.length() == 0 ? "Изображение" : caption);
             payload.put("media_id", mediaId);
+            payload.put("silent", isSilentSendEnabled());
         } catch (Exception exception) {
             statusView.setText("Не удалось подготовить изображение к отправке.");
             return;
@@ -723,6 +734,7 @@ public final class WaysGramChatFragment extends BaseFragment {
             @Override
             public void onSuccess(JSONObject response) {
                 clearChatDraft();
+                resetSilentSendMode();
                 statusView.setText("Изображение отправлено.");
                 loadMessages();
             }
@@ -1386,6 +1398,7 @@ public final class WaysGramChatFragment extends BaseFragment {
             payload.put("recipient_id", peerId);
             payload.put("body", caption);
             payload.put("media_id", mediaId);
+            payload.put("silent", isSilentSendEnabled());
         } catch (Exception exception) {
             statusView.setText("Не удалось подготовить документ к отправке.");
             return;
@@ -1395,6 +1408,7 @@ public final class WaysGramChatFragment extends BaseFragment {
             @Override
             public void onSuccess(JSONObject response) {
                 clearChatDraft();
+                resetSilentSendMode();
                 statusView.setText("Документ отправлен.");
                 loadMessages();
             }
@@ -1404,6 +1418,16 @@ public final class WaysGramChatFragment extends BaseFragment {
                 statusView.setText(message);
             }
         });
+    }
+
+    private boolean isSilentSendEnabled() {
+        return silentSendCheckBox != null && silentSendCheckBox.isChecked();
+    }
+
+    private void resetSilentSendMode() {
+        if (silentSendCheckBox != null) {
+            silentSendCheckBox.setChecked(false);
+        }
     }
 
     private void clearChatDraft() {
@@ -1434,6 +1458,7 @@ public final class WaysGramChatFragment extends BaseFragment {
         try {
             payload.put("recipient_id", peerId);
             payload.put("body", body);
+            payload.put("silent", isSilentSendEnabled());
             if (replyToMessageId > 0) {
                 payload.put("reply_to_id", replyToMessageId);
             }
@@ -1448,6 +1473,7 @@ public final class WaysGramChatFragment extends BaseFragment {
             public void onSuccess(JSONObject response) {
                 setMessageSendInFlight(false);
                 clearChatDraft();
+                resetSilentSendMode();
                 replyToMessageId = 0;
                 statusView.setOnClickListener(null);
                 statusView.setText("Сообщение отправлено");
