@@ -2820,6 +2820,7 @@ public final class WaysGramChatFragment extends BaseFragment {
             messageTarget.addView(giftCard, giftParams);
         }
 
+        addStructuredAttachment(messageTarget, message);
         String mediaId = message.optString("media_id", "");
         String mediaType = message.optString("media_type", "");
         String mediaName = message.optString("media_name", "Вложение");
@@ -2859,6 +2860,186 @@ public final class WaysGramChatFragment extends BaseFragment {
             addMediaSaveButton(messageTarget, mediaId, mediaName, mediaType);
         }
 
+    }
+
+    private void addStructuredAttachment(LinearLayout target, JSONObject message) {
+        String raw = message.optString("attachment_json", "");
+        if (raw == null || raw.trim().isEmpty() || "null".equals(raw)) {
+            return;
+        }
+        try {
+            JSONObject attachment = new JSONObject(raw);
+            String kind = attachment.optString("type", "");
+            if ("contact".equals(kind)) {
+                addContactAttachment(target, attachment);
+            } else if ("location".equals(kind)) {
+                addLocationAttachment(target, attachment);
+            }
+        } catch (Exception exception) {
+            statusView.setText("Не удалось отобразить вложение сообщения.");
+        }
+    }
+
+    private void addContactAttachment(LinearLayout target, JSONObject attachment) {
+        Context context = getParentActivity();
+        if (context == null) {
+            return;
+        }
+        String name = attachment.optString("name", "Контакт");
+        String phone = attachment.optString("phone", "");
+        String email = attachment.optString("email", "");
+        LinearLayout card = new LinearLayout(context);
+        card.setOrientation(LinearLayout.VERTICAL);
+        card.setPadding(AndroidUtilities.dp(10), AndroidUtilities.dp(8),
+                AndroidUtilities.dp(10), AndroidUtilities.dp(8));
+        GradientDrawable background = new GradientDrawable();
+        background.setColor(Theme.getColor(Theme.key_windowBackgroundWhite));
+        background.setCornerRadius(AndroidUtilities.dp(12));
+        card.setBackground(background);
+        TextView title = new TextView(context);
+        title.setText("Контакт");
+        title.setTextSize(11);
+        title.setTextColor(Theme.getColor(Theme.key_windowBackgroundWhiteGrayText));
+        card.addView(title, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
+        ));
+        TextView nameView = new TextView(context);
+        nameView.setText(name);
+        nameView.setTextSize(16);
+        nameView.setTextColor(Theme.getColor(Theme.key_windowBackgroundWhiteBlackText));
+        card.addView(nameView, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
+        ));
+        if (!phone.isEmpty()) {
+            TextView phoneView = new TextView(context);
+            phoneView.setText("Телефон: " + phone);
+            phoneView.setTextColor(Theme.getColor(Theme.key_windowBackgroundWhiteBlackText));
+            card.addView(phoneView, new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
+            ));
+        }
+        if (!email.isEmpty()) {
+            TextView emailView = new TextView(context);
+            emailView.setText("Почта: " + email);
+            emailView.setTextColor(Theme.getColor(Theme.key_windowBackgroundWhiteBlackText));
+            card.addView(emailView, new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
+            ));
+        }
+        LinearLayout actions = new LinearLayout(context);
+        actions.setOrientation(LinearLayout.HORIZONTAL);
+        if (!phone.isEmpty()) {
+            Button call = new Button(context);
+            call.setAllCaps(false);
+            call.setText("Позвонить");
+            call.setOnClickListener(view -> {
+                Intent intent = new Intent(Intent.ACTION_DIAL, Uri.parse("tel:" + Uri.encode(phone)));
+                try {
+                    context.startActivity(intent);
+                } catch (Exception exception) {
+                    statusView.setText("Не найдено приложение для звонков.");
+                }
+            });
+            actions.addView(call, new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT
+            ));
+        }
+        Button save = new Button(context);
+        save.setAllCaps(false);
+        save.setText("Сохранить контакт");
+        save.setOnClickListener(view -> {
+            Intent intent = new Intent(Intent.ACTION_INSERT);
+            intent.setType(ContactsContract.Contacts.CONTENT_TYPE);
+            intent.putExtra(ContactsContract.Intents.Insert.NAME, name);
+            if (!phone.isEmpty()) {
+                intent.putExtra(ContactsContract.Intents.Insert.PHONE, phone);
+            }
+            if (!email.isEmpty()) {
+                intent.putExtra(ContactsContract.Intents.Insert.EMAIL, email);
+            }
+            try {
+                context.startActivity(intent);
+            } catch (Exception exception) {
+                statusView.setText("Не найдено приложение для сохранения контактов.");
+            }
+        });
+        actions.addView(save, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT
+        ));
+        card.addView(actions, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
+        ));
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
+        );
+        params.bottomMargin = AndroidUtilities.dp(8);
+        target.addView(card, params);
+    }
+
+    private void addLocationAttachment(LinearLayout target, JSONObject attachment) {
+        Context context = getParentActivity();
+        if (context == null) {
+            return;
+        }
+        double latitude = attachment.optDouble("latitude", Double.NaN);
+        double longitude = attachment.optDouble("longitude", Double.NaN);
+        if (Double.isNaN(latitude) || Double.isNaN(longitude)) {
+            return;
+        }
+        long liveUntil = attachment.optLong("live_until", 0);
+        boolean isLive = liveUntil > System.currentTimeMillis() / 1000
+                && !attachment.optBoolean("stopped", false);
+        LinearLayout card = new LinearLayout(context);
+        card.setOrientation(LinearLayout.VERTICAL);
+        card.setPadding(AndroidUtilities.dp(10), AndroidUtilities.dp(8),
+                AndroidUtilities.dp(10), AndroidUtilities.dp(8));
+        GradientDrawable background = new GradientDrawable();
+        background.setColor(Theme.getColor(Theme.key_windowBackgroundWhite));
+        background.setCornerRadius(AndroidUtilities.dp(12));
+        card.setBackground(background);
+        TextView title = new TextView(context);
+        title.setText(isLive ? "Трансляция геопозиции" : "Геопозиция");
+        title.setTextSize(14);
+        title.setTextColor(Theme.getColor(Theme.key_windowBackgroundWhiteBlackText));
+        card.addView(title, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
+        ));
+        TextView coordinates = new TextView(context);
+        coordinates.setText("Широта: " + latitude + "\nДолгота: " + longitude);
+        coordinates.setTextSize(12);
+        coordinates.setTextColor(Theme.getColor(Theme.key_windowBackgroundWhiteGrayText));
+        card.addView(coordinates, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
+        ));
+        if (liveUntil > 0) {
+            TextView state = new TextView(context);
+            state.setText(isLive ? "Геопозиция обновляется" : "Трансляция завершена");
+            state.setTextSize(12);
+            state.setTextColor(Theme.getColor(Theme.key_windowBackgroundWhiteGrayText));
+            card.addView(state, new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
+            ));
+        }
+        Button openMap = new Button(context);
+        openMap.setAllCaps(false);
+        openMap.setText("Открыть карту");
+        openMap.setOnClickListener(view -> {
+            Uri mapUri = Uri.parse("geo:" + latitude + "," + longitude
+                    + "?q=" + latitude + "," + longitude);
+            try {
+                context.startActivity(new Intent(Intent.ACTION_VIEW, mapUri));
+            } catch (Exception exception) {
+                statusView.setText("Не найдено приложение для просмотра карты.");
+            }
+        });
+        card.addView(openMap, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT
+        ));
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
+        );
+        params.bottomMargin = AndroidUtilities.dp(8);
+        target.addView(card, params);
     }
 
     private void showImagePreview(Bitmap bitmap) {
