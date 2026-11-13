@@ -70,6 +70,7 @@ public final class WaysGramChatFragment extends BaseFragment {
     private boolean historyLoading = false;
     private long peerReadMessageId = 0;
     private final Map<String, String> forwardIdempotencyKeys = new HashMap<>();
+    private final Map<String, String> messageIdempotencyKeys = new HashMap<>();
     private boolean pollInFlight = false;
     private boolean eventPollInFlight = false;
     private boolean isScreenResumed = false;
@@ -730,9 +731,12 @@ public final class WaysGramChatFragment extends BaseFragment {
             return;
         }
         statusView.setText("Отправляю изображение…");
-        apiClient.post("/api/messages", payload, new WaysGramApiClient.Callback() {
+        String requestFingerprint = payload.toString();
+        String idempotencyKey = messageIdempotencyKey(requestFingerprint);
+        apiClient.post("/api/messages", payload, idempotencyKey, new WaysGramApiClient.Callback() {
             @Override
             public void onSuccess(JSONObject response) {
+                messageIdempotencyKeys.remove(requestFingerprint);
                 clearChatDraft();
                 resetSilentSendMode();
                 statusView.setText("Изображение отправлено.");
@@ -1404,9 +1408,12 @@ public final class WaysGramChatFragment extends BaseFragment {
             return;
         }
         statusView.setText("Отправляю документ…");
-        apiClient.post("/api/messages", payload, new WaysGramApiClient.Callback() {
+        String requestFingerprint = payload.toString();
+        String idempotencyKey = messageIdempotencyKey(requestFingerprint);
+        apiClient.post("/api/messages", payload, idempotencyKey, new WaysGramApiClient.Callback() {
             @Override
             public void onSuccess(JSONObject response) {
+                messageIdempotencyKeys.remove(requestFingerprint);
                 clearChatDraft();
                 resetSilentSendMode();
                 statusView.setText("Документ отправлен.");
@@ -1418,6 +1425,12 @@ public final class WaysGramChatFragment extends BaseFragment {
                 statusView.setText(message);
             }
         });
+    }
+
+    private String messageIdempotencyKey(String fingerprint) {
+        return messageIdempotencyKeys.computeIfAbsent(
+                fingerprint, ignored -> "wg-message-" + UUID.randomUUID()
+        );
     }
 
     private boolean isSilentSendEnabled() {
@@ -1468,10 +1481,13 @@ public final class WaysGramChatFragment extends BaseFragment {
         }
         statusView.setText("Отправляю…");
         setMessageSendInFlight(true);
-        apiClient.post("/api/messages", payload, new WaysGramApiClient.Callback() {
+        String requestFingerprint = payload.toString();
+        String idempotencyKey = messageIdempotencyKey(requestFingerprint);
+        apiClient.post("/api/messages", payload, idempotencyKey, new WaysGramApiClient.Callback() {
             @Override
             public void onSuccess(JSONObject response) {
                 setMessageSendInFlight(false);
+                messageIdempotencyKeys.remove(requestFingerprint);
                 clearChatDraft();
                 resetSilentSendMode();
                 replyToMessageId = 0;
@@ -1532,6 +1548,7 @@ public final class WaysGramChatFragment extends BaseFragment {
             cloudDraftSync = null;
         }
         forwardIdempotencyKeys.clear();
+        messageIdempotencyKeys.clear();
         if (apiClient != null) {
             apiClient.close();
             apiClient = null;
