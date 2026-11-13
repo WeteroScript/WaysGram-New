@@ -1874,31 +1874,37 @@ public final class WaysGramChatFragment extends BaseFragment {
                             .show();
                     return;
                 }
-                StringBuilder text = new StringBuilder();
                 int visible = Math.min(count, 100);
+                String[] labels = new String[visible];
+                long[] messageIds = new long[visible];
                 for (int i = 0; i < visible; i++) {
                     JSONObject item = pinned.optJSONObject(i);
                     if (item == null) {
+                        labels[i] = "Сообщение недоступно";
                         continue;
                     }
-                    if (text.length() > 0) {
-                        text.append("\n\n");
-                    }
-                    text.append("#").append(item.optLong("message_id", 0));
+                    long messageId = item.optLong("message_id", 0);
+                    messageIds[i] = messageId;
                     long sender = item.optLong("sender_id", 0);
-                    if (sender > 0) {
-                        text.append(" · ").append(sender == peerId ? peerTitle : "Вы");
-                    }
+                    String author = sender > 0
+                            ? (sender == peerId ? peerTitle : "Вы")
+                            : "Пользователь";
                     String body = item.optString("body", "");
-                    if (body.length() > 280) {
-                        body = body.substring(0, 280) + "…";
+                    if (body.length() > 160) {
+                        body = body.substring(0, 160) + "…";
                     }
-                    text.append("\n").append(body);
+                    labels[i] = "#" + messageId + " · " + author
+                            + (body.isEmpty() ? "" : "\\n" + body);
                 }
                 statusView.setText("Закреплённых сообщений: " + count);
                 new AlertDialog.Builder(getParentActivity())
                         .setTitle("Закреплённые сообщения · " + count)
-                        .setMessage(text.toString())
+                        .setItems(labels, (dialog, which) -> {
+                            if (which >= 0 && which < messageIds.length
+                                    && messageIds[which] > 0) {
+                                jumpToMessage(messageIds[which]);
+                            }
+                        })
                         .setPositiveButton("Закрыть", null)
                         .show();
             }
@@ -1909,6 +1915,7 @@ public final class WaysGramChatFragment extends BaseFragment {
             }
         });
     }
+
 
     private void changePinnedMessage(long messageId, boolean pin) {
         if (messageId <= 0) {
