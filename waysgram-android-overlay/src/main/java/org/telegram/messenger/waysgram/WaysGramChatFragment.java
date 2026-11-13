@@ -6,11 +6,14 @@ import android.content.ClipData;
 import android.content.ClipboardManager;
 import android.content.Context;
 import android.content.Intent;
+import android.graphics.Color;
 import android.graphics.Bitmap;
 import android.graphics.drawable.GradientDrawable;
 import android.net.Uri;
 import android.os.Handler;
 import android.os.Looper;
+import android.text.Spannable;
+import android.text.SpannableStringBuilder;
 import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
@@ -22,6 +25,13 @@ import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.TextView;
+
+import android.text.style.BackgroundColorSpan;
+import android.text.style.ForegroundColorSpan;
+import android.text.style.StrikethroughSpan;
+import android.text.style.StyleSpan;
+import android.text.style.TypefaceSpan;
+import android.text.style.UnderlineSpan;
 
 import org.json.JSONArray;
 import org.json.JSONObject;
@@ -36,6 +46,8 @@ import java.util.HashMap;
 import java.util.Iterator;
 import java.util.Locale;
 import java.util.Map;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import java.util.UUID;
 
 /** WaysGram direct text conversation backed by /api/messages. */
@@ -198,6 +210,15 @@ public final class WaysGramChatFragment extends BaseFragment {
         ));
         sendButton.setOnClickListener(view -> sendMessage());
 
+        Button formatButton = new Button(context);
+        formatButton.setText("Форматирование");
+        formatButton.setAllCaps(false);
+        root.addView(formatButton, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+        ));
+        formatButton.setOnClickListener(view -> showFormattingOptions());
+
         silentSendCheckBox = new CheckBox(context);
         silentSendCheckBox.setText("Отправить без звука");
         silentSendCheckBox.setTextSize(12);
@@ -310,6 +331,123 @@ public final class WaysGramChatFragment extends BaseFragment {
                         }
                     }
                 });
+    }
+
+    private void showFormattingOptions() {
+        String[] labels = {
+                "Жирный",
+                "Курсив",
+                "Подчёркнутый",
+                "Зачёркнутый",
+                "Спойлер",
+                "Моноширинный"
+        };
+        String[] markers = {"**", "*", "--", "~~", "||", "`"};
+        new AlertDialog.Builder(getParentActivity())
+                .setTitle("Форматирование текста")
+                .setItems(labels, (dialog, which) -> {
+                    if (which >= 0 && which < markers.length) {
+                        wrapSelectedText(markers[which]);
+                    }
+                })
+                .show();
+    }
+
+    private void wrapSelectedText(String marker) {
+        if (messageInput == null) {
+            return;
+        }
+        int start = messageInput.getSelectionStart();
+        int end = messageInput.getSelectionEnd();
+        if (start < 0 || end < 0) {
+            start = end = messageInput.length();
+        }
+        if (start > end) {
+            int swap = start;
+            start = end;
+            end = swap;
+        }
+        android.text.Editable editable = messageInput.getText();
+        String selected = editable.subSequence(start, end).toString();
+        String wrapped = marker + selected + marker;
+        editable.replace(start, end, wrapped);
+        if (selected.isEmpty()) {
+            messageInput.setSelection(start + marker.length());
+        } else {
+            messageInput.setSelection(
+                    start + marker.length(),
+                    start + marker.length() + selected.length()
+            );
+        }
+        messageInput.requestFocus();
+    }
+
+    private CharSequence formatInlineMarkup(String source) {
+        SpannableStringBuilder formatted = new SpannableStringBuilder(
+                source == null ? "" : source
+        );
+        applyInlineMarkup(formatted, "**", 0);
+        applyInlineMarkup(formatted, "*", 1);
+        applyInlineMarkup(formatted, "--", 2);
+        applyInlineMarkup(formatted, "~~", 3);
+        applyInlineMarkup(formatted, "||", 4);
+        applyInlineMarkup(formatted, "`", 5);
+        return formatted;
+    }
+
+    private void applyInlineMarkup(
+            SpannableStringBuilder text,
+            String marker,
+            int style
+    ) {
+        Pattern pattern = Pattern.compile(
+                Pattern.quote(marker) + "(.+?)" + Pattern.quote(marker),
+                Pattern.DOTALL
+        );
+        Matcher matcher = pattern.matcher(text);
+        ArrayList<int[]> ranges = new ArrayList<>();
+        while (matcher.find()) {
+            ranges.add(new int[]{matcher.start(1), matcher.end(1)});
+        }
+        for (int i = ranges.size() - 1; i >= 0; i--) {
+            int start = ranges.get(i)[0];
+            int end = ranges.get(i)[1];
+            Object span;
+            switch (style) {
+                case 0:
+                    span = new StyleSpan(android.graphics.Typeface.BOLD);
+                    break;
+                case 1:
+                    span = new StyleSpan(android.graphics.Typeface.ITALIC);
+                    break;
+                case 2:
+                    span = new UnderlineSpan();
+                    break;
+                case 3:
+                    span = new StrikethroughSpan();
+                    break;
+                case 4:
+                    int spoilerColor = Theme.getColor(
+                            Theme.key_windowBackgroundWhiteGrayText
+                    );
+                    span = new BackgroundColorSpan(spoilerColor);
+                    text.setSpan(
+                            new ForegroundColorSpan(spoilerColor),
+                            start,
+                            end,
+                            Spannable.SPAN_EXCLUSIVE_EXCLUSIVE
+                    );
+                    break;
+                case 5:
+                    span = new TypefaceSpan("monospace");
+                    break;
+                default:
+                    continue;
+            }
+            text.setSpan(span, start, end, Spannable.SPAN_EXCLUSIVE_EXCLUSIVE);
+            text.delete(end, end + marker.length());
+            text.delete(start - marker.length(), start);
+        }
     }
 
     private void showMessageSearchDialog() {
@@ -988,7 +1126,7 @@ public final class WaysGramChatFragment extends BaseFragment {
             }
             displayText += mine.toString();
         }
-        row.setText(displayText);
+        row.setText(formatInlineMarkup(displayText));
         row.setContentDescription("Удерживайте сообщение, чтобы ответить или поставить реакцию");
         if (messageId > 0) {
             row.setOnLongClickListener(view -> {
