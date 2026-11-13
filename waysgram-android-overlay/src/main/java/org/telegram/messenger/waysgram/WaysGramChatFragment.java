@@ -491,10 +491,10 @@ public final class WaysGramChatFragment extends BaseFragment {
                                 body = body.substring(0, 70) + "…";
                             }
                             labels[i] = (pending[i] ? "Ожидает · " : "Ошибка · ")
-                                    + dateText + "\\n" + body;
+                                    + dateText + "\n" + body;
                             String error = item.optString("error", "");
                             if (!pending[i] && !error.isEmpty()) {
-                                labels[i] += "\\n" + error;
+                                labels[i] += "\n" + error;
                             }
                         }
                         new AlertDialog.Builder(getParentActivity())
