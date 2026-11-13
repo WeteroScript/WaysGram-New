@@ -286,11 +286,22 @@ public final class WaysGramUserProfileFragment extends BaseFragment {
                 ).format(new Date(upgradedAt * 1000L));
                 addLabel(getParentActivity(), card, "Дата улучшения: " + upgradedAtText, 12, false);
             }
+            JSONObject collectibleTraits = attributes.optJSONObject("collectible_traits");
+            if (collectibleTraits != null) {
+                addLabel(getParentActivity(), card,
+                        "Редкость: " + collectibleTraits.optString("rarity", "—"), 13, true);
+                addLabel(getParentActivity(), card,
+                        "Модель: " + collectibleTraits.optString("model", "—"), 12, false);
+                addLabel(getParentActivity(), card,
+                        "Символ: " + collectibleTraits.optString("symbol", "—"), 12, false);
+                addLabel(getParentActivity(), card,
+                        "Фон: " + collectibleTraits.optString("backdrop", "—"), 12, false);
+            }
             Iterator<String> attributeKeys = attributes.keys();
             while (attributeKeys.hasNext()) {
                 String key = attributeKeys.next();
                 if ("upgrade_level".equals(key) || "last_upgraded_at".equals(key)
-                        || "upgrade_source".equals(key)) {
+                        || "upgrade_source".equals(key) || "collectible_traits".equals(key)) {
                     continue;
                 }
                 Object value = attributes.opt(key);
