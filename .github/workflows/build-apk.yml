@@ -236,6 +236,8 @@ jobs:
         run: |
           set -euo pipefail
           python3 "$GITHUB_WORKSPACE/waysgram-android-overlay/scripts/prepare_android_dev_build.py" --android-root "$GITHUB_WORKSPACE"
+          grep -Fq "com.google.mlkit:language-id:17.0.6" TMessagesProj/build.gradle
+          grep -Fq "com.google.mlkit:translate:17.0.3" TMessagesProj/build.gradle
           python3 - <<'PY'
           import json
           from pathlib import Path
