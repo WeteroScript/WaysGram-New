@@ -193,6 +193,12 @@ def patch_notification_permissions(android_root: Path) -> None:
          "notification permission"),
         ('    <uses-permission android:name="android.permission.RECORD_AUDIO" />\n',
          "microphone permission"),
+        ('    <uses-permission android:name="android.permission.READ_CONTACTS" />\n',
+         "contacts permission"),
+        ('    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />\n',
+         "coarse location permission"),
+        ('    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />\n',
+         "fine location permission"),
     )
     for variant in ("debug", "release"):
         manifest = android_root / f"TMessagesProj/config/{variant}/AndroidManifest.xml"
