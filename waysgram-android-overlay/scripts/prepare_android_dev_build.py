@@ -333,14 +333,12 @@ def configure_mlkit_translation_dependencies(android_root: Path) -> None:
         raise FileNotFoundError(f"Telegram project Gradle file not found: {build_file}")
 
     content = build_file.read_text(encoding="utf-8")
-    dependency_lines = (
-        "    implementation 'com.google.mlkit:language-id:17.0.6'",
-        "    implementation 'com.google.mlkit:translate:17.0.3'",
+    dependency_specs = (
+        ("language-id", "    implementation 'com.google.mlkit:language-id:17.0.6'"),
+        ("translate", "    implementation 'com.google.mlkit:translate:17.0.3'"),
     )
-    if all(line in content for line in dependency_lines):
-        return
 
-    block = re.search(r"(?m)^dependencies\s*\{", content)
+    block = re.search(r"(?m)^dependencies\\s*\\{", content)
     if block is None:
         raise ValueError("TMessagesProj/build.gradle has no dependencies block")
 
@@ -360,16 +358,41 @@ def configure_mlkit_translation_dependencies(android_root: Path) -> None:
         raise ValueError("TMessagesProj/build.gradle dependencies block is unbalanced")
 
     dependencies_block = content[opening:closing + 1]
-    missing = [line for line in dependency_lines if line.split(":")[1] not in dependencies_block]
-    if missing:
-        insertion = "\n" + "\n".join(missing) + "\n"
-        content = content[:closing] + insertion + content[closing:]
-        build_file.write_text(content, encoding="utf-8")
+    additions = []
+    for artifact, desired_line in dependency_specs:
+        pattern = re.compile(
+            r"(?m)^[ \\t]*implementation\\s+['\\\"]com\\.google\\.mlkit:"
+            + re.escape(artifact)
+            + r":[^'\\\"]+['\\\"][ \\t]*$"
+        )
+        matches = list(pattern.finditer(dependencies_block))
+        if len(matches) > 1:
+            raise ValueError(f"Multiple ML Kit dependencies found for {artifact}")
+        if not matches:
+            additions.append(desired_line)
+            continue
+        match = matches[0]
+        if match.group(0).strip() != desired_line.strip():
+            dependencies_block = (
+                dependencies_block[:match.start()]
+                + desired_line
+                + dependencies_block[match.end():]
+            )
 
-    updated = build_file.read_text(encoding="utf-8")
-    for line in dependency_lines:
-        if line not in updated:
-            raise ValueError(f"Failed to add ML Kit dependency: {line}")
+    if additions:
+        dependencies_block = (
+            dependencies_block[:-1]
+            + "\\n"
+            + "\\n".join(additions)
+            + "\\n}"
+        )
+    content = content[:opening] + dependencies_block + content[closing + 1:]
+    build_file.write_text(content, encoding="utf-8")
+
+    for artifact, desired_line in dependency_specs:
+        if desired_line not in content:
+            raise ValueError(f"Failed to add ML Kit dependency: {artifact}")
+
 
 
 def configure_android_root(android_root: Path) -> None:
