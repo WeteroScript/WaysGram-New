@@ -273,6 +273,8 @@ public final class WaysGramApiClient implements AutoCloseable {
             mimeType = "image/png";
         } else if (lowerName.endsWith(".webp")) {
             mimeType = "image/webp";
+        } else if (lowerName.endsWith(".gif")) {
+            mimeType = "image/gif";
         } else if (lowerName.endsWith(".pdf")) {
             mimeType = "application/pdf";
         } else if (lowerName.endsWith(".txt")) {
@@ -299,7 +301,7 @@ public final class WaysGramApiClient implements AutoCloseable {
             mimeType = "audio/wav";
         } else {
             throw new IOException(
-                    "Поддерживаются JPG, PNG, WebP без сжатия, PDF, TXT, CSV, ZIP, MP4, WebM, MOV, MKV, MP3, M4A, OGG и WAV"
+                    "Поддерживаются JPG, PNG, WebP, GIF, PDF, TXT, CSV, ZIP, MP4, WebM, MOV, MKV, MP3, M4A, OGG и WAV"
             );
         }
 
