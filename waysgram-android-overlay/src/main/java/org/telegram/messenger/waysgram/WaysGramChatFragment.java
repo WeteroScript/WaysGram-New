@@ -1359,8 +1359,12 @@ public final class WaysGramChatFragment extends BaseFragment {
         Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
         intent.addCategory(Intent.CATEGORY_OPENABLE);
         intent.setType("*/*");
-        intent.putExtra(Intent.EXTRA_MIME_TYPES,
-                new String[]{"image/*", "application/pdf", "text/plain", "text/csv"});
+        intent.putExtra(Intent.EXTRA_MIME_TYPES, new String[]{
+                "image/*", "video/mp4", "video/webm", "video/quicktime",
+                "video/x-matroska", "audio/mpeg", "audio/mp4", "audio/ogg",
+                "audio/wav", "application/pdf", "text/plain", "text/csv",
+                "application/zip"
+        });
         startActivityForResult(intent, REQUEST_ATTACHMENT);
     }
 
@@ -1795,9 +1799,9 @@ public final class WaysGramChatFragment extends BaseFragment {
                 }
             });
         } else if (mediaId.matches("[a-f0-9]{32}") && mediaType.startsWith("video/")) {
-            addVideoMessage(mediaId, mediaName);
+            addVideoMessage(mediaId, mediaName, mediaType);
         } else if (mediaId.matches("[a-f0-9]{32}") && mediaType.startsWith("audio/")) {
-            addAudioMessage(mediaId, mediaName);
+            addAudioMessage(mediaId, mediaName, mediaType);
         } else if (mediaId.matches("[a-f0-9]{32}") && !mediaType.isEmpty()) {
             addMediaSaveButton(mediaId, mediaName, mediaType);
         }
@@ -2427,11 +2431,11 @@ public final class WaysGramChatFragment extends BaseFragment {
         saveButton.setOnClickListener(view -> saveDocument(mediaId, mediaName, mediaType));
     }
 
-    private void addVideoMessage(String mediaId, String mediaName) {
+    private void addVideoMessage(String mediaId, String mediaName, String mediaType) {
         Context context = getParentActivity();
         Uri uri = mediaStreamUri(mediaId);
         if (context == null || uri == null) {
-            addMediaSaveButton(mediaId, mediaName, "video/mp4");
+            addMediaSaveButton(mediaId, mediaName, mediaType);
             return;
         }
         TextView label = new TextView(context);
@@ -2458,14 +2462,14 @@ public final class WaysGramChatFragment extends BaseFragment {
         );
         videoParams.bottomMargin = AndroidUtilities.dp(5);
         messagesContainer.addView(videoView, videoParams);
-        addMediaSaveButton(mediaId, mediaName, "video/mp4");
+        addMediaSaveButton(mediaId, mediaName, mediaType);
     }
 
-    private void addAudioMessage(String mediaId, String mediaName) {
+    private void addAudioMessage(String mediaId, String mediaName, String mediaType) {
         Context context = getParentActivity();
         Uri uri = mediaStreamUri(mediaId);
         if (context == null || uri == null) {
-            addMediaSaveButton(mediaId, mediaName, "audio/mpeg");
+            addMediaSaveButton(mediaId, mediaName, mediaType);
             return;
         }
         Button playButton = new Button(context);
@@ -2500,6 +2504,12 @@ public final class WaysGramChatFragment extends BaseFragment {
                     });
                     created.setOnErrorListener((errorPlayer, what, extra) -> {
                         prepared[0] = false;
+                        activeAudioPlayers.remove(errorPlayer);
+                        try {
+                            errorPlayer.release();
+                        } catch (Exception ignored) {
+                        }
+                        playerHolder[0] = null;
                         playButton.setText("Не удалось воспроизвести аудио");
                         statusView.setText("Формат аудио не поддерживается устройством. Сохраните файл для открытия в другом приложении.");
                         return true;
@@ -2532,7 +2542,7 @@ public final class WaysGramChatFragment extends BaseFragment {
                 playButton.setText("Не удалось воспроизвести аудио");
             }
         });
-        addMediaSaveButton(mediaId, mediaName, "audio/mpeg");
+        addMediaSaveButton(mediaId, mediaName, mediaType);
     }
 
     private void saveDocument(String mediaId, String mediaName, String mediaType) {
