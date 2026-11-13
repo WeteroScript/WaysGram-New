@@ -96,6 +96,8 @@ public final class WaysGramChatFragment extends BaseFragment {
     private long peerReadMessageId = 0;
     private final Map<String, String> forwardIdempotencyKeys = new HashMap<>();
     private final Map<String, String> messageIdempotencyKeys = new HashMap<>();
+    private final Map<Long, View> messageViews = new HashMap<>();
+    private long pendingJumpMessageId = 0;
     private boolean pollInFlight = false;
     private boolean eventPollInFlight = false;
     private boolean isScreenResumed = false;
@@ -1110,6 +1112,7 @@ public final class WaysGramChatFragment extends BaseFragment {
                 peerReadMessageId = response.optLong("peer_read_id", peerReadMessageId);
                 JSONArray messages = response.optJSONArray("messages");
                 messagesContainer.removeAllViews();
+                messageViews.clear();
                 int count = messages == null ? 0 : messages.length();
                 long newestId = lastMessageId;
                 for (int i = 0; i < count; i++) {
@@ -1127,6 +1130,7 @@ public final class WaysGramChatFragment extends BaseFragment {
                     loadOlderButton.setEnabled(true);
                 }
                 statusView.setText(count == 0 ? "История пока пуста" : "Сообщений: " + count);
+                messageScrollView.post(this::continuePendingMessageJump);
                 markMessagesRead();
                 scheduleNextPoll();
             }
@@ -1169,6 +1173,7 @@ public final class WaysGramChatFragment extends BaseFragment {
                             statusView.setText("Более ранних сообщений нет");
                             loadOlderButton.setEnabled(true);
                             loadOlderButton.setText("Загрузить предыдущие сообщения");
+                            continuePendingMessageJump();
                             return;
                         }
 
@@ -1202,6 +1207,7 @@ public final class WaysGramChatFragment extends BaseFragment {
                                     0, messagesContainer.getHeight() - oldContentHeight
                             );
                             messageScrollView.scrollTo(0, oldScrollY + insertedHeight);
+                            continuePendingMessageJump();
                         });
                     }
 
@@ -1217,6 +1223,36 @@ public final class WaysGramChatFragment extends BaseFragment {
                         }
                     }
                 });
+    }
+
+    private void jumpToMessage(long messageId) {
+        if (messageId <= 0 || messageScrollView == null) {
+            return;
+        }
+        pendingJumpMessageId = messageId;
+        statusView.setText("Ищу исходное сообщение в истории…");
+        continuePendingMessageJump();
+    }
+
+    private void continuePendingMessageJump() {
+        if (pendingJumpMessageId <= 0 || historyLoading) {
+            return;
+        }
+        View target = messageViews.get(pendingJumpMessageId);
+        if (target != null) {
+            pendingJumpMessageId = 0;
+            messageScrollView.post(() -> messageScrollView.smoothScrollTo(
+                    0, Math.max(0, target.getTop() - AndroidUtilities.dp(72))
+            ));
+            statusView.setText("Исходное сообщение найдено");
+            return;
+        }
+        if (oldestMessageId > 0) {
+            loadOlderMessages();
+            return;
+        }
+        pendingJumpMessageId = 0;
+        statusView.setText("Исходное сообщение отсутствует в истории");
     }
 
     private void markMessagesRead() {
@@ -1592,7 +1628,28 @@ public final class WaysGramChatFragment extends BaseFragment {
             }
             displayText += mine.toString();
         }
-        CharSequence renderedMessage = formatInlineMarkup(displayText);
+        SpannableStringBuilder renderedMessage = new SpannableStringBuilder(
+                formatInlineMarkup(displayText)
+        );
+        if (repliedToId > 0) {
+            String renderedText = renderedMessage.toString();
+            int quoteStart = renderedText.indexOf("Цитата: ");
+            int quoteEnd = quoteStart < 0 ? -1 : renderedText.indexOf("\\n", quoteStart);
+            if (quoteStart >= 0 && quoteEnd > quoteStart) {
+                renderedMessage.setSpan(new ClickableSpan() {
+                    @Override
+                    public void updateDrawState(android.text.TextPaint paint) {
+                        paint.setColor(android.graphics.Color.rgb(50, 130, 220));
+                        paint.setUnderlineText(true);
+                    }
+
+                    @Override
+                    public void onClick(View widget) {
+                        jumpToMessage(repliedToId);
+                    }
+                }, quoteStart, quoteEnd, Spannable.SPAN_EXCLUSIVE_EXCLUSIVE);
+            }
+        }
         row.setText(renderedMessage);
         if (renderedMessage instanceof Spannable
                 && ((Spannable) renderedMessage).getSpans(
@@ -1617,6 +1674,9 @@ public final class WaysGramChatFragment extends BaseFragment {
         );
         params.bottomMargin = AndroidUtilities.dp(4);
         messagesContainer.addView(row, params);
+        if (messageId > 0) {
+            messageViews.put(messageId, row);
+        }
 
         String giftSerial = message.optString("gift_serial_number", "");
         if (!giftSerial.isEmpty()) {
