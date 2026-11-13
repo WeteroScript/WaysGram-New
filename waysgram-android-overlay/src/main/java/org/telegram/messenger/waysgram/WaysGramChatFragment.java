@@ -13,6 +13,8 @@ import android.graphics.drawable.GradientDrawable;
 import android.net.Uri;
 import android.media.AudioAttributes;
 import android.media.MediaPlayer;
+import android.media.PlaybackParams;
+import android.os.Build;
 import android.os.Handler;
 import android.os.Looper;
 import android.text.Spannable;
@@ -2745,15 +2747,26 @@ public final class WaysGramChatFragment extends BaseFragment {
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
         ));
 
+        final float[] speeds = {1.0f, 1.25f, 1.5f, 2.0f};
+        final String[] speedLabels = {"1×", "1.25×", "1.5×", "2×"};
+        final int[] speedIndex = {0};
+        final MediaPlayer[] preparedPlayer = new MediaPlayer[1];
         VideoView videoView = new VideoView(context);
+        videoView.setOnPreparedListener(player -> {
+            preparedPlayer[0] = player;
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                applyMediaPlaybackSpeed(player, speeds[speedIndex[0]]);
+            }
+        });
+        videoView.setOnErrorListener((player, what, extra) -> {
+            preparedPlayer[0] = null;
+            statusView.setText("Этот формат видео не поддерживается устройством. Сохраните файл для открытия в другом приложении.");
+            return true;
+        });
         videoView.setVideoURI(uri, mediaAuthorizationHeaders());
         MediaController controller = new MediaController(context);
         controller.setAnchorView(videoView);
         videoView.setMediaController(controller);
-        videoView.setOnErrorListener((player, what, extra) -> {
-            statusView.setText("Этот формат видео не поддерживается устройством. Сохраните файл для открытия в другом приложении.");
-            return true;
-        });
         activeVideoViews.add(videoView);
         LinearLayout.LayoutParams videoParams = new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
@@ -2761,7 +2774,33 @@ public final class WaysGramChatFragment extends BaseFragment {
         );
         videoParams.bottomMargin = AndroidUtilities.dp(5);
         target.addView(videoView, videoParams);
+
+        Button speedButton = new Button(context);
+        speedButton.setAllCaps(false);
+        speedButton.setText("Скорость " + speedLabels[0]);
+        speedButton.setEnabled(Build.VERSION.SDK_INT >= Build.VERSION_CODES.M);
+        speedButton.setOnClickListener(view -> {
+            speedIndex[0] = (speedIndex[0] + 1) % speeds.length;
+            speedButton.setText("Скорость " + speedLabels[speedIndex[0]]);
+            if (preparedPlayer[0] != null) {
+                applyMediaPlaybackSpeed(preparedPlayer[0], speeds[speedIndex[0]]);
+            }
+        });
+        target.addView(speedButton, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT
+        ));
         addMediaSaveButton(target, mediaId, mediaName, mediaType);
+    }
+
+    private void applyMediaPlaybackSpeed(MediaPlayer player, float speed) {
+        if (player == null || Build.VERSION.SDK_INT < Build.VERSION_CODES.M) {
+            return;
+        }
+        try {
+            player.setPlaybackParams(new PlaybackParams().setSpeed(speed));
+        } catch (Exception exception) {
+            statusView.setText("Не удалось изменить скорость воспроизведения.");
+        }
     }
 
     private void addAudioMessage(LinearLayout target, String mediaId, String mediaName, String mediaType) {
@@ -2778,8 +2817,27 @@ public final class WaysGramChatFragment extends BaseFragment {
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
         ));
 
+        final float[] speeds = {1.0f, 1.25f, 1.5f, 2.0f};
+        final String[] speedLabels = {"1×", "1.25×", "1.5×", "2×"};
+        final int[] speedIndex = {0};
+        Button speedButton = new Button(context);
+        speedButton.setAllCaps(false);
+        speedButton.setText("Скорость " + speedLabels[0]);
+        speedButton.setEnabled(Build.VERSION.SDK_INT >= Build.VERSION_CODES.M);
+        target.addView(speedButton, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT
+        ));
+
         final MediaPlayer[] playerHolder = new MediaPlayer[1];
         final boolean[] prepared = {false};
+        speedButton.setOnClickListener(view -> {
+            speedIndex[0] = (speedIndex[0] + 1) % speeds.length;
+            speedButton.setText("Скорость " + speedLabels[speedIndex[0]]);
+            MediaPlayer current = playerHolder[0];
+            if (current != null && prepared[0]) {
+                applyMediaPlaybackSpeed(current, speeds[speedIndex[0]]);
+            }
+        });
         playButton.setOnClickListener(view -> {
             MediaPlayer player = playerHolder[0];
             if (player == null) {
@@ -2794,6 +2852,9 @@ public final class WaysGramChatFragment extends BaseFragment {
                     created.setDataSource(context, uri, mediaAuthorizationHeaders());
                     created.setOnPreparedListener(preparedPlayer -> {
                         prepared[0] = true;
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                            applyMediaPlaybackSpeed(preparedPlayer, speeds[speedIndex[0]]);
+                        }
                         preparedPlayer.start();
                         playButton.setText("⏸ Пауза: " + mediaName);
                     });
