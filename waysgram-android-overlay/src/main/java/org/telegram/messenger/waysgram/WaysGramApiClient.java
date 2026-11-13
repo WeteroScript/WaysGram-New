@@ -266,7 +266,13 @@ public final class WaysGramApiClient implements AutoCloseable {
         String filename = queryDisplayName(resolver, uri);
         String lowerName = filename.toLowerCase(Locale.ROOT);
         String mimeType;
-        if (lowerName.endsWith(".pdf")) {
+        if (lowerName.endsWith(".jpg") || lowerName.endsWith(".jpeg")) {
+            mimeType = "image/jpeg";
+        } else if (lowerName.endsWith(".png")) {
+            mimeType = "image/png";
+        } else if (lowerName.endsWith(".webp")) {
+            mimeType = "image/webp";
+        } else if (lowerName.endsWith(".pdf")) {
             mimeType = "application/pdf";
         } else if (lowerName.endsWith(".txt")) {
             mimeType = "text/plain";
@@ -292,7 +298,7 @@ public final class WaysGramApiClient implements AutoCloseable {
             mimeType = "audio/wav";
         } else {
             throw new IOException(
-                    "Поддерживаются PDF, TXT, CSV, ZIP, MP4, WebM, MOV, MKV, MP3, M4A, OGG и WAV"
+                    "Поддерживаются JPG, PNG, WebP без сжатия, PDF, TXT, CSV, ZIP, MP4, WebM, MOV, MKV, MP3, M4A, OGG и WAV"
             );
         }
 
