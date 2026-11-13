@@ -236,7 +236,23 @@ jobs:
             :TMessagesProj_App:assembleAfatRelease
 
       - name: Verify APK
-        run: test -s TMessagesProj_App/build/outputs/apk/afat/release/app.apk
+        shell: bash
+        run: |
+          set -euo pipefail
+          APK="TMessagesProj_App/build/outputs/apk/afat/release/app.apk"
+          BUILD_TOOLS="$ANDROID_HOME/build-tools/36.0.0"
+
+          test -s "$APK"
+
+          BADGING="$("$BUILD_TOOLS/aapt" dump badging "$APK")"
+          if ! grep -Fq "package: name='org.waysgram.messenger'" <<< "$BADGING"; then
+            echo "::error::APK package name is not org.waysgram.messenger"
+            printf '%s\\n' "$BADGING" | head -20
+            exit 1
+          fi
+
+          "$BUILD_TOOLS/apksigner" verify --verbose --print-certs "$APK"
+          printf '%s\\n' "$BADGING" | grep -E "^(package:|application-label:|sdkVersion:|targetSdkVersion:)"
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
