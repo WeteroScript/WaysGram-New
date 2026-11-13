@@ -392,6 +392,8 @@ public final class WaysGramChatFragment extends BaseFragment {
         applyInlineMarkup(formatted, "~~", 3);
         applyInlineMarkup(formatted, "||", 4);
         applyInlineMarkup(formatted, "`", 5);
+        applyMentionLinks(formatted);
+        applyHashtagLinks(formatted);
         return formatted;
     }
 
@@ -469,96 +471,195 @@ public final class WaysGramChatFragment extends BaseFragment {
         }
     }
 
+    private void applyMentionLinks(SpannableStringBuilder text) {
+        Pattern pattern = Pattern.compile(
+                "(?<![A-Za-z0-9_])@([A-Za-z][A-Za-z0-9_]{2,31})"
+        );
+        Matcher matcher = pattern.matcher(text);
+        ArrayList<int[]> ranges = new ArrayList<>();
+        while (matcher.find()) {
+            ranges.add(new int[]{matcher.start(), matcher.end()});
+        }
+        for (int i = ranges.size() - 1; i >= 0; i--) {
+            int start = ranges.get(i)[0];
+            int end = ranges.get(i)[1];
+            String token = text.subSequence(start + 1, end).toString();
+            text.setSpan(new ClickableSpan() {
+                @Override
+                public void updateDrawState(android.text.TextPaint paint) {
+                    paint.setColor(android.graphics.Color.rgb(50, 130, 220));
+                    paint.setUnderlineText(true);
+                }
+
+                @Override
+                public void onClick(View widget) {
+                    openMentionProfile(token);
+                }
+            }, start, end, Spannable.SPAN_EXCLUSIVE_EXCLUSIVE);
+        }
+    }
+
+    private void applyHashtagLinks(SpannableStringBuilder text) {
+        Pattern pattern = Pattern.compile(
+                "(?<![\\p{L}\\p{N}_])#[\\p{L}\\p{N}_]{1,64}"
+        );
+        Matcher matcher = pattern.matcher(text);
+        ArrayList<int[]> ranges = new ArrayList<>();
+        while (matcher.find()) {
+            ranges.add(new int[]{matcher.start(), matcher.end()});
+        }
+        for (int i = ranges.size() - 1; i >= 0; i--) {
+            int start = ranges.get(i)[0];
+            int end = ranges.get(i)[1];
+            String hashtag = text.subSequence(start, end).toString();
+            text.setSpan(new ClickableSpan() {
+                @Override
+                public void updateDrawState(android.text.TextPaint paint) {
+                    paint.setColor(android.graphics.Color.rgb(50, 130, 220));
+                    paint.setUnderlineText(true);
+                }
+
+                @Override
+                public void onClick(View widget) {
+                    searchMessages(hashtag);
+                }
+            }, start, end, Spannable.SPAN_EXCLUSIVE_EXCLUSIVE);
+        }
+    }
+
+    private void openMentionProfile(String username) {
+        if (apiClient == null) {
+            return;
+        }
+        statusView.setText("Открываю профиль @" + username + "…");
+        apiClient.get("/api/users?q=" + Uri.encode(username),
+                new WaysGramApiClient.Callback() {
+                    @Override
+                    public void onSuccess(JSONObject response) {
+                        JSONArray users = response.optJSONArray("users");
+                        int count = users == null ? 0 : users.length();
+                        for (int i = 0; i < count; i++) {
+                            JSONObject user = users.optJSONObject(i);
+                            if (user != null && username.equalsIgnoreCase(
+                                    user.optString("username", "")
+                            )) {
+                                long userId = user.optLong("id", 0);
+                                if (userId > 0) {
+                                    presentFragment(
+                                            new WaysGramUserProfileFragment(userId), false
+                                    );
+                                    return;
+                                }
+                            }
+                        }
+                        statusView.setText("Пользователь @" + username + " не найден.");
+                    }
+
+                    @Override
+                    public void onError(String message, int statusCode) {
+                        statusView.setText(message);
+                        if (statusCode == 401 && getParentActivity() != null) {
+                            WaysGramSessionStore.getInstance(getParentActivity()).clearSession();
+                            presentFragment(new WaysGramLoginFragment(), true);
+                        }
+                    }
+                });
+    }
+
+    private void searchMessages(String query) {
+        String term = query == null ? "" : query.trim();
+        if (term.isEmpty()) {
+            statusView.setText("Введите текст для поиска");
+            return;
+        }
+        if (term.length() > 128) {
+            statusView.setText("Запрос не должен превышать 128 символов");
+            return;
+        }
+        statusView.setText("Ищу сообщения…");
+        apiClient.get(
+                "/api/messages/search?with=" + peerId + "&q=" + Uri.encode(term),
+                new WaysGramApiClient.Callback() {
+                    @Override
+                    public void onSuccess(JSONObject response) {
+                        JSONArray messages = response.optJSONArray("messages");
+                        int count = messages == null ? 0 : messages.length();
+                        if (count == 0) {
+                            statusView.setText("Совпадений не найдено");
+                            new AlertDialog.Builder(getParentActivity())
+                                    .setTitle("Результаты поиска")
+                                    .setMessage("По запросу «" + term + "» ничего не найдено.")
+                                    .setPositiveButton("Закрыть", null)
+                                    .show();
+                            return;
+                        }
+                        StringBuilder results = new StringBuilder();
+                        int displayCount = Math.min(count, 20);
+                        for (int i = 0; i < displayCount; i++) {
+                            JSONObject message = messages.optJSONObject(i);
+                            if (message == null) {
+                                continue;
+                            }
+                            long sender = message.optLong("sender_id", 0);
+                            String author = sender == peerId ? peerTitle : "Вы";
+                            long createdAt = message.optLong("created_at", 0);
+                            String time = createdAt > 0
+                                    ? DateFormat.getDateTimeInstance(
+                                            DateFormat.SHORT, DateFormat.SHORT
+                                    ).format(new Date(createdAt * 1000L))
+                                    : "";
+                            if (results.length() > 0) {
+                                results.append("\\n\\n");
+                            }
+                            results.append(author);
+                            if (!time.isEmpty()) {
+                                results.append(" · ").append(time);
+                            }
+                            String body = message.optString("body", "");
+                            if (body.length() > 600) {
+                                body = body.substring(0, 600) + "…";
+                            }
+                            results.append("\\n").append(body);
+                        }
+                        statusView.setText("Найдено сообщений: " + count);
+                        if (count > displayCount) {
+                            results.append("\\n\\nПоказаны первые ")
+                                    .append(displayCount).append(" из ")
+                                    .append(count).append(" совпадений.");
+                        }
+                        new AlertDialog.Builder(getParentActivity())
+                                .setTitle("Результаты поиска · " + count)
+                                .setMessage(results.toString())
+                                .setPositiveButton("Закрыть", null)
+                                .show();
+                    }
+
+                    @Override
+                    public void onError(String message, int statusCode) {
+                        statusView.setText(message);
+                        if (statusCode == 401) {
+                            WaysGramSessionStore.getInstance(getParentActivity()).clearSession();
+                            presentFragment(new WaysGramLoginFragment(), true);
+                        }
+                    }
+                }
+        );
+    }
+
     private void showMessageSearchDialog() {
         EditText queryInput = new EditText(getParentActivity());
         queryInput.setSingleLine(true);
-        queryInput.setHint("Текст сообщения");
+        queryInput.setHint("Текст сообщения или #хэштег");
         new AlertDialog.Builder(getParentActivity())
                 .setTitle("Поиск по переписке")
                 .setView(queryInput)
                 .setNegativeButton("Отмена", null)
-                .setPositiveButton("Найти", (dialog, which) -> {
-                    String query = queryInput.getText() == null
-                            ? ""
-                            : queryInput.getText().toString().trim();
-                    if (query.isEmpty()) {
-                        statusView.setText("Введите текст для поиска");
-                        return;
-                    }
-                    if (query.length() > 128) {
-                        statusView.setText("Запрос не должен превышать 128 символов");
-                        return;
-                    }
-                    statusView.setText("Ищу сообщения…");
-                    String encodedQuery = Uri.encode(query);
-                    apiClient.get(
-                            "/api/messages/search?with=" + peerId + "&q=" + encodedQuery,
-                            new WaysGramApiClient.Callback() {
-                                @Override
-                                public void onSuccess(JSONObject response) {
-                                    JSONArray messages = response.optJSONArray("messages");
-                                    int count = messages == null ? 0 : messages.length();
-                                    if (count == 0) {
-                                        statusView.setText("Совпадений не найдено");
-                                        new AlertDialog.Builder(getParentActivity())
-                                                .setTitle("Результаты поиска")
-                                                .setMessage("По запросу «" + query + "» ничего не найдено.")
-                                                .setPositiveButton("Закрыть", null)
-                                                .show();
-                                        return;
-                                    }
-                                    StringBuilder results = new StringBuilder();
-                                    int displayCount = Math.min(count, 20);
-                                    for (int i = 0; i < displayCount; i++) {
-                                        JSONObject message = messages.optJSONObject(i);
-                                        if (message == null) {
-                                            continue;
-                                        }
-                                        long sender = message.optLong("sender_id", 0);
-                                        String author = sender == peerId ? peerTitle : "Вы";
-                                        long createdAt = message.optLong("created_at", 0);
-                                        String time = createdAt > 0
-                                                ? DateFormat.getDateTimeInstance(DateFormat.SHORT, DateFormat.SHORT)
-                                                        .format(new Date(createdAt * 1000L))
-                                                : "";
-                                        if (results.length() > 0) {
-                                            results.append("\n\n");
-                                        }
-                                        results.append(author);
-                                        if (!time.isEmpty()) {
-                                            results.append(" · ").append(time);
-                                        }
-                                        String body = message.optString("body", "");
-                                        if (body.length() > 600) {
-                                            body = body.substring(0, 600) + "…";
-                                        }
-                                        results.append("\n").append(body);
-                                    }
-                                    statusView.setText("Найдено сообщений: " + count);
-                                    if (count > displayCount) {
-                                        results.append("\n\nПоказаны первые ").append(displayCount)
-                                                .append(" из ").append(count).append(" совпадений.");
-                                    }
-                                    new AlertDialog.Builder(getParentActivity())
-                                            .setTitle("Результаты поиска · " + count)
-                                            .setMessage(results.toString())
-                                            .setPositiveButton("Закрыть", null)
-                                            .show();
-                                }
-
-                                @Override
-                                public void onError(String message, int statusCode) {
-                                    statusView.setText(message);
-                                    if (statusCode == 401) {
-                                        WaysGramSessionStore.getInstance(getParentActivity()).clearSession();
-                                        presentFragment(new WaysGramLoginFragment(), true);
-                                    }
-                                }
-                            }
-                    );
-                })
+                .setPositiveButton("Найти", (dialog, which) ->
+                        searchMessages(queryInput.getText() == null
+                                ? "" : queryInput.getText().toString()))
                 .show();
     }
+
 
     private void initializeMessageEventCursor() {
         if (apiClient == null || messageEventsReady || messageEventsInitializing) {
