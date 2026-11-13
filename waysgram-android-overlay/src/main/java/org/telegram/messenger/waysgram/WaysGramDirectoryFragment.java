@@ -358,7 +358,7 @@ public final class WaysGramDirectoryFragment extends BaseFragment {
                     statusView.setText("Не удалось определить аккаунт для Избранного.");
                     return;
                 }
-                presentFragment(new WaysGramChatFragment(userId, "Избранное"), false);
+                presentFragment(new WaysGramChatFragment(userId, "Избранное", true), false);
             }
 
             @Override
