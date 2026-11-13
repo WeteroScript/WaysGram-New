@@ -401,7 +401,12 @@ public final class WaysGramGiftCatalogSheet extends BottomSheet {
                         }
                         items.add(listing);
                         String seller = listing.optString("seller_username", "");
+                        JSONObject marketAttributes = listing.optJSONObject("attributes");
+                        JSONObject marketTraits = marketAttributes == null
+                                ? null : marketAttributes.optJSONObject("collectible_traits");
+                        String rarity = marketTraits == null ? "" : marketTraits.optString("rarity", "");
                         labels[i] = listing.optString("gift_name", "Подарок WaysGram")
+                                + (rarity.isEmpty() ? "" : " · " + rarity)
                                 + " · " + listing.optInt("price_grams", 0) + " Gram"
                                 + (seller.isEmpty() ? "" : " · @" + seller);
                     }
@@ -416,9 +421,20 @@ public final class WaysGramGiftCatalogSheet extends BottomSheet {
                                 int listingId = listing.optInt("listing_id", 0);
                                 String giftName = listing.optString("gift_name", "Подарок WaysGram");
                                 int price = listing.optInt("price_grams", 0);
+                                StringBuilder listingDetails = new StringBuilder(giftName)
+                                        .append("\\nЦена: ").append(price).append(" Gram");
+                                JSONObject marketAttributes = listing.optJSONObject("attributes");
+                                JSONObject marketTraits = marketAttributes == null
+                                        ? null : marketAttributes.optJSONObject("collectible_traits");
+                                if (marketTraits != null) {
+                                    listingDetails.append("\\nРедкость: ").append(marketTraits.optString("rarity", "—"));
+                                    listingDetails.append("\\nМодель: ").append(marketTraits.optString("model", "—"));
+                                    listingDetails.append("\\nСимвол: ").append(marketTraits.optString("symbol", "—"));
+                                    listingDetails.append("\\nФон: ").append(marketTraits.optString("backdrop", "—"));
+                                }
                                 new AlertDialog.Builder(getContext())
                                         .setTitle("Купить подарок")
-                                        .setMessage(giftName + "\nЦена: " + price + " Gram")
+                                        .setMessage(listingDetails.toString())
                                         .setNegativeButton("Отмена", null)
                                         .setPositiveButton("Купить", (d, w) ->
                                                 catalogClient.purchaseMarketGift(
