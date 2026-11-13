@@ -210,7 +210,14 @@ public final class WaysGramGiftCatalogSheet extends BottomSheet {
                         String name = gift.optString("gift_name", "Подарок WaysGram");
                         String serial = gift.optString("serial_number", "");
                         int level = gift.optInt("upgrade_level", 0);
-                        labels[i] = name + (level > 0 ? " · уровень " + level : "")
+                        JSONObject giftAttributes = gift.optJSONObject("attributes");
+                        JSONObject collectibleTraits = giftAttributes == null
+                                ? null : giftAttributes.optJSONObject("collectible_traits");
+                        String rarity = collectibleTraits == null
+                                ? "" : collectibleTraits.optString("rarity", "");
+                        labels[i] = name
+                                + (rarity.isEmpty() ? "" : " · " + rarity)
+                                + (level > 0 ? " · уровень " + level : "")
                                 + (gift.optInt("is_listed", gift.optBoolean("is_listed", false) ? 1 : 0) == 1 ? " · выставлен" : "")
                                 + (serial.isEmpty() ? "" : "\n" + serial);
                     }
@@ -259,9 +266,19 @@ public final class WaysGramGiftCatalogSheet extends BottomSheet {
             actions.add("Улучшить за WaysGram Stars");
         }
         actions.add("Передать пользователю");
+        StringBuilder giftDetails = new StringBuilder("Серийный номер: ").append(serial);
+        JSONObject giftAttributes = gift.optJSONObject("attributes");
+        JSONObject collectibleTraits = giftAttributes == null
+                ? null : giftAttributes.optJSONObject("collectible_traits");
+        if (collectibleTraits != null) {
+            giftDetails.append("\\nРедкость: ").append(collectibleTraits.optString("rarity", "—"));
+            giftDetails.append("\\nМодель: ").append(collectibleTraits.optString("model", "—"));
+            giftDetails.append("\\nСимвол: ").append(collectibleTraits.optString("symbol", "—"));
+            giftDetails.append("\\nФон: ").append(collectibleTraits.optString("backdrop", "—"));
+        }
         new AlertDialog.Builder(getContext())
                 .setTitle(name)
-                .setMessage("Серийный номер: " + serial)
+                .setMessage(giftDetails.toString())
                 .setItems(actions.toArray(new String[0]), (dialog, which) -> {
                     if (which < 0 || which >= actions.size()) {
                         return;
