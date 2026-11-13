@@ -31,7 +31,8 @@ public final class WaysGramApiClient implements AutoCloseable {
     private static final int CONNECT_TIMEOUT_MS = 15000;
     private static final int READ_TIMEOUT_MS = 30000;
     private static final int MAX_RESPONSE_BYTES = 2 * 1024 * 1024;
-    private static final int MAX_MEDIA_BYTES = 10 * 1024 * 1024;
+    private static final int MAX_IMAGE_BYTES = 10 * 1024 * 1024;
+    private static final int MAX_DOCUMENT_BYTES = 25 * 1024 * 1024;
 
     public interface Callback {
         void onSuccess(JSONObject response);
@@ -213,7 +214,7 @@ public final class WaysGramApiClient implements AutoCloseable {
             if (input == null) {
                 throw new IOException("Не удалось открыть выбранное изображение");
             }
-            content = readLimited(input, MAX_MEDIA_BYTES);
+            content = readLimited(input, MAX_IMAGE_BYTES);
         }
         if (content.length == 0) {
             throw new IOException("Файл изображения пуст");
@@ -271,8 +272,28 @@ public final class WaysGramApiClient implements AutoCloseable {
             mimeType = "text/plain";
         } else if (lowerName.endsWith(".csv")) {
             mimeType = "text/csv";
+        } else if (lowerName.endsWith(".zip")) {
+            mimeType = "application/zip";
+        } else if (lowerName.endsWith(".mp4") || lowerName.endsWith(".m4v")) {
+            mimeType = "video/mp4";
+        } else if (lowerName.endsWith(".mov")) {
+            mimeType = "video/quicktime";
+        } else if (lowerName.endsWith(".webm")) {
+            mimeType = "video/webm";
+        } else if (lowerName.endsWith(".mkv")) {
+            mimeType = "video/x-matroska";
+        } else if (lowerName.endsWith(".mp3")) {
+            mimeType = "audio/mpeg";
+        } else if (lowerName.endsWith(".m4a")) {
+            mimeType = "audio/mp4";
+        } else if (lowerName.endsWith(".ogg")) {
+            mimeType = "audio/ogg";
+        } else if (lowerName.endsWith(".wav")) {
+            mimeType = "audio/wav";
         } else {
-            throw new IOException("Поддерживаются только PDF, TXT и CSV");
+            throw new IOException(
+                    "Поддерживаются PDF, TXT, CSV, ZIP, MP4, WebM, MOV, MKV, MP3, M4A, OGG и WAV"
+            );
         }
 
         byte[] content;
@@ -280,7 +301,7 @@ public final class WaysGramApiClient implements AutoCloseable {
             if (input == null) {
                 throw new IOException("Не удалось открыть выбранный документ");
             }
-            content = readLimited(input, MAX_MEDIA_BYTES);
+            content = readLimited(input, MAX_DOCUMENT_BYTES);
         }
         if (content.length == 0) {
             throw new IOException("Документ пуст");
@@ -345,7 +366,7 @@ public final class WaysGramApiClient implements AutoCloseable {
             connection.setInstanceFollowRedirects(false);
             connection.setConnectTimeout(CONNECT_TIMEOUT_MS);
             connection.setReadTimeout(READ_TIMEOUT_MS);
-            connection.setRequestProperty("Accept", "application/pdf,text/plain,text/csv");
+            connection.setRequestProperty("Accept", "*/*");
             connection.setRequestProperty("Authorization", "Bearer " + token);
             int status = connection.getResponseCode();
             if (status < 200 || status >= 300) {
@@ -354,7 +375,7 @@ public final class WaysGramApiClient implements AutoCloseable {
                 JSONObject errorJson = parseJsonResponse(errorBytes);
                 throw new ApiException(status, safeApiMessage(errorJson, status));
             }
-            byte[] bytes = readLimited(connection.getInputStream(), MAX_MEDIA_BYTES);
+            byte[] bytes = readLimited(connection.getInputStream(), MAX_DOCUMENT_BYTES);
             try (OutputStream output = resolver.openOutputStream(destination, "w")) {
                 if (output == null) {
                     throw new IOException("Не удалось открыть место сохранения документа");
@@ -419,7 +440,7 @@ public final class WaysGramApiClient implements AutoCloseable {
                 JSONObject errorJson = parseJsonResponse(errorBytes);
                 throw new ApiException(status, safeApiMessage(errorJson, status));
             }
-            byte[] bytes = readLimited(connection.getInputStream(), MAX_MEDIA_BYTES);
+            byte[] bytes = readLimited(connection.getInputStream(), MAX_IMAGE_BYTES);
             BitmapFactory.Options bounds = new BitmapFactory.Options();
             bounds.inJustDecodeBounds = true;
             BitmapFactory.decodeByteArray(bytes, 0, bytes.length, bounds);
