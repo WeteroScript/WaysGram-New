@@ -1059,32 +1059,64 @@ public final class WaysGramChatFragment extends BaseFragment {
         if (messageId <= 0) {
             return;
         }
-        String[] actions = {
-                "Ответить", "Реакция", "Копировать", "Редактировать",
-                "Удалить", "Переслать", "Закрепить", "Снять закрепление"
-        };
+        long senderId = message.optLong("sender_id", 0);
+        long recipientId = message.optLong("recipient_id", 0);
+        boolean ownMessage = senderId == recipientId || senderId != peerId;
+
+        ArrayList<String> labels = new ArrayList<>();
+        ArrayList<Integer> actionCodes = new ArrayList<>();
+        labels.add("Ответить");
+        actionCodes.add(0);
+        labels.add("Реакция");
+        actionCodes.add(1);
+        labels.add("Копировать");
+        actionCodes.add(2);
+        if (ownMessage) {
+            labels.add("Редактировать");
+            actionCodes.add(3);
+        }
+        labels.add("Удалить у меня");
+        actionCodes.add(4);
+        if (ownMessage) {
+            labels.add("Удалить у всех");
+            actionCodes.add(5);
+        }
+        labels.add("Переслать");
+        actionCodes.add(6);
+        labels.add("Закрепить");
+        actionCodes.add(7);
+        labels.add("Снять закрепление");
+        actionCodes.add(8);
+
         new AlertDialog.Builder(getParentActivity())
-                .setItems(actions, (dialog, which) -> {
-                    if (which == 0) {
+                .setItems(labels.toArray(new String[0]), (dialog, which) -> {
+                    if (which < 0 || which >= actionCodes.size()) {
+                        return;
+                    }
+                    int action = actionCodes.get(which);
+                    if (action == 0) {
                         setReplyTarget(messageId);
-                    } else if (which == 1) {
+                    } else if (action == 1) {
                         showReactionPicker(messageId);
-                    } else if (which == 2) {
+                    } else if (action == 2) {
                         copyMessageText(message.optString("body", ""));
-                    } else if (which == 3) {
+                    } else if (action == 3) {
                         editMessage(messageId, message.optString("body", ""));
-                    } else if (which == 4) {
+                    } else if (action == 4) {
+                        confirmDeleteMessageForMe(messageId);
+                    } else if (action == 5) {
                         confirmDeleteMessage(messageId);
-                    } else if (which == 5) {
+                    } else if (action == 6) {
                         chooseForwardRecipient(messageId);
-                    } else if (which == 6) {
+                    } else if (action == 7) {
                         changePinnedMessage(messageId, true);
-                    } else if (which == 7) {
+                    } else if (action == 8) {
                         changePinnedMessage(messageId, false);
                     }
                 })
                 .show();
     }
+
 
     private void showPinnedMessages() {
         statusView.setText("Загружаю закреплённые сообщения…");
@@ -1342,6 +1374,32 @@ public final class WaysGramChatFragment extends BaseFragment {
                         }
                     });
                 })
+                .show();
+    }
+
+    private void confirmDeleteMessageForMe(long messageId) {
+        new AlertDialog.Builder(getParentActivity())
+                .setTitle("Удалить у себя?")
+                .setMessage("Сообщение исчезнет только из вашей истории. У собеседника оно останется.")
+                .setNegativeButton("Отмена", null)
+                .setPositiveButton("Удалить", (dialog, which) ->
+                        apiClient.delete("/api/messages/" + messageId + "?for=me",
+                                new WaysGramApiClient.Callback() {
+                                    @Override
+                                    public void onSuccess(JSONObject response) {
+                                        statusView.setText("Сообщение удалено у вас");
+                                        loadMessages();
+                                    }
+
+                                    @Override
+                                    public void onError(String message, int statusCode) {
+                                        statusView.setText(message);
+                                        if (statusCode == 401 && getParentActivity() != null) {
+                                            WaysGramSessionStore.getInstance(getParentActivity()).clearSession();
+                                            presentFragment(new WaysGramLoginFragment(), true);
+                                        }
+                                    }
+                                }))
                 .show();
     }
 
