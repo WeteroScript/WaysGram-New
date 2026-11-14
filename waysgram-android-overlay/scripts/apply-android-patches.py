@@ -207,10 +207,10 @@ def patch_notification_permissions(android_root: Path) -> None:
 
 def patch_location_permissions(android_root: Path) -> None:
     """Declare foreground location permission in both application manifests."""
-    anchor = '    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />\\n'
+    anchor = '    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />\n'
     permissions = (
-        '    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />\\n'
-        '    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />\\n'
+        '    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />\n'
+        '    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />\n'
     )
     for variant in ("debug", "release"):
         manifest = android_root / f"TMessagesProj/config/{variant}/AndroidManifest.xml"
