@@ -124,9 +124,8 @@ def patch_profile_gifts_source(original: str) -> str:
         "                    mediaPages[a].addView(waysGramGiftsContainer, new FrameLayout.LayoutParams(\n"
         "                            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));\n"
         "                    mediaPages[a].emptyView.setVisibility(View.INVISIBLE);\n"
-        "                } else {\n"
-        "                    waysGramGiftsContainer.refresh();\n"
         "                }\n"
+        "                waysGramGiftsContainer.refresh();\n"
         "            }\n"
     )
     updated = replace_exactly_once(
