@@ -372,6 +372,9 @@ public final class WaysGramHomeFragment extends BaseFragment {
             if (gift.optInt("is_listed", 0) == 1) {
                 addLabel(getParentActivity(), card, "Выставлен на маркетплейсе", 12, false);
             }
+            if (gift.optInt("is_auctioned", 0) == 1) {
+                addLabel(getParentActivity(), card, "Выставлен на аукционе", 12, false);
+            }
 
             LinearLayout.LayoutParams cardParams = new LinearLayout.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
