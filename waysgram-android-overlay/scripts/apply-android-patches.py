@@ -46,12 +46,12 @@ def patch_launch_source(original: str) -> str:
 
 def patch_profile_gifts_source(original: str) -> str:
     """Add a WaysGram-only inventory tab beside Archived Stories in the current user's profile."""
-    tab_marker = "    public static final int TAB_POLL = 15;\\n"
-    tab_added = "    public static final int TAB_WAYSGRAM_GIFTS = 16;\\n"
-    field_marker = "    public ProfileGiftsContainer giftsContainer;\\n"
-    field_added = field_marker + "    private org.telegram.messenger.waysgram.WaysGramProfileGiftsView waysGramGiftsContainer;\\n"
-    import_marker = "import org.telegram.messenger.AndroidUtilities;\\n"
-    import_added = import_marker + "import org.telegram.messenger.waysgram.WaysGramProfileGiftsView;\\n"
+    tab_marker = "    public static final int TAB_POLL = 15;\n"
+    tab_added = "    public static final int TAB_WAYSGRAM_GIFTS = 16;\n"
+    field_marker = "    public ProfileGiftsContainer giftsContainer;\n"
+    field_added = field_marker + "    private org.telegram.messenger.waysgram.WaysGramProfileGiftsView waysGramGiftsContainer;\n"
+    import_marker = "import org.telegram.messenger.AndroidUtilities;\n"
+    import_added = import_marker + "import org.telegram.messenger.waysgram.WaysGramProfileGiftsView;\n"
 
     markers_present = (
         "TAB_WAYSGRAM_GIFTS",
@@ -68,29 +68,29 @@ def patch_profile_gifts_source(original: str) -> str:
     updated = replace_exactly_once(updated, field_marker, field_added, "profile gifts view field")
 
     gifts_changed = (
-        "        if (hasGifts != scrollSlidingTextTabStrip.hasTab(TAB_GIFTS)) {\\n"
-        "            changed++;\\n"
-        "        } else if (giftsContainer != null && hasGifts && giftsLastHash != giftsContainer.getLastEmojisHash()) {\\n"
-        "            changed++;\\n"
-        "        }\\n"
+        "        if (hasGifts != scrollSlidingTextTabStrip.hasTab(TAB_GIFTS)) {\n"
+        "            changed++;\n"
+        "        } else if (giftsContainer != null && hasGifts && giftsLastHash != giftsContainer.getLastEmojisHash()) {\n"
+        "            changed++;\n"
+        "        }\n"
     )
     gifts_changed_patched = (
-        "        if (isStoriesView() != scrollSlidingTextTabStrip.hasTab(TAB_WAYSGRAM_GIFTS)) {\\n"
-        "            changed++;\\n"
-        "        }\\n" + gifts_changed
+        "        if (isStoriesView() != scrollSlidingTextTabStrip.hasTab(TAB_WAYSGRAM_GIFTS)) {\n"
+        "            changed++;\n"
+        "        }\n" + gifts_changed
     )
     updated = replace_exactly_once(updated, gifts_changed, gifts_changed_patched, "profile gifts tab change detection")
 
     native_gifts_tabs = (
-        "            if (hasGifts) {\\n"
-        "                tabs.add(new Pair(TAB_GIFTS, TextUtils.concat(getString(R.string.ProfileGifts), giftsContainer.getLastEmojis(null))));\\n"
-        "                giftsLastHash = giftsContainer.getLastEmojisHash();\\n"
-        "            }\\n"
+        "            if (hasGifts) {\n"
+        "                tabs.add(new Pair(TAB_GIFTS, TextUtils.concat(getString(R.string.ProfileGifts), giftsContainer.getLastEmojis(null))));\n"
+        "                giftsLastHash = giftsContainer.getLastEmojisHash();\n"
+        "            }\n"
     )
     waysgram_tab = (
-        "            if (isStoriesView()) {\\n"
-        "                tabs.add(new Pair(TAB_WAYSGRAM_GIFTS, \\"Мои подарки\\"));\\n"
-        "            }\\n"
+        "            if (isStoriesView()) {\n"
+        "                tabs.add(new Pair(TAB_WAYSGRAM_GIFTS, \"Мои подарки\"));\n"
+        "            }\n"
     )
     updated = replace_exactly_once(
         updated, native_gifts_tabs, waysgram_tab + native_gifts_tabs,
@@ -98,52 +98,52 @@ def patch_profile_gifts_source(original: str) -> str:
     )
 
     native_page_branch = (
-        "            } else if (mediaPages[a].selectedType == TAB_GIFTS) {\\n"
-        "                if (currentAdapter != null) {\\n"
-        "                    recycleAdapter(currentAdapter);\\n"
-        "                    mediaPages[a].listView.setAdapter(null);\\n"
-        "                }\\n"
-        "                if (giftsContainer != null && giftsContainer.getParent() != mediaPages[a]) {\\n"
-        "                    AndroidUtilities.removeFromParent(giftsContainer);\\n"
-        "                    mediaPages[a].addView(giftsContainer);\\n"
-        "                    mediaPages[a].emptyView.setVisibility(View.INVISIBLE);\\n"
-        "                }\\n"
-        "            }\\n"
+        "            } else if (mediaPages[a].selectedType == TAB_GIFTS) {\n"
+        "                if (currentAdapter != null) {\n"
+        "                    recycleAdapter(currentAdapter);\n"
+        "                    mediaPages[a].listView.setAdapter(null);\n"
+        "                }\n"
+        "                if (giftsContainer != null && giftsContainer.getParent() != mediaPages[a]) {\n"
+        "                    AndroidUtilities.removeFromParent(giftsContainer);\n"
+        "                    mediaPages[a].addView(giftsContainer);\n"
+        "                    mediaPages[a].emptyView.setVisibility(View.INVISIBLE);\n"
+        "                }\n"
+        "            }\n"
     )
     custom_page_branch = (
-        "            } else if (mediaPages[a].selectedType == TAB_WAYSGRAM_GIFTS) {\\n"
-        "                if (currentAdapter != null) {\\n"
-        "                    recycleAdapter(currentAdapter);\\n"
-        "                    mediaPages[a].listView.setAdapter(null);\\n"
-        "                }\\n"
-        "                if (waysGramGiftsContainer == null) {\\n"
-        "                    waysGramGiftsContainer = new WaysGramProfileGiftsView(getContext());\\n"
-        "                }\\n"
-        "                if (waysGramGiftsContainer.getParent() != mediaPages[a]) {\\n"
-        "                    AndroidUtilities.removeFromParent(waysGramGiftsContainer);\\n"
-        "                    mediaPages[a].addView(waysGramGiftsContainer, new FrameLayout.LayoutParams(\\n"
-        "                            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));\\n"
-        "                    mediaPages[a].emptyView.setVisibility(View.INVISIBLE);\\n"
-        "                } else {\\n"
-        "                    waysGramGiftsContainer.refresh();\\n"
-        "                }\\n"
-        "            }\\n"
+        "            } else if (mediaPages[a].selectedType == TAB_WAYSGRAM_GIFTS) {\n"
+        "                if (currentAdapter != null) {\n"
+        "                    recycleAdapter(currentAdapter);\n"
+        "                    mediaPages[a].listView.setAdapter(null);\n"
+        "                }\n"
+        "                if (waysGramGiftsContainer == null) {\n"
+        "                    waysGramGiftsContainer = new WaysGramProfileGiftsView(getContext());\n"
+        "                }\n"
+        "                if (waysGramGiftsContainer.getParent() != mediaPages[a]) {\n"
+        "                    AndroidUtilities.removeFromParent(waysGramGiftsContainer);\n"
+        "                    mediaPages[a].addView(waysGramGiftsContainer, new FrameLayout.LayoutParams(\n"
+        "                            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));\n"
+        "                    mediaPages[a].emptyView.setVisibility(View.INVISIBLE);\n"
+        "                } else {\n"
+        "                    waysGramGiftsContainer.refresh();\n"
+        "                }\n"
+        "            }\n"
     )
     updated = replace_exactly_once(
         updated, native_page_branch,
-        native_page_branch[:-len("            }\\n")] + custom_page_branch,
+        native_page_branch[:-len("            }\n")] + custom_page_branch,
         "profile gifts inventory page"
     )
 
     native_cleanup = (
-        "            if (giftsContainer != null && mediaPages[a].selectedType != TAB_GIFTS && giftsContainer.getParent() == mediaPages[a]) {\\n"
-        "                mediaPages[a].removeView(giftsContainer);\\n"
-        "            }\\n"
+        "            if (giftsContainer != null && mediaPages[a].selectedType != TAB_GIFTS && giftsContainer.getParent() == mediaPages[a]) {\n"
+        "                mediaPages[a].removeView(giftsContainer);\n"
+        "            }\n"
     )
     custom_cleanup = (
-        "            if (waysGramGiftsContainer != null && mediaPages[a].selectedType != TAB_WAYSGRAM_GIFTS && waysGramGiftsContainer.getParent() == mediaPages[a]) {\\n"
-        "                mediaPages[a].removeView(waysGramGiftsContainer);\\n"
-        "            }\\n"
+        "            if (waysGramGiftsContainer != null && mediaPages[a].selectedType != TAB_WAYSGRAM_GIFTS && waysGramGiftsContainer.getParent() == mediaPages[a]) {\n"
+        "                mediaPages[a].removeView(waysGramGiftsContainer);\n"
+        "            }\n"
     )
     updated = replace_exactly_once(updated, native_cleanup, native_cleanup + custom_cleanup, "profile gifts inventory cleanup")
 
