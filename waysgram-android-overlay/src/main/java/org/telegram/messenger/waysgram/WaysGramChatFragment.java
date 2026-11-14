@@ -3125,8 +3125,11 @@ public final class WaysGramChatFragment extends BaseFragment {
         boolean showMessageHeader = !isAlbum
                 || message.optInt("media_album_index", 0) == 0;
         JSONObject giftAttributesForMessage = message.optJSONObject("gift_attributes");
-        boolean isGiftPurchaseEvent = giftAttributesForMessage != null
-                && "purchase".equals(giftAttributesForMessage.optString("event_type", ""));
+        boolean isGiftPurchaseEvent = (giftAttributesForMessage != null
+                && "purchase".equals(giftAttributesForMessage.optString("event_type", "")))
+                || message.optString("body", "").startsWith(
+                        "Вы приобрели коллекционный подарок «"
+                );
         TextView row = new TextView(getParentActivity());
         long sender = message.optLong("sender_id", 0);
         long recipient = message.optLong("recipient_id", 0);
@@ -3355,7 +3358,7 @@ public final class WaysGramChatFragment extends BaseFragment {
                 }
             }
             String giftTelegramId = message.optString("gift_telegram_gift_id", "");
-            if (!giftTelegramId.isEmpty()) {
+            if (!isGiftPurchaseEvent && !giftTelegramId.isEmpty()) {
                 giftInfo.append("\nTelegram Gift ID: ").append(giftTelegramId);
             }
             if (giftAttributes != null
