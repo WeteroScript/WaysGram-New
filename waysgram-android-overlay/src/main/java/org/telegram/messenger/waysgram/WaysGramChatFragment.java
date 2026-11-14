@@ -2271,6 +2271,10 @@ public final class WaysGramChatFragment extends BaseFragment {
     }
 
     private void openDisplayedLiveLocation() {
+        Activity activity = getParentActivity();
+        if (activity == null) {
+            return;
+        }
         try {
             Uri mapUri = Uri.parse("geo:" + displayedLiveLatitude + "," + displayedLiveLongitude
                     + "?q=" + displayedLiveLatitude + "," + displayedLiveLongitude);
