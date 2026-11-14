@@ -284,6 +284,24 @@ public final class WaysGramChatFragment extends BaseFragment {
         ));
         scheduledListButton.setOnClickListener(view -> loadScheduledMessages());
 
+        Button whenOnlineButton = new Button(context);
+        whenOnlineButton.setText("Отправить при появлении онлайн");
+        whenOnlineButton.setAllCaps(false);
+        root.addView(whenOnlineButton, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+        ));
+        whenOnlineButton.setOnClickListener(view -> scheduleMessageWhenOnline());
+
+        Button whenOnlineListButton = new Button(context);
+        whenOnlineListButton.setText("Ожидают появления онлайн");
+        whenOnlineListButton.setAllCaps(false);
+        root.addView(whenOnlineListButton, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+        ));
+        whenOnlineListButton.setOnClickListener(view -> loadMessagesWaitingForOnline());
+
         Button refreshButton = new Button(context);
         refreshButton.setText("Обновить историю");
         root.addView(refreshButton, new LinearLayout.LayoutParams(
@@ -388,6 +406,128 @@ public final class WaysGramChatFragment extends BaseFragment {
                         }
                     }
                 });
+    }
+
+    private void scheduleMessageWhenOnline() {
+        if (messageSendInFlight || apiClient == null) {
+            return;
+        }
+        String body = messageInput.getText() == null
+                ? ""
+                : messageInput.getText().toString().trim();
+        if (body.isEmpty() || body.length() > 4000) {
+            statusView.setText("Сообщение должно содержать от 1 до 4000 символов.");
+            return;
+        }
+        JSONObject payload = new JSONObject();
+        try {
+            payload.put("recipient_id", peerId);
+            payload.put("body", body);
+            payload.put("silent", isSilentSendEnabled());
+        } catch (Exception exception) {
+            statusView.setText("Не удалось подготовить отправку при появлении онлайн.");
+            return;
+        }
+        String fingerprint = payload.toString();
+        String key = messageIdempotencyKey(fingerprint);
+        statusView.setText("Ставлю сообщение в очередь до появления собеседника онлайн…");
+        setMessageSendInFlight(true);
+        apiClient.post("/api/messages/when-online", payload, key, new WaysGramApiClient.Callback() {
+            @Override
+            public void onSuccess(JSONObject response) {
+                setMessageSendInFlight(false);
+                messageIdempotencyKeys.remove(fingerprint);
+                clearChatDraft();
+                resetSilentSendMode();
+                statusView.setText("Сообщение отправится, когда собеседник появится онлайн.");
+            }
+
+            @Override
+            public void onError(String message, int statusCode) {
+                setMessageSendInFlight(false);
+                statusView.setText(message);
+                if (statusCode == 401 && getParentActivity() != null) {
+                    WaysGramSessionStore.getInstance(getParentActivity()).clearSession();
+                    presentFragment(new WaysGramLoginFragment(), true);
+                }
+            }
+        });
+    }
+
+    private void loadMessagesWaitingForOnline() {
+        if (apiClient == null) {
+            return;
+        }
+        statusView.setText("Загружаю очередь сообщений…");
+        apiClient.get("/api/messages/when-online?with=" + peerId, new WaysGramApiClient.Callback() {
+            @Override
+            public void onSuccess(JSONObject response) {
+                JSONArray rows = response.optJSONArray("scheduled_messages");
+                int count = rows == null ? 0 : rows.length();
+                if (count == 0) {
+                    statusView.setText("Нет сообщений, ожидающих появления онлайн.");
+                    return;
+                }
+                String[] labels = new String[count];
+                long[] ids = new long[count];
+                boolean[] pending = new boolean[count];
+                for (int i = 0; i < count; i++) {
+                    JSONObject item = rows.optJSONObject(i);
+                    if (item == null) {
+                        labels[i] = "Сообщение";
+                        continue;
+                    }
+                    ids[i] = item.optLong("id", 0);
+                    pending[i] = "pending".equals(item.optString("status", ""));
+                    String body = item.optString("body", "").replace('\n', ' ').trim();
+                    if (body.length() > 72) {
+                        body = body.substring(0, 72) + "…";
+                    }
+                    labels[i] = (pending[i] ? "Ожидает: " : "Ошибка: ") + body;
+                }
+                new AlertDialog.Builder(getParentActivity())
+                        .setTitle("Сообщения в очереди · " + count)
+                        .setItems(labels, (dialog, which) -> {
+                            if (which >= 0 && which < ids.length && ids[which] > 0) {
+                                if (pending[which]) {
+                                    confirmCancelWhenOnlineMessage(ids[which]);
+                                } else {
+                                    statusView.setText("Не удалось отправить: " + labels[which]);
+                                }
+                            }
+                        })
+                        .setNegativeButton("Закрыть", null)
+                        .show();
+                statusView.setText("Сообщений в очереди: " + count);
+            }
+
+            @Override
+            public void onError(String message, int statusCode) {
+                statusView.setText(message);
+            }
+        });
+    }
+
+    private void confirmCancelWhenOnlineMessage(long scheduledId) {
+        new AlertDialog.Builder(getParentActivity())
+                .setTitle("Отменить отправку?")
+                .setMessage("Сообщение будет удалено из очереди ожидания онлайн.")
+                .setNegativeButton("Оставить", null)
+                .setPositiveButton("Отменить", (dialog, which) ->
+                        apiClient.delete("/api/messages/when-online/" + scheduledId,
+                                new WaysGramApiClient.Callback() {
+                                    @Override
+                                    public void onSuccess(JSONObject response) {
+                                        statusView.setText("Отправка отменена.");
+                                        loadMessagesWaitingForOnline();
+                                    }
+
+                                    @Override
+                                    public void onError(String message, int statusCode) {
+                                        statusView.setText(message);
+                                    }
+                                }))
+                .show();
     }
 
     private void showScheduleMessagePicker() {
