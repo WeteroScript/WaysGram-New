@@ -274,6 +274,24 @@ public final class WaysGramApiClient implements AutoCloseable {
             mimeType = "text/csv";
         } else if (lowerName.endsWith(".zip")) {
             mimeType = "application/zip";
+        } else if (lowerName.endsWith(".rar")) {
+            mimeType = "application/vnd.rar";
+        } else if (lowerName.endsWith(".7z")) {
+            mimeType = "application/x-7z-compressed";
+        } else if (lowerName.endsWith(".tar")) {
+            mimeType = "application/x-tar";
+        } else if (lowerName.endsWith(".gz") || lowerName.endsWith(".tgz")) {
+            mimeType = "application/gzip";
+        } else if (lowerName.endsWith(".bz2") || lowerName.endsWith(".tbz2")) {
+            mimeType = "application/x-bzip2";
+        } else if (lowerName.endsWith(".xz") || lowerName.endsWith(".txz")) {
+            mimeType = "application/x-xz";
+        } else if (lowerName.endsWith(".tar.gz")) {
+            mimeType = "application/gzip";
+        } else if (lowerName.endsWith(".tar.bz2")) {
+            mimeType = "application/x-bzip2";
+        } else if (lowerName.endsWith(".tar.xz")) {
+            mimeType = "application/x-xz";
         } else if (lowerName.endsWith(".mp4") || lowerName.endsWith(".m4v")) {
             mimeType = "video/mp4";
         } else if (lowerName.endsWith(".mov")) {
@@ -292,7 +310,7 @@ public final class WaysGramApiClient implements AutoCloseable {
             mimeType = "audio/wav";
         } else {
             throw new IOException(
-                    "Поддерживаются PDF, TXT, CSV, ZIP, MP4, WebM, MOV, MKV, MP3, M4A, OGG и WAV"
+                    "Поддерживаются PDF, TXT, CSV, ZIP, RAR, 7Z, TAR, GZIP, BZIP2, XZ, MP4, WebM, MOV, MKV, MP3, M4A, OGG и WAV"
             );
         }
 

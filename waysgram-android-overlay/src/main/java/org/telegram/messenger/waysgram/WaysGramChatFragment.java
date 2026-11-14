@@ -1585,7 +1585,9 @@ public final class WaysGramChatFragment extends BaseFragment {
                 "image/*", "video/mp4", "video/webm", "video/quicktime",
                 "video/x-matroska", "audio/mpeg", "audio/mp4", "audio/ogg",
                 "audio/wav", "application/pdf", "text/plain", "text/csv",
-                "application/zip"
+                "application/zip", "application/vnd.rar", "application/x-rar-compressed",
+                "application/x-7z-compressed", "application/x-tar", "application/gzip",
+                "application/x-bzip2", "application/x-xz"
         });
         startActivityForResult(intent, REQUEST_ATTACHMENT);
     }
