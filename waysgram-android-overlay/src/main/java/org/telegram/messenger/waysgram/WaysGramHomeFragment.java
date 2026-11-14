@@ -130,6 +130,9 @@ public final class WaysGramHomeFragment extends BaseFragment {
         addButton(context, content, "Сообщения", () ->
                 presentFragment(new WaysGramDirectoryFragment(WaysGramDirectoryFragment.TYPE_CONVERSATIONS), false)
         );
+        addButton(context, content, "Облачные файлы", () ->
+                presentFragment(new WaysGramCloudStorageFragment(), false)
+        );
         addButton(context, content, "Группы", () ->
                 presentFragment(new WaysGramDirectoryFragment(WaysGramDirectoryFragment.TYPE_GROUPS), false)
         );
