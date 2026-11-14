@@ -191,6 +191,23 @@ public final class WaysGramApiClient implements AutoCloseable {
         });
     }
 
+    public void downloadTelegramGiftSticker(String giftId, ImageCallback callback) {
+        ioExecutor.execute(() -> {
+            try {
+                Bitmap bitmap = performTelegramGiftStickerDownload(giftId);
+                mainHandler.post(() -> {
+                    if (callback != null) {
+                        callback.onSuccess(bitmap);
+                    }
+                });
+            } catch (ApiException exception) {
+                deliverImageError(callback, exception.getMessage(), exception.statusCode);
+            } catch (Exception exception) {
+                deliverImageError(callback, "Не удалось загрузить изображение подарка", 0);
+            }
+        });
+    }
+
     private void execute(String method, String path, JSONObject payload, Callback callback) {
         execute(method, path, payload, callback, null);
     }
@@ -515,6 +532,46 @@ public final class WaysGramApiClient implements AutoCloseable {
             Bitmap bitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.length, bounds);
             if (bitmap == null) {
                 throw new IOException("Не удалось декодировать изображение");
+            }
+            return bitmap;
+        } finally {
+            if (connection != null) {
+                connection.disconnect();
+            }
+        }
+    }
+
+    private Bitmap performTelegramGiftStickerDownload(String giftId) throws IOException {
+        if (giftId == null || !giftId.matches("[A-Za-z0-9_-]{1,120}")) {
+            throw new IOException("Некорректный Telegram Gift ID");
+        }
+        String baseUrl = sessionStore.getApiBaseUrl();
+        String token = sessionStore.getWaysGramSessionToken();
+        if (baseUrl == null || token == null || token.length() == 0) {
+            throw new IOException("Нет активной сессии WaysGram");
+        }
+
+        HttpURLConnection connection = null;
+        try {
+            String path = "/api/telegram/gifts/" + Uri.encode(giftId) + "/sticker";
+            connection = (HttpURLConnection) new URL(baseUrl + path).openConnection();
+            connection.setRequestMethod("GET");
+            connection.setInstanceFollowRedirects(false);
+            connection.setConnectTimeout(CONNECT_TIMEOUT_MS);
+            connection.setReadTimeout(READ_TIMEOUT_MS);
+            connection.setRequestProperty("Accept", "image/webp,image/png,image/jpeg");
+            connection.setRequestProperty("Authorization", "Bearer " + token);
+            int status = connection.getResponseCode();
+            if (status < 200 || status >= 300) {
+                InputStream error = connection.getErrorStream();
+                byte[] errorBytes = error == null ? new byte[0] : readLimited(error, MAX_RESPONSE_BYTES);
+                JSONObject errorJson = parseJsonResponse(errorBytes);
+                throw new ApiException(status, safeApiMessage(errorJson, status));
+            }
+            byte[] bytes = readLimited(connection.getInputStream(), MAX_IMAGE_BYTES);
+            Bitmap bitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.length);
+            if (bitmap == null) {
+                throw new IOException("Стикер подарка не является статическим изображением");
             }
             return bitmap;
         } finally {
