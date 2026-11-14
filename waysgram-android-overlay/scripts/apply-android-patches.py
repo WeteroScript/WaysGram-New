@@ -336,6 +336,18 @@ def verify_source(android_root: Path) -> None:
         if not path.is_file():
             raise FileNotFoundError(f"Required upstream source file not found: {path}")
 
+    profile_layout = android_root / "TMessagesProj/src/main/java/org/telegram/ui/Components/SharedMediaLayout.java"
+    if not profile_layout.is_file():
+        raise FileNotFoundError(f"Required profile layout source not found: {profile_layout}")
+    profile_source = profile_layout.read_text(encoding="utf-8")
+    patched_profile_source = patch_profile_gifts_source(profile_source)
+    if patched_profile_source != profile_source:
+        profile_layout.write_text(patched_profile_source, encoding="utf-8")
+    final_profile_source = profile_layout.read_text(encoding="utf-8")
+    for marker in ("TAB_WAYSGRAM_GIFTS", "WaysGramProfileGiftsView", "Мои подарки"):
+        if marker not in final_profile_source:
+            raise ValueError("WaysGram profile gift tab patch was not applied completely")
+
     gift_content = gift_sheet.read_text(encoding="utf-8")
     launch_content = launch_activity.read_text(encoding="utf-8")
 
@@ -403,7 +415,7 @@ def main() -> None:
     args = parser.parse_args()
     verify_source(args.android_root)
     print(
-        "Verified: original Telegram Settings, LaunchActivity, LoginActivity routing, main tabs and GiftSheet are preserved."
+        "Verified: Telegram Settings, LaunchActivity, LoginActivity routing and native GiftSheet are preserved; WaysGram inventory is added as a separate tab in the current user profile."
     )
 
 
