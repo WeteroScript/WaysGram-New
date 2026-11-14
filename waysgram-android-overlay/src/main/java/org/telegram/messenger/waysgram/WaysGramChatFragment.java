@@ -3303,19 +3303,23 @@ public final class WaysGramChatFragment extends BaseFragment {
 
                 String giftTelegramId = message.optString("gift_telegram_gift_id", "");
                 if (!giftTelegramId.isEmpty() && apiClient != null) {
+                    android.widget.FrameLayout stickerFrame = new android.widget.FrameLayout(getParentActivity());
+                    LinearLayout.LayoutParams stickerFrameParams = new LinearLayout.LayoutParams(
+                            AndroidUtilities.dp(128), AndroidUtilities.dp(112)
+                    );
                     TextView stickerPlaceholder = new TextView(getParentActivity());
                     stickerPlaceholder.setText("🎁");
                     stickerPlaceholder.setTextSize(48);
                     stickerPlaceholder.setGravity(android.view.Gravity.CENTER);
-                    giftCard.addView(stickerPlaceholder, new LinearLayout.LayoutParams(
-                            AndroidUtilities.dp(128), AndroidUtilities.dp(112)
+                    stickerFrame.addView(stickerPlaceholder, new android.widget.FrameLayout.LayoutParams(
+                            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT
                     ));
                     ImageView giftSticker = new ImageView(getParentActivity());
                     giftSticker.setScaleType(ImageView.ScaleType.FIT_CENTER);
-                    LinearLayout.LayoutParams stickerParams = new LinearLayout.LayoutParams(
-                            AndroidUtilities.dp(128), AndroidUtilities.dp(112)
-                    );
-                    giftCard.addView(giftSticker, stickerParams);
+                    stickerFrame.addView(giftSticker, new android.widget.FrameLayout.LayoutParams(
+                            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT
+                    ));
+                    giftCard.addView(stickerFrame, stickerFrameParams);
                     giftSticker.setVisibility(View.GONE);
                     apiClient.downloadTelegramGiftSticker(giftTelegramId,
                             new WaysGramApiClient.ImageCallback() {
