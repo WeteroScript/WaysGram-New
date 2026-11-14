@@ -205,6 +205,33 @@ def patch_notification_permissions(android_root: Path) -> None:
         manifest.write_text(updated, encoding="utf-8")
 
 
+def patch_location_permissions(android_root: Path) -> None:
+    """Declare foreground location permission in both application manifests."""
+    anchor = '    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />\\n'
+    permissions = (
+        '    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />\\n'
+        '    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />\\n'
+    )
+    for variant in ("debug", "release"):
+        manifest = android_root / f"TMessagesProj/config/{variant}/AndroidManifest.xml"
+        if not manifest.is_file():
+            raise FileNotFoundError(f"Required {variant} manifest not found: {manifest}")
+        content = manifest.read_text(encoding="utf-8")
+        missing = "".join(
+            permission for permission in permissions.splitlines(keepends=True)
+            if permission not in content
+        )
+        if not missing:
+            continue
+        if anchor not in content:
+            raise ValueError(
+                f"Cannot add foreground location permissions to {variant}: "
+                "notification permission anchor is missing"
+            )
+        updated = content.replace(anchor, anchor + missing, 1)
+        manifest.write_text(updated, encoding="utf-8")
+
+
 def patch_translation_dependencies(android_root: Path) -> None:
     """Add on-device translation and language-identification libraries to WaysGram."""
     gradle_file = android_root / "TMessagesProj/build.gradle"
@@ -278,6 +305,7 @@ def verify_source(android_root: Path) -> None:
     if patched_push_listener != push_listener_source:
         push_listener.write_text(patched_push_listener, encoding="utf-8")
     patch_notification_permissions(android_root)
+    patch_location_permissions(android_root)
     patch_translation_dependencies(android_root)
 
     translation_gradle = (android_root / "TMessagesProj/build.gradle").read_text(encoding="utf-8")
