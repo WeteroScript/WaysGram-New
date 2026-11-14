@@ -1729,7 +1729,7 @@ public final class WaysGramChatFragment extends BaseFragment {
         if (Build.VERSION.SDK_INT >= 23
                 && activity.checkSelfPermission(Manifest.permission.RECORD_AUDIO)
                 != PackageManager.PERMISSION_GRANTED) {
-            requestPermissions(
+            activity.requestPermissions(
                     new String[]{Manifest.permission.RECORD_AUDIO},
                     REQUEST_RECORD_AUDIO_PERMISSION
             );
@@ -2274,7 +2274,7 @@ public final class WaysGramChatFragment extends BaseFragment {
         try {
             Uri mapUri = Uri.parse("geo:" + displayedLiveLatitude + "," + displayedLiveLongitude
                     + "?q=" + displayedLiveLatitude + "," + displayedLiveLongitude);
-            startActivity(new Intent(Intent.ACTION_VIEW, mapUri));
+            activity.startActivity(new Intent(Intent.ACTION_VIEW, mapUri));
         } catch (ActivityNotFoundException exception) {
             statusView.setText("На устройстве нет приложения для просмотра карт.");
         }
@@ -2617,7 +2617,7 @@ public final class WaysGramChatFragment extends BaseFragment {
                         .show();
                 return;
             }
-            String selectedMime = getParentActivity().getContentResolver().getType(selectedUris.get(0));
+            selectedMime = getParentActivity().getContentResolver().getType(selectedUris.get(0));
             if (selectedMime == null && selectedUris.get(0).getScheme() != null
                     && selectedUris.get(0).getScheme().equalsIgnoreCase("file")) {
                 String localPath = selectedUris.get(0).getPath() == null ? ""
