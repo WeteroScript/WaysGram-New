@@ -4135,12 +4135,10 @@ public final class WaysGramChatFragment extends BaseFragment {
             videoPlaybackSpeed[0] = nextPlaybackSpeed(videoPlaybackSpeed[0]);
             videoSpeedButton.setText("Скорость · " + playbackSpeedLabel(videoPlaybackSpeed[0]));
             try {
-                if (videoView.isPlaying()) {
-                    if (videoPlayer[0] != null) {
-                        videoPlayer[0].setPlaybackParams(
-                                videoPlayer[0].getPlaybackParams().setSpeed(videoPlaybackSpeed[0])
-                        );
-                    }
+                if (videoPlayer[0] != null) {
+                    videoPlayer[0].setPlaybackParams(
+                            videoPlayer[0].getPlaybackParams().setSpeed(videoPlaybackSpeed[0])
+                    );
                 }
             } catch (IllegalArgumentException | IllegalStateException exception) {
                 statusView.setText("Не удалось изменить скорость видео.");
