@@ -1905,6 +1905,8 @@ public final class WaysGramChatFragment extends BaseFragment {
         SpannableStringBuilder renderedMessage = new SpannableStringBuilder(
                 formatInlineMarkup(displayText)
         );
+        applyMentionLinks(renderedMessage);
+        applyHashtagLinks(renderedMessage);
         if (repliedToId > 0) {
             String renderedText = renderedMessage.toString();
             int quoteStart = renderedText.indexOf("Цитата: ");
