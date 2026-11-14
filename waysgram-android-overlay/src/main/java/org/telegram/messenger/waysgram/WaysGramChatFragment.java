@@ -626,13 +626,14 @@ public final class WaysGramChatFragment extends BaseFragment {
                 "Зачёркнутый",
                 "Спойлер",
                 "Моноширинный",
-                "Цитата"
+                "Цитата",
+                "Блок кода"
         };
         String[] opening = {
-                "<b>", "<i>", "<u>", "<s>", "<tg-spoiler>", "<code>", "<blockquote>"
+                "<b>", "<i>", "<u>", "<s>", "<tg-spoiler>", "<code>", "<blockquote>", "<pre>"
         };
         String[] closing = {
-                "</b>", "</i>", "</u>", "</s>", "</tg-spoiler>", "</code>", "</blockquote>"
+                "</b>", "</i>", "</u>", "</s>", "</tg-spoiler>", "</code>", "</blockquote>", "</pre>"
         };
         new AlertDialog.Builder(getParentActivity())
                 .setTitle("Форматирование текста")
@@ -683,6 +684,7 @@ public final class WaysGramChatFragment extends BaseFragment {
         applyTagMarkup(formatted, "<tg-spoiler>", "</tg-spoiler>", 4);
         applyTagMarkup(formatted, "<code>", "</code>", 5);
         applyTagMarkup(formatted, "<blockquote>", "</blockquote>", 6);
+        applyTagMarkup(formatted, "<pre>", "</pre>", 7);
 
         // Keep messages created by earlier WaysGram builds readable.
         applyInlineMarkup(formatted, "**", 0);
@@ -762,6 +764,15 @@ public final class WaysGramChatFragment extends BaseFragment {
                     break;
                 case 6:
                     span = new android.text.style.QuoteSpan();
+                    break;
+                case 7:
+                    span = new TypefaceSpan("monospace");
+                    text.setSpan(new android.text.style.BackgroundColorSpan(
+                            android.graphics.Color.argb(28, 128, 128, 128)
+                    ), start, end, Spannable.SPAN_EXCLUSIVE_EXCLUSIVE);
+                    text.setSpan(new android.text.style.LeadingMarginSpan.Standard(
+                            AndroidUtilities.dp(8)
+                    ), start, end, Spannable.SPAN_EXCLUSIVE_EXCLUSIVE);
                     break;
                 default:
                     continue;
