@@ -237,11 +237,11 @@ def patch_location_permissions(android_root: Path) -> None:
 def patch_live_location_service(android_root: Path) -> None:
     """Register the WaysGram foreground location service in both app manifests."""
     declaration = (
-        '        <service\\n'
-        '            android:name="org.telegram.messenger.waysgram.WaysGramLiveLocationService"\\n'
-        '            android:exported="false"\\n'
-        '            android:stopWithTask="false"\\n'
-        '            android:foregroundServiceType="location" />\\n'
+        '        <service\n'
+        '            android:name="org.telegram.messenger.waysgram.WaysGramLiveLocationService"\n'
+        '            android:exported="false"\n'
+        '            android:stopWithTask="false"\n'
+        '            android:foregroundServiceType="location" />\n'
     )
     for variant in ("debug", "release"):
         manifest = android_root / f"TMessagesProj/config/{variant}/AndroidManifest.xml"
@@ -250,7 +250,7 @@ def patch_live_location_service(android_root: Path) -> None:
         content = manifest.read_text(encoding="utf-8")
         if declaration in content:
             continue
-        anchor = "    </application>\\n"
+        anchor = "    </application>\n"
         if content.count(anchor) != 1:
             raise ValueError(f"Cannot register WaysGram live location service in {variant} manifest")
         manifest.write_text(content.replace(anchor, declaration + anchor, 1), encoding="utf-8")
