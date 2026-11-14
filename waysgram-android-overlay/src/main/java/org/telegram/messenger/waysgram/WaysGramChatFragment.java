@@ -1857,7 +1857,7 @@ public final class WaysGramChatFragment extends BaseFragment {
         pendingVoiceMessageFile = outputFile;
         ArrayList<Uri> voiceAttachment = new ArrayList<>();
         voiceAttachment.add(Uri.fromFile(outputFile));
-        startAttachmentBatch(voiceAttachment, true, "Голосовое сообщение");
+        startAttachmentBatch(voiceAttachment, true, "Голосовое сообщение", "voice");
     }
 
     @Override
@@ -2711,11 +2711,12 @@ public final class WaysGramChatFragment extends BaseFragment {
                 failAttachmentBatch(message);
             }
         };
-        if ("video_note".equals(pendingAttachmentMediaKind)) {
+        if ("video_note".equals(pendingAttachmentMediaKind)
+                || "voice".equals(pendingAttachmentMediaKind)) {
             apiClient.uploadDocument(
                     getParentActivity().getContentResolver(),
                     uri,
-                    "video_note",
+                    pendingAttachmentMediaKind,
                     uploadCallback
             );
         } else if (mimeType != null && mimeType.startsWith("image/") && !pendingAttachmentAsFile) {
@@ -4351,7 +4352,84 @@ public final class WaysGramChatFragment extends BaseFragment {
         target.addView(speedButton, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT
         ));
+
+        TextView transcriptView = new TextView(context);
+        transcriptView.setTextSize(13);
+        transcriptView.setTextColor(Theme.getColor(Theme.key_windowBackgroundWhiteBlackText));
+        transcriptView.setTextIsSelectable(true);
+        transcriptView.setVisibility(View.GONE);
+        target.addView(transcriptView, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
+        ));
+
+        Button transcribeButton = new Button(context);
+        transcribeButton.setAllCaps(false);
+        transcribeButton.setText("Расшифровать");
+        target.addView(transcribeButton, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT
+        ));
+        transcribeButton.setOnClickListener(view -> confirmAudioTranscription(
+                context, mediaId, transcribeButton, transcriptView
+        ));
         addMediaSaveButton(target, mediaId, mediaName, mediaType);
+    }
+
+    private void confirmAudioTranscription(
+            Context context,
+            String mediaId,
+            Button actionButton,
+            TextView transcriptView
+    ) {
+        if (context == null || mediaId == null || !mediaId.matches("[a-f0-9]{32}")) {
+            statusView.setText("Некорректный аудиофайл для расшифровки.");
+            return;
+        }
+        new AlertDialog.Builder(context)
+                .setTitle("Расшифровать аудио?")
+                .setMessage("Для получения текста аудиофайл будет передан внешнему сервису OpenAI. Продолжить?")
+                .setNegativeButton("Отмена", null)
+                .setPositiveButton("Передать и расшифровать", (dialog, which) ->
+                        transcribeAudio(mediaId, actionButton, transcriptView))
+                .show();
+    }
+
+    private void transcribeAudio(String mediaId, Button actionButton, TextView transcriptView) {
+        if (apiClient == null) {
+            statusView.setText("Сервис WaysGram недоступен.");
+            return;
+        }
+        actionButton.setEnabled(false);
+        actionButton.setText("Расшифровываю…");
+        statusView.setText("Отправляю аудио на распознавание…");
+        apiClient.post(
+                "/api/media/" + mediaId + "/transcription",
+                new JSONObject(),
+                new WaysGramApiClient.Callback() {
+                    @Override
+                    public void onSuccess(JSONObject response) {
+                        String transcript = response.optString("text", "").trim();
+                        if (transcript.isEmpty()) {
+                            actionButton.setText("Расшифровать");
+                            actionButton.setEnabled(true);
+                            statusView.setText("Сервис не вернул текст расшифровки.");
+                            return;
+                        }
+                        transcriptView.setText("Расшифровка:\\n" + transcript);
+                        transcriptView.setVisibility(View.VISIBLE);
+                        actionButton.setText(response.optBoolean("cached", false)
+                                ? "Расшифровка сохранена" : "Расшифровано");
+                        actionButton.setEnabled(true);
+                        statusView.setText("Расшифровка готова.");
+                    }
+
+                    @Override
+                    public void onError(String message, int statusCode) {
+                        actionButton.setText("Повторить расшифровку");
+                        actionButton.setEnabled(true);
+                        statusView.setText(message);
+                    }
+                }
+        );
     }
 
     private float nextPlaybackSpeed(float current) {
