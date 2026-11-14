@@ -625,13 +625,14 @@ public final class WaysGramChatFragment extends BaseFragment {
                 "Подчёркнутый",
                 "Зачёркнутый",
                 "Спойлер",
-                "Моноширинный"
+                "Моноширинный",
+                "Цитата"
         };
         String[] opening = {
-                "<b>", "<i>", "<u>", "<s>", "<tg-spoiler>", "<code>"
+                "<b>", "<i>", "<u>", "<s>", "<tg-spoiler>", "<code>", "<blockquote>"
         };
         String[] closing = {
-                "</b>", "</i>", "</u>", "</s>", "</tg-spoiler>", "</code>"
+                "</b>", "</i>", "</u>", "</s>", "</tg-spoiler>", "</code>", "</blockquote>"
         };
         new AlertDialog.Builder(getParentActivity())
                 .setTitle("Форматирование текста")
@@ -681,6 +682,7 @@ public final class WaysGramChatFragment extends BaseFragment {
         applyTagMarkup(formatted, "<s>", "</s>", 3);
         applyTagMarkup(formatted, "<tg-spoiler>", "</tg-spoiler>", 4);
         applyTagMarkup(formatted, "<code>", "</code>", 5);
+        applyTagMarkup(formatted, "<blockquote>", "</blockquote>", 6);
 
         // Keep messages created by earlier WaysGram builds readable.
         applyInlineMarkup(formatted, "**", 0);
@@ -757,6 +759,9 @@ public final class WaysGramChatFragment extends BaseFragment {
                     break;
                 case 5:
                     span = new TypefaceSpan("monospace");
+                    break;
+                case 6:
+                    span = new android.text.style.QuoteSpan();
                     break;
                 default:
                     continue;
@@ -2100,6 +2105,8 @@ public final class WaysGramChatFragment extends BaseFragment {
         ArrayList<Integer> actionCodes = new ArrayList<>();
         labels.add("Ответить");
         actionCodes.add(0);
+        labels.add("Цитировать");
+        actionCodes.add(10);
         labels.add("Реакция");
         actionCodes.add(1);
         labels.add("Копировать");
@@ -2131,6 +2138,8 @@ public final class WaysGramChatFragment extends BaseFragment {
                     int action = actionCodes.get(which);
                     if (action == 0) {
                         setReplyTarget(messageId);
+                    } else if (action == 10) {
+                        quoteMessage(messageId, message.optString("body", ""));
                     } else if (action == 1) {
                         showReactionPicker(messageId);
                     } else if (action == 2) {
@@ -2667,6 +2676,30 @@ public final class WaysGramChatFragment extends BaseFragment {
         replyToMessageId = messageId;
         statusView.setText("Ответ на сообщение #" + messageId + " · нажмите сюда, чтобы отменить");
         statusView.setOnClickListener(view -> clearReplyTarget());
+    }
+
+    private void quoteMessage(long messageId, String quotedBody) {
+        if (messageInput == null || messageId <= 0) {
+            return;
+        }
+        String quoteText = quotedBody == null ? "" : quotedBody.trim();
+        if (quoteText.isEmpty()) {
+            statusView.setText("В этом сообщении нет текста для цитирования.");
+            return;
+        }
+        String quoteBlock = "<blockquote>" + quoteText + "</blockquote>";
+        android.text.Editable editable = messageInput.getText();
+        String existing = editable == null ? "" : editable.toString();
+        String separator = existing.isEmpty() ? "" : existing.endsWith("\n") ? "\n" : "\n\n";
+        if (existing.length() + separator.length() + quoteBlock.length() > 4000) {
+            statusView.setText("Цитата не помещается в лимит сообщения 4000 символов.");
+            return;
+        }
+        editable.append(separator).append(quoteBlock).append("\n");
+        messageInput.setSelection(editable.length());
+        setReplyTarget(messageId);
+        statusView.setText("Цитата добавлена · ответ привязан к исходному сообщению");
+        messageInput.requestFocus();
     }
 
     private void clearReplyTarget() {
