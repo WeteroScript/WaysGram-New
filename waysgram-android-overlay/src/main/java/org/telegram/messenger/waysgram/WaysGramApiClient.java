@@ -358,9 +358,16 @@ public final class WaysGramApiClient implements AutoCloseable {
         }
 
         String requestedMediaKind = mediaKind == null ? "" : mediaKind.trim();
-        if (!requestedMediaKind.isEmpty()
-                && (!"video_note".equals(requestedMediaKind) || !"video/mp4".equals(mimeType))) {
+        if ("video_note".equals(requestedMediaKind) && !"video/mp4".equals(mimeType)) {
             throw new IOException("Видеосообщение должно быть файлом MP4");
+        }
+        if ("voice".equals(requestedMediaKind) && (mimeType == null || !mimeType.startsWith("audio/"))) {
+            throw new IOException("Голосовое сообщение должно быть аудиофайлом");
+        }
+        if (!requestedMediaKind.isEmpty()
+                && !"video_note".equals(requestedMediaKind)
+                && !"voice".equals(requestedMediaKind)) {
+            throw new IOException("Неизвестный тип медиафайла");
         }
 
         HttpURLConnection connection = null;
