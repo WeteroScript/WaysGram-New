@@ -4386,7 +4386,7 @@ public final class WaysGramChatFragment extends BaseFragment {
         }
         new AlertDialog.Builder(context)
                 .setTitle("Расшифровать аудио?")
-                .setMessage("Для получения текста аудиофайл будет передан внешнему сервису OpenAI. Продолжить?")
+                .setMessage("Аудиофайл будет передан внешнему сервису OpenAI для распознавания. Текст расшифровки сохранится на сервере WaysGram рядом с медиафайлом. Продолжить?")
                 .setNegativeButton("Отмена", null)
                 .setPositiveButton("Передать и расшифровать", (dialog, which) ->
                         transcribeAudio(mediaId, actionButton, transcriptView))
@@ -4414,7 +4414,7 @@ public final class WaysGramChatFragment extends BaseFragment {
                             statusView.setText("Сервис не вернул текст расшифровки.");
                             return;
                         }
-                        transcriptView.setText("Расшифровка:\\n" + transcript);
+                        transcriptView.setText("Расшифровка:\n" + transcript);
                         transcriptView.setVisibility(View.VISIBLE);
                         actionButton.setText(response.optBoolean("cached", false)
                                 ? "Расшифровка сохранена" : "Расшифровано");
