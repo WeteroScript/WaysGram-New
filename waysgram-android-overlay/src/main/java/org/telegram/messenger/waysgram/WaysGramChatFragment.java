@@ -12,6 +12,7 @@ import android.content.ClipboardManager;
 import android.content.Context;
 import android.content.Intent;
 import android.graphics.Bitmap;
+import android.graphics.Outline;
 import android.graphics.drawable.GradientDrawable;
 import android.net.Uri;
 import android.media.AudioAttributes;
@@ -20,6 +21,7 @@ import android.media.MediaRecorder;
 import android.os.Build;
 import android.os.Handler;
 import android.os.Looper;
+import android.provider.MediaStore;
 import android.text.Spannable;
 import android.text.SpannableStringBuilder;
 import android.text.method.LinkMovementMethod;
@@ -28,6 +30,7 @@ import android.text.style.ForegroundColorSpan;
 import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
+import android.view.ViewOutlineProvider;
 import android.view.inputmethod.InputMethodManager;
 import android.widget.Button;
 import android.widget.CheckBox;
@@ -78,7 +81,9 @@ public final class WaysGramChatFragment extends BaseFragment {
     private static final int REQUEST_ATTACHMENT = 7101;
     private static final int REQUEST_SAVE_DOCUMENT = 7103;
     private static final int REQUEST_RECORD_AUDIO_PERMISSION = 7104;
+    private static final int REQUEST_VIDEO_NOTE = 7105;
     private static final int MAX_VOICE_MESSAGE_DURATION_MS = 5 * 60 * 1000;
+    private static final int MAX_VIDEO_NOTE_DURATION_SECONDS = 60;
     private final long peerId;
     private final String peerTitle;
     private final boolean savedMessages;
@@ -97,6 +102,7 @@ public final class WaysGramChatFragment extends BaseFragment {
     private File voiceRecordingFile;
     private File pendingVoiceMessageFile;
     private long voiceRecordingStartedAtMs = 0;
+    private String pendingAttachmentMediaKind = "";
     private TextView statusView;
     private TextView typingView;
     private boolean messageSendInFlight = false;
@@ -258,6 +264,15 @@ public final class WaysGramChatFragment extends BaseFragment {
                 ViewGroup.LayoutParams.WRAP_CONTENT
         ));
         voiceRecordButton.setOnClickListener(view -> toggleVoiceRecording());
+
+        Button videoNoteButton = new Button(context);
+        videoNoteButton.setText("Кружок");
+        videoNoteButton.setAllCaps(false);
+        composer.addView(videoNoteButton, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+        ));
+        videoNoteButton.setOnClickListener(view -> pickVideoNote());
 
         Button giftButton = new Button(context);
         giftButton.setText("Подарок");
@@ -1770,6 +1785,29 @@ public final class WaysGramChatFragment extends BaseFragment {
         super.onRequestPermissionsResultFragment(requestCode, permissions, grantResults);
     }
 
+    private void pickVideoNote() {
+        if (messageSendInFlight || voiceRecorder != null) {
+            statusView.setText("Завершите текущую отправку или запись перед съёмкой.");
+            return;
+        }
+        Activity activity = getParentActivity();
+        if (activity == null) {
+            statusView.setText("Не удалось открыть камеру.");
+            return;
+        }
+        Intent captureIntent = new Intent(MediaStore.ACTION_VIDEO_CAPTURE);
+        captureIntent.putExtra(
+                MediaStore.EXTRA_DURATION_LIMIT,
+                MAX_VIDEO_NOTE_DURATION_SECONDS
+        );
+        captureIntent.putExtra(MediaStore.EXTRA_VIDEO_QUALITY, 1);
+        if (captureIntent.resolveActivity(activity.getPackageManager()) == null) {
+            statusView.setText("На устройстве нет доступного приложения камеры.");
+            return;
+        }
+        startActivityForResult(captureIntent, REQUEST_VIDEO_NOTE);
+    }
+
     private void pickAttachment(boolean sendImagesAsFile) {
         if (voiceRecorder != null) {
             statusView.setText("Сначала завершите запись голосового сообщения.");
@@ -1797,6 +1835,30 @@ public final class WaysGramChatFragment extends BaseFragment {
 
     @Override
     public void onActivityResultFragment(int requestCode, int resultCode, Intent data) {
+        if (requestCode == REQUEST_VIDEO_NOTE) {
+            if (resultCode != Activity.RESULT_OK || data == null) {
+                statusView.setText("Съёмка видеосообщения отменена.");
+                return;
+            }
+            Uri videoUri = data.getData();
+            if (videoUri == null && data.getClipData() != null
+                    && data.getClipData().getItemCount() > 0) {
+                videoUri = data.getClipData().getItemAt(0).getUri();
+            }
+            if (videoUri == null) {
+                statusView.setText("Камера не вернула записанный видеоролик.");
+                return;
+            }
+            ArrayList<Uri> videoAttachments = new ArrayList<>();
+            videoAttachments.add(videoUri);
+            startAttachmentBatch(
+                    videoAttachments,
+                    true,
+                    "Видеосообщение",
+                    "video_note"
+            );
+            return;
+        }
         if (requestCode == REQUEST_SAVE_DOCUMENT) {
             if (resultCode != Activity.RESULT_OK || data == null || data.getData() == null) {
                 pendingSaveMediaId = null;
@@ -1864,6 +1926,15 @@ public final class WaysGramChatFragment extends BaseFragment {
             boolean sendAsFile,
             String captionOverride
     ) {
+        startAttachmentBatch(selectedUris, sendAsFile, captionOverride, "");
+    }
+
+    private void startAttachmentBatch(
+            ArrayList<Uri> selectedUris,
+            boolean sendAsFile,
+            String captionOverride,
+            String mediaKind
+    ) {
         if (messageSendInFlight || voiceRecorder != null || selectedUris == null || selectedUris.isEmpty()) {
             return;
         }
@@ -1878,6 +1949,7 @@ public final class WaysGramChatFragment extends BaseFragment {
         pendingAttachmentSilent = isSilentSendEnabled();
         pendingAttachmentReplyToMessageId = replyToMessageId;
         pendingAttachmentAsFile = sendAsFile;
+        pendingAttachmentMediaKind = mediaKind == null ? "" : mediaKind;
         pendingAttachmentMakeAlbum = !sendAsFile
                 && selectedUris.size() >= 2 && selectedUris.size() <= 10;
         if (pendingAttachmentMakeAlbum && getParentActivity() != null) {
@@ -1925,7 +1997,14 @@ public final class WaysGramChatFragment extends BaseFragment {
                 failAttachmentBatch(message);
             }
         };
-        if (mimeType != null && mimeType.startsWith("image/") && !pendingAttachmentAsFile) {
+        if ("video_note".equals(pendingAttachmentMediaKind)) {
+            apiClient.uploadDocument(
+                    getParentActivity().getContentResolver(),
+                    uri,
+                    "video_note",
+                    uploadCallback
+            );
+        } else if (mimeType != null && mimeType.startsWith("image/") && !pendingAttachmentAsFile) {
             apiClient.uploadImage(getParentActivity().getContentResolver(), uri, uploadCallback);
         } else {
             apiClient.uploadDocument(getParentActivity().getContentResolver(), uri, uploadCallback);
@@ -2049,6 +2128,7 @@ public final class WaysGramChatFragment extends BaseFragment {
         pendingAttachmentSilent = false;
         pendingAttachmentMakeAlbum = false;
         pendingAttachmentAsFile = false;
+        pendingAttachmentMediaKind = "";
         pendingAttachmentReplyToMessageId = 0;
         if (pendingVoiceMessageFile != null) {
             pendingVoiceMessageFile.delete();
@@ -2500,7 +2580,13 @@ public final class WaysGramChatFragment extends BaseFragment {
             });
             addMediaSaveButton(messageTarget, mediaId, mediaName, mediaType);
         } else if (mediaId.matches("[a-f0-9]{32}") && mediaType.startsWith("video/")) {
-            addVideoMessage(messageTarget, mediaId, mediaName, mediaType);
+            addVideoMessage(
+                    messageTarget,
+                    mediaId,
+                    mediaName,
+                    mediaType,
+                    "video_note".equals(message.optString("media_kind", ""))
+            );
         } else if (mediaId.matches("[a-f0-9]{32}") && mediaType.startsWith("audio/")) {
             addAudioMessage(messageTarget, mediaId, mediaName, mediaType);
         } else if (mediaId.matches("[a-f0-9]{32}") && !mediaType.isEmpty()) {
@@ -3177,7 +3263,13 @@ public final class WaysGramChatFragment extends BaseFragment {
         saveButton.setOnClickListener(view -> saveDocument(mediaId, mediaName, mediaType));
     }
 
-    private void addVideoMessage(LinearLayout target, String mediaId, String mediaName, String mediaType) {
+    private void addVideoMessage(
+            LinearLayout target,
+            String mediaId,
+            String mediaName,
+            String mediaType,
+            boolean videoNote
+    ) {
         Context context = getParentActivity();
         Uri uri = mediaStreamUri(mediaId);
         if (context == null || uri == null) {
@@ -3185,7 +3277,7 @@ public final class WaysGramChatFragment extends BaseFragment {
             return;
         }
         TextView label = new TextView(context);
-        label.setText("Видео · " + mediaName);
+        label.setText(videoNote ? "Видеосообщение" : "Видео · " + mediaName);
         label.setTextSize(12);
         label.setTextColor(Theme.getColor(Theme.key_windowBackgroundWhiteGrayText));
         target.addView(label, new LinearLayout.LayoutParams(
@@ -3193,6 +3285,15 @@ public final class WaysGramChatFragment extends BaseFragment {
         ));
 
         VideoView videoView = new VideoView(context);
+        if (videoNote && Build.VERSION.SDK_INT >= 21) {
+            videoView.setClipToOutline(true);
+            videoView.setOutlineProvider(new ViewOutlineProvider() {
+                @Override
+                public void getOutline(View view, Outline outline) {
+                    outline.setOval(0, 0, view.getWidth(), view.getHeight());
+                }
+            });
+        }
         videoView.setVideoURI(uri, mediaAuthorizationHeaders());
         MediaController controller = new MediaController(context);
         controller.setAnchorView(videoView);
@@ -3203,9 +3304,12 @@ public final class WaysGramChatFragment extends BaseFragment {
         });
         activeVideoViews.add(videoView);
         LinearLayout.LayoutParams videoParams = new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
+                videoNote ? AndroidUtilities.dp(210) : ViewGroup.LayoutParams.MATCH_PARENT,
                 AndroidUtilities.dp(210)
         );
+        if (videoNote) {
+            videoParams.gravity = Gravity.CENTER_HORIZONTAL;
+        }
         videoParams.bottomMargin = AndroidUtilities.dp(5);
         target.addView(videoView, videoParams);
         addMediaSaveButton(target, mediaId, mediaName, mediaType);
