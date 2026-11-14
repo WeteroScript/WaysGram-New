@@ -1917,7 +1917,7 @@ public final class WaysGramChatFragment extends BaseFragment {
             return;
         }
         if (Build.VERSION.SDK_INT >= 23 && !hasLocationPermission()) {
-            requestPermissions(
+            activity.requestPermissions(
                     new String[]{
                             Manifest.permission.ACCESS_COARSE_LOCATION,
                             Manifest.permission.ACCESS_FINE_LOCATION
