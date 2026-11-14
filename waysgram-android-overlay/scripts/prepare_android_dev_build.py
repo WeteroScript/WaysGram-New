@@ -390,6 +390,32 @@ def configure_mlkit_translation_dependencies(android_root: Path) -> None:
             raise ValueError(f"Failed to add ML Kit dependency: {artifact}")
 
 
+
+def configure_giphy_api_key(android_root: Path) -> bool:
+    """Generate the client-side GIPHY API config without logging the key."""
+    api_key = os.getenv("GIPHY_API_KEY", "").strip()
+    if len(api_key) > 256 or any(char.isspace() for char in api_key):
+        raise ValueError("GIPHY_API_KEY must be a non-empty token without whitespace")
+
+    source = f'''package org.telegram.messenger.waysgram;
+
+/** Build-generated public GIPHY API client key. */
+public final class WaysGramGiphyConfig {{
+    public static final String API_KEY = {json.dumps(api_key)};
+
+    private WaysGramGiphyConfig() {{
+    }}
+}}
+'''
+    output = (
+        android_root
+        / "TMessagesProj/src/main/java/org/telegram/messenger/waysgram/WaysGramGiphyConfig.java"
+    )
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(source, encoding="utf-8")
+    return bool(api_key)
+
+
 def configure_android_root(android_root: Path) -> None:
     if not (android_root / "gradlew").is_file():
         raise FileNotFoundError(f"Android Gradle wrapper not found in {android_root}")
@@ -407,12 +433,14 @@ def configure_android_root(android_root: Path) -> None:
     configure_mlkit_translation_dependencies(android_root)
     configure_default_api_base_url(android_root)
     firebase_configured = configure_waysgram_firebase(android_root)
+    giphy_configured = configure_giphy_api_key(android_root)
     patch_string_resources(android_root)
 
     print(
         "Configured WaysGram as the default Firebase app and preserved Telegram FCM "
         "in a named Firebase app; Telegram API settings, permissions, and manifests remain intact. "
         + ("WaysGram Firebase configured." if firebase_configured else "Firebase secrets were not supplied.")
+        + (" GIPHY search configured." if giphy_configured else " GIPHY API key not supplied; GIF search remains disabled.")
     )
 
 

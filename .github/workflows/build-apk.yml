@@ -217,6 +217,7 @@ jobs:
           FIREBASE_CONFIG: ${{ secrets.FIREBASE_CONFIG }}
           WAYSGRAM_REQUIRE_FIREBASE_CONFIG: "1"
           WAYSGRAM_API_BASE_URL: ${{ secrets.PUBLIC_API_BASE_URL }}
+          GIPHY_API_KEY: ${{ secrets.GIPHY_API_KEY }}
         shell: bash
         run: |
           set -euo pipefail

@@ -296,6 +296,31 @@ public final class WaysGramChatFragment extends BaseFragment {
         ));
         uncompressedButton.setOnClickListener(view -> pickAttachment(true));
 
+        Button gifButton = new Button(context);
+        gifButton.setText("GIF");
+        gifButton.setAllCaps(false);
+        composer.addView(gifButton, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+        ));
+        gifButton.setOnClickListener(view -> {
+            Activity activity = getParentActivity();
+            if (activity == null) return;
+            WaysGramGifSearchDialog.show(activity, new WaysGramGifSearchDialog.Callback() {
+                @Override
+                public void onGifSelected(Uri mp4File) {
+                    ArrayList<Uri> attachment = new ArrayList<>();
+                    attachment.add(mp4File);
+                    startAttachmentBatch(attachment, true, "GIF");
+                }
+
+                @Override
+                public void onError(String message) {
+                    statusView.setText(message);
+                }
+            });
+        });
+
         voiceRecordButton = new Button(context);
         voiceRecordButton.setText("Голос");
         voiceRecordButton.setAllCaps(false);
@@ -2666,6 +2691,10 @@ public final class WaysGramChatFragment extends BaseFragment {
             if (localPath.endsWith(".png")) mimeType = "image/png";
             else if (localPath.endsWith(".jpg") || localPath.endsWith(".jpeg")) mimeType = "image/jpeg";
             else if (localPath.endsWith(".webp")) mimeType = "image/webp";
+            else if (localPath.endsWith(".mp4") || localPath.endsWith(".m4v")) mimeType = "video/mp4";
+            else if (localPath.endsWith(".mov")) mimeType = "video/quicktime";
+            else if (localPath.endsWith(".webm")) mimeType = "video/webm";
+            else if (localPath.endsWith(".mkv")) mimeType = "video/x-matroska";
         }
         int currentIndex = pendingAttachmentIndex;
         int total = pendingAttachments.size();
@@ -4134,8 +4163,11 @@ public final class WaysGramChatFragment extends BaseFragment {
             addMediaSaveButton(target, mediaId, mediaName, mediaType);
             return;
         }
+        boolean giphyGif = mediaName != null
+                && mediaName.toLowerCase(Locale.ROOT).startsWith("waysgram_giphy_");
         TextView label = new TextView(context);
-        label.setText(videoNote ? "Видеосообщение" : "Видео · " + mediaName);
+        label.setText(videoNote ? "Видеосообщение"
+                : giphyGif ? "GIF · Powered by GIPHY" : "Видео · " + mediaName);
         label.setTextSize(12);
         label.setTextColor(Theme.getColor(Theme.key_windowBackgroundWhiteGrayText));
         target.addView(label, new LinearLayout.LayoutParams(
@@ -4160,6 +4192,10 @@ public final class WaysGramChatFragment extends BaseFragment {
         final android.media.MediaPlayer[] videoPlayer = {null};
         videoView.setOnPreparedListener(player -> {
             videoPlayer[0] = player;
+            if (giphyGif) {
+                player.setLooping(true);
+                player.setVolume(0f, 0f);
+            }
             if (Build.VERSION.SDK_INT >= 23) {
                 try {
                     player.setPlaybackParams(player.getPlaybackParams().setSpeed(videoPlaybackSpeed[0]));
