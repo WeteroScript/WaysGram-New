@@ -2556,6 +2556,43 @@ public final class WaysGramChatFragment extends BaseFragment {
         }
         boolean sendAsFile = pendingPickerAsFile;
         pendingPickerAsFile = false;
+        if (!sendAsFile && selectedUris.size() == 1 && getParentActivity() != null) {
+            String selectedMime = getParentActivity().getContentResolver().getType(selectedUris.get(0));
+            if (selectedMime != null && selectedMime.startsWith("image/")) {
+                Uri sourceImage = selectedUris.get(0);
+                new AlertDialog.Builder(getParentActivity())
+                        .setTitle("Фотография")
+                        .setItems(new String[]{"Отправить без изменений", "Редактировать фото"},
+                                (dialog, which) -> {
+                                    if (which == 0) {
+                                        startAttachmentBatch(selectedUris, false);
+                                    } else {
+                                        statusView.setText("Открываю редактор фотографии…");
+                                        WaysGramPhotoEditor.show(
+                                                getParentActivity(),
+                                                getParentActivity().getContentResolver(),
+                                                sourceImage,
+                                                new WaysGramPhotoEditor.Callback() {
+                                                    @Override
+                                                    public void onEdited(Uri editedImage) {
+                                                        ArrayList<Uri> edited = new ArrayList<>();
+                                                        edited.add(editedImage);
+                                                        startAttachmentBatch(edited, false);
+                                                    }
+
+                                                    @Override
+                                                    public void onError(String message) {
+                                                        statusView.setText(message);
+                                                    }
+                                                }
+                                        );
+                                    }
+                                })
+                        .setNegativeButton("Отмена", null)
+                        .show();
+                return;
+            }
+        }
         startAttachmentBatch(selectedUris, sendAsFile);
     }
 
