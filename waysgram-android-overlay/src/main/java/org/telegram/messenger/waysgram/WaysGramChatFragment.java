@@ -1880,6 +1880,9 @@ public final class WaysGramChatFragment extends BaseFragment {
                 statusView.setText("Служба геолокации недоступна.");
                 return;
             }
+            boolean finePermission = Build.VERSION.SDK_INT < 23
+                    || activity.checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION)
+                        == PackageManager.PERMISSION_GRANTED;
             pendingLocationManager = manager;
             lastKnownLocationFallback = null;
             String[] providers = {
@@ -1893,7 +1896,9 @@ public final class WaysGramChatFragment extends BaseFragment {
                         continue;
                     }
                     Location lastKnown = manager.getLastKnownLocation(provider);
-                    if (lastKnown != null && (lastKnownLocationFallback == null
+                    boolean recentEnough = lastKnown != null
+                            && System.currentTimeMillis() - lastKnown.getTime() <= 10 * 60 * 1000L;
+                    if (recentEnough && (lastKnownLocationFallback == null
                             || lastKnown.getTime() > lastKnownLocationFallback.getTime())) {
                         lastKnownLocationFallback = lastKnown;
                     }
@@ -1902,12 +1907,10 @@ public final class WaysGramChatFragment extends BaseFragment {
                 }
             }
             Criteria criteria = new Criteria();
-            criteria.setAccuracy(Criteria.ACCURACY_FINE);
+            criteria.setAccuracy(
+                    finePermission ? Criteria.ACCURACY_FINE : Criteria.ACCURACY_COARSE
+            );
             String provider = manager.getBestProvider(criteria, true);
-            if (provider == null) {
-                criteria.setAccuracy(Criteria.ACCURACY_COARSE);
-                provider = manager.getBestProvider(criteria, true);
-            }
             if (provider == null) {
                 provider = manager.isProviderEnabled(LocationManager.NETWORK_PROVIDER)
                         ? LocationManager.NETWORK_PROVIDER
