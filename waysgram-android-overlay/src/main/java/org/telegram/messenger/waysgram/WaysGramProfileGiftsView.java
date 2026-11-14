@@ -155,13 +155,24 @@ public final class WaysGramProfileGiftsView extends FrameLayout {
                 Theme.getColor(Theme.key_divider));
         card.setBackground(background);
 
-        ImageView image = new ImageView(getContext());
-        image.setScaleType(ImageView.ScaleType.FIT_CENTER);
-        image.setImageResource(android.R.drawable.btn_star_big_on);
+        FrameLayout imageFrame = new FrameLayout(getContext());
         LinearLayout.LayoutParams imageParams = new LinearLayout.LayoutParams(
                 AndroidUtilities.dp(64), AndroidUtilities.dp(64));
         imageParams.rightMargin = AndroidUtilities.dp(12);
-        card.addView(image, imageParams);
+        card.addView(imageFrame, imageParams);
+
+        TextView placeholder = new TextView(getContext());
+        placeholder.setText("🎁");
+        placeholder.setTextSize(30);
+        placeholder.setGravity(Gravity.CENTER);
+        imageFrame.addView(placeholder, new FrameLayout.LayoutParams(
+                LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT));
+
+        ImageView image = new ImageView(getContext());
+        image.setScaleType(ImageView.ScaleType.FIT_CENTER);
+        image.setVisibility(View.GONE);
+        imageFrame.addView(image, new FrameLayout.LayoutParams(
+                LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT));
 
         LinearLayout details = new LinearLayout(getContext());
         details.setOrientation(LinearLayout.VERTICAL);
@@ -224,6 +235,8 @@ public final class WaysGramProfileGiftsView extends FrameLayout {
                         @Override
                         public void onSuccess(Bitmap bitmap) {
                             image.setImageBitmap(bitmap);
+                            image.setVisibility(View.VISIBLE);
+                            placeholder.setVisibility(View.GONE);
                             imageClient.close();
                         }
 
