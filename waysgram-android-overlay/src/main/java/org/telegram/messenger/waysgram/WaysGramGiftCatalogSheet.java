@@ -31,12 +31,14 @@ import org.telegram.ui.ActionBar.Theme;
 import org.json.JSONObject;
 import org.json.JSONArray;
 
+import java.text.DateFormat;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.Date;
 
 /**
  * WaysGram Telegram gift storefront.
@@ -129,6 +131,15 @@ public final class WaysGramGiftCatalogSheet extends BottomSheet {
                 ViewGroup.LayoutParams.WRAP_CONTENT
         ));
 
+        Button auctionsButton = new Button(context);
+        auctionsButton.setAllCaps(false);
+        auctionsButton.setText("Аукционы коллекционных подарков");
+        auctionsButton.setOnClickListener(view -> showCollectibleAuctions());
+        content.addView(auctionsButton, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+        ));
+
         FrameLayout statusContainer = new FrameLayout(context);
         statusView = new TextView(context);
         statusView.setText("Загрузка каталога…");
@@ -215,10 +226,17 @@ public final class WaysGramGiftCatalogSheet extends BottomSheet {
                                 ? null : giftAttributes.optJSONObject("collectible_traits");
                         String rarity = collectibleTraits == null
                                 ? "" : collectibleTraits.optString("rarity", "");
+                        boolean isListed = gift.optInt(
+                                "is_listed", gift.optBoolean("is_listed", false) ? 1 : 0
+                        ) == 1;
+                        boolean isAuctioned = gift.optInt(
+                                "is_auctioned", gift.optBoolean("is_auctioned", false) ? 1 : 0
+                        ) == 1;
                         labels[i] = name
                                 + (rarity.isEmpty() ? "" : " · " + rarity)
                                 + (level > 0 ? " · уровень " + level : "")
-                                + (gift.optInt("is_listed", gift.optBoolean("is_listed", false) ? 1 : 0) == 1 ? " · выставлен" : "")
+                                + (isListed ? " · выставлен" : "")
+                                + (isAuctioned ? " · на аукционе" : "")
                                 + (serial.isEmpty() ? "" : "\n" + serial);
                     }
                     loading.dismiss();
@@ -260,12 +278,20 @@ public final class WaysGramGiftCatalogSheet extends BottomSheet {
         }
         ArrayList<String> actions = new ArrayList<>();
         boolean listed = gift.optInt("is_listed", gift.optBoolean("is_listed", false) ? 1 : 0) == 1;
-        actions.add(listed ? "Снять с продажи" : "Выставить на продажу");
+        boolean auctioned = gift.optInt("is_auctioned", gift.optBoolean("is_auctioned", false) ? 1 : 0) == 1;
         boolean canUpgrade = gift.optString("telegram_gift_id", "").length() > 0;
-        if (canUpgrade) {
-            actions.add("Улучшить за WaysGram Stars");
+        if (listed) {
+            actions.add("Снять с продажи");
+        } else if (auctioned) {
+            actions.add("Снять с аукциона");
+        } else {
+            actions.add("Выставить на продажу");
+            actions.add("Выставить на аукцион");
+            if (canUpgrade) {
+                actions.add("Улучшить за WaysGram Stars");
+            }
+            actions.add("Передать пользователю");
         }
-        actions.add("Передать пользователю");
         StringBuilder giftDetails = new StringBuilder("Серийный номер: ").append(serial);
         JSONObject giftAttributes = gift.optJSONObject("attributes");
         JSONObject collectibleTraits = giftAttributes == null
@@ -275,6 +301,11 @@ public final class WaysGramGiftCatalogSheet extends BottomSheet {
             giftDetails.append("\\nМодель: ").append(collectibleTraits.optString("model", "—"));
             giftDetails.append("\\nСимвол: ").append(collectibleTraits.optString("symbol", "—"));
             giftDetails.append("\\nФон: ").append(collectibleTraits.optString("backdrop", "—"));
+        }
+        if (auctioned) {
+            giftDetails.append("\\nСтатус: на аукционе");
+        } else if (listed) {
+            giftDetails.append("\\nСтатус: фиксированная продажа");
         }
         new AlertDialog.Builder(getContext())
                 .setTitle(name)
@@ -288,6 +319,12 @@ public final class WaysGramGiftCatalogSheet extends BottomSheet {
                         showGiftListingPrice(serial);
                     } else if (action.equals("Снять с продажи")) {
                         catalogClient.cancelGiftListing(serial, giftActionCallback("Объявление снято"));
+                    } else if (action.equals("Выставить на аукцион")) {
+                        showGiftAuctionPrice(serial);
+                    } else if (action.equals("Снять с аукциона")) {
+                        catalogClient.cancelCollectibleAuction(
+                                serial, giftActionCallback("Аукцион отменён")
+                        );
                     } else if (action.equals("Улучшить за WaysGram Stars")) {
                         new AlertDialog.Builder(getContext())
                                 .setTitle("Улучшить подарок")
@@ -320,6 +357,198 @@ public final class WaysGramGiftCatalogSheet extends BottomSheet {
                         catalogClient.listGift(serial, price, giftActionCallback("Подарок выставлен на маркетплейсе"));
                     } catch (NumberFormatException exception) {
                         Toast.makeText(getContext(), "Укажите целую цену в Gram", Toast.LENGTH_SHORT).show();
+                    }
+                })
+                .show();
+    }
+
+    private void showGiftAuctionPrice(String serial) {
+        EditText priceInput = new EditText(getContext());
+        priceInput.setSingleLine(true);
+        priceInput.setInputType(InputType.TYPE_CLASS_NUMBER);
+        priceInput.setHint("Стартовая цена в Gram");
+        new AlertDialog.Builder(getContext())
+                .setTitle("Выставить на аукцион")
+                .setMessage("Срок аукциона — 24 часа. Ставки принимаются в Gram. Подарок должен быть предварительно улучшен до коллекционного.")
+                .setView(priceInput)
+                .setNegativeButton("Отмена", null)
+                .setPositiveButton("Создать аукцион", (dialog, which) -> {
+                    try {
+                        int price = Integer.parseInt(priceInput.getText().toString().trim());
+                        if (price <= 0) {
+                            throw new NumberFormatException();
+                        }
+                        catalogClient.createCollectibleAuction(
+                                serial, price, 86400,
+                                giftActionCallback("Подарок выставлен на аукцион")
+                        );
+                    } catch (NumberFormatException exception) {
+                        Toast.makeText(getContext(), "Укажите целую цену в Gram", Toast.LENGTH_SHORT).show();
+                    }
+                })
+                .show();
+    }
+
+    private void showCollectibleAuctions() {
+        AlertDialog loading = new AlertDialog.Builder(getContext())
+                .setTitle("Аукционы коллекционных подарков")
+                .setMessage("Загружаю активные аукционы…")
+                .setPositiveButton("Закрыть", null)
+                .create();
+        loading.show();
+        catalogClient.loadCollectibleAuctions(new WaysGramGiftCatalogClient.MarketCallback() {
+            @Override
+            public void onLoaded(JSONArray auctions) {
+                AndroidUtilities.runOnUIThread(() -> {
+                    if (isDismissed() || !loading.isShowing()) {
+                        return;
+                    }
+                    if (auctions.length() == 0) {
+                        loading.setMessage("Активных аукционов пока нет.");
+                        return;
+                    }
+                    ArrayList<JSONObject> items = new ArrayList<>();
+                    String[] labels = new String[auctions.length()];
+                    for (int i = 0; i < auctions.length(); i++) {
+                        JSONObject auction = auctions.optJSONObject(i);
+                        if (auction == null) {
+                            items.add(new JSONObject());
+                            labels[i] = "Аукцион";
+                            continue;
+                        }
+                        items.add(auction);
+                        JSONObject attributes = auction.optJSONObject("attributes");
+                        JSONObject traits = attributes == null
+                                ? null : attributes.optJSONObject("collectible_traits");
+                        String rarity = traits == null ? "" : traits.optString("rarity", "");
+                        String seller = auction.optString("seller_username", "");
+                        int currentBid = auction.optInt("current_bid_grams", 0);
+                        int price = currentBid > 0
+                                ? currentBid : auction.optInt("starting_price_grams", 0);
+                        long endsAt = auction.optLong("ends_at", 0);
+                        String endText = endsAt > 0
+                                ? DateFormat.getDateTimeInstance(DateFormat.SHORT, DateFormat.SHORT)
+                                        .format(new Date(endsAt * 1000L))
+                                : "—";
+                        labels[i] = auction.optString("gift_name", "Подарок WaysGram")
+                                + (rarity.isEmpty() ? "" : " · " + rarity)
+                                + " · " + price + " Gram"
+                                + (seller.isEmpty() ? "" : " · @" + seller)
+                                + "\\nДо " + endText;
+                    }
+                    loading.dismiss();
+                    new AlertDialog.Builder(getContext())
+                            .setTitle("Аукционы коллекционных подарков")
+                            .setItems(labels, (dialog, which) -> {
+                                if (which >= 0 && which < items.size()) {
+                                    showCollectibleAuctionDetails(items.get(which));
+                                }
+                            })
+                            .setPositiveButton("Обновить", (dialog, which) -> showCollectibleAuctions())
+                            .setNegativeButton("Закрыть", null)
+                            .show();
+                });
+            }
+
+            @Override
+            public void onError(String message) {
+                AndroidUtilities.runOnUIThread(() -> {
+                    if (!isDismissed() && loading.isShowing()) {
+                        loading.setMessage("Не удалось загрузить аукционы: " + message);
+                    }
+                });
+            }
+        });
+    }
+
+    private void showCollectibleAuctionDetails(JSONObject auction) {
+        int auctionId = auction.optInt("auction_id", 0);
+        int minimumBid = auction.optInt("minimum_bid_grams",
+                Math.max(1, auction.optInt("starting_price_grams", 1)));
+        boolean ownAuction = auction.optBoolean("is_own_auction", false);
+        JSONObject attributes = auction.optJSONObject("attributes");
+        JSONObject traits = attributes == null ? null : attributes.optJSONObject("collectible_traits");
+        StringBuilder details = new StringBuilder(auction.optString("gift_name", "Подарок WaysGram"));
+        details.append("\\nСтартовая цена: ")
+                .append(auction.optInt("starting_price_grams", 0)).append(" Gram");
+        details.append("\\nТекущая ставка: ")
+                .append(auction.optInt("current_bid_grams", 0)).append(" Gram");
+        details.append("\\nСледующая ставка: ").append(minimumBid).append(" Gram");
+        details.append("\\nСтавок: ").append(auction.optInt("bid_count", 0));
+        String seller = auction.optString("seller_username", "");
+        if (!seller.isEmpty()) {
+            details.append("\\nПродавец: @").append(seller);
+        }
+        long endsAt = auction.optLong("ends_at", 0);
+        if (endsAt > 0) {
+            details.append("\\nОкончание: ").append(
+                    DateFormat.getDateTimeInstance(DateFormat.SHORT, DateFormat.SHORT)
+                            .format(new Date(endsAt * 1000L))
+            );
+        }
+        if (traits != null) {
+            details.append("\\nРедкость: ").append(traits.optString("rarity", "—"));
+            details.append("\\nМодель: ").append(traits.optString("model", "—"));
+            details.append("\\nСимвол: ").append(traits.optString("symbol", "—"));
+            details.append("\\nФон: ").append(traits.optString("backdrop", "—"));
+        }
+        AlertDialog.Builder builder = new AlertDialog.Builder(getContext())
+                .setTitle("Аукцион подарка")
+                .setMessage(details.toString())
+                .setNegativeButton("Закрыть", null);
+        if (!ownAuction && auctionId > 0) {
+            builder.setPositiveButton("Сделать ставку", (dialog, which) ->
+                    showCollectibleAuctionBid(auctionId, minimumBid));
+        } else if (ownAuction) {
+            builder.setPositiveButton("Обновить аукционы", (dialog, which) ->
+                    showCollectibleAuctions());
+        }
+        builder.show();
+    }
+
+    private void showCollectibleAuctionBid(int auctionId, int minimumBid) {
+        EditText bidInput = new EditText(getContext());
+        bidInput.setSingleLine(true);
+        bidInput.setInputType(InputType.TYPE_CLASS_NUMBER);
+        bidInput.setText(String.valueOf(minimumBid));
+        new AlertDialog.Builder(getContext())
+                .setTitle("Ставка в Gram")
+                .setMessage("Минимальная ставка: " + minimumBid + " Gram. Предыдущая ставка лидера возвращается автоматически после перебивания.")
+                .setView(bidInput)
+                .setNegativeButton("Отмена", null)
+                .setPositiveButton("Подтвердить ставку", (dialog, which) -> {
+                    try {
+                        int amount = Integer.parseInt(bidInput.getText().toString().trim());
+                        if (amount < minimumBid) {
+                            throw new NumberFormatException();
+                        }
+                        catalogClient.placeCollectibleAuctionBid(
+                                auctionId, amount,
+                                new WaysGramGiftCatalogClient.ActionCallback() {
+                                    @Override
+                                    public void onComplete(JSONObject result) {
+                                        AndroidUtilities.runOnUIThread(() -> {
+                                            if (!isDismissed()) {
+                                                Toast.makeText(getContext(), "Ставка принята: "
+                                                        + amount + " Gram", Toast.LENGTH_LONG).show();
+                                                showCollectibleAuctions();
+                                            }
+                                        });
+                                    }
+
+                                    @Override
+                                    public void onError(String message) {
+                                        AndroidUtilities.runOnUIThread(() -> {
+                                            if (!isDismissed()) {
+                                                Toast.makeText(getContext(), "Ставка не принята: "
+                                                        + message, Toast.LENGTH_LONG).show();
+                                            }
+                                        });
+                                    }
+                                }
+                        );
+                    } catch (NumberFormatException exception) {
+                        Toast.makeText(getContext(), "Ставка должна быть не меньше минимума", Toast.LENGTH_SHORT).show();
                     }
                 })
                 .show();
