@@ -92,10 +92,7 @@ public final class WaysGramLiveLocationService extends Service {
                     .putLong(EXTRA_EXPIRY, expiresAt)
                     .apply();
         } else if (intent == null) {
-            android.content.SharedPreferences prefs = getSharedPreferences(PREFS, MODE_PRIVATE);
-            liveLocationId = prefs.getString(EXTRA_ID, null);
-            peerId = prefs.getLong(EXTRA_PEER, 0);
-            expiresAt = prefs.getLong(EXTRA_EXPIRY, 0);
+            restoreState();
         }
 
         if (liveLocationId == null || !liveLocationId.matches("[a-f0-9]{32}")
@@ -110,6 +107,13 @@ public final class WaysGramLiveLocationService extends Service {
                 Math.max(0L, expiresAt * 1000L - System.currentTimeMillis()));
         startLocationUpdates();
         return START_STICKY;
+    }
+
+    private void restoreState() {
+        android.content.SharedPreferences prefs = getSharedPreferences(PREFS, MODE_PRIVATE);
+        liveLocationId = prefs.getString(EXTRA_ID, null);
+        peerId = prefs.getLong(EXTRA_PEER, 0);
+        expiresAt = prefs.getLong(EXTRA_EXPIRY, 0);
     }
 
     private void createNotificationChannel() {
