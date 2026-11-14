@@ -1633,7 +1633,8 @@ public final class WaysGramChatFragment extends BaseFragment {
 
     private void startVoiceRecording() {
         Activity activity = getParentActivity();
-        if (activity == null || messageSendInFlight || voiceRecorder != null) {
+        if (activity == null || voiceRecordButton == null
+                || messageSendInFlight || voiceRecorder != null) {
             return;
         }
         File recordingDirectory = new File(activity.getCacheDir(), "waysgram_voice");
@@ -1761,7 +1762,7 @@ public final class WaysGramChatFragment extends BaseFragment {
             if (grantResults != null && grantResults.length > 0
                     && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
                 startVoiceRecording();
-            } else {
+            } else if (statusView != null) {
                 statusView.setText("Доступ к микрофону не предоставлен. Голосовая запись недоступна.");
             }
             return;
@@ -3370,6 +3371,9 @@ public final class WaysGramChatFragment extends BaseFragment {
         }
         if (silentSendCheckBox != null) {
             silentSendCheckBox.setEnabled(!inFlight);
+        }
+        if (voiceRecordButton != null && voiceRecorder == null) {
+            voiceRecordButton.setEnabled(!inFlight);
         }
     }
 
