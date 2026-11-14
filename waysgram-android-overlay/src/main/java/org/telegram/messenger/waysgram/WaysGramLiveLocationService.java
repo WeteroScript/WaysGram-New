@@ -15,6 +15,7 @@ import android.location.LocationManager;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.IBinder;
+import android.os.Handler;
 import android.os.Looper;
 
 import org.json.JSONObject;
@@ -37,6 +38,8 @@ public final class WaysGramLiveLocationService extends Service {
     private long expiresAt;
     private boolean stopping;
     private long lastUpdateAt;
+    private final Handler expiryHandler = new Handler(Looper.getMainLooper());
+    private final Runnable expiryRunnable = () -> endShare(true);
 
     public static void start(Context context, long peerId, String liveLocationId, long expiresAt) {
         if (context == null || peerId <= 0 || liveLocationId == null
@@ -68,6 +71,10 @@ public final class WaysGramLiveLocationService extends Service {
     public int onStartCommand(Intent intent, int flags, int startId) {
         if (intent != null && ACTION_STOP.equals(intent.getAction())) {
             String requestedId = intent.getStringExtra(EXTRA_ID);
+            if (liveLocationId == null) restoreState();
+            if (liveLocationId != null && apiClient == null) {
+                apiClient = new WaysGramApiClient(WaysGramSessionStore.getInstance(this));
+            }
             if (requestedId == null || requestedId.isEmpty()
                     || liveLocationId == null || requestedId.equals(liveLocationId)) endShare(true);
             return START_NOT_STICKY;
@@ -77,6 +84,8 @@ public final class WaysGramLiveLocationService extends Service {
             liveLocationId = intent.getStringExtra(EXTRA_ID);
             peerId = intent.getLongExtra(EXTRA_PEER, 0);
             expiresAt = intent.getLongExtra(EXTRA_EXPIRY, 0);
+            stopping = false;
+            lastUpdateAt = 0;
             getSharedPreferences(PREFS, MODE_PRIVATE).edit()
                     .putString(EXTRA_ID, liveLocationId)
                     .putLong(EXTRA_PEER, peerId)
@@ -96,6 +105,9 @@ public final class WaysGramLiveLocationService extends Service {
         }
         startForeground(NOTIFICATION_ID, buildNotification());
         if (apiClient == null) apiClient = new WaysGramApiClient(WaysGramSessionStore.getInstance(this));
+        expiryHandler.removeCallbacks(expiryRunnable);
+        expiryHandler.postDelayed(expiryRunnable,
+                Math.max(0L, expiresAt * 1000L - System.currentTimeMillis()));
         startLocationUpdates();
         return START_STICKY;
     }
@@ -199,7 +211,7 @@ public final class WaysGramLiveLocationService extends Service {
         apiClient.post("/api/messages/live-location", payload, new WaysGramApiClient.Callback() {
             @Override public void onSuccess(JSONObject response) { }
             @Override public void onError(String message, int statusCode) {
-                if (statusCode == 404 || statusCode == 403) endShare(true);
+                if (statusCode == 401 || statusCode == 403 || statusCode == 404) endShare(true);
             }
         });
     }
@@ -229,6 +241,7 @@ public final class WaysGramLiveLocationService extends Service {
     }
 
     private void finishService() {
+        expiryHandler.removeCallbacks(expiryRunnable);
         getSharedPreferences(PREFS, MODE_PRIVATE).edit().clear().apply();
         if (Build.VERSION.SDK_INT >= 24) stopForeground(STOP_FOREGROUND_REMOVE);
         else stopForeground(true);
@@ -237,6 +250,7 @@ public final class WaysGramLiveLocationService extends Service {
 
     @Override
     public void onDestroy() {
+        expiryHandler.removeCallbacks(expiryRunnable);
         stopLocationUpdates();
         if (apiClient != null) {
             apiClient.close();
