@@ -4,6 +4,7 @@ import android.app.Activity;
 import android.app.AlertDialog;
 import android.app.DatePickerDialog;
 import android.app.TimePickerDialog;
+import android.content.ActivityNotFoundException;
 import android.content.ClipData;
 import android.content.ClipboardManager;
 import android.content.Context;
@@ -883,6 +884,56 @@ public final class WaysGramChatFragment extends BaseFragment {
                     openMentionProfile(token);
                 }
             }, start, end, Spannable.SPAN_EXCLUSIVE_EXCLUSIVE);
+        }
+    }
+
+    private void applyHttpLinks(SpannableStringBuilder text) {
+        Pattern pattern = Pattern.compile("(?i)\\bhttps?://[^\\s<>\\\"']+");
+        Matcher matcher = pattern.matcher(text);
+        ArrayList<int[]> ranges = new ArrayList<>();
+        ArrayList<String> urls = new ArrayList<>();
+        while (matcher.find()) {
+            String candidate = matcher.group();
+            while (!candidate.isEmpty() && ".,!?;:)]}".indexOf(
+                    candidate.charAt(candidate.length() - 1)
+            ) >= 0) {
+                candidate = candidate.substring(0, candidate.length() - 1);
+            }
+            if (candidate.isEmpty()) {
+                continue;
+            }
+            int start = matcher.start();
+            ranges.add(new int[]{start, start + candidate.length()});
+            urls.add(candidate);
+        }
+        for (int i = ranges.size() - 1; i >= 0; i--) {
+            int[] range = ranges.get(i);
+            String url = urls.get(i);
+            text.setSpan(new ClickableSpan() {
+                @Override
+                public void updateDrawState(android.text.TextPaint paint) {
+                    paint.setColor(android.graphics.Color.rgb(50, 130, 220));
+                    paint.setUnderlineText(true);
+                }
+
+                @Override
+                public void onClick(View widget) {
+                    Uri uri = Uri.parse(url);
+                    String scheme = uri.getScheme();
+                    if (!("http".equalsIgnoreCase(scheme)
+                            || "https".equalsIgnoreCase(scheme))) {
+                        statusView.setText("Поддерживаются только ссылки http и https.");
+                        return;
+                    }
+                    try {
+                        if (getParentActivity() != null) {
+                            getParentActivity().startActivity(new Intent(Intent.ACTION_VIEW, uri));
+                        }
+                    } catch (ActivityNotFoundException exception) {
+                        statusView.setText("На устройстве не найдено приложение для открытия ссылки.");
+                    }
+                }
+            }, range[0], range[1], Spannable.SPAN_EXCLUSIVE_EXCLUSIVE);
         }
     }
 
@@ -1918,6 +1969,7 @@ public final class WaysGramChatFragment extends BaseFragment {
         );
         applyMentionLinks(renderedMessage);
         applyHashtagLinks(renderedMessage);
+        applyHttpLinks(renderedMessage);
         if (repliedToId > 0) {
             String renderedText = renderedMessage.toString();
             int quoteStart = renderedText.indexOf("Цитата: ");
