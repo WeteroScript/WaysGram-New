@@ -569,9 +569,21 @@ public final class WaysGramApiClient implements AutoCloseable {
                 throw new ApiException(status, safeApiMessage(errorJson, status));
             }
             byte[] bytes = readLimited(connection.getInputStream(), MAX_IMAGE_BYTES);
-            Bitmap bitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.length);
-            if (bitmap == null) {
+            BitmapFactory.Options options = new BitmapFactory.Options();
+            options.inJustDecodeBounds = true;
+            BitmapFactory.decodeByteArray(bytes, 0, bytes.length, options);
+            if (options.outWidth <= 0 || options.outHeight <= 0) {
                 throw new IOException("Стикер подарка не является статическим изображением");
+            }
+            options.inSampleSize = 1;
+            while (options.outWidth / options.inSampleSize > 384
+                    || options.outHeight / options.inSampleSize > 384) {
+                options.inSampleSize *= 2;
+            }
+            options.inJustDecodeBounds = false;
+            Bitmap bitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.length, options);
+            if (bitmap == null) {
+                throw new IOException("Не удалось декодировать стикер подарка");
             }
             return bitmap;
         } finally {
