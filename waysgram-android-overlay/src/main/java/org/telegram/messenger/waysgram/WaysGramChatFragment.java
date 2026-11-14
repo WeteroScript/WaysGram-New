@@ -117,6 +117,19 @@ public final class WaysGramChatFragment extends BaseFragment {
     private LocationListener pendingLocationListener;
     private Location lastKnownLocationFallback;
     private final Runnable locationTimeoutRunnable = () -> finishLocationRequest(null);
+    private Button liveLocationButton;
+    private TextView liveLocationView;
+    private String activeLiveLocationId;
+    private int pendingLiveLocationDurationSeconds = 0;
+    private double displayedLiveLatitude = 0;
+    private double displayedLiveLongitude = 0;
+    private final Runnable liveLocationRefreshRunnable = new Runnable() {
+        @Override
+        public void run() {
+            refreshLiveLocations();
+            if (isScreenResumed) pollHandler.postDelayed(this, 15000L);
+        }
+    };
     private TextView statusView;
     private TextView typingView;
     private boolean messageSendInFlight = false;
@@ -205,6 +218,18 @@ public final class WaysGramChatFragment extends BaseFragment {
         typingView.setTextColor(Theme.getColor(Theme.key_windowBackgroundWhiteGrayText));
         typingView.setVisibility(View.GONE);
         root.addView(typingView, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+        ));
+
+        liveLocationView = new TextView(context);
+        liveLocationView.setTextSize(13);
+        liveLocationView.setTextColor(Theme.getColor(Theme.key_windowBackgroundWhiteBlueText));
+        liveLocationView.setVisibility(View.GONE);
+        liveLocationView.setPadding(AndroidUtilities.dp(6), AndroidUtilities.dp(4),
+                AndroidUtilities.dp(6), AndroidUtilities.dp(4));
+        liveLocationView.setOnClickListener(view -> openDisplayedLiveLocation());
+        root.addView(liveLocationView, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT
         ));
@@ -305,6 +330,15 @@ public final class WaysGramChatFragment extends BaseFragment {
                 ViewGroup.LayoutParams.WRAP_CONTENT
         ));
         locationButton.setOnClickListener(view -> requestCurrentLocation());
+
+        liveLocationButton = new Button(context);
+        liveLocationButton.setText("Гео эфир");
+        liveLocationButton.setAllCaps(false);
+        composer.addView(liveLocationButton, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+        ));
+        liveLocationButton.setOnClickListener(view -> showLiveLocationOptions());
 
         Button giftButton = new Button(context);
         giftButton.setText("Подарок");
@@ -1442,6 +1476,7 @@ public final class WaysGramChatFragment extends BaseFragment {
                 statusView.setText(count == 0 ? "История пока пуста" : "Сообщений: " + count);
                 messageScrollView.post(() -> continuePendingMessageJump());
                 markMessagesRead();
+                refreshLiveLocations();
                 scheduleNextPoll();
             }
 
@@ -1858,7 +1893,7 @@ public final class WaysGramChatFragment extends BaseFragment {
                     },
                     REQUEST_LOCATION_PERMISSION
             );
-            statusView.setText("Разрешите доступ к местоположению для отправки одной точки.");
+            statusView.setText("Разрешите доступ к местоположению для отправки геопозиции.");
             return;
         }
         requestSingleCurrentLocation();
@@ -2001,16 +2036,31 @@ public final class WaysGramChatFragment extends BaseFragment {
     private void confirmLocationBeforeSending(Location location, boolean usingLastKnown) {
         Activity activity = getParentActivity();
         if (activity == null || location == null) {
+            pendingLiveLocationDurationSeconds = 0;
             return;
         }
         double latitude = location.getLatitude();
         double longitude = location.getLongitude();
-        String coordinates = String.format(
-                Locale.US,
-                "%.6f, %.6f",
-                latitude,
-                longitude
-        );
+        String coordinates = String.format(Locale.US, "%.6f, %.6f", latitude, longitude);
+        if (pendingLiveLocationDurationSeconds > 0) {
+            int duration = pendingLiveLocationDurationSeconds;
+            pendingLiveLocationDurationSeconds = 0;
+            String message = "Передавать обновления местоположения собеседнику в течение "
+                    + liveLocationDurationLabel(duration) + "?\n" + coordinates;
+            if (usingLastKnown) {
+                message += "\n\nСейчас используется последнее сохранённое местоположение устройства.";
+            }
+            new AlertDialog.Builder(activity)
+                    .setTitle("Трансляция геолокации")
+                    .setMessage(message)
+                    .setNegativeButton("Отмена", null)
+                    .setPositiveButton("Начать", (dialog, which) -> {
+                        Float accuracy = location.hasAccuracy() ? location.getAccuracy() : null;
+                        startLiveLocation(latitude, longitude, accuracy, duration);
+                    })
+                    .show();
+            return;
+        }
         String message = "Отправить эту точку собеседнику?\n" + coordinates;
         if (usingLastKnown) {
             message += "\n\nИспользуется последнее сохранённое местоположение устройства.";
@@ -2019,9 +2069,166 @@ public final class WaysGramChatFragment extends BaseFragment {
                 .setTitle("Поделиться геолокацией")
                 .setMessage(message)
                 .setNegativeButton("Отмена", null)
-                .setPositiveButton("Отправить", (dialog, which) ->
-                        sendLocation(latitude, longitude))
+                .setPositiveButton("Отправить", (dialog, which) -> sendLocation(latitude, longitude))
                 .show();
+    }
+
+    private void showLiveLocationOptions() {
+        Activity activity = getParentActivity();
+        if (activity == null) return;
+        if (activeLiveLocationId != null) {
+            new AlertDialog.Builder(activity)
+                    .setTitle("Трансляция геолокации")
+                    .setMessage("Остановить передачу местоположения этому собеседнику?")
+                    .setNegativeButton("Продолжить", null)
+                    .setPositiveButton("Остановить", (dialog, which) -> stopOwnLiveLocation())
+                    .show();
+            return;
+        }
+        String[] labels = {"15 минут", "1 час", "8 часов"};
+        int[] seconds = {900, 3600, 28800};
+        new AlertDialog.Builder(activity)
+                .setTitle("Длительность трансляции")
+                .setItems(labels, (dialog, which) -> {
+                    pendingLiveLocationDurationSeconds = seconds[which];
+                    requestCurrentLocation();
+                })
+                .setNegativeButton("Отмена", null)
+                .show();
+    }
+
+    private String liveLocationDurationLabel(int seconds) {
+        if (seconds == 900) return "15 минут";
+        if (seconds == 3600) return "1 час";
+        return "8 часов";
+    }
+
+    private void startLiveLocation(double latitude, double longitude, Float accuracy, int durationSeconds) {
+        if (apiClient == null || messageSendInFlight || voiceRecorder != null) {
+            statusView.setText("Сейчас нельзя начать трансляцию геолокации.");
+            return;
+        }
+        JSONObject payload = new JSONObject();
+        try {
+            payload.put("recipient_id", peerId);
+            payload.put("latitude", latitude);
+            payload.put("longitude", longitude);
+            payload.put("duration_seconds", durationSeconds);
+            if (accuracy != null && !Float.isNaN(accuracy) && !Float.isInfinite(accuracy)) {
+                payload.put("accuracy_m", accuracy.doubleValue());
+            }
+        } catch (Exception exception) {
+            statusView.setText("Не удалось подготовить трансляцию геолокации.");
+            return;
+        }
+        setMessageSendInFlight(true);
+        statusView.setText("Запускаю трансляцию геолокации…");
+        apiClient.post("/api/messages/live-location", payload, new WaysGramApiClient.Callback() {
+            @Override
+            public void onSuccess(JSONObject response) {
+                setMessageSendInFlight(false);
+                String id = response.optString("id", "");
+                long expiresAt = response.optLong("expires_at", 0);
+                if (!id.matches("[a-f0-9]{32}") || expiresAt <= System.currentTimeMillis() / 1000L) {
+                    statusView.setText("Сервер вернул некорректные данные трансляции.");
+                    return;
+                }
+                activeLiveLocationId = id;
+                if (liveLocationButton != null) liveLocationButton.setText("Остановить эфир");
+                Activity activity = getParentActivity();
+                if (activity != null) WaysGramLiveLocationService.start(activity, peerId, id, expiresAt);
+                statusView.setText("Трансляция геолокации запущена на " + liveLocationDurationLabel(durationSeconds) + ".");
+                refreshLiveLocations();
+            }
+
+            @Override
+            public void onError(String message, int statusCode) {
+                setMessageSendInFlight(false);
+                statusView.setText(message);
+            }
+        });
+    }
+
+    private void stopOwnLiveLocation() {
+        String id = activeLiveLocationId;
+        if (id == null) return;
+        Activity activity = getParentActivity();
+        if (activity != null) {
+            WaysGramLiveLocationService.stop(activity, id);
+        } else if (apiClient != null) {
+            apiClient.delete("/api/messages/live-location/" + id, new WaysGramApiClient.Callback() {
+                @Override public void onSuccess(JSONObject response) { }
+                @Override public void onError(String message, int statusCode) { }
+            });
+        }
+        activeLiveLocationId = null;
+        if (liveLocationButton != null) liveLocationButton.setText("Гео эфир");
+        statusView.setText("Трансляция геолокации остановлена.");
+        refreshLiveLocations();
+    }
+
+    private void refreshLiveLocations() {
+        if (apiClient == null || liveLocationView == null) return;
+        apiClient.get("/api/messages/live-location?with=" + peerId, new WaysGramApiClient.Callback() {
+            @Override
+            public void onSuccess(JSONObject response) {
+                JSONArray locations = response.optJSONArray("locations");
+                JSONObject incoming = null;
+                JSONObject own = null;
+                if (locations != null) {
+                    for (int i = 0; i < locations.length(); i++) {
+                        JSONObject item = locations.optJSONObject(i);
+                        if (item == null) continue;
+                        if (item.optLong("sender_telegram_id", 0) == peerId) incoming = item;
+                        if (item.optLong("sender_telegram_id", 0) != peerId
+                                && item.optLong("recipient_telegram_id", 0) == peerId) own = item;
+                    }
+                }
+                if (own != null) {
+                    activeLiveLocationId = own.optString("id", null);
+                    if (liveLocationButton != null) liveLocationButton.setText("Остановить эфир");
+                } else if (activeLiveLocationId == null && liveLocationButton != null) {
+                    liveLocationButton.setText("Гео эфир");
+                }
+                if (incoming != null) {
+                    displayedLiveLatitude = incoming.optDouble("latitude", 0);
+                    displayedLiveLongitude = incoming.optDouble("longitude", 0);
+                    long remaining = Math.max(0, incoming.optLong("expires_at", 0)
+                            - System.currentTimeMillis() / 1000L);
+                    liveLocationView.setText("Собеседник делится геопозицией · осталось "
+                            + formatLiveLocationRemaining(remaining) + " · открыть карту");
+                    liveLocationView.setVisibility(View.VISIBLE);
+                } else {
+                    liveLocationView.setVisibility(View.GONE);
+                }
+            }
+
+            @Override
+            public void onError(String message, int statusCode) {
+                if (statusCode == 401 && getParentActivity() != null) {
+                    WaysGramSessionStore.getInstance(getParentActivity()).clearSession();
+                    presentFragment(new WaysGramLoginFragment(), true);
+                }
+            }
+        });
+    }
+
+    private String formatLiveLocationRemaining(long seconds) {
+        long minutes = Math.max(1, (seconds + 59) / 60);
+        if (minutes < 60) return minutes + " мин.";
+        long hours = minutes / 60;
+        long rest = minutes % 60;
+        return rest == 0 ? hours + " ч." : hours + " ч. " + rest + " мин.";
+    }
+
+    private void openDisplayedLiveLocation() {
+        try {
+            Uri mapUri = Uri.parse("geo:" + displayedLiveLatitude + "," + displayedLiveLongitude
+                    + "?q=" + displayedLiveLatitude + "," + displayedLiveLongitude);
+            startActivity(new Intent(Intent.ACTION_VIEW, mapUri));
+        } catch (ActivityNotFoundException exception) {
+            statusView.setText("На устройстве нет приложения для просмотра карт.");
+        }
     }
 
     private void sendLocation(double latitude, double longitude) {
@@ -4205,6 +4412,9 @@ public final class WaysGramChatFragment extends BaseFragment {
         }
         pollHandler.removeCallbacks(pollRunnable);
         pollHandler.removeCallbacks(eventPollRetryRunnable);
+        pollHandler.removeCallbacks(liveLocationRefreshRunnable);
+        pollHandler.post(liveLocationRefreshRunnable);
+        refreshLiveLocations();
         if (messageEventsReady) {
             pollNewMessages();
             checkMessageEvents();
@@ -4222,6 +4432,7 @@ public final class WaysGramChatFragment extends BaseFragment {
         }
         pollHandler.removeCallbacks(pollRunnable);
         pollHandler.removeCallbacks(eventPollRetryRunnable);
+        pollHandler.removeCallbacks(liveLocationRefreshRunnable);
         if (typingIndicatorController != null) {
             typingIndicatorController.stopPolling();
         }
