@@ -280,6 +280,9 @@ public final class WaysGramGiftCatalogSheet extends BottomSheet {
         boolean listed = gift.optInt("is_listed", gift.optBoolean("is_listed", false) ? 1 : 0) == 1;
         boolean auctioned = gift.optInt("is_auctioned", gift.optBoolean("is_auctioned", false) ? 1 : 0) == 1;
         boolean canUpgrade = gift.optString("telegram_gift_id", "").length() > 0;
+        boolean auctionEligible = gift.optInt(
+                "auction_eligible", gift.optBoolean("auction_eligible", false) ? 1 : 0
+        ) == 1;
         JSONObject currentAttributes = gift.optJSONObject("attributes");
         JSONObject currentTraits = currentAttributes == null
                 ? null : currentAttributes.optJSONObject("collectible_traits");
@@ -291,7 +294,7 @@ public final class WaysGramGiftCatalogSheet extends BottomSheet {
             actions.add("Снять с аукциона");
         } else {
             actions.add("Выставить на продажу");
-            if (isCollectible) {
+            if (isCollectible && auctionEligible) {
                 actions.add("Выставить на аукцион");
             }
             if (canUpgrade) {
@@ -308,6 +311,9 @@ public final class WaysGramGiftCatalogSheet extends BottomSheet {
             giftDetails.append("\\nМодель: ").append(collectibleTraits.optString("model", "—"));
             giftDetails.append("\\nСимвол: ").append(collectibleTraits.optString("symbol", "—"));
             giftDetails.append("\\nФон: ").append(collectibleTraits.optString("backdrop", "—"));
+        }
+        if (isCollectible && !auctionEligible) {
+            giftDetails.append("\\nWaysGram-аукцион недоступен: модель не выпускалась через аукцион Telegram");
         }
         if (auctioned) {
             giftDetails.append("\\nСтатус: на аукционе");
