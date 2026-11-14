@@ -119,6 +119,8 @@ public final class WaysGramChatFragment extends BaseFragment {
         }
     };
     private String pendingSaveMediaId;
+    private boolean pendingPickerAsFile = false;
+    private boolean pendingAttachmentAsFile = false;
     private final ArrayList<Uri> pendingAttachments = new ArrayList<>();
     private final ArrayList<String> pendingAttachmentMediaIds = new ArrayList<>();
     private String pendingAttachmentCaption = "";
@@ -225,7 +227,16 @@ public final class WaysGramChatFragment extends BaseFragment {
                 ViewGroup.LayoutParams.WRAP_CONTENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT
         ));
-        attachButton.setOnClickListener(view -> pickAttachment());
+        attachButton.setOnClickListener(view -> pickAttachment(false));
+
+        Button uncompressedButton = new Button(context);
+        uncompressedButton.setText("Без сжатия");
+        uncompressedButton.setAllCaps(false);
+        composer.addView(uncompressedButton, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+        ));
+        uncompressedButton.setOnClickListener(view -> pickAttachment(true));
 
         Button giftButton = new Button(context);
         giftButton.setText("Подарок");
@@ -1572,11 +1583,12 @@ public final class WaysGramChatFragment extends BaseFragment {
                 });
     }
 
-    private void pickAttachment() {
+    private void pickAttachment(boolean sendImagesAsFile) {
         if (messageSendInFlight) {
             statusView.setText("Дождитесь завершения текущей отправки.");
             return;
         }
+        pendingPickerAsFile = sendImagesAsFile;
         Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
         intent.addCategory(Intent.CATEGORY_OPENABLE);
         intent.setType("*/*");
@@ -1620,7 +1632,11 @@ public final class WaysGramChatFragment extends BaseFragment {
                     });
             return;
         }
-        if (requestCode != REQUEST_ATTACHMENT || resultCode != Activity.RESULT_OK || data == null) {
+        if (requestCode != REQUEST_ATTACHMENT) {
+            return;
+        }
+        if (resultCode != Activity.RESULT_OK || data == null) {
+            pendingPickerAsFile = false;
             return;
         }
         ArrayList<Uri> selectedUris = new ArrayList<>();
@@ -1639,13 +1655,16 @@ public final class WaysGramChatFragment extends BaseFragment {
             }
         }
         if (selectedUris.isEmpty()) {
+            pendingPickerAsFile = false;
             statusView.setText("Не удалось получить выбранные файлы.");
             return;
         }
-        startAttachmentBatch(selectedUris);
+        boolean sendAsFile = pendingPickerAsFile;
+        pendingPickerAsFile = false;
+        startAttachmentBatch(selectedUris, sendAsFile);
     }
 
-    private void startAttachmentBatch(ArrayList<Uri> selectedUris) {
+    private void startAttachmentBatch(ArrayList<Uri> selectedUris, boolean sendAsFile) {
         if (messageSendInFlight || selectedUris == null || selectedUris.isEmpty()) {
             return;
         }
@@ -1657,7 +1676,9 @@ public final class WaysGramChatFragment extends BaseFragment {
                 : messageInput.getText().toString().trim();
         pendingAttachmentSilent = isSilentSendEnabled();
         pendingAttachmentReplyToMessageId = replyToMessageId;
-        pendingAttachmentMakeAlbum = selectedUris.size() >= 2 && selectedUris.size() <= 10;
+        pendingAttachmentAsFile = sendAsFile;
+        pendingAttachmentMakeAlbum = !sendAsFile
+                && selectedUris.size() >= 2 && selectedUris.size() <= 10;
         if (pendingAttachmentMakeAlbum && getParentActivity() != null) {
             for (Uri uri : selectedUris) {
                 String type = getParentActivity().getContentResolver().getType(uri);
@@ -1703,7 +1724,7 @@ public final class WaysGramChatFragment extends BaseFragment {
                 failAttachmentBatch(message);
             }
         };
-        if (mimeType != null && mimeType.startsWith("image/")) {
+        if (mimeType != null && mimeType.startsWith("image/") && !pendingAttachmentAsFile) {
             apiClient.uploadImage(getParentActivity().getContentResolver(), uri, uploadCallback);
         } else {
             apiClient.uploadDocument(getParentActivity().getContentResolver(), uri, uploadCallback);
@@ -1826,6 +1847,7 @@ public final class WaysGramChatFragment extends BaseFragment {
         pendingAttachmentCaption = "";
         pendingAttachmentSilent = false;
         pendingAttachmentMakeAlbum = false;
+        pendingAttachmentAsFile = false;
         pendingAttachmentReplyToMessageId = 0;
         pendingAttachmentIndex = 0;
         pendingAttachmentSent = 0;
