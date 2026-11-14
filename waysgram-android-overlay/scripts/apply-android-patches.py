@@ -206,11 +206,13 @@ def patch_notification_permissions(android_root: Path) -> None:
 
 
 def patch_location_permissions(android_root: Path) -> None:
-    """Declare foreground location permission in both application manifests."""
+    """Declare runtime and foreground-service location permissions in both app manifests."""
     anchor = '    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />\n'
     permissions = (
         '    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />\n'
         '    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />\n'
+        '    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />\n'
+        '    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_LOCATION" />\n'
     )
     for variant in ("debug", "release"):
         manifest = android_root / f"TMessagesProj/config/{variant}/AndroidManifest.xml"
@@ -230,6 +232,28 @@ def patch_location_permissions(android_root: Path) -> None:
             )
         updated = content.replace(anchor, anchor + missing, 1)
         manifest.write_text(updated, encoding="utf-8")
+
+
+def patch_live_location_service(android_root: Path) -> None:
+    """Register the WaysGram foreground location service in both app manifests."""
+    declaration = (
+        '        <service\\n'
+        '            android:name="org.telegram.messenger.waysgram.WaysGramLiveLocationService"\\n'
+        '            android:exported="false"\\n'
+        '            android:stopWithTask="false"\\n'
+        '            android:foregroundServiceType="location" />\\n'
+    )
+    for variant in ("debug", "release"):
+        manifest = android_root / f"TMessagesProj/config/{variant}/AndroidManifest.xml"
+        if not manifest.is_file():
+            raise FileNotFoundError(f"Required {variant} manifest not found: {manifest}")
+        content = manifest.read_text(encoding="utf-8")
+        if declaration in content:
+            continue
+        anchor = "    </application>\\n"
+        if content.count(anchor) != 1:
+            raise ValueError(f"Cannot register WaysGram live location service in {variant} manifest")
+        manifest.write_text(content.replace(anchor, declaration + anchor, 1), encoding="utf-8")
 
 
 def patch_translation_dependencies(android_root: Path) -> None:
@@ -290,6 +314,10 @@ def verify_source(android_root: Path) -> None:
     if patched_settings != settings_content:
         settings_activity.write_text(patched_settings, encoding="utf-8")
 
+    live_service = android_root / "TMessagesProj/src/main/java/org/telegram/messenger/waysgram/WaysGramLiveLocationService.java"
+    if not live_service.is_file():
+        raise FileNotFoundError(f"WaysGram live location service missing: {live_service}")
+
     push_service = android_root / "TMessagesProj/src/main/java/org/telegram/messenger/GcmPushListenerService.java"
     if not push_service.is_file():
         raise FileNotFoundError(f"Required Firebase messaging service not found: {push_service}")
@@ -306,6 +334,7 @@ def verify_source(android_root: Path) -> None:
         push_listener.write_text(patched_push_listener, encoding="utf-8")
     patch_notification_permissions(android_root)
     patch_location_permissions(android_root)
+    patch_live_location_service(android_root)
     patch_translation_dependencies(android_root)
 
     translation_gradle = (android_root / "TMessagesProj/build.gradle").read_text(encoding="utf-8")
