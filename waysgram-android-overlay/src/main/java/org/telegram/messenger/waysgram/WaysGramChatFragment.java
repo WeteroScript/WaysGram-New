@@ -11,6 +11,10 @@ import android.content.ClipData;
 import android.content.ClipboardManager;
 import android.content.Context;
 import android.content.Intent;
+import android.location.Criteria;
+import android.location.Location;
+import android.location.LocationListener;
+import android.location.LocationManager;
 import android.database.Cursor;
 import android.graphics.Bitmap;
 import android.graphics.Outline;
@@ -20,6 +24,7 @@ import android.media.AudioAttributes;
 import android.media.MediaPlayer;
 import android.media.MediaRecorder;
 import android.os.Build;
+import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
 import android.provider.ContactsContract;
@@ -85,6 +90,8 @@ public final class WaysGramChatFragment extends BaseFragment {
     private static final int REQUEST_RECORD_AUDIO_PERMISSION = 7104;
     private static final int REQUEST_VIDEO_NOTE = 7105;
     private static final int REQUEST_CONTACT_PICKER = 7106;
+    private static final int REQUEST_LOCATION_PERMISSION = 7107;
+    private static final long LOCATION_REQUEST_TIMEOUT_MS = 15000L;
     private static final int MAX_VOICE_MESSAGE_DURATION_MS = 5 * 60 * 1000;
     private static final int MAX_VIDEO_NOTE_DURATION_SECONDS = 60;
     private final long peerId;
@@ -106,6 +113,10 @@ public final class WaysGramChatFragment extends BaseFragment {
     private File pendingVoiceMessageFile;
     private long voiceRecordingStartedAtMs = 0;
     private String pendingAttachmentMediaKind = "";
+    private LocationManager pendingLocationManager;
+    private LocationListener pendingLocationListener;
+    private Location lastKnownLocationFallback;
+    private final Runnable locationTimeoutRunnable = () -> finishLocationRequest(null);
     private TextView statusView;
     private TextView typingView;
     private boolean messageSendInFlight = false;
@@ -285,6 +296,15 @@ public final class WaysGramChatFragment extends BaseFragment {
                 ViewGroup.LayoutParams.WRAP_CONTENT
         ));
         contactButton.setOnClickListener(view -> pickContact());
+
+        Button locationButton = new Button(context);
+        locationButton.setText("Гео");
+        locationButton.setAllCaps(false);
+        composer.addView(locationButton, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+        ));
+        locationButton.setOnClickListener(view -> requestCurrentLocation());
 
         Button giftButton = new Button(context);
         giftButton.setText("Подарок");
@@ -1785,6 +1805,15 @@ public final class WaysGramChatFragment extends BaseFragment {
             String[] permissions,
             int[] grantResults
     ) {
+        if (requestCode == REQUEST_LOCATION_PERMISSION) {
+            if (grantResults != null && grantResults.length > 0
+                    && hasLocationPermission()) {
+                requestSingleCurrentLocation();
+            } else if (statusView != null) {
+                statusView.setText("Разрешение на геолокацию не предоставлено.");
+            }
+            return;
+        }
         if (requestCode == REQUEST_RECORD_AUDIO_PERMISSION) {
             if (grantResults != null && grantResults.length > 0
                     && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
@@ -1795,6 +1824,246 @@ public final class WaysGramChatFragment extends BaseFragment {
             return;
         }
         super.onRequestPermissionsResultFragment(requestCode, permissions, grantResults);
+    }
+
+    private boolean hasLocationPermission() {
+        Activity activity = getParentActivity();
+        if (activity == null) {
+            return false;
+        }
+        if (Build.VERSION.SDK_INT < 23) {
+            return true;
+        }
+        return activity.checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION)
+                == PackageManager.PERMISSION_GRANTED
+                || activity.checkSelfPermission(Manifest.permission.ACCESS_COARSE_LOCATION)
+                == PackageManager.PERMISSION_GRANTED;
+    }
+
+    private void requestCurrentLocation() {
+        if (messageSendInFlight || voiceRecorder != null || apiClient == null) {
+            statusView.setText("Завершите текущую отправку или запись перед отправкой геолокации.");
+            return;
+        }
+        Activity activity = getParentActivity();
+        if (activity == null) {
+            statusView.setText("Не удалось получить доступ к геолокации.");
+            return;
+        }
+        if (Build.VERSION.SDK_INT >= 23 && !hasLocationPermission()) {
+            requestPermissions(
+                    new String[]{
+                            Manifest.permission.ACCESS_COARSE_LOCATION,
+                            Manifest.permission.ACCESS_FINE_LOCATION
+                    },
+                    REQUEST_LOCATION_PERMISSION
+            );
+            statusView.setText("Разрешите доступ к местоположению для отправки одной точки.");
+            return;
+        }
+        requestSingleCurrentLocation();
+    }
+
+    @SuppressWarnings("MissingPermission")
+    private void requestSingleCurrentLocation() {
+        Activity activity = getParentActivity();
+        if (activity == null || !hasLocationPermission()) {
+            statusView.setText("Нет разрешения на получение местоположения.");
+            return;
+        }
+        cancelPendingLocationRequest();
+        try {
+            LocationManager manager = (LocationManager) activity.getSystemService(
+                    Context.LOCATION_SERVICE
+            );
+            if (manager == null) {
+                statusView.setText("Служба геолокации недоступна.");
+                return;
+            }
+            pendingLocationManager = manager;
+            lastKnownLocationFallback = null;
+            String[] providers = {
+                    LocationManager.NETWORK_PROVIDER,
+                    LocationManager.GPS_PROVIDER,
+                    LocationManager.PASSIVE_PROVIDER
+            };
+            for (String provider : providers) {
+                try {
+                    if (!manager.isProviderEnabled(provider)) {
+                        continue;
+                    }
+                    Location lastKnown = manager.getLastKnownLocation(provider);
+                    if (lastKnown != null && (lastKnownLocationFallback == null
+                            || lastKnown.getTime() > lastKnownLocationFallback.getTime())) {
+                        lastKnownLocationFallback = lastKnown;
+                    }
+                } catch (IllegalArgumentException | SecurityException ignored) {
+                    // A provider can be absent or unavailable on this device.
+                }
+            }
+            Criteria criteria = new Criteria();
+            criteria.setAccuracy(Criteria.ACCURACY_FINE);
+            String provider = manager.getBestProvider(criteria, true);
+            if (provider == null) {
+                criteria.setAccuracy(Criteria.ACCURACY_COARSE);
+                provider = manager.getBestProvider(criteria, true);
+            }
+            if (provider == null) {
+                provider = manager.isProviderEnabled(LocationManager.NETWORK_PROVIDER)
+                        ? LocationManager.NETWORK_PROVIDER
+                        : manager.isProviderEnabled(LocationManager.GPS_PROVIDER)
+                            ? LocationManager.GPS_PROVIDER
+                            : null;
+            }
+            if (provider == null) {
+                if (lastKnownLocationFallback != null) {
+                    confirmLocationBeforeSending(lastKnownLocationFallback, true);
+                } else {
+                    statusView.setText("Включите геолокацию в настройках устройства и повторите попытку.");
+                }
+                return;
+            }
+            final String selectedProvider = provider;
+            pendingLocationListener = new LocationListener() {
+                @Override
+                public void onLocationChanged(Location location) {
+                    finishLocationRequest(location);
+                }
+
+                @Override
+                public void onStatusChanged(String providerName, int status, Bundle extras) {
+                }
+
+                @Override
+                public void onProviderEnabled(String providerName) {
+                }
+
+                @Override
+                public void onProviderDisabled(String providerName) {
+                }
+            };
+            manager.requestSingleUpdate(
+                    selectedProvider,
+                    pendingLocationListener,
+                    Looper.getMainLooper()
+            );
+            pollHandler.removeCallbacks(locationTimeoutRunnable);
+            pollHandler.postDelayed(locationTimeoutRunnable, LOCATION_REQUEST_TIMEOUT_MS);
+            statusView.setText("Определяю местоположение…");
+        } catch (SecurityException exception) {
+            cancelPendingLocationRequest();
+            statusView.setText("Нет разрешения на получение местоположения.");
+        } catch (Exception exception) {
+            cancelPendingLocationRequest();
+            statusView.setText("Не удалось определить местоположение.");
+        }
+    }
+
+    @SuppressWarnings("MissingPermission")
+    private void finishLocationRequest(Location location) {
+        pollHandler.removeCallbacks(locationTimeoutRunnable);
+        if (pendingLocationManager != null && pendingLocationListener != null) {
+            try {
+                pendingLocationManager.removeUpdates(pendingLocationListener);
+            } catch (SecurityException ignored) {
+            }
+        }
+        pendingLocationManager = null;
+        pendingLocationListener = null;
+        Location selected = location != null ? location : lastKnownLocationFallback;
+        lastKnownLocationFallback = null;
+        if (selected == null) {
+            if (statusView != null) {
+                statusView.setText("Не удалось получить координаты. Проверьте настройки геолокации.");
+            }
+            return;
+        }
+        confirmLocationBeforeSending(selected, location == null);
+    }
+
+    @SuppressWarnings("MissingPermission")
+    private void cancelPendingLocationRequest() {
+        pollHandler.removeCallbacks(locationTimeoutRunnable);
+        if (pendingLocationManager != null && pendingLocationListener != null) {
+            try {
+                pendingLocationManager.removeUpdates(pendingLocationListener);
+            } catch (SecurityException ignored) {
+            }
+        }
+        pendingLocationManager = null;
+        pendingLocationListener = null;
+        lastKnownLocationFallback = null;
+    }
+
+    private void confirmLocationBeforeSending(Location location, boolean usingLastKnown) {
+        Activity activity = getParentActivity();
+        if (activity == null || location == null) {
+            return;
+        }
+        double latitude = location.getLatitude();
+        double longitude = location.getLongitude();
+        String coordinates = String.format(
+                Locale.US,
+                "%.6f, %.6f",
+                latitude,
+                longitude
+        );
+        String message = "Отправить эту точку собеседнику?\n" + coordinates;
+        if (usingLastKnown) {
+            message += "\n\nИспользуется последнее сохранённое местоположение устройства.";
+        }
+        new AlertDialog.Builder(activity)
+                .setTitle("Поделиться геолокацией")
+                .setMessage(message)
+                .setNegativeButton("Отмена", null)
+                .setPositiveButton("Отправить", (dialog, which) ->
+                        sendLocation(latitude, longitude))
+                .show();
+    }
+
+    private void sendLocation(double latitude, double longitude) {
+        if (apiClient == null || messageSendInFlight || voiceRecorder != null) {
+            statusView.setText("Сейчас нельзя отправить геолокацию.");
+            return;
+        }
+        JSONObject location = new JSONObject();
+        JSONObject payload = new JSONObject();
+        try {
+            location.put("latitude", latitude);
+            location.put("longitude", longitude);
+            payload.put("recipient_id", peerId);
+            payload.put("body", "Местоположение");
+            payload.put("location", location);
+            payload.put("silent", isSilentSendEnabled());
+            if (replyToMessageId > 0) {
+                payload.put("reply_to_id", replyToMessageId);
+            }
+        } catch (Exception exception) {
+            statusView.setText("Не удалось подготовить геолокацию.");
+            return;
+        }
+        String fingerprint = payload.toString();
+        String idempotencyKey = messageIdempotencyKey(fingerprint);
+        setMessageSendInFlight(true);
+        statusView.setText("Отправляю геолокацию…");
+        apiClient.post("/api/messages", payload, idempotencyKey, new WaysGramApiClient.Callback() {
+            @Override
+            public void onSuccess(JSONObject response) {
+                setMessageSendInFlight(false);
+                messageIdempotencyKeys.remove(fingerprint);
+                resetSilentSendMode();
+                replyToMessageId = 0;
+                statusView.setOnClickListener(null);
+                statusView.setText("Геолокация отправлена.");
+                loadMessages();
+            }
+
+            @Override
+            public void onError(String message, int statusCode) {
+                setMessageSendInFlight(false);
+                statusView.setText(message);
+            }
+        });
     }
 
     private void pickContact() {
@@ -2607,6 +2876,17 @@ public final class WaysGramChatFragment extends BaseFragment {
             messageViews.put(messageId, isAlbum ? messageTarget : row);
         }
 
+        double sharedLatitude = message.optDouble("location_latitude", Double.NaN);
+        double sharedLongitude = message.optDouble("location_longitude", Double.NaN);
+        if (!Double.isNaN(sharedLatitude) && !Double.isNaN(sharedLongitude)) {
+            addLocationCard(
+                    messageTarget,
+                    sharedLatitude,
+                    sharedLongitude,
+                    message.optString("location_label", "")
+            );
+        }
+
         String sharedContactName = message.optString("contact_name", "").trim();
         String sharedContactPhone = message.optString("contact_phone", "").trim();
         String sharedContactEmail = message.optString("contact_email", "").trim();
@@ -3404,6 +3684,65 @@ public final class WaysGramChatFragment extends BaseFragment {
         return headers;
     }
 
+    private void addLocationCard(
+            LinearLayout target,
+            double latitude,
+            double longitude,
+            String label
+    ) {
+        Context context = getParentActivity();
+        if (context == null) {
+            return;
+        }
+        LinearLayout card = new LinearLayout(context);
+        card.setOrientation(LinearLayout.VERTICAL);
+        card.setPadding(AndroidUtilities.dp(12), AndroidUtilities.dp(10),
+                AndroidUtilities.dp(12), AndroidUtilities.dp(10));
+        GradientDrawable background = new GradientDrawable();
+        background.setColor(Theme.getColor(Theme.key_windowBackgroundWhite));
+        background.setCornerRadius(AndroidUtilities.dp(12));
+        card.setBackground(background);
+
+        TextView title = new TextView(context);
+        title.setText(label == null || label.trim().isEmpty() ? "Геолокация" : label);
+        title.setTextSize(15);
+        title.setTextColor(Theme.getColor(Theme.key_windowBackgroundWhiteBlackText));
+        card.addView(title, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
+        ));
+
+        TextView coordinates = new TextView(context);
+        coordinates.setText(String.format(Locale.US, "%.6f, %.6f", latitude, longitude));
+        coordinates.setTextSize(12);
+        coordinates.setTextColor(Theme.getColor(Theme.key_windowBackgroundWhiteGrayText));
+        card.addView(coordinates, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
+        ));
+
+        Button openMap = new Button(context);
+        openMap.setAllCaps(false);
+        openMap.setText("Открыть на карте");
+        openMap.setOnClickListener(view -> {
+            try {
+                Uri mapUri = Uri.parse("geo:" + latitude + "," + longitude
+                        + "?q=" + latitude + "," + longitude);
+                Intent mapIntent = new Intent(Intent.ACTION_VIEW, mapUri);
+                context.startActivity(Intent.createChooser(mapIntent, "Открыть карту"));
+            } catch (ActivityNotFoundException exception) {
+                statusView.setText("Не найдено приложение для просмотра карт.");
+            }
+        });
+        card.addView(openMap, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
+        ));
+
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
+        );
+        params.bottomMargin = AndroidUtilities.dp(8);
+        target.addView(card, params);
+    }
+
     private void addContactCard(
             LinearLayout target,
             String name,
@@ -3793,6 +4132,7 @@ public final class WaysGramChatFragment extends BaseFragment {
     @Override
     public void onPause() {
         isScreenResumed = false;
+        cancelPendingLocationRequest();
         if (voiceRecorder != null) {
             stopVoiceRecording(false);
         }
@@ -3810,6 +4150,7 @@ public final class WaysGramChatFragment extends BaseFragment {
     @Override
     public void onFragmentDestroy() {
         isScreenResumed = false;
+        cancelPendingLocationRequest();
         if (voiceRecorder != null) {
             stopVoiceRecording(false);
         }
