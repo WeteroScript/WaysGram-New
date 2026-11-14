@@ -215,10 +215,10 @@ public final class WaysGramProfileGiftsView extends FrameLayout {
             }
         }
 
-        if (gift.optInt("is_listed", 0) == 1) {
+        if (gift.optInt("is_listed", gift.optBoolean("is_listed", false) ? 1 : 0) == 1) {
             details.addView(createLabel("Выставлен на маркетплейсе", 12, false));
         }
-        if (gift.optInt("is_auctioned", 0) == 1) {
+        if (gift.optInt("is_auctioned", gift.optBoolean("is_auctioned", false) ? 1 : 0) == 1) {
             details.addView(createLabel("На аукционе", 12, false));
         }
 
