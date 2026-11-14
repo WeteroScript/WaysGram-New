@@ -120,6 +120,7 @@ public final class WaysGramChatFragment extends BaseFragment {
     private Button liveLocationButton;
     private TextView liveLocationView;
     private String activeLiveLocationId;
+    private String registeredLiveLocationServiceId;
     private int pendingLiveLocationDurationSeconds = 0;
     private double displayedLiveLatitude = 0;
     private double displayedLiveLongitude = 0;
@@ -2145,7 +2146,10 @@ public final class WaysGramChatFragment extends BaseFragment {
                 activeLiveLocationId = id;
                 if (liveLocationButton != null) liveLocationButton.setText("Остановить эфир");
                 Activity activity = getParentActivity();
-                if (activity != null) WaysGramLiveLocationService.start(activity, peerId, id, expiresAt);
+                if (activity != null) {
+                    WaysGramLiveLocationService.start(activity, peerId, id, expiresAt);
+                    registeredLiveLocationServiceId = id;
+                }
                 statusView.setText("Трансляция геолокации запущена на " + liveLocationDurationLabel(durationSeconds) + ".");
                 refreshLiveLocations();
             }
@@ -2171,6 +2175,7 @@ public final class WaysGramChatFragment extends BaseFragment {
             });
         }
         activeLiveLocationId = null;
+        registeredLiveLocationServiceId = null;
         if (liveLocationButton != null) liveLocationButton.setText("Гео эфир");
         statusView.setText("Трансляция геолокации остановлена.");
         pollHandler.postDelayed(this::refreshLiveLocations, 1200L);
@@ -2196,8 +2201,17 @@ public final class WaysGramChatFragment extends BaseFragment {
                         if (own != null) {
                     activeLiveLocationId = own.optString("id", null);
                     if (liveLocationButton != null) liveLocationButton.setText("Остановить эфир");
+                    Activity activity = getParentActivity();
+                    long ownExpiry = own.optLong("expires_at", 0);
+                    if (activity != null && isScreenResumed && activeLiveLocationId != null
+                            && ownExpiry > System.currentTimeMillis() / 1000L
+                            && !activeLiveLocationId.equals(registeredLiveLocationServiceId)) {
+                        WaysGramLiveLocationService.start(activity, peerId, activeLiveLocationId, ownExpiry);
+                        registeredLiveLocationServiceId = activeLiveLocationId;
+                    }
                 } else {
                     activeLiveLocationId = null;
+                    registeredLiveLocationServiceId = null;
                     if (liveLocationButton != null) liveLocationButton.setText("Гео эфир");
                 }
                 if (incoming != null) {
