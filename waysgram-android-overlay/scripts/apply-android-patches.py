@@ -162,8 +162,8 @@ def patch_profile_gifts_source(original: str) -> str:
     )
     updated = replace_exactly_once(updated, load_more_condition, load_more_patched, "profile gifts load-more exclusion")
 
-    searchable_condition = "            type != TAB_GIFTS &&\\n"
-    searchable_patched = "            type != TAB_GIFTS &&\\n            type != TAB_WAYSGRAM_GIFTS &&\\n"
+    searchable_condition = "            type != TAB_GIFTS &&\n"
+    searchable_patched = "            type != TAB_GIFTS &&\n            type != TAB_WAYSGRAM_GIFTS &&\n"
     updated = replace_exactly_once(updated, searchable_condition, searchable_patched, "profile gifts search exclusion")
 
     return updated
