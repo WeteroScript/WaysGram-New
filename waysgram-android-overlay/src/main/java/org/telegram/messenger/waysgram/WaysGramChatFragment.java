@@ -1844,8 +1844,11 @@ public final class WaysGramChatFragment extends BaseFragment {
             if (grantResults != null && grantResults.length > 0
                     && hasLocationPermission()) {
                 requestSingleCurrentLocation();
-            } else if (statusView != null) {
-                statusView.setText("Разрешение на геолокацию не предоставлено.");
+            } else {
+                pendingLiveLocationDurationSeconds = 0;
+                if (statusView != null) {
+                    statusView.setText("Разрешение на геолокацию не предоставлено.");
+                }
             }
             return;
         }
@@ -1877,11 +1880,13 @@ public final class WaysGramChatFragment extends BaseFragment {
 
     private void requestCurrentLocation() {
         if (messageSendInFlight || voiceRecorder != null || apiClient == null) {
+            pendingLiveLocationDurationSeconds = 0;
             statusView.setText("Завершите текущую отправку или запись перед отправкой геолокации.");
             return;
         }
         Activity activity = getParentActivity();
         if (activity == null) {
+            pendingLiveLocationDurationSeconds = 0;
             statusView.setText("Не удалось получить доступ к геолокации.");
             return;
         }
@@ -1957,6 +1962,7 @@ public final class WaysGramChatFragment extends BaseFragment {
                 if (lastKnownLocationFallback != null) {
                     confirmLocationBeforeSending(lastKnownLocationFallback, true);
                 } else {
+                            pendingLiveLocationDurationSeconds = 0;
                     statusView.setText("Включите геолокацию в настройках устройства и повторите попытку.");
                 }
                 return;
@@ -1990,9 +1996,11 @@ public final class WaysGramChatFragment extends BaseFragment {
             statusView.setText("Определяю местоположение…");
         } catch (SecurityException exception) {
             cancelPendingLocationRequest();
+            pendingLiveLocationDurationSeconds = 0;
             statusView.setText("Нет разрешения на получение местоположения.");
         } catch (Exception exception) {
             cancelPendingLocationRequest();
+            pendingLiveLocationDurationSeconds = 0;
             statusView.setText("Не удалось определить местоположение.");
         }
     }
@@ -2011,6 +2019,7 @@ public final class WaysGramChatFragment extends BaseFragment {
         Location selected = location != null ? location : lastKnownLocationFallback;
         lastKnownLocationFallback = null;
         if (selected == null) {
+            pendingLiveLocationDurationSeconds = 0;
             if (statusView != null) {
                 statusView.setText("Не удалось получить координаты. Проверьте настройки геолокации.");
             }
@@ -2164,7 +2173,7 @@ public final class WaysGramChatFragment extends BaseFragment {
         activeLiveLocationId = null;
         if (liveLocationButton != null) liveLocationButton.setText("Гео эфир");
         statusView.setText("Трансляция геолокации остановлена.");
-        refreshLiveLocations();
+        pollHandler.postDelayed(this::refreshLiveLocations, 1200L);
     }
 
     private void refreshLiveLocations() {
@@ -2184,11 +2193,12 @@ public final class WaysGramChatFragment extends BaseFragment {
                                 && item.optLong("recipient_telegram_id", 0) == peerId) own = item;
                     }
                 }
-                if (own != null) {
+                        if (own != null) {
                     activeLiveLocationId = own.optString("id", null);
                     if (liveLocationButton != null) liveLocationButton.setText("Остановить эфир");
-                } else if (activeLiveLocationId == null && liveLocationButton != null) {
-                    liveLocationButton.setText("Гео эфир");
+                } else {
+                    activeLiveLocationId = null;
+                    if (liveLocationButton != null) liveLocationButton.setText("Гео эфир");
                 }
                 if (incoming != null) {
                     displayedLiveLatitude = incoming.optDouble("latitude", 0);
@@ -4427,6 +4437,7 @@ public final class WaysGramChatFragment extends BaseFragment {
     public void onPause() {
         isScreenResumed = false;
         cancelPendingLocationRequest();
+        pendingLiveLocationDurationSeconds = 0;
         if (voiceRecorder != null) {
             stopVoiceRecording(false);
         }
