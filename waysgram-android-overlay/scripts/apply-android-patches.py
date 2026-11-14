@@ -154,6 +154,18 @@ def patch_profile_gifts_source(original: str) -> str:
     )
     updated = replace_exactly_once(updated, search_condition, search_patched, "profile gifts search visibility")
 
+    load_more_condition = (
+        "        } else if (mediaPage.selectedType != TAB_RECOMMENDED_CHANNELS && mediaPage.selectedType != TAB_SAVED_MESSAGES && mediaPage.selectedType != TAB_BOT_PREVIEWS && mediaPage.selectedType != TAB_GIFTS) {"
+    )
+    load_more_patched = (
+        "        } else if (mediaPage.selectedType != TAB_RECOMMENDED_CHANNELS && mediaPage.selectedType != TAB_SAVED_MESSAGES && mediaPage.selectedType != TAB_BOT_PREVIEWS && mediaPage.selectedType != TAB_GIFTS && mediaPage.selectedType != TAB_WAYSGRAM_GIFTS) {"
+    )
+    updated = replace_exactly_once(updated, load_more_condition, load_more_patched, "profile gifts load-more exclusion")
+
+    searchable_condition = "            type != TAB_GIFTS &&\\n"
+    searchable_patched = "            type != TAB_GIFTS &&\\n            type != TAB_WAYSGRAM_GIFTS &&\\n"
+    updated = replace_exactly_once(updated, searchable_condition, searchable_patched, "profile gifts search exclusion")
+
     return updated
 
 
