@@ -25,11 +25,13 @@ public final class WaysGramProfileGiftsView extends FrameLayout {
     private final Context appContext;
     private final LinearLayout itemsContainer;
     private final TextView statusView;
+    private final WaysGramApiClient stickerClient;
     private boolean loading;
 
     public WaysGramProfileGiftsView(Context context) {
         super(context);
         appContext = context.getApplicationContext();
+        stickerClient = new WaysGramApiClient(WaysGramSessionStore.getInstance(appContext));
         setBackgroundColor(Theme.getColor(Theme.key_windowBackgroundWhite));
 
         LinearLayout root = new LinearLayout(context);
@@ -78,7 +80,6 @@ public final class WaysGramProfileGiftsView extends FrameLayout {
         scrollView.addView(itemsContainer, new ScrollView.LayoutParams(
                 LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT));
 
-        refresh();
     }
 
     public void refresh() {
@@ -127,12 +128,25 @@ public final class WaysGramProfileGiftsView extends FrameLayout {
         }
 
         int visible = Math.min(count, 100);
-        for (int i = 0; i < visible; i++) {
-            JSONObject gift = gifts.optJSONObject(i);
-            if (gift == null) {
-                continue;
+        for (int i = 0; i < visible; i += 2) {
+            LinearLayout row = new LinearLayout(getContext());
+            row.setOrientation(LinearLayout.HORIZONTAL);
+            row.setGravity(Gravity.TOP);
+
+            JSONObject first = gifts.optJSONObject(i);
+            JSONObject second = i + 1 < visible ? gifts.optJSONObject(i + 1) : null;
+            if (first != null) {
+                addGiftCard(first, row);
+            } else {
+                row.addView(new View(getContext()), new LinearLayout.LayoutParams(0, 1, 1f));
             }
-            addGiftCard(gift);
+            if (second != null) {
+                addGiftCard(second, row);
+            } else {
+                row.addView(new View(getContext()), new LinearLayout.LayoutParams(0, 1, 1f));
+            }
+            itemsContainer.addView(row, new LinearLayout.LayoutParams(
+                    LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT));
         }
         if (count > visible) {
             itemsContainer.addView(createLabel(
@@ -141,29 +155,36 @@ public final class WaysGramProfileGiftsView extends FrameLayout {
         }
     }
 
-    private void addGiftCard(JSONObject gift) {
+    private void addGiftCard(JSONObject gift, LinearLayout row) {
         LinearLayout card = new LinearLayout(getContext());
-        card.setOrientation(LinearLayout.HORIZONTAL);
-        card.setGravity(Gravity.CENTER_VERTICAL);
-        card.setPadding(AndroidUtilities.dp(12), AndroidUtilities.dp(10),
-                AndroidUtilities.dp(12), AndroidUtilities.dp(10));
+        card.setOrientation(LinearLayout.VERTICAL);
+        card.setGravity(Gravity.CENTER_HORIZONTAL);
+        card.setPadding(AndroidUtilities.dp(10), AndroidUtilities.dp(10),
+                AndroidUtilities.dp(10), AndroidUtilities.dp(12));
 
         GradientDrawable background = new GradientDrawable();
         background.setColor(Theme.getColor(Theme.key_windowBackgroundWhite));
-        background.setCornerRadius(AndroidUtilities.dp(12));
-        background.setStroke(AndroidUtilities.dp(1),
-                Theme.getColor(Theme.key_divider));
+        background.setCornerRadius(AndroidUtilities.dp(14));
+        background.setStroke(AndroidUtilities.dp(1), Theme.getColor(Theme.key_divider));
         card.setBackground(background);
+        card.setClipToOutline(true);
+
+        LinearLayout.LayoutParams cardParams = new LinearLayout.LayoutParams(
+                0, LayoutParams.WRAP_CONTENT, 1f);
+        cardParams.leftMargin = AndroidUtilities.dp(4);
+        cardParams.rightMargin = AndroidUtilities.dp(4);
+        cardParams.bottomMargin = AndroidUtilities.dp(8);
+        row.addView(card, cardParams);
 
         FrameLayout imageFrame = new FrameLayout(getContext());
         LinearLayout.LayoutParams imageParams = new LinearLayout.LayoutParams(
-                AndroidUtilities.dp(64), AndroidUtilities.dp(64));
-        imageParams.rightMargin = AndroidUtilities.dp(12);
+                LayoutParams.MATCH_PARENT, AndroidUtilities.dp(132));
+        imageParams.bottomMargin = AndroidUtilities.dp(8);
         card.addView(imageFrame, imageParams);
 
         TextView placeholder = new TextView(getContext());
         placeholder.setText("🎁");
-        placeholder.setTextSize(30);
+        placeholder.setTextSize(48);
         placeholder.setGravity(Gravity.CENTER);
         imageFrame.addView(placeholder, new FrameLayout.LayoutParams(
                 LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT));
@@ -171,24 +192,31 @@ public final class WaysGramProfileGiftsView extends FrameLayout {
         ImageView image = new ImageView(getContext());
         image.setScaleType(ImageView.ScaleType.FIT_CENTER);
         image.setVisibility(View.GONE);
+        image.setPadding(AndroidUtilities.dp(4), AndroidUtilities.dp(4),
+                AndroidUtilities.dp(4), AndroidUtilities.dp(4));
         imageFrame.addView(image, new FrameLayout.LayoutParams(
                 LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT));
 
-        LinearLayout details = new LinearLayout(getContext());
-        details.setOrientation(LinearLayout.VERTICAL);
-        card.addView(details, new LinearLayout.LayoutParams(0,
-                LayoutParams.WRAP_CONTENT, 1f));
-
         String name = gift.optString("gift_name", "Подарок WaysGram");
-        details.addView(createLabel(name, 16, true));
+        TextView title = createLabel(name, 15, true);
+        title.setGravity(Gravity.CENTER);
+        title.setMaxLines(2);
+        card.addView(title, new LinearLayout.LayoutParams(
+                LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT));
 
         String serial = gift.optString("serial_number", "");
         if (!serial.isEmpty()) {
-            details.addView(createLabel("Серийный номер: " + serial, 12, false));
+            TextView serialLabel = createLabel("№ " + serial, 12, true);
+            serialLabel.setGravity(Gravity.CENTER);
+            serialLabel.setTextColor(Theme.getColor(Theme.key_windowBackgroundWhiteBlueText));
+            card.addView(serialLabel);
         }
+
         String telegramId = gift.optString("telegram_gift_id", "");
         if (!telegramId.isEmpty()) {
-            details.addView(createLabel("Telegram Gift ID: " + telegramId, 12, false));
+            TextView idLabel = createLabel("Telegram Gift ID: " + telegramId, 10, false);
+            idLabel.setGravity(Gravity.CENTER);
+            card.addView(idLabel);
         }
 
         JSONObject attributes = gift.optJSONObject("attributes");
@@ -197,55 +225,49 @@ public final class WaysGramProfileGiftsView extends FrameLayout {
         }
         int level = Math.max(gift.optInt("upgrade_level", 0),
                 attributes.optInt("upgrade_level", 0));
-        details.addView(createLabel("Уровень WaysGram: " + level, 12, false));
+        card.addView(createLabel(
+                level > 0 ? "Коллекционный · уровень " + level : "Уровень WaysGram: 0",
+                12, level > 0));
 
         JSONObject traits = attributes.optJSONObject("collectible_traits");
         if (traits != null) {
-            String rarity = traits.optString("rarity", "");
-            String model = traits.optString("model", "");
-            String symbol = traits.optString("symbol", "");
-            String backdrop = traits.optString("backdrop", "");
-            StringBuilder line = new StringBuilder();
-            if (!rarity.isEmpty()) line.append("Редкость: ").append(rarity);
-            if (!model.isEmpty()) appendTrait(line, "Модель", model);
-            if (!symbol.isEmpty()) appendTrait(line, "Символ", symbol);
-            if (!backdrop.isEmpty()) appendTrait(line, "Фон", backdrop);
-            if (line.length() > 0) {
-                details.addView(createLabel(line.toString(), 12, false));
-            }
+            addTraitLabel(card, "Редкость", traits.optString("rarity", ""));
+            addTraitLabel(card, "Модель", traits.optString("model", ""));
+            addTraitLabel(card, "Символ", traits.optString("symbol", ""));
+            addTraitLabel(card, "Фон", traits.optString("backdrop", ""));
         }
 
         if (gift.optInt("is_listed", gift.optBoolean("is_listed", false) ? 1 : 0) == 1) {
-            details.addView(createLabel("Выставлен на маркетплейсе", 12, false));
+            card.addView(createLabel("Выставлен на маркетплейсе", 11, false));
         }
         if (gift.optInt("is_auctioned", gift.optBoolean("is_auctioned", false) ? 1 : 0) == 1) {
-            details.addView(createLabel("На аукционе", 12, false));
+            card.addView(createLabel("На аукционе", 11, false));
         }
 
-        LinearLayout.LayoutParams cardParams = new LinearLayout.LayoutParams(
-                LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT);
-        cardParams.bottomMargin = AndroidUtilities.dp(8);
-        itemsContainer.addView(card, cardParams);
-
-        if (!telegramId.isEmpty()) {
-            WaysGramApiClient imageClient = new WaysGramApiClient(
-                    WaysGramSessionStore.getInstance(appContext));
-            imageClient.downloadTelegramGiftSticker(telegramId,
+        boolean stickerAvailable = gift.optBoolean("sticker_available", !telegramId.isEmpty());
+        if (!telegramId.isEmpty() && stickerAvailable) {
+            stickerClient.downloadTelegramGiftSticker(telegramId,
                     new WaysGramApiClient.ImageCallback() {
                         @Override
                         public void onSuccess(Bitmap bitmap) {
                             image.setImageBitmap(bitmap);
                             image.setVisibility(View.VISIBLE);
                             placeholder.setVisibility(View.GONE);
-                            imageClient.close();
                         }
 
                         @Override
                         public void onError(String message, int statusCode) {
-                            imageClient.close();
+                            // Keep the local gift placeholder when Telegram media is unavailable.
                         }
                     });
         }
+    }
+
+    private void addTraitLabel(LinearLayout card, String label, String value) {
+        if (value == null || value.trim().isEmpty()) {
+            return;
+        }
+        card.addView(createLabel(label + ": " + value, 11, false));
     }
 
     private void appendTrait(StringBuilder line, String label, String value) {
