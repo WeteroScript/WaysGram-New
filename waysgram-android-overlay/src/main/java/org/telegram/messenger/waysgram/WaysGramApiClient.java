@@ -278,6 +278,12 @@ public final class WaysGramApiClient implements AutoCloseable {
         }
         String filename = queryDisplayName(resolver, uri);
         String lowerName = filename.toLowerCase(Locale.ROOT);
+        if ("video_note".equals(mediaKind)
+                && !lowerName.endsWith(".mp4")
+                && !lowerName.endsWith(".m4v")) {
+            filename = filename + ".mp4";
+            lowerName = filename.toLowerCase(Locale.ROOT);
+        }
         String mimeType;
         if (lowerName.endsWith(".jpg") || lowerName.endsWith(".jpeg")) {
             mimeType = "image/jpeg";

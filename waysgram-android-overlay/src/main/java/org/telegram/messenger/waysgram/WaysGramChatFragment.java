@@ -1800,7 +1800,7 @@ public final class WaysGramChatFragment extends BaseFragment {
                 MediaStore.EXTRA_DURATION_LIMIT,
                 MAX_VIDEO_NOTE_DURATION_SECONDS
         );
-        captureIntent.putExtra(MediaStore.EXTRA_VIDEO_QUALITY, 1);
+        captureIntent.putExtra(MediaStore.EXTRA_VIDEO_QUALITY, 0);
         if (captureIntent.resolveActivity(activity.getPackageManager()) == null) {
             statusView.setText("На устройстве нет доступного приложения камеры.");
             return;
