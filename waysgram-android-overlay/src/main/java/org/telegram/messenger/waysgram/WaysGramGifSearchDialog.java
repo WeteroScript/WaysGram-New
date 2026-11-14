@@ -294,7 +294,8 @@ public final class WaysGramGifSearchDialog {
                             file.delete();
                             return;
                         }
-                        close();
+                        if (dialog != null) dialog.dismiss();
+                        else close();
                         callback.onGifSelected(uri);
                     });
                 } catch (Exception exception) {
