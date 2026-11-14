@@ -2661,6 +2661,12 @@ public final class WaysGramChatFragment extends BaseFragment {
 
         Uri uri = pendingAttachments.get(pendingAttachmentIndex);
         String mimeType = getParentActivity().getContentResolver().getType(uri);
+        if (mimeType == null && uri.getScheme() != null && uri.getScheme().equalsIgnoreCase("file")) {
+            String localPath = uri.getPath() == null ? "" : uri.getPath().toLowerCase(Locale.ROOT);
+            if (localPath.endsWith(".png")) mimeType = "image/png";
+            else if (localPath.endsWith(".jpg") || localPath.endsWith(".jpeg")) mimeType = "image/jpeg";
+            else if (localPath.endsWith(".webp")) mimeType = "image/webp";
+        }
         int currentIndex = pendingAttachmentIndex;
         int total = pendingAttachments.size();
         statusView.setText("Загружаю вложение " + (currentIndex + 1) + " из " + total + "…");
