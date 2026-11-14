@@ -280,13 +280,20 @@ public final class WaysGramGiftCatalogSheet extends BottomSheet {
         boolean listed = gift.optInt("is_listed", gift.optBoolean("is_listed", false) ? 1 : 0) == 1;
         boolean auctioned = gift.optInt("is_auctioned", gift.optBoolean("is_auctioned", false) ? 1 : 0) == 1;
         boolean canUpgrade = gift.optString("telegram_gift_id", "").length() > 0;
+        JSONObject currentAttributes = gift.optJSONObject("attributes");
+        JSONObject currentTraits = currentAttributes == null
+                ? null : currentAttributes.optJSONObject("collectible_traits");
+        boolean isCollectible = currentTraits != null
+                && gift.optInt("upgrade_level", 0) > 0;
         if (listed) {
             actions.add("Снять с продажи");
         } else if (auctioned) {
             actions.add("Снять с аукциона");
         } else {
             actions.add("Выставить на продажу");
-            actions.add("Выставить на аукцион");
+            if (isCollectible) {
+                actions.add("Выставить на аукцион");
+            }
             if (canUpgrade) {
                 actions.add("Улучшить за WaysGram Stars");
             }
