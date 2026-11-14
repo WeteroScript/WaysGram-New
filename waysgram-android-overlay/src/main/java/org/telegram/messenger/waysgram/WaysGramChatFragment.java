@@ -2617,6 +2617,55 @@ public final class WaysGramChatFragment extends BaseFragment {
                         .show();
                 return;
             }
+            String selectedMime = getParentActivity().getContentResolver().getType(selectedUris.get(0));
+            if (selectedMime == null && selectedUris.get(0).getScheme() != null
+                    && selectedUris.get(0).getScheme().equalsIgnoreCase("file")) {
+                String localPath = selectedUris.get(0).getPath() == null ? ""
+                        : selectedUris.get(0).getPath().toLowerCase(Locale.ROOT);
+                if (localPath.endsWith(".mp4") || localPath.endsWith(".m4v")) {
+                    selectedMime = "video/mp4";
+                } else if (localPath.endsWith(".mov")) {
+                    selectedMime = "video/quicktime";
+                } else if (localPath.endsWith(".webm")) {
+                    selectedMime = "video/webm";
+                } else if (localPath.endsWith(".mkv")) {
+                    selectedMime = "video/x-matroska";
+                }
+            }
+            if (selectedMime != null && selectedMime.startsWith("video/")) {
+                Uri sourceVideo = selectedUris.get(0);
+                new AlertDialog.Builder(getParentActivity())
+                        .setTitle("Видео")
+                        .setItems(new String[]{"Отправить без изменений", "Обрезать видео"},
+                                (dialog, which) -> {
+                                    if (which == 0) {
+                                        startAttachmentBatch(selectedUris, true);
+                                    } else {
+                                        statusView.setText("Открываю редактор видео…");
+                                        WaysGramVideoEditor.show(
+                                                getParentActivity(),
+                                                getParentActivity().getContentResolver(),
+                                                sourceVideo,
+                                                new WaysGramVideoEditor.Callback() {
+                                                    @Override
+                                                    public void onEdited(Uri editedVideo) {
+                                                        ArrayList<Uri> edited = new ArrayList<>();
+                                                        edited.add(editedVideo);
+                                                        startAttachmentBatch(edited, true);
+                                                    }
+
+                                                    @Override
+                                                    public void onError(String message) {
+                                                        statusView.setText(message);
+                                                    }
+                                                }
+                                        );
+                                    }
+                                })
+                        .setNegativeButton("Отмена", null)
+                        .show();
+                return;
+            }
         }
         startAttachmentBatch(selectedUris, sendAsFile);
     }
