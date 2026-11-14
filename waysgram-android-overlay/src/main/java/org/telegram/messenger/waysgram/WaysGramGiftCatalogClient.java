@@ -276,6 +276,44 @@ public final class WaysGramGiftCatalogClient implements AutoCloseable {
         });
     }
 
+    public void loadCollectibleAuctions(MarketCallback callback) {
+        if (callback == null) {
+            return;
+        }
+        ioExecutor.execute(() -> {
+            try {
+                JSONObject response = requestJson(getBaseUrl() + "/api/gift-auctions");
+                JSONArray auctions = response.optJSONArray("auctions");
+                callback.onLoaded(auctions == null ? new JSONArray() : auctions);
+            } catch (Exception exception) {
+                callback.onError(toSafeError(exception));
+            }
+        });
+    }
+
+    public void createCollectibleAuction(String serial, int startingPriceGrams,
+                                         int durationSeconds, ActionCallback callback) {
+        JSONObject body = new JSONObject();
+        try {
+            body.put("starting_price_grams", startingPriceGrams);
+            body.put("duration_seconds", durationSeconds);
+        } catch (Exception ignored) {
+        }
+        runGiftAction("/api/gifts/" + encodePathSegment(serial) + "/auction",
+                "POST", body.toString(), callback);
+    }
+
+    public void cancelCollectibleAuction(String serial, ActionCallback callback) {
+        runGiftAction("/api/gifts/" + encodePathSegment(serial) + "/auction",
+                "DELETE", null, callback);
+    }
+
+    public void placeCollectibleAuctionBid(int auctionId, int amountGrams,
+                                           ActionCallback callback) {
+        runGiftAction("/api/gift-auctions/" + auctionId + "/bid",
+                "POST", jsonBody("amount_grams", amountGrams), callback);
+    }
+
     public void listGift(String serial, int priceGrams, ActionCallback callback) {
         runGiftAction("/api/gifts/" + encodePathSegment(serial) + "/list", "POST",
                 jsonBody("price_grams", priceGrams), callback);
