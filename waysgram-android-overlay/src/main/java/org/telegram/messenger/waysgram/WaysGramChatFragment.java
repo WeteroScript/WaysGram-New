@@ -3882,6 +3882,39 @@ public final class WaysGramChatFragment extends BaseFragment {
         MediaController controller = new MediaController(context);
         controller.setAnchorView(videoView);
         videoView.setMediaController(controller);
+        final float[] videoPlaybackSpeed = {1.0f};
+        final android.media.MediaPlayer[] videoPlayer = {null};
+        videoView.setOnPreparedListener(player -> {
+            videoPlayer[0] = player;
+            if (Build.VERSION.SDK_INT >= 23) {
+                try {
+                    player.setPlaybackParams(player.getPlaybackParams().setSpeed(videoPlaybackSpeed[0]));
+                } catch (IllegalArgumentException | IllegalStateException ignored) {
+                }
+            }
+        });
+        Button videoSpeedButton = new Button(context);
+        videoSpeedButton.setAllCaps(false);
+        videoSpeedButton.setText("Скорость · 1×");
+        videoSpeedButton.setOnClickListener(view -> {
+            if (Build.VERSION.SDK_INT < 23) {
+                statusView.setText("Изменение скорости доступно на Android 6.0 и новее.");
+                return;
+            }
+            videoPlaybackSpeed[0] = nextPlaybackSpeed(videoPlaybackSpeed[0]);
+            videoSpeedButton.setText("Скорость · " + playbackSpeedLabel(videoPlaybackSpeed[0]));
+            try {
+                if (videoView.isPlaying()) {
+                    if (videoPlayer[0] != null) {
+                        videoPlayer[0].setPlaybackParams(
+                                videoPlayer[0].getPlaybackParams().setSpeed(videoPlaybackSpeed[0])
+                        );
+                    }
+                }
+            } catch (IllegalArgumentException | IllegalStateException exception) {
+                statusView.setText("Не удалось изменить скорость видео.");
+            }
+        });
         videoView.setOnErrorListener((player, what, extra) -> {
             statusView.setText("Этот формат видео не поддерживается устройством. Сохраните файл для открытия в другом приложении.");
             return true;
@@ -3896,6 +3929,9 @@ public final class WaysGramChatFragment extends BaseFragment {
         }
         videoParams.bottomMargin = AndroidUtilities.dp(5);
         target.addView(videoView, videoParams);
+        target.addView(videoSpeedButton, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT
+        ));
         addMediaSaveButton(target, mediaId, mediaName, mediaType);
     }
 
@@ -3915,6 +3951,26 @@ public final class WaysGramChatFragment extends BaseFragment {
 
         final MediaPlayer[] playerHolder = new MediaPlayer[1];
         final boolean[] prepared = {false};
+        final float[] playbackSpeed = {1.0f};
+        Button speedButton = new Button(context);
+        speedButton.setAllCaps(false);
+        speedButton.setText("Скорость · 1×");
+        speedButton.setOnClickListener(view -> {
+            if (Build.VERSION.SDK_INT < 23) {
+                statusView.setText("Изменение скорости доступно на Android 6.0 и новее.");
+                return;
+            }
+            playbackSpeed[0] = nextPlaybackSpeed(playbackSpeed[0]);
+            speedButton.setText("Скорость · " + playbackSpeedLabel(playbackSpeed[0]));
+            MediaPlayer current = playerHolder[0];
+            if (current != null && prepared[0]) {
+                try {
+                    current.setPlaybackParams(current.getPlaybackParams().setSpeed(playbackSpeed[0]));
+                } catch (IllegalArgumentException | IllegalStateException exception) {
+                    statusView.setText("Не удалось изменить скорость аудио.");
+                }
+            }
+        });
         playButton.setOnClickListener(view -> {
             MediaPlayer player = playerHolder[0];
             if (player == null) {
@@ -3929,6 +3985,14 @@ public final class WaysGramChatFragment extends BaseFragment {
                     created.setDataSource(context, uri, mediaAuthorizationHeaders());
                     created.setOnPreparedListener(preparedPlayer -> {
                         prepared[0] = true;
+                        if (Build.VERSION.SDK_INT >= 23) {
+                            try {
+                                preparedPlayer.setPlaybackParams(
+                                        preparedPlayer.getPlaybackParams().setSpeed(playbackSpeed[0])
+                                );
+                            } catch (IllegalArgumentException | IllegalStateException ignored) {
+                            }
+                        }
                         preparedPlayer.start();
                         playButton.setText("⏸ Пауза: " + mediaName);
                     });
@@ -3976,7 +4040,24 @@ public final class WaysGramChatFragment extends BaseFragment {
                 playButton.setText("Не удалось воспроизвести аудио");
             }
         });
+        target.addView(speedButton, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT
+        ));
         addMediaSaveButton(target, mediaId, mediaName, mediaType);
+    }
+
+    private float nextPlaybackSpeed(float current) {
+        if (current < 1.1f) return 1.25f;
+        if (current < 1.4f) return 1.5f;
+        if (current < 1.7f) return 2.0f;
+        return 1.0f;
+    }
+
+    private String playbackSpeedLabel(float speed) {
+        if (Math.abs(speed - 1.0f) < 0.01f) return "1×";
+        if (Math.abs(speed - 1.25f) < 0.01f) return "1,25×";
+        if (Math.abs(speed - 1.5f) < 0.01f) return "1,5×";
+        return "2×";
     }
 
     private void saveDocument(String mediaId, String mediaName, String mediaType) {
