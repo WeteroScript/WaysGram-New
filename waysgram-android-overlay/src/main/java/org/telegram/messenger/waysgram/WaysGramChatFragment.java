@@ -11,6 +11,7 @@ import android.content.ClipData;
 import android.content.ClipboardManager;
 import android.content.Context;
 import android.content.Intent;
+import android.database.Cursor;
 import android.graphics.Bitmap;
 import android.graphics.Outline;
 import android.graphics.drawable.GradientDrawable;
@@ -21,6 +22,7 @@ import android.media.MediaRecorder;
 import android.os.Build;
 import android.os.Handler;
 import android.os.Looper;
+import android.provider.ContactsContract;
 import android.provider.MediaStore;
 import android.text.Spannable;
 import android.text.SpannableStringBuilder;
@@ -82,6 +84,7 @@ public final class WaysGramChatFragment extends BaseFragment {
     private static final int REQUEST_SAVE_DOCUMENT = 7103;
     private static final int REQUEST_RECORD_AUDIO_PERMISSION = 7104;
     private static final int REQUEST_VIDEO_NOTE = 7105;
+    private static final int REQUEST_CONTACT_PICKER = 7106;
     private static final int MAX_VOICE_MESSAGE_DURATION_MS = 5 * 60 * 1000;
     private static final int MAX_VIDEO_NOTE_DURATION_SECONDS = 60;
     private final long peerId;
@@ -273,6 +276,15 @@ public final class WaysGramChatFragment extends BaseFragment {
                 ViewGroup.LayoutParams.WRAP_CONTENT
         ));
         videoNoteButton.setOnClickListener(view -> pickVideoNote());
+
+        Button contactButton = new Button(context);
+        contactButton.setText("Контакт");
+        contactButton.setAllCaps(false);
+        composer.addView(contactButton, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+        ));
+        contactButton.setOnClickListener(view -> pickContact());
 
         Button giftButton = new Button(context);
         giftButton.setText("Подарок");
@@ -1785,6 +1797,129 @@ public final class WaysGramChatFragment extends BaseFragment {
         super.onRequestPermissionsResultFragment(requestCode, permissions, grantResults);
     }
 
+    private void pickContact() {
+        if (messageSendInFlight || voiceRecorder != null) {
+            statusView.setText("Завершите текущую отправку или запись перед выбором контакта.");
+            return;
+        }
+        Activity activity = getParentActivity();
+        if (activity == null) {
+            statusView.setText("Не удалось открыть список контактов.");
+            return;
+        }
+        Intent picker = new Intent(
+                Intent.ACTION_PICK,
+                ContactsContract.CommonDataKinds.Phone.CONTENT_URI
+        );
+        if (picker.resolveActivity(activity.getPackageManager()) == null) {
+            statusView.setText("На устройстве нет приложения контактов.");
+            return;
+        }
+        startActivityForResult(picker, REQUEST_CONTACT_PICKER);
+    }
+
+    private void handleContactPickerResult(int resultCode, Intent data) {
+        if (resultCode != Activity.RESULT_OK || data == null || data.getData() == null) {
+            statusView.setText("Выбор контакта отменён.");
+            return;
+        }
+        Activity activity = getParentActivity();
+        if (activity == null) {
+            statusView.setText("Не удалось прочитать выбранный контакт.");
+            return;
+        }
+        String contactName = "";
+        String contactPhone = "";
+        try (Cursor cursor = activity.getContentResolver().query(
+                data.getData(),
+                new String[]{
+                        ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME,
+                        ContactsContract.CommonDataKinds.Phone.NUMBER
+                },
+                null,
+                null,
+                null
+        )) {
+            if (cursor != null && cursor.moveToFirst()) {
+                int nameIndex = cursor.getColumnIndex(
+                        ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME
+                );
+                int phoneIndex = cursor.getColumnIndex(
+                        ContactsContract.CommonDataKinds.Phone.NUMBER
+                );
+                if (nameIndex >= 0) {
+                    contactName = cursor.getString(nameIndex);
+                }
+                if (phoneIndex >= 0) {
+                    contactPhone = cursor.getString(phoneIndex);
+                }
+            }
+        } catch (Exception exception) {
+            statusView.setText("Не удалось получить данные выбранного контакта.");
+            return;
+        }
+        contactName = contactName == null ? "" : contactName.trim();
+        contactPhone = contactPhone == null ? "" : contactPhone.trim();
+        if (contactName.isEmpty() || contactPhone.isEmpty()) {
+            statusView.setText("В выбранной записи нет имени или номера телефона.");
+            return;
+        }
+        final String selectedName = contactName;
+        final String selectedPhone = contactPhone;
+        new AlertDialog.Builder(activity)
+                .setTitle("Отправить контакт?")
+                .setMessage(selectedName + "\n" + selectedPhone)
+                .setNegativeButton("Отмена", null)
+                .setPositiveButton("Отправить", (dialog, which) ->
+                        sendContact(selectedName, selectedPhone))
+                .show();
+    }
+
+    private void sendContact(String name, String phone) {
+        if (apiClient == null || messageSendInFlight || voiceRecorder != null) {
+            statusView.setText("Сейчас нельзя отправить контакт. Повторите попытку позже.");
+            return;
+        }
+        JSONObject contact = new JSONObject();
+        JSONObject payload = new JSONObject();
+        try {
+            contact.put("name", name);
+            contact.put("phone", phone);
+            payload.put("recipient_id", peerId);
+            payload.put("body", "Контакт: " + name);
+            payload.put("contact", contact);
+            payload.put("silent", isSilentSendEnabled());
+            if (replyToMessageId > 0) {
+                payload.put("reply_to_id", replyToMessageId);
+            }
+        } catch (Exception exception) {
+            statusView.setText("Не удалось подготовить карточку контакта.");
+            return;
+        }
+        String fingerprint = payload.toString();
+        String idempotencyKey = messageIdempotencyKey(fingerprint);
+        setMessageSendInFlight(true);
+        statusView.setText("Отправляю контакт…");
+        apiClient.post("/api/messages", payload, idempotencyKey, new WaysGramApiClient.Callback() {
+            @Override
+            public void onSuccess(JSONObject response) {
+                setMessageSendInFlight(false);
+                messageIdempotencyKeys.remove(fingerprint);
+                resetSilentSendMode();
+                replyToMessageId = 0;
+                statusView.setOnClickListener(null);
+                statusView.setText("Контакт отправлен.");
+                loadMessages();
+            }
+
+            @Override
+            public void onError(String message, int statusCode) {
+                setMessageSendInFlight(false);
+                statusView.setText(message);
+            }
+        });
+    }
+
     private void pickVideoNote() {
         if (messageSendInFlight || voiceRecorder != null) {
             statusView.setText("Завершите текущую отправку или запись перед съёмкой.");
@@ -1835,6 +1970,10 @@ public final class WaysGramChatFragment extends BaseFragment {
 
     @Override
     public void onActivityResultFragment(int requestCode, int resultCode, Intent data) {
+        if (requestCode == REQUEST_CONTACT_PICKER) {
+            handleContactPickerResult(resultCode, data);
+            return;
+        }
         if (requestCode == REQUEST_VIDEO_NOTE) {
             if (resultCode != Activity.RESULT_OK || data == null) {
                 statusView.setText("Съёмка видеосообщения отменена.");
@@ -2466,6 +2605,18 @@ public final class WaysGramChatFragment extends BaseFragment {
         }
         if (messageId > 0) {
             messageViews.put(messageId, isAlbum ? messageTarget : row);
+        }
+
+        String sharedContactName = message.optString("contact_name", "").trim();
+        String sharedContactPhone = message.optString("contact_phone", "").trim();
+        String sharedContactEmail = message.optString("contact_email", "").trim();
+        if (!sharedContactName.isEmpty() && !sharedContactPhone.isEmpty()) {
+            addContactCard(
+                    messageTarget,
+                    sharedContactName,
+                    sharedContactPhone,
+                    sharedContactEmail
+            );
         }
 
         String giftSerial = message.optString("gift_serial_number", "");
@@ -3251,6 +3402,97 @@ public final class WaysGramChatFragment extends BaseFragment {
             }
         }
         return headers;
+    }
+
+    private void addContactCard(
+            LinearLayout target,
+            String name,
+            String phone,
+            String email
+    ) {
+        Context context = getParentActivity();
+        if (context == null) {
+            return;
+        }
+        LinearLayout card = new LinearLayout(context);
+        card.setOrientation(LinearLayout.VERTICAL);
+        card.setPadding(AndroidUtilities.dp(12), AndroidUtilities.dp(10),
+                AndroidUtilities.dp(12), AndroidUtilities.dp(10));
+        GradientDrawable background = new GradientDrawable();
+        background.setColor(Theme.getColor(Theme.key_windowBackgroundWhite));
+        background.setCornerRadius(AndroidUtilities.dp(12));
+        card.setBackground(background);
+
+        TextView title = new TextView(context);
+        title.setText("Контакт");
+        title.setTextSize(11);
+        title.setTextColor(Theme.getColor(Theme.key_windowBackgroundWhiteGrayText));
+        card.addView(title, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
+        ));
+
+        TextView contactName = new TextView(context);
+        contactName.setText(name);
+        contactName.setTextSize(16);
+        contactName.setTextColor(Theme.getColor(Theme.key_windowBackgroundWhiteBlackText));
+        card.addView(contactName, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
+        ));
+
+        TextView contactPhone = new TextView(context);
+        contactPhone.setText(phone);
+        contactPhone.setTextSize(14);
+        contactPhone.setTextColor(Theme.getColor(Theme.key_windowBackgroundWhiteGrayText));
+        card.addView(contactPhone, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
+        ));
+
+        LinearLayout actions = new LinearLayout(context);
+        actions.setOrientation(LinearLayout.HORIZONTAL);
+        Button callButton = new Button(context);
+        callButton.setAllCaps(false);
+        callButton.setText("Позвонить");
+        callButton.setOnClickListener(view -> {
+            try {
+                Intent dial = new Intent(Intent.ACTION_DIAL, Uri.fromParts("tel", phone, null));
+                context.startActivity(dial);
+            } catch (ActivityNotFoundException exception) {
+                statusView.setText("Не найдено приложение для звонков.");
+            }
+        });
+        actions.addView(callButton, new LinearLayout.LayoutParams(
+                0, ViewGroup.LayoutParams.WRAP_CONTENT, 1
+        ));
+
+        Button saveButton = new Button(context);
+        saveButton.setAllCaps(false);
+        saveButton.setText("Сохранить");
+        saveButton.setOnClickListener(view -> {
+            try {
+                Intent insert = new Intent(ContactsContract.Intents.Insert.ACTION);
+                insert.setType(ContactsContract.RawContacts.CONTENT_TYPE);
+                insert.putExtra(ContactsContract.Intents.Insert.NAME, name);
+                insert.putExtra(ContactsContract.Intents.Insert.PHONE, phone);
+                if (email != null && !email.trim().isEmpty()) {
+                    insert.putExtra(ContactsContract.Intents.Insert.EMAIL, email);
+                }
+                context.startActivity(insert);
+            } catch (ActivityNotFoundException exception) {
+                statusView.setText("Не найдено приложение для сохранения контактов.");
+            }
+        });
+        actions.addView(saveButton, new LinearLayout.LayoutParams(
+                0, ViewGroup.LayoutParams.WRAP_CONTENT, 1
+        ));
+        card.addView(actions, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
+        ));
+
+        LinearLayout.LayoutParams cardParams = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
+        );
+        cardParams.bottomMargin = AndroidUtilities.dp(8);
+        target.addView(card, cardParams);
     }
 
     private void addMediaSaveButton(LinearLayout target, String mediaId, String mediaName, String mediaType) {
