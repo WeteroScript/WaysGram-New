@@ -1,5 +1,9 @@
 name: Build Android APK
 
+concurrency:
+  group: waysgram-android-apk-${{ github.ref }}
+  cancel-in-progress: true
+
 on:
   workflow_dispatch:
   push:
