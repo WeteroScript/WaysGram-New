@@ -45,9 +45,18 @@ public final class WaysGramApiClient implements AutoCloseable {
     }
 
     public void uploadDocument(ContentResolver resolver, Uri uri, Callback callback) {
+        uploadDocument(resolver, uri, "", callback);
+    }
+
+    public void uploadDocument(
+            ContentResolver resolver,
+            Uri uri,
+            String mediaKind,
+            Callback callback
+    ) {
         ioExecutor.execute(() -> {
             try {
-                JSONObject response = performDocumentUpload(resolver, uri);
+                JSONObject response = performDocumentUpload(resolver, uri, mediaKind);
                 deliverSuccess(callback, response);
             } catch (ApiException exception) {
                 deliverError(callback, exception.getMessage(), exception.statusCode);
@@ -259,7 +268,11 @@ public final class WaysGramApiClient implements AutoCloseable {
     }
 
 
-    private JSONObject performDocumentUpload(ContentResolver resolver, Uri uri) throws Exception {
+    private JSONObject performDocumentUpload(
+            ContentResolver resolver,
+            Uri uri,
+            String mediaKind
+    ) throws Exception {
         if (resolver == null || uri == null) {
             throw new IOException("Не выбран документ");
         }
@@ -338,6 +351,12 @@ public final class WaysGramApiClient implements AutoCloseable {
             throw new IOException("Нет активной сессии WaysGram");
         }
 
+        String requestedMediaKind = mediaKind == null ? "" : mediaKind.trim();
+        if (!requestedMediaKind.isEmpty()
+                && (!"video_note".equals(requestedMediaKind) || !"video/mp4".equals(mimeType))) {
+            throw new IOException("Видеосообщение должно быть файлом MP4");
+        }
+
         HttpURLConnection connection = null;
         try {
             connection = (HttpURLConnection) new URL(baseUrl + "/api/media/documents").openConnection();
@@ -350,6 +369,9 @@ public final class WaysGramApiClient implements AutoCloseable {
             connection.setRequestProperty("Authorization", "Bearer " + token);
             connection.setRequestProperty("Content-Type", mimeType);
             connection.setRequestProperty("X-Filename", encodedName);
+            if (!requestedMediaKind.isEmpty()) {
+                connection.setRequestProperty("X-Media-Kind", requestedMediaKind);
+            }
             connection.setFixedLengthStreamingMode(content.length);
             try (OutputStream output = connection.getOutputStream()) {
                 output.write(content);
