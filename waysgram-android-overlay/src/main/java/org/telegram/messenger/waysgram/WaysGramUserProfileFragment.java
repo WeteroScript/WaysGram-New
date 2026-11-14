@@ -318,6 +318,9 @@ public final class WaysGramUserProfileFragment extends BaseFragment {
             if (gift.optInt("is_listed", 0) == 1) {
                 addLabel(getParentActivity(), card, "Выставлен на маркетплейсе", 12, false);
             }
+            if (gift.optInt("is_auctioned", 0) == 1) {
+                addLabel(getParentActivity(), card, "Выставлен на аукционе", 12, false);
+            }
             LinearLayout.LayoutParams cardParams = matchWrap();
             cardParams.bottomMargin = AndroidUtilities.dp(8);
             giftsContainer.addView(card, cardParams);
