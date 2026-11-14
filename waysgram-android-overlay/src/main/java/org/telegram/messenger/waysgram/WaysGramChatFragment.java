@@ -2749,6 +2749,7 @@ public final class WaysGramChatFragment extends BaseFragment {
             else if (localPath.endsWith(".webm")) mimeType = "video/webm";
             else if (localPath.endsWith(".mkv")) mimeType = "video/x-matroska";
         }
+        final String uploadMimeType = mimeType;
         int currentIndex = pendingAttachmentIndex;
         int total = pendingAttachments.size();
         statusView.setText("Загружаю вложение " + (currentIndex + 1) + " из " + total + "…");
@@ -2756,7 +2757,7 @@ public final class WaysGramChatFragment extends BaseFragment {
         WaysGramApiClient.Callback uploadCallback = new WaysGramApiClient.Callback() {
             @Override
             public void onSuccess(JSONObject response) {
-                sendUploadedAttachment(response, mimeType, currentIndex);
+                sendUploadedAttachment(response, uploadMimeType, currentIndex);
             }
 
             @Override
@@ -2772,7 +2773,7 @@ public final class WaysGramChatFragment extends BaseFragment {
                     pendingAttachmentMediaKind,
                     uploadCallback
             );
-        } else if (mimeType != null && mimeType.startsWith("image/") && !pendingAttachmentAsFile) {
+        } else if (uploadMimeType != null && uploadMimeType.startsWith("image/") && !pendingAttachmentAsFile) {
             apiClient.uploadImage(getParentActivity().getContentResolver(), uri, uploadCallback);
         } else {
             apiClient.uploadDocument(getParentActivity().getContentResolver(), uri, uploadCallback);
