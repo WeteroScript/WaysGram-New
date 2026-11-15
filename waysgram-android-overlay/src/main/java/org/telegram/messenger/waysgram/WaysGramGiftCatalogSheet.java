@@ -60,7 +60,8 @@ public final class WaysGramGiftCatalogSheet extends BottomSheet {
     private TextView statusView;
     private ProgressBar progressBar;
     private final Set<String> purchasingGiftIds = new HashSet<>();
-    private AlertDialog inventoryDialog;
+    private WaysGramGiftInventorySheet inventorySheet;
+    private final WaysGramGiftCatalogClient.SessionProvider sessionProvider;
 
     public WaysGramGiftCatalogSheet(
             Context context,
@@ -79,6 +80,7 @@ public final class WaysGramGiftCatalogSheet extends BottomSheet {
         super(context, false, resourcesProvider);
         this.resourcesProvider = resourcesProvider;
         this.onPurchaseComplete = onPurchaseComplete;
+        this.sessionProvider = sessionProvider;
         catalogClient = new WaysGramGiftCatalogClient(sessionProvider);
         adapter = new GiftAdapter();
 
@@ -88,10 +90,10 @@ public final class WaysGramGiftCatalogSheet extends BottomSheet {
         setCustomView(createContent(context));
 
         setOnDismissListener(dialog -> {
-            if (inventoryDialog != null && inventoryDialog.isShowing()) {
-                inventoryDialog.dismiss();
+            if (inventorySheet != null && !inventorySheet.isDismissed()) {
+                inventorySheet.dismiss();
             }
-            inventoryDialog = null;
+            inventorySheet = null;
             catalogClient.close();
         });
         loadCatalog();
@@ -186,92 +188,20 @@ public final class WaysGramGiftCatalogSheet extends BottomSheet {
     }
 
     private void showMyGifts() {
-        if (inventoryDialog != null && inventoryDialog.isShowing()) {
-            inventoryDialog.dismiss();
+        if (inventorySheet != null && !inventorySheet.isDismissed()) {
+            inventorySheet.dismiss();
         }
-        AlertDialog loading = new AlertDialog.Builder(getContext())
-                .setTitle("Мои подарки")
-                .setMessage("Загружаю инвентарь…")
-                .setPositiveButton("Закрыть", null)
-                .create();
-        inventoryDialog = loading;
-        loading.setOnDismissListener(ignored -> {
-            if (inventoryDialog == loading) {
-                inventoryDialog = null;
-            }
-        });
-        loading.show();
-        catalogClient.loadMyGifts(new WaysGramGiftCatalogClient.InventoryCallback() {
-            @Override
-            public void onLoaded(JSONArray gifts) {
-                AndroidUtilities.runOnUIThread(() -> {
-                    if (isDismissed() || !loading.isShowing()) {
-                        return;
-                    }
-                    if (gifts.length() == 0) {
-                        loading.setMessage("Инвентарь пока пуст.");
-                        return;
-                    }
-                    ArrayList<JSONObject> items = new ArrayList<>();
-                    String[] labels = new String[gifts.length()];
-                    for (int i = 0; i < gifts.length(); i++) {
-                        JSONObject gift = gifts.optJSONObject(i);
-                        if (gift == null) {
-                            labels[i] = "Подарок";
-                            items.add(new JSONObject());
-                            continue;
-                        }
-                        items.add(gift);
-                        String name = gift.optString("gift_name", "Подарок WaysGram");
-                        String serial = gift.optString("serial_number", "");
-                        int level = gift.optInt("upgrade_level", 0);
-                        JSONObject giftAttributes = gift.optJSONObject("attributes");
-                        JSONObject collectibleTraits = giftAttributes == null
-                                ? null : giftAttributes.optJSONObject("collectible_traits");
-                        String rarity = collectibleTraits == null
-                                ? "" : collectibleTraits.optString("rarity", "");
-                        boolean isListed = gift.optInt(
-                                "is_listed", gift.optBoolean("is_listed", false) ? 1 : 0
-                        ) == 1;
-                        boolean isAuctioned = gift.optInt(
-                                "is_auctioned", gift.optBoolean("is_auctioned", false) ? 1 : 0
-                        ) == 1;
-                        labels[i] = name
-                                + (rarity.isEmpty() ? "" : " · " + rarity)
-                                + (level > 0 ? " · уровень " + level : "")
-                                + (isListed ? " · выставлен" : "")
-                                + (isAuctioned ? " · на аукционе" : "")
-                                + (serial.isEmpty() ? "" : "\n" + serial);
-                    }
-                    loading.dismiss();
-                    AlertDialog list = new AlertDialog.Builder(getContext())
-                            .setTitle("Мои подарки")
-                            .setItems(labels, (dialog, which) -> {
-                                if (which >= 0 && which < items.size()) {
-                                    showGiftActions(items.get(which));
-                                }
-                            })
-                            .setPositiveButton("Закрыть", null)
-                            .create();
-                    inventoryDialog = list;
-                    list.setOnDismissListener(ignored -> {
-                        if (inventoryDialog == list) {
-                            inventoryDialog = null;
-                        }
-                    });
-                    list.show();
-                });
-            }
-
-            @Override
-            public void onError(String message) {
-                AndroidUtilities.runOnUIThread(() -> {
-                    if (!isDismissed() && loading.isShowing()) {
-                        loading.setMessage("Не удалось загрузить инвентарь: " + message);
-                    }
-                });
-            }
-        });
+        inventorySheet = new WaysGramGiftInventorySheet(
+                getContext(),
+                sessionProvider,
+                resourcesProvider,
+                gift -> {
+                    inventorySheet = null;
+                    showGiftActions(gift);
+                }
+        );
+        inventorySheet.setOnDismissListener(dialog -> inventorySheet = null);
+        inventorySheet.show();
     }
 
     private void showGiftActions(JSONObject gift) {
