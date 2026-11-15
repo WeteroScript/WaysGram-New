@@ -2,6 +2,7 @@ package org.telegram.messenger.waysgram;
 
 import android.content.Context;
 import android.graphics.Bitmap;
+import android.graphics.Color;
 
 import org.json.JSONArray;
 import org.json.JSONObject;
@@ -14,6 +15,7 @@ import org.telegram.ui.Gifts.ProfileGiftsContainer;
 
 import java.util.ArrayList;
 import java.util.HashSet;
+import java.util.Locale;
 import java.util.Set;
 
 /**
@@ -60,8 +62,8 @@ public final class WaysGramProfileGiftsController {
                     loading = false;
                     client.close();
                     JSONArray inventory = gifts == null ? new JSONArray() : gifts;
-                    ArrayList<TL_stars.SavedStarGift> nativeGifts = toNativeGifts(inventory);
                     WaysGramGiftMediaStore.clear();
+                    ArrayList<TL_stars.SavedStarGift> nativeGifts = toNativeGifts(inventory);
                     container.setWaysGramInventory(nativeGifts);
                     downloadGiftStickers(inventory);
                 });
@@ -96,13 +98,35 @@ public final class WaysGramProfileGiftsController {
             long telegramGiftId = positiveLong(item, "telegram_gift_id", uniqueId);
             int serialNumber = serialNumber(item, serial);
             long acquiredAt = Math.max(0L, item.optLong("acquired_at", 0L));
+            JSONObject attributes = item.optJSONObject("attributes");
+            JSONObject traits = attributes == null ? null : attributes.optJSONObject("collectible_traits");
+            int upgradeLevel = item.has("upgrade_level")
+                    ? Math.max(0, item.optInt("upgrade_level", 0))
+                    : Math.max(0, attributes == null ? 0 : attributes.optInt("upgrade_level", 0));
+            String rarity = optText(traits, "rarity");
+            String model = optText(traits, "model");
+            String symbol = optText(traits, "symbol");
+            String backdropName = backdropName(optText(traits, "backdrop"));
+            String giftTitle = item.optString("gift_name", "Gift");
+            boolean isListed = item.optBoolean("is_listed", false);
+            boolean isAuctioned = item.optBoolean("is_auctioned", false);
+
+            WaysGramGiftMediaStore.putMetadata(
+                    serial,
+                    giftTitle,
+                    buildGiftSubtitle(serial, upgradeLevel, rarity, model, symbol, backdropName, isListed, isAuctioned)
+            );
 
             TL_stars.TL_starGiftUnique nativeGift = new TL_stars.TL_starGiftUnique();
             nativeGift.id = uniqueId;
             nativeGift.gift_id = telegramGiftId;
-            nativeGift.title = item.optString("gift_name", "Gift");
+            nativeGift.title = giftTitle;
             nativeGift.slug = "waysgram://" + serial;
             nativeGift.num = serialNumber;
+            TL_stars.starGiftAttributeBackdrop nativeBackdrop = createNativeBackdrop(traits, rarity);
+            if (nativeBackdrop != null) {
+                nativeGift.attributes.add(nativeBackdrop);
+            }
 
             TL_stars.TL_savedStarGift savedGift = new TL_stars.TL_savedStarGift();
             savedGift.date = (int) Math.min(Integer.MAX_VALUE, acquiredAt);
@@ -113,6 +137,150 @@ public final class WaysGramProfileGiftsController {
             result.add(savedGift);
         }
         return result;
+    }
+
+    private static String optText(JSONObject object, String key) {
+        if (object == null) {
+            return "";
+        }
+        String value = object.optString(key, "").trim();
+        return "null".equalsIgnoreCase(value) ? "" : value;
+    }
+
+    private static String backdropName(String value) {
+        if (value == null || value.trim().isEmpty()) {
+            return "";
+        }
+        int colorIndex = value.lastIndexOf('#');
+        String name = colorIndex >= 0 ? value.substring(0, colorIndex) : value;
+        return name.replace('·', ' ').trim();
+    }
+
+    private static String buildGiftSubtitle(
+            String serial,
+            int upgradeLevel,
+            String rarity,
+            String model,
+            String symbol,
+            String backdrop,
+            boolean isListed,
+            boolean isAuctioned
+    ) {
+        StringBuilder firstLine = new StringBuilder(serial)
+                .append(" · Ур. ")
+                .append(upgradeLevel);
+        if (isAuctioned) {
+            firstLine.append(" · Аукцион");
+        } else if (isListed) {
+            firstLine.append(" · На продаже");
+        }
+
+        StringBuilder secondLine = new StringBuilder();
+        appendPart(secondLine, rarity);
+        appendPart(secondLine, model);
+        appendPart(secondLine, symbol);
+        appendPart(secondLine, backdrop);
+        return secondLine.length() == 0
+                ? firstLine.toString()
+                : firstLine.append('\n').append(secondLine).toString();
+    }
+
+    private static void appendPart(StringBuilder target, String value) {
+        if (value == null || value.trim().isEmpty()) {
+            return;
+        }
+        if (target.length() > 0) {
+            target.append(" · ");
+        }
+        target.append(value.trim());
+    }
+
+    private static TL_stars.starGiftAttributeBackdrop createNativeBackdrop(JSONObject traits, String rarityName) {
+        String value = optText(traits, "backdrop");
+        int hashIndex = value.lastIndexOf('#');
+        if (hashIndex < 0) {
+            return null;
+        }
+
+        int hexStart = hashIndex + 1;
+        int hexLength = 0;
+        while (hexStart + hexLength < value.length()
+                && isHex(value.charAt(hexStart + hexLength))
+                && hexLength < 8) {
+            hexLength++;
+        }
+        if (hexLength != 6 && hexLength != 8) {
+            return null;
+        }
+
+        final int parsedColor;
+        try {
+            parsedColor = Color.parseColor("#" + value.substring(hexStart, hexStart + hexLength));
+        } catch (IllegalArgumentException ignored) {
+            return null;
+        }
+
+        int center = parsedColor & 0x00FFFFFF;
+        int contrast = contrastColor(center);
+        String name = backdropName(value);
+        if (name.isEmpty()) {
+            name = "WaysGram";
+        }
+
+        TL_stars.TL_starGiftAttributeBackdrop backdrop = new TL_stars.TL_starGiftAttributeBackdrop();
+        backdrop.name = name;
+        backdrop.backdrop_id = stableBackdropId(name);
+        backdrop.center_color = center;
+        backdrop.edge_color = darken(center, 0.78f);
+        backdrop.pattern_color = contrast;
+        backdrop.text_color = contrast;
+        backdrop.rarity = nativeRarity(rarityName);
+        return backdrop;
+    }
+
+    private static boolean isHex(char value) {
+        return (value >= '0' && value <= '9')
+                || (value >= 'a' && value <= 'f')
+                || (value >= 'A' && value <= 'F');
+    }
+
+    private static int stableBackdropId(String name) {
+        int value = name == null ? 1 : name.hashCode() & 0x7fffffff;
+        return value == 0 ? 1 : value;
+    }
+
+    private static int darken(int color, float factor) {
+        return Color.rgb(
+                Math.max(0, Math.min(255, Math.round(Color.red(color) * factor))),
+                Math.max(0, Math.min(255, Math.round(Color.green(color) * factor))),
+                Math.max(0, Math.min(255, Math.round(Color.blue(color) * factor)))
+        );
+    }
+
+    private static int contrastColor(int color) {
+        int luminance = (Color.red(color) * 299
+                + Color.green(color) * 587
+                + Color.blue(color) * 114) / 1000;
+        return luminance >= 150 ? 0x00202020 : 0x00FFFFFF;
+    }
+
+    private static TL_stars.StarGiftAttributeRarity nativeRarity(String rarityName) {
+        String rarity = rarityName == null ? "" : rarityName.trim().toLowerCase(Locale.ROOT);
+        if (rarity.equals("необычная") || rarity.equals("uncommon")) {
+            return new TL_stars.TL_starGiftAttributeRarityUncommon();
+        }
+        if (rarity.equals("редкая") || rarity.equals("rare")) {
+            return new TL_stars.TL_starGiftAttributeRarityRare();
+        }
+        if (rarity.equals("эпическая") || rarity.equals("epic")) {
+            return new TL_stars.TL_starGiftAttributeRarityEpic();
+        }
+        if (rarity.equals("легендарная") || rarity.equals("legendary")) {
+            return new TL_stars.TL_starGiftAttributeRarityLegendary();
+        }
+        TL_stars.TL_starGiftAttributeRarity common = new TL_stars.TL_starGiftAttributeRarity();
+        common.permille = 0;
+        return common;
     }
 
     private void downloadGiftStickers(JSONArray inventory) {
