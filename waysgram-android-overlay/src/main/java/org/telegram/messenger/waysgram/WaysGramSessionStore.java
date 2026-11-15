@@ -5,6 +5,7 @@ import android.content.SharedPreferences;
 import android.security.keystore.KeyGenParameterSpec;
 import android.security.keystore.KeyProperties;
 import android.util.Base64;
+import android.util.Log;
 
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
@@ -27,6 +28,7 @@ public final class WaysGramSessionStore implements WaysGramGiftCatalogClient.Ses
     private static final String KEY_ALIAS = "org.telegram.messenger.WaysGramSession.v1";
     private static final String PREF_API_BASE = "api_base_encrypted";
     private static final String PREF_SESSION_TOKEN = "session_token_encrypted";
+    private static final String TAG = "WaysGramSessionStore";
     private static final int GCM_TAG_BITS = 128;
 
     private static volatile WaysGramSessionStore instance;
@@ -65,15 +67,24 @@ public final class WaysGramSessionStore implements WaysGramGiftCatalogClient.Ses
         if (base.length() == 0 || token.length() == 0) {
             throw new IllegalArgumentException("WaysGram API address and session token are required");
         }
-        String encryptedBase = encrypt(base);
-        String encryptedToken = encrypt(token);
-        preferences.edit()
-                .putString(PREF_API_BASE, encryptedBase)
-                .putString(PREF_SESSION_TOKEN, encryptedToken)
-                .apply();
+        Log.i(TAG, "Saving WaysGram session (apiBasePresent=true, tokenPresent=true)");
+        try {
+            String encryptedBase = encrypt(base);
+            String encryptedToken = encrypt(token);
+            preferences.edit()
+                    .putString(PREF_API_BASE, encryptedBase)
+                    .putString(PREF_SESSION_TOKEN, encryptedToken)
+                    .apply();
+            Log.i(TAG, "WaysGram session preferences saved");
+        } catch (GeneralSecurityException | RuntimeException exception) {
+            Log.e(TAG, "Failed to encrypt and save WaysGram session (" +
+                    exception.getClass().getSimpleName() + ")", exception);
+            throw exception;
+        }
     }
 
     public synchronized void clearSession() {
+        Log.w(TAG, "Clearing encrypted WaysGram session preferences");
         preferences.edit()
                 .remove(PREF_API_BASE)
                 .remove(PREF_SESSION_TOKEN)
@@ -97,11 +108,21 @@ public final class WaysGramSessionStore implements WaysGramGiftCatalogClient.Ses
     private String decryptPreference(String key) {
         String value = preferences.getString(key, null);
         if (value == null || value.length() == 0) {
+            Log.w(TAG, "Encrypted session preference is missing: " + key);
             return null;
         }
         try {
-            return decrypt(value);
+            String decrypted = decrypt(value);
+            if (decrypted == null || decrypted.length() == 0) {
+                Log.e(TAG, "Decrypted session preference is empty: " + key);
+                return null;
+            }
+            Log.d(TAG, "Successfully decrypted session preference: " + key);
+            return decrypted;
         } catch (GeneralSecurityException | RuntimeException exception) {
+            Log.e(TAG, "Unable to decrypt session preference " + key + " (" +
+                    exception.getClass().getSimpleName() + "); clearing the WaysGram session",
+                    exception);
             clearSession();
             return null;
         }
