@@ -105,7 +105,7 @@ public final class WaysGramLoginSheet extends BottomSheet {
         virtualNumberInput = addField(
                 context,
                 content,
-                "Внутренний номер (+1 и 10 цифр)",
+                "Внутренний номер (+код страны и номер)",
                 InputType.TYPE_CLASS_PHONE
         );
         virtualNumberInput.setSingleLine(true);
