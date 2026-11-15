@@ -107,7 +107,7 @@ def patch_profile_phone_source(original: str) -> str:
     """Prevent invalid API placeholder strings from becoming Telegram phone rows."""
     marker = "// WaysGram: ignore invalid Telegram phone placeholders"
     if marker in original:
-        if "user.phone.matches('[0-9]{8,15}')" not in original:
+        if 'user.phone.matches("[0-9]{8,15}")' not in original:
             raise ValueError("ProfileActivity contains an incomplete phone placeholder patch")
         return original
 
@@ -116,7 +116,7 @@ def patch_profile_phone_source(original: str) -> str:
     )
     new_has_phone = (
         "                // WaysGram: ignore invalid Telegram phone placeholders\n"
-        "                boolean hasPhone = user != null && ((user.phone != null && user.phone.matches('[0-9]{8,15}')) || (vcardPhone != null && vcardPhone.matches('[0-9]{8,15}')));\n"
+        "                boolean hasPhone = user != null && ((user.phone != null && user.phone.matches(\"[0-9]{8,15}\")) || (vcardPhone != null && vcardPhone.matches(\"[0-9]{8,15}\")));\n"
     )
     original = replace_exactly_once(
         original, old_has_phone, new_has_phone,
@@ -126,13 +126,13 @@ def patch_profile_phone_source(original: str) -> str:
     original = replace_exactly_once(
         original,
         "                        if (user != null && !TextUtils.isEmpty(vcardPhone)) {\n",
-        "                        if (user != null && vcardPhone != null && vcardPhone.matches('[0-9]{8,15}')) {\n",
+        "                        if (user != null && vcardPhone != null && vcardPhone.matches(\"[0-9]{8,15}\")) {\n",
         "valid vCard profile phone display"
     )
     original = replace_exactly_once(
         original,
         "                        } else if (user != null && !TextUtils.isEmpty(user.phone)) {\n",
-        "                        } else if (user != null && user.phone != null && user.phone.matches('[0-9]{8,15}')) {\n",
+        "                        } else if (user != null && user.phone != null && user.phone.matches(\"[0-9]{8,15}\")) {\n",
         "valid Telegram profile phone display"
     )
     return original
@@ -839,6 +839,8 @@ def verify_source(android_root: Path) -> None:
         "// WaysGram: restore profile action visibility" not in final_profile_activity
         or "WaysGram: keep native profile actions above avatar overlays" not in final_profile_activity
         or "actionsView.setAlpha(1.0f);" not in final_profile_activity
+        or "actionsView.bringToFront();" not in final_profile_activity
+        or 'user.phone.matches("[0-9]{8,15}")' not in final_profile_activity
         or "WaysGram: ignore invalid Telegram phone placeholders" not in final_profile_activity
     ):
         raise ValueError("Native profile actions or phone placeholder patch was not applied")
