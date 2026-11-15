@@ -114,7 +114,7 @@ public final class WaysGramProfileGiftsController {
             WaysGramGiftMediaStore.putMetadata(
                     serial,
                     giftTitle,
-                    buildGiftSubtitle(serial, upgradeLevel, rarity, model, symbol, backdropName, isListed, isAuctioned)
+                    buildGiftSubtitle(serial, upgradeLevel, rarity, model, symbol, isListed, isAuctioned)
             );
 
             TL_stars.TL_starGiftUnique nativeGift = new TL_stars.TL_starGiftUnique();
@@ -180,7 +180,6 @@ public final class WaysGramProfileGiftsController {
             String rarity,
             String model,
             String symbol,
-            String backdrop,
             boolean isListed,
             boolean isAuctioned
     ) {
@@ -190,14 +189,13 @@ public final class WaysGramProfileGiftsController {
         if (isAuctioned) {
             firstLine.append(" · Аукцион");
         } else if (isListed) {
-            firstLine.append(" · На продаже");
+            firstLine.append(" · Продажа");
         }
 
         StringBuilder secondLine = new StringBuilder();
         appendPart(secondLine, rarity);
         appendPart(secondLine, model);
         appendPart(secondLine, symbol);
-        appendPart(secondLine, backdrop);
         return secondLine.length() == 0
                 ? firstLine.toString()
                 : firstLine.append('\n').append(secondLine).toString();
