@@ -873,8 +873,8 @@ def verify_source(android_root: Path) -> None:
         or "WaysGram: place native profile actions above avatar pager indicator" not in final_profile_activity
         or "actionsView.setAlpha(1.0f);" not in final_profile_activity
         or "actionsView.bringToFront();" not in final_profile_activity
-        or 'user.phone.matches("[0-9]{8,15}")' not in final_profile_activity
-        or "WaysGram: ignore invalid Telegram phone placeholders" not in final_profile_activity
+        or 'profilePhone.matches("[0-9]{8,15}")' not in final_profile_activity
+        or "WaysGram: use persisted self phone while profile refreshes" not in final_profile_activity
     ):
         raise ValueError("Native profile actions or phone placeholder patch was not applied")
 
