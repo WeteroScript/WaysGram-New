@@ -71,11 +71,14 @@ public final class WaysGramSessionStore implements WaysGramGiftCatalogClient.Ses
         try {
             String encryptedBase = encrypt(base);
             String encryptedToken = encrypt(token);
-            preferences.edit()
+            boolean committed = preferences.edit()
                     .putString(PREF_API_BASE, encryptedBase)
                     .putString(PREF_SESSION_TOKEN, encryptedToken)
-                    .apply();
-            Log.i(TAG, "WaysGram session preferences saved");
+                    .commit();
+            if (!committed) {
+                throw new GeneralSecurityException("Android did not persist the encrypted WaysGram session");
+            }
+            Log.i(TAG, "WaysGram session preferences committed");
         } catch (GeneralSecurityException | RuntimeException exception) {
             Log.e(TAG, "Failed to encrypt and save WaysGram session (" +
                     exception.getClass().getSimpleName() + ")", exception);
@@ -97,7 +100,16 @@ public final class WaysGramSessionStore implements WaysGramGiftCatalogClient.Ses
 
     @Override
     public synchronized String getApiBaseUrl() {
-        return decryptPreference(PREF_API_BASE);
+        String savedBase = decryptPreference(PREF_API_BASE);
+        if (savedBase != null && !savedBase.trim().isEmpty()) {
+            return savedBase;
+        }
+        String configuredDefault = WaysGramLoginSheet.getDefaultApiBaseUrl();
+        if (configuredDefault != null && !configuredDefault.trim().isEmpty()) {
+            Log.w(TAG, "Stored API base URL is missing; using the build-configured public API origin");
+            return configuredDefault.trim();
+        }
+        return null;
     }
 
     @Override
