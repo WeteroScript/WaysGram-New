@@ -200,7 +200,6 @@ public final class WaysGramGiftCatalogSheet extends BottomSheet {
                     showGiftActions(gift);
                 }
         );
-        inventorySheet.setOnDismissListener(dialog -> inventorySheet = null);
         inventorySheet.show();
     }
 
