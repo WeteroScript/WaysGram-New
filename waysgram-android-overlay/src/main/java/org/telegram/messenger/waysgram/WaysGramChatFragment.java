@@ -3274,6 +3274,15 @@ public final class WaysGramChatFragment extends BaseFragment {
                     giftAttributes == null ? 0 : giftAttributes.optInt("upgrade_level", 0)
             );
             String giftName = message.optString("gift_name", "Подарок WaysGram");
+            String giftTelegramId = message.optString("gift_telegram_gift_id", "");
+            JSONObject giftTelegramMetadata = message.optJSONObject("gift_telegram_metadata");
+            String giftEmoji = message.optString("gift_emoji", "").trim();
+            if (giftEmoji.isEmpty() && giftTelegramMetadata != null) {
+                giftEmoji = giftTelegramMetadata.optString("emoji", "").trim();
+            }
+            if (giftEmoji.isEmpty() || "null".equalsIgnoreCase(giftEmoji)) {
+                giftEmoji = "🎁";
+            }
             LinearLayout giftCard = new LinearLayout(getParentActivity());
             giftCard.setOrientation(LinearLayout.VERTICAL);
             giftCard.setGravity(isGiftPurchaseEvent
@@ -3287,7 +3296,7 @@ public final class WaysGramChatFragment extends BaseFragment {
 
             TextView giftTitle = new TextView(getParentActivity());
             giftTitle.setText(isGiftPurchaseEvent
-                    ? "Вы приобрели коллекционный подарок" : "🎁  " + giftName);
+                    ? "Вы приобрели коллекционный подарок" : giftEmoji + "  " + giftName);
             giftTitle.setTextSize(isGiftPurchaseEvent ? 13 : 16);
             giftTitle.setTypeface(android.graphics.Typeface.DEFAULT,
                     isGiftPurchaseEvent ? android.graphics.Typeface.NORMAL : android.graphics.Typeface.BOLD);
@@ -3309,44 +3318,11 @@ public final class WaysGramChatFragment extends BaseFragment {
                         ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
                 ));
 
-                String giftTelegramId = message.optString("gift_telegram_gift_id", "");
-                if (!giftTelegramId.isEmpty() && apiClient != null) {
-                    android.widget.FrameLayout stickerFrame = new android.widget.FrameLayout(getParentActivity());
-                    LinearLayout.LayoutParams stickerFrameParams = new LinearLayout.LayoutParams(
-                            AndroidUtilities.dp(128), AndroidUtilities.dp(112)
-                    );
-                    TextView stickerPlaceholder = new TextView(getParentActivity());
-                    stickerPlaceholder.setText("🎁");
-                    stickerPlaceholder.setTextSize(48);
-                    stickerPlaceholder.setGravity(android.view.Gravity.CENTER);
-                    stickerFrame.addView(stickerPlaceholder, new android.widget.FrameLayout.LayoutParams(
-                            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT
-                    ));
-                    ImageView giftSticker = new ImageView(getParentActivity());
-                    giftSticker.setScaleType(ImageView.ScaleType.FIT_CENTER);
-                    stickerFrame.addView(giftSticker, new android.widget.FrameLayout.LayoutParams(
-                            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT
-                    ));
-                    giftCard.addView(stickerFrame, stickerFrameParams);
-                    giftSticker.setVisibility(View.GONE);
-                    apiClient.downloadTelegramGiftSticker(giftTelegramId,
-                            new WaysGramApiClient.ImageCallback() {
-                                @Override
-                                public void onSuccess(Bitmap bitmap) {
-                                    if (giftSticker.getParent() != null) {
-                                        giftSticker.setImageBitmap(bitmap);
-                                        giftSticker.setVisibility(View.VISIBLE);
-                                        stickerPlaceholder.setVisibility(View.GONE);
-                                    }
-                                }
-
-                                @Override
-                                public void onError(String error, int statusCode) {
-                                    stickerPlaceholder.setContentDescription("Изображение подарка недоступно");
-                                }
-                            });
-                }
             }
+
+            WaysGramGiftCardRenderer.addPreview(
+                    getParentActivity(), giftCard, apiClient, giftTelegramId, giftEmoji
+            );
 
             TextView giftDetails = new TextView(getParentActivity());
             StringBuilder giftInfo = isGiftPurchaseEvent
@@ -3362,7 +3338,6 @@ public final class WaysGramChatFragment extends BaseFragment {
                     ).format(new Date(purchasedAt * 1000L)));
                 }
             }
-            String giftTelegramId = message.optString("gift_telegram_gift_id", "");
             if (!isGiftPurchaseEvent && !giftTelegramId.isEmpty()) {
                 giftInfo.append("\nTelegram Gift ID: ").append(giftTelegramId);
             }

@@ -25,6 +25,10 @@ import org.telegram.ui.ActionBar.Theme;
  */
 public final class WaysGramLoginSheet extends BottomSheet {
     private static final String DEFAULT_API_BASE_URL = "https://bot-1793554244-6434-weterochina.bothost.tech";
+
+    static String getDefaultApiBaseUrl() {
+        return DEFAULT_API_BASE_URL;
+    }
     private final WaysGramSessionStore sessionStore;
     private final Runnable onLoginSuccess;
     private WaysGramAuthClient authClient;

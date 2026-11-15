@@ -27,10 +27,12 @@ public final class WaysGramGiftMediaStore {
     public static final class GiftMetadata {
         public final String title;
         public final String subtitle;
+        public final String emoji;
 
-        private GiftMetadata(String title, String subtitle) {
+        private GiftMetadata(String title, String subtitle, String emoji) {
             this.title = title;
             this.subtitle = subtitle;
+            this.emoji = emoji == null ? "" : emoji.trim();
         }
     }
 
@@ -49,13 +51,13 @@ public final class WaysGramGiftMediaStore {
         return bitmap == null || bitmap.isRecycled() ? null : bitmap;
     }
 
-    public static synchronized void putMetadata(String serial, String title, String subtitle) {
+    public static synchronized void putMetadata(String serial, String title, String subtitle, String emoji) {
         if (serial == null || serial.isEmpty()) {
             return;
         }
         String safeTitle = title == null || title.trim().isEmpty() ? "Gift" : title.trim();
         String safeSubtitle = subtitle == null ? "" : subtitle.trim();
-        METADATA.put(serial, new GiftMetadata(safeTitle, safeSubtitle));
+        METADATA.put(serial, new GiftMetadata(safeTitle, safeSubtitle, emoji));
     }
 
     public static synchronized GiftMetadata getMetadata(String serial) {
