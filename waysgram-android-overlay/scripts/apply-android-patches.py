@@ -125,12 +125,37 @@ def patch_profile_phone_source(original: str) -> str:
     marker = "// WaysGram: use persisted self phone while profile refreshes"
     if marker in original:
         required = (
-            'myProfile ? getUserConfig().getClientPhone()',
+            'myProfile ? waysGramStablePhone',
             'profilePhone.matches("[0-9]{8,15}")',
         )
         if not all(value in original for value in required):
             raise ValueError("ProfileActivity contains an incomplete stable phone patch")
         return original
+
+    original = replace_exactly_once(
+        original,
+        "    private String vcardPhone;\\n",
+        "    private String vcardPhone;\\n"
+        "    // WaysGram: snapshot the signed-in account phone before profile refresh.\\n"
+        "    private String waysGramStablePhone = \"\";\\n",
+        "stable signed-in phone field"
+    )
+
+    original = replace_exactly_once(
+        original,
+        "            TLRPC.User user = getMessagesController().getUser(userId);\\n"
+        "            if (user == null) {\\n"
+        "                return false;\\n"
+        "            }\\n",
+        "            TLRPC.User user = getMessagesController().getUser(userId);\\n"
+        "            if (user == null) {\\n"
+        "                return false;\\n"
+        "            }\\n"
+        "            if (UserObject.isUserSelf(user)) {\\n"
+        "                waysGramStablePhone = getUserConfig().getClientPhone();\\n"
+        "            }\\n",
+        "stable self phone snapshot before loading full profile"
+    )
 
     old_has_phone = (
         "                // WaysGram: ignore invalid Telegram phone placeholders\n"
@@ -138,7 +163,7 @@ def patch_profile_phone_source(original: str) -> str:
     )
     new_has_phone = (
         "                // WaysGram: use persisted self phone while profile refreshes\n"
-        "                String profilePhone = myProfile ? getUserConfig().getClientPhone() : (user == null ? \"\" : user.phone);\n"
+        "                String profilePhone = myProfile ? waysGramStablePhone : (user == null ? \"\" : user.phone);\n"
         "                boolean hasPhone = user != null && ((profilePhone != null && profilePhone.matches(\"[0-9]{8,15}\")) || (vcardPhone != null && vcardPhone.matches(\"[0-9]{8,15}\")));\n"
     )
     original = replace_exactly_once(
@@ -149,7 +174,7 @@ def patch_profile_phone_source(original: str) -> str:
     original = replace_exactly_once(
         original,
         "                        if (user != null && vcardPhone != null && vcardPhone.matches(\"[0-9]{8,15}\")) {\n",
-        "                        String profilePhone = myProfile ? getUserConfig().getClientPhone() : (user == null ? \"\" : user.phone);\n"
+        "                        String profilePhone = myProfile ? waysGramStablePhone : (user == null ? \"\" : user.phone);\n"
         "                        if (user != null && vcardPhone != null && vcardPhone.matches(\"[0-9]{8,15}\")) {\n",
         "stable profile phone display value"
     )
@@ -875,6 +900,7 @@ def verify_source(android_root: Path) -> None:
         or "actionsView.bringToFront();" not in final_profile_activity
         or 'profilePhone.matches("[0-9]{8,15}")' not in final_profile_activity
         or "WaysGram: use persisted self phone while profile refreshes" not in final_profile_activity
+        or "waysGramStablePhone = getUserConfig().getClientPhone();" not in final_profile_activity
     ):
         raise ValueError("Native profile actions or phone placeholder patch was not applied")
 
