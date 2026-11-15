@@ -36,6 +36,7 @@ public final class WaysGramProfileGiftsController {
     private static final int MAX_STICKER_DOWNLOADS = MAX_VISIBLE_GIFTS;
 
     private final Context appContext;
+    private final Context uiContext;
     private final BaseFragment fragment;
     private final ProfileGiftsContainer container;
     private final WaysGramSessionStore sessionStore;
@@ -52,6 +53,7 @@ public final class WaysGramProfileGiftsController {
             throw new IllegalArgumentException("WaysGram profile gifts dependencies are required");
         }
         appContext = context.getApplicationContext();
+        uiContext = context;
         this.fragment = fragment;
         this.container = container;
         sessionStore = WaysGramSessionStore.getInstance(appContext);
@@ -104,7 +106,7 @@ public final class WaysGramProfileGiftsController {
     }
 
     private void createSessionOverlay() {
-        LinearLayout content = new LinearLayout(appContext);
+        LinearLayout content = new LinearLayout(uiContext);
         content.setOrientation(LinearLayout.VERTICAL);
         content.setGravity(Gravity.CENTER);
         content.setPadding(
@@ -114,7 +116,7 @@ public final class WaysGramProfileGiftsController {
                 AndroidUtilities.dp(20)
         );
 
-        TextView title = new TextView(appContext);
+        TextView title = new TextView(uiContext);
         title.setText("Вход в WaysGram");
         title.setTextSize(18);
         title.setTypeface(android.graphics.Typeface.DEFAULT, android.graphics.Typeface.BOLD);
@@ -125,7 +127,7 @@ public final class WaysGramProfileGiftsController {
                 ViewGroup.LayoutParams.WRAP_CONTENT
         ));
 
-        TextView description = new TextView(appContext);
+        TextView description = new TextView(uiContext);
         description.setText("Чтобы загрузить ваши подарки, войдите в отдельную сессию WaysGram. Сессия Telegram не затрагивается.");
         description.setTextSize(14);
         description.setTextColor(Theme.getColor(Theme.key_windowBackgroundWhiteGrayText));
@@ -137,7 +139,7 @@ public final class WaysGramProfileGiftsController {
         descriptionParams.topMargin = AndroidUtilities.dp(8);
         content.addView(description, descriptionParams);
 
-        Button loginButton = new Button(appContext);
+        Button loginButton = new Button(uiContext);
         loginButton.setText("Войти в WaysGram");
         loginButton.setAllCaps(false);
         LinearLayout.LayoutParams buttonParams = new LinearLayout.LayoutParams(
