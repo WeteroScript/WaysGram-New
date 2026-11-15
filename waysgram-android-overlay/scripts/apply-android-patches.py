@@ -158,8 +158,7 @@ def patch_profile_phone_source(original: str) -> str:
     )
 
     old_has_phone = (
-        "                // WaysGram: ignore invalid Telegram phone placeholders\n"
-        "                boolean hasPhone = user != null && ((user.phone != null && user.phone.matches(\"[0-9]{8,15}\")) || (vcardPhone != null && vcardPhone.matches(\"[0-9]{8,15}\")));\n"
+        "                boolean hasPhone = user != null && (!TextUtils.isEmpty(user.phone) || !TextUtils.isEmpty(vcardPhone));\\n"
     )
     new_has_phone = (
         "                // WaysGram: use persisted self phone while profile refreshes\n"
@@ -173,14 +172,14 @@ def patch_profile_phone_source(original: str) -> str:
 
     original = replace_exactly_once(
         original,
-        "                        if (user != null && vcardPhone != null && vcardPhone.matches(\"[0-9]{8,15}\")) {\n",
+        "                        if (user != null && !TextUtils.isEmpty(vcardPhone)) {\\n",
         "                        String profilePhone = myProfile ? waysGramStablePhone : (user == null ? \"\" : user.phone);\n"
         "                        if (user != null && vcardPhone != null && vcardPhone.matches(\"[0-9]{8,15}\")) {\n",
         "stable profile phone display value"
     )
     original = replace_exactly_once(
         original,
-        "                        } else if (user != null && user.phone != null && user.phone.matches(\"[0-9]{8,15}\")) {\n",
+        "                        } else if (user != null && !TextUtils.isEmpty(user.phone)) {\\n",
         "                        } else if (user != null && profilePhone != null && profilePhone.matches(\"[0-9]{8,15}\")) {\n",
         "stable Telegram profile phone display"
     )
