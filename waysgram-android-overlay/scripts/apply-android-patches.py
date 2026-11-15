@@ -127,7 +127,7 @@ def patch_profile_gifts_source(original: str) -> str:
         "                if (waysGramGiftsContainer == null) {\n"
         "                    waysGramGiftsContainer = new ProfileGiftsContainer(profileActivity, getContext(),\n"
         "                            profileActivity.getCurrentAccount(), ((ProfileActivity) profileActivity).getDialogId(),\n"
-        "                            resourcesProvider, null, true);\n"
+        "                            resourcesProvider, true);\n"
         "                    waysGramGiftsController = new WaysGramProfileGiftsController(\n"
         "                            getContext(), profileActivity, waysGramGiftsContainer);\n"
         "                }\n"
