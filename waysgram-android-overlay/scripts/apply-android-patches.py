@@ -134,31 +134,31 @@ def patch_profile_phone_source(original: str) -> str:
 
     original = replace_exactly_once(
         original,
-        "    private String vcardPhone;\\n",
-        "    private String vcardPhone;\\n"
-        "    // WaysGram: snapshot the signed-in account phone before profile refresh.\\n"
-        "    private String waysGramStablePhone = \"\";\\n",
+        "    private String vcardPhone;\n",
+        "    private String vcardPhone;\n"
+        "    // WaysGram: snapshot the signed-in account phone before profile refresh.\n"
+        "    private String waysGramStablePhone = \"\";\n",
         "stable signed-in phone field"
     )
 
     original = replace_exactly_once(
         original,
-        "            TLRPC.User user = getMessagesController().getUser(userId);\\n"
-        "            if (user == null) {\\n"
-        "                return false;\\n"
-        "            }\\n",
-        "            TLRPC.User user = getMessagesController().getUser(userId);\\n"
-        "            if (user == null) {\\n"
-        "                return false;\\n"
-        "            }\\n"
-        "            if (UserObject.isUserSelf(user)) {\\n"
-        "                waysGramStablePhone = getUserConfig().getClientPhone();\\n"
-        "            }\\n",
+        "            TLRPC.User user = getMessagesController().getUser(userId);\n"
+        "            if (user == null) {\n"
+        "                return false;\n"
+        "            }\n",
+        "            TLRPC.User user = getMessagesController().getUser(userId);\n"
+        "            if (user == null) {\n"
+        "                return false;\n"
+        "            }\n"
+        "            if (UserObject.isUserSelf(user)) {\n"
+        "                waysGramStablePhone = getUserConfig().getClientPhone();\n"
+        "            }\n",
         "stable self phone snapshot before loading full profile"
     )
 
     old_has_phone = (
-        "                boolean hasPhone = user != null && (!TextUtils.isEmpty(user.phone) || !TextUtils.isEmpty(vcardPhone));\\n"
+        "                boolean hasPhone = user != null && (!TextUtils.isEmpty(user.phone) || !TextUtils.isEmpty(vcardPhone));\n"
     )
     new_has_phone = (
         "                // WaysGram: use persisted self phone while profile refreshes\n"
@@ -172,14 +172,14 @@ def patch_profile_phone_source(original: str) -> str:
 
     original = replace_exactly_once(
         original,
-        "                        if (user != null && !TextUtils.isEmpty(vcardPhone)) {\\n",
+        "                        if (user != null && !TextUtils.isEmpty(vcardPhone)) {\n",
         "                        String profilePhone = myProfile ? waysGramStablePhone : (user == null ? \"\" : user.phone);\n"
         "                        if (user != null && vcardPhone != null && vcardPhone.matches(\"[0-9]{8,15}\")) {\n",
         "stable profile phone display value"
     )
     original = replace_exactly_once(
         original,
-        "                        } else if (user != null && !TextUtils.isEmpty(user.phone)) {\\n",
+        "                        } else if (user != null && !TextUtils.isEmpty(user.phone)) {\n",
         "                        } else if (user != null && profilePhone != null && profilePhone.matches(\"[0-9]{8,15}\")) {\n",
         "stable Telegram profile phone display"
     )
