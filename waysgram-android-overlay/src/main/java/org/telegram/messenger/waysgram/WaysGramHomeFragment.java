@@ -44,6 +44,7 @@ public final class WaysGramHomeFragment extends BaseFragment {
     private TextView statusView;
     private TextView inboxSummaryView;
     private LinearLayout giftsContainer;
+    private LinearLayout profileMenuContainer;
     private ImageView avatarView;
     private final Handler eventHandler = new Handler(Looper.getMainLooper());
     private final Runnable eventRetryRunnable = new Runnable() {
@@ -114,7 +115,12 @@ public final class WaysGramHomeFragment extends BaseFragment {
         content.addView(giftsContainer, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
         ));
-        addButton(context, content, "Открыть инвентарь подарков", () ->
+        profileMenuContainer = new LinearLayout(context);
+        profileMenuContainer.setOrientation(LinearLayout.VERTICAL);
+        content.addView(profileMenuContainer, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
+        ));
+        addButton(context, profileMenuContainer, "Открыть инвентарь подарков", () ->
                 new WaysGramGiftCatalogSheet(context, sessionStore, resourceProvider, this::loadProfile).show()
         );
 
@@ -171,8 +177,15 @@ public final class WaysGramHomeFragment extends BaseFragment {
     }
 
     private void addButton(Context context, LinearLayout parent, String title, Runnable callback) {
+        if (parent == null) {
+            return;
+        }
+        parent.setVisibility(View.VISIBLE);
         Button button = new Button(context);
         button.setText(title);
+        button.setVisibility(View.VISIBLE);
+        button.setEnabled(true);
+        button.setAlpha(1f);
         LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT
@@ -205,7 +218,12 @@ public final class WaysGramHomeFragment extends BaseFragment {
                 if (!currentUsername.isEmpty()) {
                     profileText += "\n@" + currentUsername;
                 }
-                String phone = response.optString("phone", "");
+                String phone = response.optString("phone", "").trim();
+                if ("null".equalsIgnoreCase(phone) || "+null".equalsIgnoreCase(phone)
+                        || "none".equalsIgnoreCase(phone) || "+none".equalsIgnoreCase(phone)
+                        || "undefined".equalsIgnoreCase(phone) || "+undefined".equalsIgnoreCase(phone)) {
+                    phone = "";
+                }
                 if (!phone.isEmpty()) {
                     profileText += "\n" + phone;
                 }
@@ -306,9 +324,17 @@ public final class WaysGramHomeFragment extends BaseFragment {
             if (attributes == null) {
                 attributes = new JSONObject();
             }
-            String title = gift.optString("gift_name", "Подарок WaysGram");
-            String serial = gift.optString("serial_number", "");
+            JSONObject telegramGift = gift.optJSONObject("telegram_gift");
+            String title = telegramGift == null ? "" : telegramGift.optString("title", "").trim();
+            if (title.isEmpty()) {
+                title = gift.optString("gift_name", "Подарок WaysGram");
+            }
+            String emoji = gift.optString("gift_emoji", "").trim();
+            if (emoji.isEmpty() && telegramGift != null) {
+                emoji = telegramGift.optString("emoji", "").trim();
+            }
             String telegramId = gift.optString("telegram_gift_id", "");
+            String serial = gift.optString("serial_number", "");
             int level = Math.max(
                     gift.optInt("upgrade_level", 0),
                     attributes.optInt("upgrade_level", 0)
@@ -323,8 +349,22 @@ public final class WaysGramHomeFragment extends BaseFragment {
             background.setCornerRadius(AndroidUtilities.dp(12));
             card.setBackground(background);
 
-            addLabel(getParentActivity(), card, "🎁  " + title, 16, true);
+            addLabel(getParentActivity(), card,
+                    (emoji.isEmpty() ? "🎁" : emoji) + "  " + title, 16, true);
+            WaysGramGiftCardRenderer.addPreview(
+                    getParentActivity(), card, apiClient, telegramId, emoji
+            );
             addLabel(getParentActivity(), card, "Уровень WaysGram: " + level, 13, true);
+            if (telegramGift != null && telegramGift.optBoolean("can_upgrade", false)) {
+                int upgradePrice = telegramGift.optInt("upgrade_star_count", 0);
+                int upgradeVariants = telegramGift.optInt("upgrade_variants", 0);
+                addLabel(getParentActivity(), card,
+                        "Улучшение Telegram доступно"
+                                + (upgradePrice > 0 ? " · " + upgradePrice + " Stars" : "")
+                                + (upgradeVariants > 0 ? " · вариантов: " + upgradeVariants : ""),
+                        12, true
+                );
+            }
             if (!serial.isEmpty()) {
                 addLabel(getParentActivity(), card, "Серийный номер: " + serial, 12, false);
             }
@@ -578,8 +618,30 @@ public final class WaysGramHomeFragment extends BaseFragment {
     }
 
     @Override
+    private void restoreProfileMenuVisibility() {
+        if (profileMenuContainer == null) {
+            return;
+        }
+        profileMenuContainer.setVisibility(View.VISIBLE);
+        for (int i = 0; i < profileMenuContainer.getChildCount(); i++) {
+            View child = profileMenuContainer.getChildAt(i);
+            child.setVisibility(View.VISIBLE);
+            child.setAlpha(1f);
+            if (child instanceof Button) {
+                child.setEnabled(true);
+            }
+        }
+        profileMenuContainer.requestLayout();
+        if (fragmentView != null) {
+            fragmentView.requestLayout();
+            fragmentView.invalidate();
+        }
+    }
+
+    @Override
     public void onResume() {
         super.onResume();
+        restoreProfileMenuVisibility();
         WaysGramPushManager.sync(getParentActivity());
         WaysGramPushManager.requestNotificationPermission(getParentActivity());
         isScreenResumed = true;
