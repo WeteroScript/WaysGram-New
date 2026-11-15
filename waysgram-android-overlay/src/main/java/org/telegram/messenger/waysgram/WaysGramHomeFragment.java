@@ -221,7 +221,8 @@ public final class WaysGramHomeFragment extends BaseFragment {
                 String phone = response.optString("phone", "").trim();
                 if ("null".equalsIgnoreCase(phone) || "+null".equalsIgnoreCase(phone)
                         || "none".equalsIgnoreCase(phone) || "+none".equalsIgnoreCase(phone)
-                        || "undefined".equalsIgnoreCase(phone) || "+undefined".equalsIgnoreCase(phone)) {
+                        || "undefined".equalsIgnoreCase(phone) || "+undefined".equalsIgnoreCase(phone)
+                        || "unknown".equalsIgnoreCase(phone) || "+unknown".equalsIgnoreCase(phone)) {
                     phone = "";
                 }
                 if (!phone.isEmpty()) {
@@ -622,6 +623,8 @@ public final class WaysGramHomeFragment extends BaseFragment {
             return;
         }
         profileMenuContainer.setVisibility(View.VISIBLE);
+        profileMenuContainer.setAlpha(1f);
+        profileMenuContainer.setEnabled(true);
         for (int i = 0; i < profileMenuContainer.getChildCount(); i++) {
             View child = profileMenuContainer.getChildAt(i);
             child.setVisibility(View.VISIBLE);
