@@ -125,9 +125,9 @@ def patch_profile_gifts_source(original: str) -> str:
         "                    mediaPages[a].listView.setAdapter(null);\n"
         "                }\n"
         "                if (waysGramGiftsContainer == null) {\n"
-        "                    waysGramGiftsContainer = new ProfileGiftsContainer(profileActivity, context,\n"
+        "                    waysGramGiftsContainer = new ProfileGiftsContainer(profileActivity, getContext(),\n"
         "                            profileActivity.getCurrentAccount(), ((ProfileActivity) profileActivity).getDialogId(),\n"
-        "                            resourcesProvider, iBlur3FactoryLiquidGlass, true);\n"
+        "                            resourcesProvider, null, true);\n"
         "                    waysGramGiftsController = new WaysGramProfileGiftsController(\n"
         "                            getContext(), profileActivity, waysGramGiftsContainer);\n"
         "                }\n"
@@ -418,6 +418,23 @@ def patch_profile_gifts_container_source(original: str) -> str:
         "            if (!waysGramInventory) collections.load();\n"
         "        }\n",
         "disable native Telegram network fetches on WaysGram tab attach",
+    )
+
+    updated = replace_exactly_once(
+        updated,
+        "        ProfileActivity.Button2 button2 = new ProfileActivity.Button2(context);\n"
+        "        BlurredBackgroundDrawable drawable = buttonGlassFactory.create(button2, new BlurredBackgroundColorProviderThemed(resourcesProvider, Theme.key_windowBackgroundWhite));\n"
+        "        drawable.setPadding(dp(8));\n"
+        "        drawable.setRadius(dp(22));\n"
+        "        button2.setBackground(drawable);\n",
+        "        ProfileActivity.Button2 button2 = new ProfileActivity.Button2(context);\n"
+        "        if (!waysGramInventory) {\n"
+        "            BlurredBackgroundDrawable drawable = buttonGlassFactory.create(button2, new BlurredBackgroundColorProviderThemed(resourcesProvider, Theme.key_windowBackgroundWhite));\n"
+        "            drawable.setPadding(dp(8));\n"
+        "            drawable.setRadius(dp(22));\n"
+        "            button2.setBackground(drawable);\n"
+        "        }\n",
+        "skip unused action button background for WaysGram inventory",
     )
 
     method = (
