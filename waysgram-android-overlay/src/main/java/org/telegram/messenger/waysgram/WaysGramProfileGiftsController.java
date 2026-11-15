@@ -243,7 +243,7 @@ public final class WaysGramProfileGiftsController {
             name = "WaysGram";
         }
 
-        TL_stars.TL_starGiftAttributeBackdrop backdrop = new TL_stars.starGiftAttributeBackdrop();
+        TL_stars.starGiftAttributeBackdrop backdrop = new TL_stars.starGiftAttributeBackdrop();
         backdrop.name = name;
         backdrop.backdrop_id = 0; // WaysGram API exposes the name and color, not Telegram's backdrop ID.
         backdrop.center_color = center;
