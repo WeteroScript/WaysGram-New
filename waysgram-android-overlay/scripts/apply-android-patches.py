@@ -7,6 +7,7 @@ provides only the inventory data and sticker bitmaps.
 from __future__ import annotations
 
 import argparse
+import re
 from pathlib import Path
 
 
@@ -222,40 +223,35 @@ def patch_profile_gifts_container_source(original: str) -> str:
         "native gifts container inventory mode field",
     )
 
-    signature = (
-        "    public ProfileGiftsContainer(\n"
-        "        BaseFragment fragment,\n"
-        "        Context context,\n"
-        "        int currentAccount,\n"
-        "        long did,\n"
-        "        Theme.ResourcesProvider resourcesProvider,\n"
-        "        BlurredBackgroundDrawableViewFactory buttonGlassFactory\n"
-        "    ) {\n"
-        "        super(context);\n"
+    constructor_match = re.search(
+        r"(?m)^[ \t]*public ProfileGiftsContainer\s*\((?P<params>.*?)\)\s*\{\s*super\(context\);",
+        updated,
+        re.DOTALL,
     )
-    overload = (
-        "    public ProfileGiftsContainer(\n"
-        "        BaseFragment fragment,\n"
-        "        Context context,\n"
-        "        int currentAccount,\n"
-        "        long did,\n"
-        "        Theme.ResourcesProvider resourcesProvider,\n"
-        "        BlurredBackgroundDrawableViewFactory buttonGlassFactory\n"
-        "    ) {\n"
-        "        this(fragment, context, currentAccount, did, resourcesProvider, buttonGlassFactory, false);\n"
-        "    }\n\n"
-        "    public ProfileGiftsContainer(\n"
-        "        BaseFragment fragment,\n"
-        "        Context context,\n"
-        "        int currentAccount,\n"
-        "        long did,\n"
-        "        Theme.ResourcesProvider resourcesProvider,\n"
-        "        BlurredBackgroundDrawableViewFactory buttonGlassFactory,\n"
-        "        boolean waysGramInventory\n"
-        "    ) {\n"
-        "        super(context);\n"
+    if constructor_match is None:
+        raise ValueError("Could not locate native ProfileGiftsContainer constructor in archived Telegram source")
+    parameter_parts = [part.strip() for part in constructor_match.group("params").split(",") if part.strip()]
+    parameter_names = [part.split()[-1] for part in parameter_parts]
+    constructor_start = constructor_match.start()
+    open_brace = updated.find("{", constructor_start)
+    super_call = "super(context);"
+    super_position = updated.find(super_call, open_brace)
+    if open_brace < 0 or super_position < 0 or not parameter_names:
+        raise ValueError("Native ProfileGiftsContainer constructor signature is not supported")
+    original_header = updated[constructor_start:open_brace + 1]
+    overload_header = (
+        original_header[:original_header.rfind(")")]
+        + ",\n        boolean waysGramInventory\n    ) {"
     )
-    updated = replace_exactly_once(updated, signature, overload, "native gifts container constructor overload")
+    wrapper = (
+        original_header
+        + "\n        this(" + ", ".join(parameter_names + ["false"]) + ");\n"
+        + "    }\n\n"
+        + overload_header
+        + "\n        super(context);"
+    )
+    super_end = super_position + len(super_call)
+    updated = updated[:constructor_start] + wrapper + updated[super_end:]
     updated = replace_exactly_once(
         updated,
         "        this.fragment = fragment;\n\n        this.currentAccount = currentAccount;\n",
