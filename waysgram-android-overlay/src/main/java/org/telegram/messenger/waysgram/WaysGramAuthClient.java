@@ -291,9 +291,9 @@ public final class WaysGramAuthClient implements AutoCloseable {
     }
 
     private static String normalizeNumber(String value) {
-        String number = value == null ? "" : value.replace(" ", "").replace("-", "").trim();
-        if (!number.matches("\\+1[0-9]{10}")) {
-            throw new IllegalArgumentException("Нужен внутренний номер WaysGram вида +1 и десять цифр");
+        String number = value == null ? "" : value.replaceAll("[\\s().-]", "").trim();
+        if (!number.matches("\\+[1-9][0-9]{7,14}")) {
+            throw new IllegalArgumentException("Введите виртуальный номер в международном формате: +код страны и номер.");
         }
         return number;
     }
