@@ -162,6 +162,25 @@ def patch_profile_gifts_source(original: str) -> str:
     )
     updated = replace_exactly_once(updated, load_more_condition, load_more_patched, "profile gifts load-more exclusion")
 
+    media_loading_branch = (
+        "            } else if (mediaPages[a].selectedType == TAB_GIFTS) {\n"
+        "\n"
+        "            } else {\n"
+        "                int type = mediaPages[a].selectedType;\n"
+    )
+    media_loading_branch_patched = (
+        "            } else if (mediaPages[a].selectedType == TAB_GIFTS) {\n"
+        "\n"
+        "            } else if (mediaPages[a].selectedType == TAB_WAYSGRAM_GIFTS) {\n"
+        "\n"
+        "            } else {\n"
+        "                int type = mediaPages[a].selectedType;\n"
+    )
+    updated = replace_exactly_once(
+        updated, media_loading_branch, media_loading_branch_patched,
+        "profile gifts initial media loading exclusion"
+    )
+
     search_method_marker = "    public boolean isSearchItemVisible(int type) {\n"
     search_method_guard = "        if (type == TAB_WAYSGRAM_GIFTS) {\n            return false;\n        }\n"
     if search_method_guard not in updated:
