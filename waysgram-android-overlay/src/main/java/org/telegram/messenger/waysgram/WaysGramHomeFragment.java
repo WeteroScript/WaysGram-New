@@ -617,7 +617,6 @@ public final class WaysGramHomeFragment extends BaseFragment {
         );
     }
 
-    @Override
     private void restoreProfileMenuVisibility() {
         if (profileMenuContainer == null) {
             return;
