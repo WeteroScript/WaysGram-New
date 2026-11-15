@@ -3338,7 +3338,6 @@ public final class WaysGramChatFragment extends BaseFragment {
                     ).format(new Date(purchasedAt * 1000L)));
                 }
             }
-            String giftTelegramId = message.optString("gift_telegram_gift_id", "");
             if (!isGiftPurchaseEvent && !giftTelegramId.isEmpty()) {
                 giftInfo.append("\nTelegram Gift ID: ").append(giftTelegramId);
             }
