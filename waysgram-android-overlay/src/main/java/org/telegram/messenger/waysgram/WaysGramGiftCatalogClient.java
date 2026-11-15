@@ -76,6 +76,7 @@ public final class WaysGramGiftCatalogClient implements AutoCloseable {
         public final int starCount;
         public final int storePriceStars;
         public final int storeRemaining;
+        public final boolean storeUnlimited;
         public final boolean forSale;
         public final Integer upgradeStarCount;
         public final boolean premium;
@@ -111,6 +112,7 @@ public final class WaysGramGiftCatalogClient implements AutoCloseable {
             currency = object.optString("currency", "telegram_stars");
             starCount = Math.max(0, object.optInt("star_count", 0));
             storePriceStars = Math.max(0, object.optInt("price_stars", 0));
+            storeUnlimited = object.optBoolean("unlimited_supply", false);
             storeRemaining = Math.max(0, object.optInt("remaining", 0));
             forSale = object.optBoolean("for_sale", storePriceStars > 0 && storeRemaining > 0);
             upgradeStarCount = optionalInt(object, "upgrade_star_count");
