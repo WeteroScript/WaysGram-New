@@ -101,17 +101,17 @@ def patch_profile_actions_visibility_source(original: str) -> str:
             "native profile action z-order and visibility restoration"
         )
 
-    pager_indicator_anchor = "        avatarContainer2.addView(avatarsViewPagerIndicatorView);\\n"
+    pager_indicator_anchor = "        avatarContainer2.addView(avatarsViewPagerIndicatorView);\n"
     pager_indicator_marker = "// WaysGram: place native profile actions above avatar pager indicator"
     if pager_indicator_marker not in original:
         pager_indicator_patched = (
             pager_indicator_anchor
-            + "        // WaysGram: place native profile actions above avatar pager indicator\\n"
-            + "        if (actionsView != null) {\\n"
-            + "            actionsView.setAlpha(1.0f);\\n"
-            + "            actionsView.setVisibility(View.VISIBLE);\\n"
-            + "            actionsView.bringToFront();\\n"
-            + "        }\\n"
+            + "        // WaysGram: place native profile actions above avatar pager indicator\n"
+            + "        if (actionsView != null) {\n"
+            + "            actionsView.setAlpha(1.0f);\n"
+            + "            actionsView.setVisibility(View.VISIBLE);\n"
+            + "            actionsView.bringToFront();\n"
+            + "        }\n"
         )
         original = replace_exactly_once(
             original, pager_indicator_anchor, pager_indicator_patched,
