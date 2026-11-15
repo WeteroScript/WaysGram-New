@@ -221,7 +221,10 @@ public final class WaysGramGiftCatalogClient implements AutoCloseable {
             try {
                 JSONObject response = requestJson(getBaseUrl() + "/api/me/gifts");
                 JSONArray gifts = response.optJSONArray("gifts");
-                callback.onLoaded(gifts == null ? new JSONArray() : gifts);
+                if (gifts == null) {
+                    throw new IOException("WaysGram inventory response does not contain a gifts array");
+                }
+                callback.onLoaded(gifts);
             } catch (Exception exception) {
                 callback.onError(toSafeError(exception));
             }
@@ -449,7 +452,17 @@ public final class WaysGramGiftCatalogClient implements AutoCloseable {
             }
             int status = connection.getResponseCode();
             if (status < 200 || status >= 300) {
-                throw new HttpStatusException(status);
+                String detail = "";
+                InputStream errorStream = connection.getErrorStream();
+                if (errorStream != null) {
+                    try (InputStream input = errorStream) {
+                        byte[] errorBody = readLimited(input, 16 * 1024);
+                        detail = extractErrorDetail(errorBody);
+                    } catch (Exception ignored) {
+                        detail = "";
+                    }
+                }
+                throw new HttpStatusException(status, detail);
             }
             int contentLength = connection.getContentLength();
             if (contentLength > maxBytes) {
@@ -515,12 +528,25 @@ public final class WaysGramGiftCatalogClient implements AutoCloseable {
 
     private static String toSafeError(Exception exception) {
         if (exception instanceof HttpStatusException) {
-            int status = ((HttpStatusException) exception).statusCode;
-            if (status == 409) {
-                return "Покупка отклонена: проверьте баланс и наличие подарка";
+            HttpStatusException http = (HttpStatusException) exception;
+            int status = http.statusCode;
+            if (status == 401) {
+                return "Сессия WaysGram недействительна (HTTP 401)";
             }
             if (status == 403) {
-                return "Покупка недоступна для этого аккаунта";
+                return "Доступ к инвентарю запрещён (HTTP 403)";
+            }
+            if (status == 404) {
+                return "Маршрут инвентаря не найден на сервере (HTTP 404)";
+            }
+            if (status >= 500) {
+                return "Ошибка сервера AuthBot (HTTP " + status + ")";
+            }
+            if (status == 409) {
+                return "Операция отклонена: проверьте состояние подарка (HTTP 409)";
+            }
+            if (http.detail.length() > 0) {
+                return http.detail + " (HTTP " + status + ")";
             }
             return "WaysGram API returned HTTP " + status;
         }
@@ -528,7 +554,25 @@ public final class WaysGramGiftCatalogClient implements AutoCloseable {
                 && exception.getMessage().startsWith("WaysGram")) {
             return exception.getMessage();
         }
-        return "Не удалось выполнить запрос к магазину подарков WaysGram";
+        return "Не удалось выполнить запрос к серверу подарков WaysGram";
+    }
+
+    private static String extractErrorDetail(byte[] body) {
+        if (body == null || body.length == 0) {
+            return "";
+        }
+        String raw = new String(body, StandardCharsets.UTF_8).trim();
+        try {
+            JSONObject json = new JSONObject(raw);
+            String detail = json.optString("detail", json.optString("message", "")).trim();
+            if (!detail.isEmpty()) {
+                return detail.length() > 180 ? detail.substring(0, 180) : detail;
+            }
+        } catch (Exception ignored) {
+            // Keep only a short plain-text response as diagnostic context.
+        }
+        raw = raw.replaceAll("\\s+", " ").trim();
+        return raw.length() > 180 ? raw.substring(0, 180) : raw;
     }
 
     @Override
@@ -539,10 +583,12 @@ public final class WaysGramGiftCatalogClient implements AutoCloseable {
 
     private static final class HttpStatusException extends IOException {
         final int statusCode;
+        final String detail;
 
-        HttpStatusException(int statusCode) {
+        HttpStatusException(int statusCode, String detail) {
             super("HTTP " + statusCode);
             this.statusCode = statusCode;
+            this.detail = detail == null ? "" : detail;
         }
     }
 }
