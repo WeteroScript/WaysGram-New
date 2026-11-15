@@ -121,36 +121,51 @@ def patch_profile_actions_visibility_source(original: str) -> str:
 
 
 def patch_profile_phone_source(original: str) -> str:
-    """Prevent invalid API placeholder strings from becoming Telegram phone rows."""
-    marker = "// WaysGram: ignore invalid Telegram phone placeholders"
+    """Use the persisted self phone instead of a transient cached profile value."""
+    marker = "// WaysGram: use persisted self phone while profile refreshes"
     if marker in original:
-        if 'user.phone.matches("[0-9]{8,15}")' not in original:
-            raise ValueError("ProfileActivity contains an incomplete phone placeholder patch")
+        required = (
+            'myProfile ? getUserConfig().getClientPhone()',
+            'profilePhone.matches("[0-9]{8,15}")',
+        )
+        if not all(value in original for value in required):
+            raise ValueError("ProfileActivity contains an incomplete stable phone patch")
         return original
 
     old_has_phone = (
-        "                boolean hasPhone = user != null && (!TextUtils.isEmpty(user.phone) || !TextUtils.isEmpty(vcardPhone));\n"
-    )
-    new_has_phone = (
         "                // WaysGram: ignore invalid Telegram phone placeholders\n"
         "                boolean hasPhone = user != null && ((user.phone != null && user.phone.matches(\"[0-9]{8,15}\")) || (vcardPhone != null && vcardPhone.matches(\"[0-9]{8,15}\")));\n"
     )
+    new_has_phone = (
+        "                // WaysGram: use persisted self phone while profile refreshes\n"
+        "                String profilePhone = myProfile ? getUserConfig().getClientPhone() : (user == null ? \"\" : user.phone);\n"
+        "                boolean hasPhone = user != null && ((profilePhone != null && profilePhone.matches(\"[0-9]{8,15}\")) || (vcardPhone != null && vcardPhone.matches(\"[0-9]{8,15}\")));\n"
+    )
     original = replace_exactly_once(
         original, old_has_phone, new_has_phone,
-        "valid Telegram profile phone row condition"
+        "stable Telegram profile phone row condition"
     )
 
     original = replace_exactly_once(
         original,
-        "                        if (user != null && !TextUtils.isEmpty(vcardPhone)) {\n",
         "                        if (user != null && vcardPhone != null && vcardPhone.matches(\"[0-9]{8,15}\")) {\n",
-        "valid vCard profile phone display"
+        "                        String profilePhone = myProfile ? getUserConfig().getClientPhone() : (user == null ? \"\" : user.phone);\n"
+        "                        if (user != null && vcardPhone != null && vcardPhone.matches(\"[0-9]{8,15}\")) {\n",
+        "stable profile phone display value"
     )
     original = replace_exactly_once(
         original,
-        "                        } else if (user != null && !TextUtils.isEmpty(user.phone)) {\n",
         "                        } else if (user != null && user.phone != null && user.phone.matches(\"[0-9]{8,15}\")) {\n",
-        "valid Telegram profile phone display"
+        "                        } else if (user != null && profilePhone != null && profilePhone.matches(\"[0-9]{8,15}\")) {\n",
+        "stable Telegram profile phone display"
+    )
+    original = replace_exactly_once(
+        original,
+        "                            text = PhoneFormat.getInstance().format(\"+\" + user.phone);\n"
+        "                            phoneNumber = user.phone;\n",
+        "                            text = PhoneFormat.getInstance().format(\"+\" + profilePhone);\n"
+        "                            phoneNumber = profilePhone;\n",
+        "persisted profile phone formatting"
     )
     return original
 
