@@ -3298,7 +3298,16 @@ public final class WaysGramChatFragment extends BaseFragment {
 
             if (isGiftPurchaseEvent) {
                 GiftMessageView purchaseNotice = new GiftMessageView(getParentActivity());
-                purchaseNotice.setMessage("Вы приобрели коллекционный подарок");
+                String purchaseNoticeText;
+                if (sender == recipient) {
+                    purchaseNoticeText = "Вы приобрели коллекционный подарок";
+                } else if (sender == peerId) {
+                    purchaseNoticeText = (peerTitle.isEmpty() ? "Пользователь" : peerTitle)
+                            + " отправил вам подарок";
+                } else {
+                    purchaseNoticeText = "Вы отправили подарок";
+                }
+                purchaseNotice.setMessage(purchaseNoticeText);
                 purchaseNotice.setPadding(AndroidUtilities.dp(30), AndroidUtilities.dp(2),
                         AndroidUtilities.dp(30), AndroidUtilities.dp(2));
                 LinearLayout.LayoutParams noticeParams = new LinearLayout.LayoutParams(

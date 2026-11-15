@@ -76,6 +76,7 @@ public final class WaysGramGiftCatalogClient implements AutoCloseable {
         public final int starCount;
         public final int storePriceStars;
         public final int storeRemaining;
+        public final boolean storeUnlimited;
         public final boolean forSale;
         public final Integer upgradeStarCount;
         public final boolean premium;
@@ -111,6 +112,7 @@ public final class WaysGramGiftCatalogClient implements AutoCloseable {
             currency = object.optString("currency", "telegram_stars");
             starCount = Math.max(0, object.optInt("star_count", 0));
             storePriceStars = Math.max(0, object.optInt("price_stars", 0));
+            storeUnlimited = object.optBoolean("unlimited_supply", false);
             storeRemaining = Math.max(0, object.optInt("remaining", 0));
             forSale = object.optBoolean("for_sale", storePriceStars > 0 && storeRemaining > 0);
             upgradeStarCount = optionalInt(object, "upgrade_star_count");
@@ -236,29 +238,78 @@ public final class WaysGramGiftCatalogClient implements AutoCloseable {
      * controlled only by the AuthBot administrator panel.
      */
     public void purchaseGift(Gift gift, PurchaseCallback callback) {
+        purchaseGift(gift, (String) null, callback);
+    }
+
+    public void purchaseGift(Gift gift, @Nullable String recipient, PurchaseCallback callback) {
         if (gift == null || callback == null || !gift.forSale) {
             if (callback != null) {
                 callback.onError("Подарок сейчас недоступен для покупки");
             }
             return;
         }
+        String recipientQuery = recipient == null ? "" : recipient.trim();
+        if (recipientQuery.startsWith("@")) {
+            recipientQuery = recipientQuery.substring(1).trim();
+        }
+        if (recipient != null && recipientQuery.isEmpty()) {
+            callback.onError("Укажите получателя");
+            return;
+        }
+        final String lookup = recipientQuery;
         ioExecutor.execute(() -> {
+            String scope = gift.id + ":" + (lookup.isEmpty() ? "self" : lookup.toLowerCase(java.util.Locale.ROOT));
+            String idempotencyKey = purchaseIdempotencyKeys.computeIfAbsent(
+                    scope, ignored -> "wg-" + UUID.randomUUID().toString()
+            );
             try {
+                Long recipientId = null;
+                if (!lookup.isEmpty()) {
+                    if (lookup.matches("[0-9]{1,20}")) {
+                        recipientId = Long.parseLong(lookup);
+                    } else {
+                        String query = URLEncoder.encode(lookup, "UTF-8").replace("+", "%20");
+                        JSONObject search = requestJson(getBaseUrl() + "/api/users?q=" + query);
+                        JSONArray users = search.optJSONArray("users");
+                        long exactId = 0;
+                        int exactMatches = 0;
+                        if (users != null) {
+                            for (int i = 0; i < users.length(); i++) {
+                                JSONObject candidate = users.optJSONObject(i);
+                                if (candidate == null) {
+                                    continue;
+                                }
+                                String username = candidate.optString("username", "");
+                                if (username.equalsIgnoreCase(lookup)) {
+                                    exactId = candidate.optLong("id", 0);
+                                    exactMatches++;
+                                }
+                            }
+                        }
+                        if (exactMatches != 1 || exactId <= 0) {
+                            throw new IOException("Пользователь с таким @username не найден");
+                        }
+                        recipientId = exactId;
+                    }
+                    if (recipientId <= 0) {
+                        throw new IOException("Некорректный ID получателя");
+                    }
+                }
                 String encodedGiftId = URLEncoder.encode(gift.id, "UTF-8").replace("+", "%20");
                 JSONObject payload = new JSONObject();
-                String idempotencyKey = purchaseIdempotencyKeys.computeIfAbsent(
-                        gift.id,
-                        ignored -> "wg-" + UUID.randomUUID().toString()
-                );
+                if (recipientId != null) {
+                    payload.put("recipient_id", recipientId);
+                }
                 JSONObject response = requestJson(
                         getBaseUrl() + "/api/telegram/gifts/" + encodedGiftId + "/purchase",
                         "POST",
                         payload.toString(),
                         idempotencyKey
                 );
-                purchaseIdempotencyKeys.remove(gift.id, idempotencyKey);
+                purchaseIdempotencyKeys.remove(scope, idempotencyKey);
                 callback.onPurchased(response);
             } catch (Exception exception) {
+                // Keep the same key so a retry cannot double-charge after a timeout.
                 callback.onError(toSafeError(exception));
             }
         });
