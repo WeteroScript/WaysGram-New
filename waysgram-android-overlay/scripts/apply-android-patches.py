@@ -48,10 +48,18 @@ def patch_launch_source(original: str) -> str:
 def patch_profile_actions_visibility_source(original: str) -> str:
     """Restore native profile action controls after an interrupted avatar animation."""
     marker = "// WaysGram: restore profile action visibility"
-    if marker in original:
-        if "actionsView.setAlpha(1.0f);" not in original:
+    if marker in original and "WaysGram: keep native profile actions above avatar overlays" in original:
+        required = (
+            "actionsView.setAlpha(1.0f);",
+            "actionsView.setVisibility(View.VISIBLE);",
+            "actionsView.bringToFront();",
+        )
+        if not all(value in original for value in required):
             raise ValueError("ProfileActivity contains an incomplete action visibility patch")
         return original
+
+    if marker in original and "actionsView.setAlpha(1.0f);" not in original:
+        raise ValueError("ProfileActivity contains an incomplete action visibility patch")
 
     before = (
         "        } else {\n"
@@ -71,7 +79,63 @@ def patch_profile_actions_visibility_source(original: str) -> str:
         "            actionsView.updatePosition(bottom - height, height);\n"
         "        }\n"
     )
-    return replace_exactly_once(original, before, after, "profile action visibility restoration")
+    if marker not in original:
+        original = replace_exactly_once(original, before, after, "profile action visibility restoration")
+
+    action_position = (
+        "            actionsView.updatePosition(bottom - height, height);\\n"
+    )
+    action_position_patched = (
+        action_position
+        + "            // WaysGram: keep native profile actions above avatar overlays\\n"
+        + "            if (!openAnimationInProgress) {\\n"
+        + "                actionsView.setAlpha(1.0f);\\n"
+        + "                actionsView.setVisibility(View.VISIBLE);\\n"
+        + "            }\\n"
+        + "            actionsView.bringToFront();\\n"
+        + "            actionsView.invalidate();\\n"
+    )
+    if "WaysGram: keep native profile actions above avatar overlays" not in original:
+        original = replace_exactly_once(
+            original, action_position, action_position_patched,
+            "native profile action z-order and visibility restoration"
+        )
+    return original
+
+
+def patch_profile_phone_source(original: str) -> str:
+    """Prevent invalid API placeholder strings from becoming Telegram phone rows."""
+    marker = "// WaysGram: ignore invalid Telegram phone placeholders"
+    if marker in original:
+        if 'user.phone.matches("[0-9]{8,15}")' not in original:
+            raise ValueError("ProfileActivity contains an incomplete phone placeholder patch")
+        return original
+
+    old_has_phone = (
+        "                boolean hasPhone = user != null && (!TextUtils.isEmpty(user.phone) || !TextUtils.isEmpty(vcardPhone));\\n"
+    )
+    new_has_phone = (
+        "                // WaysGram: ignore invalid Telegram phone placeholders\\n"
+        "                boolean hasPhone = user != null && ((user.phone != null && user.phone.matches(\\"[0-9]{8,15}\\")) || (vcardPhone != null && vcardPhone.matches(\\"[0-9]{8,15}\\")));\\n"
+    )
+    original = replace_exactly_once(
+        original, old_has_phone, new_has_phone,
+        "valid Telegram profile phone row condition"
+    )
+
+    original = replace_exactly_once(
+        original,
+        "                        if (user != null && !TextUtils.isEmpty(vcardPhone)) {\\n",
+        "                        if (user != null && vcardPhone != null && vcardPhone.matches(\\"[0-9]{8,15}\\")) {\\n",
+        "valid vCard profile phone display"
+    )
+    original = replace_exactly_once(
+        original,
+        "                        } else if (user != null && !TextUtils.isEmpty(user.phone)) {\\n",
+        "                        } else if (user != null && user.phone != null && user.phone.matches(\\"[0-9]{8,15}\\")) {\\n",
+        "valid Telegram profile phone display"
+    )
+    return original
 
 
 def patch_profile_gifts_source(original: str) -> str:
@@ -768,11 +832,17 @@ def verify_source(android_root: Path) -> None:
     if patched_profile_activity != profile_activity_source:
         profile_activity.write_text(patched_profile_activity, encoding="utf-8")
     final_profile_activity = profile_activity.read_text(encoding="utf-8")
+    patched_profile_phone = patch_profile_phone_source(final_profile_activity)
+    if patched_profile_phone != final_profile_activity:
+        profile_activity.write_text(patched_profile_phone, encoding="utf-8")
+    final_profile_activity = profile_activity.read_text(encoding="utf-8")
     if (
         "// WaysGram: restore profile action visibility" not in final_profile_activity
+        or "WaysGram: keep native profile actions above avatar overlays" not in final_profile_activity
         or "actionsView.setAlpha(1.0f);" not in final_profile_activity
+        or "WaysGram: ignore invalid Telegram phone placeholders" not in final_profile_activity
     ):
-        raise ValueError("Native profile action visibility restoration was not applied")
+        raise ValueError("Native profile actions or phone placeholder patch was not applied")
 
     gifts_container = android_root / "TMessagesProj/src/main/java/org/telegram/ui/Gifts/ProfileGiftsContainer.java"
     if not gifts_container.is_file():
