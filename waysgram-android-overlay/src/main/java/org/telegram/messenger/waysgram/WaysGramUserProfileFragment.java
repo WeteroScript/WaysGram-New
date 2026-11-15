@@ -280,11 +280,11 @@ public final class WaysGramUserProfileFragment extends BaseFragment {
                     getParentActivity(), card, apiClient, telegramId, emoji
             );
             addLabel(getParentActivity(), card, "Уровень WaysGram: " + level, 13, true);
-            if (telegramGift != null && telegramGift.optBoolean("can_upgrade", false)) {
+            if (telegramGift != null && gift.optBoolean("can_upgrade", false)) {
                 int upgradePrice = telegramGift.optInt("upgrade_star_count", 0);
                 int upgradeVariants = telegramGift.optInt("upgrade_variants", 0);
                 addLabel(getParentActivity(), card,
-                        "Улучшение Telegram доступно"
+                        "Параметры Telegram-улучшения"
                                 + (upgradePrice > 0 ? " · " + upgradePrice + " Stars" : "")
                                 + (upgradeVariants > 0 ? " · вариантов: " + upgradeVariants : ""),
                         12, true
