@@ -41,6 +41,7 @@ public final class WaysGramLoginSheet extends BottomSheet {
     private final Button requestCodeButton;
     private final Button verifyButton;
     private boolean codeRequested;
+    private Runnable onDismissCallback;
 
     public WaysGramLoginSheet(
             Context context,
@@ -156,7 +157,16 @@ public final class WaysGramLoginSheet extends BottomSheet {
         verifyButton.setEnabled(false);
         requestCodeButton.setEnabled(true);
 
-        setOnDismissListener(dialog -> closeClient());
+        setOnDismissListener(dialog -> {
+            closeClient();
+            if (onDismissCallback != null) {
+                onDismissCallback.run();
+            }
+        });
+    }
+
+    public void setOnDismissCallback(Runnable callback) {
+        onDismissCallback = callback;
     }
 
     private EditText addField(Context context, LinearLayout parent, String hint, int inputType) {

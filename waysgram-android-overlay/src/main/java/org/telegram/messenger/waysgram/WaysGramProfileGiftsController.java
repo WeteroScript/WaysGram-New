@@ -33,6 +33,7 @@ public final class WaysGramProfileGiftsController {
     private final WaysGramSessionStore sessionStore;
     private final WaysGramApiClient imageClient;
     private boolean loading;
+    private boolean loginPromptShown;
 
     public WaysGramProfileGiftsController(
             Context context,
@@ -51,6 +52,10 @@ public final class WaysGramProfileGiftsController {
 
     public void refresh() {
         if (loading) {
+            return;
+        }
+        if (!sessionStore.hasSession()) {
+            showLoginPrompt();
             return;
         }
         loading = true;
@@ -74,7 +79,12 @@ public final class WaysGramProfileGiftsController {
                 AndroidUtilities.runOnUIThread(() -> {
                     loading = false;
                     client.close();
-                    showError(message);
+                    if (message != null && (message.contains("WaysGram session is missing") || message.contains("HTTP 401"))) {
+                        sessionStore.clearSession();
+                        showLoginPrompt();
+                    } else {
+                        showError(message);
+                    }
                 });
             }
         });
@@ -364,6 +374,26 @@ public final class WaysGramProfileGiftsController {
                 }
             });
         }
+    }
+
+    private void showLoginPrompt() {
+        if (loginPromptShown) {
+            return;
+        }
+        if (fragment == null || fragment.getParentActivity() == null) {
+            showError("Войдите в WaysGram, чтобы открыть свои подарки.");
+            return;
+        }
+        loginPromptShown = true;
+        WaysGramLoginSheet sheet = new WaysGramLoginSheet(
+                fragment.getParentActivity(), sessionStore, null,
+                () -> {
+                    loginPromptShown = false;
+                    refresh();
+                }
+        );
+        sheet.setOnDismissCallback(() -> loginPromptShown = false);
+        sheet.show();
     }
 
     private void showError(String message) {
