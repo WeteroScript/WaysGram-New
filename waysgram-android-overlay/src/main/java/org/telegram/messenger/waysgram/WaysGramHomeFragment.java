@@ -247,7 +247,8 @@ public final class WaysGramHomeFragment extends BaseFragment {
                                 if (avatarView != null) {
                                     avatarView.setImageDrawable(null);
                                 }
-                            }                        });
+                            }
+                        });
                     } else {
                         avatarView.setImageDrawable(null);
                     }
@@ -496,7 +497,8 @@ public final class WaysGramHomeFragment extends BaseFragment {
             }
 
             @Override
-            public void onError(String message, int statusCode) {                if (statusCode == 401 && getParentActivity() != null) {
+            public void onError(String message, int statusCode) {
+                if (statusCode == 401 && getParentActivity() != null) {
                     sessionStore.clearSession();
                     presentFragment(new WaysGramLoginFragment(), true);
                 }
@@ -744,7 +746,8 @@ public final class WaysGramHomeFragment extends BaseFragment {
                                 .setPositiveButton("Удалить", (confirm, selected) ->
                                         apiClient.delete("/api/me/avatar", new WaysGramApiClient.Callback() {
                                             @Override
-                                            public void onSuccess(JSONObject response) {                                                currentAvatarMediaId = "";
+                                            public void onSuccess(JSONObject response) {
+                                                currentAvatarMediaId = "";
                                                 avatarView.setImageDrawable(null);
                                                 statusView.setText("Фото профиля удалено");
                                                 loadProfile();
