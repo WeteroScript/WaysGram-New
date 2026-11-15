@@ -7,6 +7,8 @@ import android.graphics.BitmapFactory;
 import android.graphics.Color;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
+import java.io.File;
+import java.io.FileOutputStream;
 import android.view.Gravity;
 import android.text.InputType;
 import android.view.View;
@@ -26,6 +28,8 @@ import androidx.recyclerview.widget.LinearLayoutManager;
 import androidx.recyclerview.widget.RecyclerView;
 
 import org.telegram.messenger.AndroidUtilities;
+import org.telegram.messenger.UserConfig;
+import org.telegram.ui.Components.AnimatedFileDrawable;
 import org.telegram.ui.ActionBar.BottomSheet;
 import org.telegram.ui.ActionBar.Theme;
 import org.json.JSONObject;
@@ -740,7 +744,7 @@ public final class WaysGramGiftCatalogSheet extends BottomSheet {
                 .setTitle("Подтвердить покупку")
                 .setMessage(
                         gift.title + "\n\nЦена: " + gift.storePriceStars
-                                + " WaysGram Stars\nОсталось в магазине: " + gift.storeRemaining
+                                + " WaysGram Stars\nОсталось в магазине: " + (gift.storeUnlimited ? "без ограничений" : String.valueOf(gift.storeRemaining))
                 )
                 .setNegativeButton("Отмена", (dialog, which) -> finishPurchaseAttempt(gift.id))
                 .setPositiveButton("Купить", (dialog, which) -> {
@@ -804,6 +808,12 @@ public final class WaysGramGiftCatalogSheet extends BottomSheet {
                 items.addAll(gifts);
             }
             notifyDataSetChanged();
+            // Load previews for the first visible rows immediately; opening a gift
+            // is not required to trigger the thumbnail download.
+            int prefetchCount = Math.min(items.size(), 12);
+            for (int i = 0; i < prefetchCount; i++) {
+                requestSticker(items.get(i));
+            }
         }
 
         void setSticker(String giftId, Bitmap bitmap) {
@@ -833,14 +843,14 @@ public final class WaysGramGiftCatalogSheet extends BottomSheet {
         }
 
         private void requestSticker(WaysGramGiftCatalogClient.Gift gift) {
-            if (gift.animatedSticker || gift.videoSticker || gift.stickerUrl.length() == 0
+            if (gift.stickerUrl.length() == 0
                     || stickers.containsKey(gift.id) || !requestedStickers.add(gift.id)) {
                 return;
             }
             catalogClient.downloadSticker(gift, new WaysGramGiftCatalogClient.StickerCallback() {
                 @Override
                 public void onLoaded(byte[] bytes, String mimeType) {
-                    Bitmap bitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.length);
+                    Bitmap bitmap = decodeStickerPreview(gift, bytes);
                     if (bitmap == null) {
                         return;
                     }
@@ -858,6 +868,40 @@ public final class WaysGramGiftCatalogSheet extends BottomSheet {
                     // Keep the emoji placeholder if Telegram cannot deliver this sticker.
                 }
             });
+        }
+
+        private Bitmap decodeStickerPreview(WaysGramGiftCatalogClient.Gift gift, byte[] bytes) {
+            Bitmap bitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.length);
+            if (bitmap != null) {
+                return bitmap;
+            }
+            File previewFile = null;
+            AnimatedFileDrawable drawable = null;
+            try {
+                String extension = gift.videoSticker ? ".webm" : ".tgs";
+                previewFile = new File(
+                        getContext().getCacheDir(),
+                        "waysgram_gift_preview_" + gift.id + extension
+                );
+                try (FileOutputStream output = new FileOutputStream(previewFile)) {
+                    output.write(bytes);
+                    output.flush();
+                }
+                drawable = new AnimatedFileDrawable(
+                        previewFile, true, 0, 0, null, null, null, 0,
+                        UserConfig.selectedAccount, true, 64, 64, null
+                );
+                return drawable.getFirstFrame(null);
+            } catch (Exception exception) {
+                return null;
+            } finally {
+                if (drawable != null) {
+                    drawable.recycle();
+                }
+                if (previewFile != null && previewFile.exists()) {
+                    previewFile.delete();
+                }
+            }
         }
 
         @Override
@@ -963,7 +1007,7 @@ public final class WaysGramGiftCatalogSheet extends BottomSheet {
             titleView.setText(gift.title);
             if (gift.forSale) {
                 priceView.setText("Цена: " + gift.storePriceStars + " WaysGram Stars");
-                stockView.setText("В наличии: " + gift.storeRemaining);
+                stockView.setText("В наличии: " + (gift.storeUnlimited ? "без ограничений" : String.valueOf(gift.storeRemaining)));
                 stockView.setVisibility(View.VISIBLE);
                 buyButton.setVisibility(View.VISIBLE);
                 buyButton.setEnabled(!purchasingGiftIds.contains(gift.id));
