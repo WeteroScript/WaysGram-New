@@ -25,7 +25,7 @@ import java.util.Set;
  */
 public final class WaysGramProfileGiftsController {
     private static final int MAX_VISIBLE_GIFTS = 200;
-    private static final int MAX_STICKER_DOWNLOADS = 32;
+    private static final int MAX_STICKER_DOWNLOADS = MAX_VISIBLE_GIFTS;
 
     private final Context appContext;
     private final BaseFragment fragment;
@@ -100,6 +100,7 @@ public final class WaysGramProfileGiftsController {
             long acquiredAt = Math.max(0L, item.optLong("acquired_at", 0L));
             JSONObject attributes = item.optJSONObject("attributes");
             JSONObject traits = attributes == null ? null : attributes.optJSONObject("collectible_traits");
+            JSONObject telegramGift = item.optJSONObject("telegram_gift");
             int upgradeLevel = item.has("upgrade_level")
                     ? Math.max(0, item.optInt("upgrade_level", 0))
                     : Math.max(0, attributes == null ? 0 : attributes.optInt("upgrade_level", 0));
@@ -107,14 +108,35 @@ public final class WaysGramProfileGiftsController {
             String model = optText(traits, "model");
             String symbol = optText(traits, "symbol");
             String backdropName = backdropName(optText(traits, "backdrop"));
-            String giftTitle = item.optString("gift_name", "Gift");
+            String giftEmoji = optText(item, "gift_emoji");
+            if (giftEmoji.isEmpty()) {
+                giftEmoji = optText(telegramGift, "emoji");
+            }
+            String catalogTitle = optText(telegramGift, "title");
+            String giftTitle = catalogTitle.isEmpty()
+                    ? optText(item, "gift_name")
+                    : catalogTitle;
+            if (giftTitle.isEmpty()) {
+                giftTitle = giftEmoji.isEmpty() ? "Gift" : giftEmoji;
+            }
+            int telegramUpgradePrice = telegramGift == null
+                    ? 0 : Math.max(0, telegramGift.optInt("upgrade_star_count", 0));
+            int telegramUpgradeVariants = telegramGift == null
+                    ? 0 : Math.max(0, telegramGift.optInt("upgrade_variants", 0));
+            boolean canUpgrade = optBooleanLike(item, "can_upgrade")
+                    || (telegramUpgradePrice > 0 && upgradeLevel == 0);
             boolean isListed = optBooleanLike(item, "is_listed");
             boolean isAuctioned = optBooleanLike(item, "is_auctioned");
 
             WaysGramGiftMediaStore.putMetadata(
                     serial,
                     giftTitle,
-                    buildGiftSubtitle(serial, upgradeLevel, rarity, model, symbol, isListed, isAuctioned)
+                    buildGiftSubtitle(
+                            serial, upgradeLevel, rarity, model, symbol, giftEmoji,
+                            canUpgrade, telegramUpgradePrice, telegramUpgradeVariants,
+                            isListed, isAuctioned
+                    ),
+                    giftEmoji
             );
 
             TL_stars.TL_starGiftUnique nativeGift = new TL_stars.TL_starGiftUnique();
@@ -133,7 +155,7 @@ public final class WaysGramProfileGiftsController {
             savedGift.gift = nativeGift;
             savedGift.saved_id = uniqueId;
             savedGift.gift_num = serialNumber;
-            savedGift.can_upgrade = item.optBoolean("can_upgrade", false);
+            savedGift.can_upgrade = canUpgrade;
             result.add(savedGift);
         }
         return result;
@@ -180,6 +202,10 @@ public final class WaysGramProfileGiftsController {
             String rarity,
             String model,
             String symbol,
+            String giftEmoji,
+            boolean canUpgrade,
+            int telegramUpgradePrice,
+            int telegramUpgradeVariants,
             boolean isListed,
             boolean isAuctioned
     ) {
@@ -193,9 +219,18 @@ public final class WaysGramProfileGiftsController {
         }
 
         StringBuilder secondLine = new StringBuilder();
+        appendPart(secondLine, giftEmoji);
         appendPart(secondLine, rarity);
         appendPart(secondLine, model);
         appendPart(secondLine, symbol);
+        if (canUpgrade) {
+            appendPart(secondLine, telegramUpgradePrice > 0
+                    ? "Апгрейд Telegram · " + telegramUpgradePrice + " Stars"
+                    : "Доступно улучшение");
+        }
+        if (telegramUpgradeVariants > 0) {
+            appendPart(secondLine, "Вариантов: " + telegramUpgradeVariants);
+        }
         return secondLine.length() == 0
                 ? firstLine.toString()
                 : firstLine.append('\n').append(secondLine).toString();
@@ -304,6 +339,10 @@ public final class WaysGramProfileGiftsController {
             }
             String serial = item.optString("serial_number", "").trim();
             String telegramGiftId = item.optString("telegram_gift_id", "").trim();
+            if (telegramGiftId.isEmpty()) {
+                JSONObject telegramGift = item.optJSONObject("telegram_gift");
+                telegramGiftId = optText(telegramGift, "id");
+            }
             if (serial.isEmpty() || telegramGiftId.isEmpty() || !started.add(serial)) {
                 continue;
             }
