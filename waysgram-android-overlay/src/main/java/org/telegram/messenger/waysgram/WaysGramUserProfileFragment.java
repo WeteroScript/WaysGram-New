@@ -247,7 +247,15 @@ public final class WaysGramUserProfileFragment extends BaseFragment {
             if (attributes == null) {
                 attributes = new JSONObject();
             }
-            String title = gift.optString("gift_name", "Подарок WaysGram");
+            JSONObject telegramGift = gift.optJSONObject("telegram_gift");
+            String title = telegramGift == null ? "" : telegramGift.optString("title", "").trim();
+            if (title.isEmpty()) {
+                title = gift.optString("gift_name", "Подарок WaysGram");
+            }
+            String emoji = gift.optString("gift_emoji", "").trim();
+            if (emoji.isEmpty() && telegramGift != null) {
+                emoji = telegramGift.optString("emoji", "").trim();
+            }
             String serial = gift.optString("serial_number", "");
             String telegramId = gift.optString("telegram_gift_id", "");
             int level = Math.max(
@@ -264,10 +272,24 @@ public final class WaysGramUserProfileFragment extends BaseFragment {
             background.setCornerRadius(AndroidUtilities.dp(12));
             card.setBackground(background);
 
-            TextView titleView = addLabel(getParentActivity(), card, "🎁  " + title, 16, true);
+            TextView titleView = addLabel(getParentActivity(), card,
+                    (emoji.isEmpty() ? "🎁" : emoji) + "  " + title, 16, true);
             titleView.setPadding(AndroidUtilities.dp(2), AndroidUtilities.dp(3),
                     AndroidUtilities.dp(2), AndroidUtilities.dp(5));
+            WaysGramGiftCardRenderer.addPreview(
+                    getParentActivity(), card, apiClient, telegramId, emoji
+            );
             addLabel(getParentActivity(), card, "Уровень WaysGram: " + level, 13, true);
+            if (telegramGift != null && telegramGift.optBoolean("can_upgrade", false)) {
+                int upgradePrice = telegramGift.optInt("upgrade_star_count", 0);
+                int upgradeVariants = telegramGift.optInt("upgrade_variants", 0);
+                addLabel(getParentActivity(), card,
+                        "Улучшение Telegram доступно"
+                                + (upgradePrice > 0 ? " · " + upgradePrice + " Stars" : "")
+                                + (upgradeVariants > 0 ? " · вариантов: " + upgradeVariants : ""),
+                        12, true
+                );
+            }
             if (!serial.isEmpty()) {
                 addLabel(getParentActivity(), card, "Серийный номер: " + serial, 12, false);
             }
