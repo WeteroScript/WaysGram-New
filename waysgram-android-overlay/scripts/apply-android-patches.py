@@ -335,20 +335,27 @@ def patch_profile_gifts_container_source(original: str) -> str:
         "disable Telegram scroll pagination for WaysGram gifts",
     )
 
-    click_anchor = "        void onItemClick(UItem item, View view, int position, float x, float y) {\n            if (list == null) return;\n"
-    updated = replace_exactly_once(
-        updated, click_anchor,
-        "        void onItemClick(UItem item, View view, int position, float x, float y) {\n"
-        "            if (parent.waysGramInventory || list == null) return;\n",
-        "prevent Telegram-side gift actions on WaysGram inventory",
+    click_match = re.search(
+        r"(?m)^(?P<indent>[ \t]*)(?:(?:public|private|protected)\s+)?void\s+onItemClick\s*\([^)]*\)\s*\{",
+        updated,
     )
-    long_press_anchor = "        public boolean onItemLongPress(UItem item, View view, int position, float x, float y) {\n            if (list == null) return false;\n"
-    updated = replace_exactly_once(
-        updated, long_press_anchor,
-        "        public boolean onItemLongPress(UItem item, View view, int position, float x, float y) {\n"
-        "            if (parent.waysGramInventory || list == null) return false;\n",
-        "prevent Telegram-side gift menu on WaysGram inventory",
+    if click_match is None:
+        raise ValueError("Could not locate native gift item click handler")
+    click_insert = (
+        "\n" + click_match.group("indent") + "    if (parent.waysGramInventory || list == null) return;"
     )
+    updated = updated[:click_match.end()] + click_insert + updated[click_match.end():]
+
+    long_press_match = re.search(
+        r"(?m)^(?P<indent>[ \t]*)(?:(?:public|private|protected)\s+)?boolean\s+onItemLongPress\s*\([^)]*\)\s*\{",
+        updated,
+    )
+    if long_press_match is None:
+        raise ValueError("Could not locate native gift item long-press handler")
+    long_press_insert = (
+        "\n" + long_press_match.group("indent") + "    if (parent.waysGramInventory || list == null) return false;"
+    )
+    updated = updated[:long_press_match.end()] + long_press_insert + updated[long_press_match.end():]
 
     updated = replace_exactly_once(
         updated,
