@@ -219,10 +219,8 @@ public final class WaysGramHomeFragment extends BaseFragment {
                     profileText += "\n@" + currentUsername;
                 }
                 String phone = response.optString("phone", "").trim();
-                if ("null".equalsIgnoreCase(phone) || "+null".equalsIgnoreCase(phone)
-                        || "none".equalsIgnoreCase(phone) || "+none".equalsIgnoreCase(phone)
-                        || "undefined".equalsIgnoreCase(phone) || "+undefined".equalsIgnoreCase(phone)
-                        || "unknown".equalsIgnoreCase(phone) || "+unknown".equalsIgnoreCase(phone)) {
+                // Show only a valid international WaysGram number; never render null-like placeholders.
+                if (!phone.matches("\\+[1-9][0-9]{7,14}")) {
                     phone = "";
                 }
                 if (!phone.isEmpty()) {
