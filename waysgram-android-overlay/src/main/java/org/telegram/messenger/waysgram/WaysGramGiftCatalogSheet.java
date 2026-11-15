@@ -741,53 +741,83 @@ public final class WaysGramGiftCatalogSheet extends BottomSheet {
         }
         adapter.notifyDataSetChanged();
         new AlertDialog.Builder(getContext())
-                .setTitle("Подтвердить покупку")
+                .setTitle("Купить подарок")
                 .setMessage(
                         gift.title + "\n\nЦена: " + gift.storePriceStars
-                                + " WaysGram Stars\nОсталось в магазине: " + (gift.storeUnlimited ? "без ограничений" : String.valueOf(gift.storeRemaining))
+                                + " WaysGram Stars\nОсталось в магазине: "
+                                + (gift.storeUnlimited ? "без ограничений" : String.valueOf(gift.storeRemaining))
                 )
                 .setNegativeButton("Отмена", (dialog, which) -> finishPurchaseAttempt(gift.id))
-                .setPositiveButton("Купить", (dialog, which) -> {
-                    statusView.setText("Покупка подарка…");
-                    catalogClient.purchaseGift(gift, new WaysGramGiftCatalogClient.PurchaseCallback() {
-                        @Override
-                        public void onPurchased(JSONObject result) {
-                            AndroidUtilities.runOnUIThread(() -> {
-                                if (isDismissed()) {
-                                    return;
-                                }
-                                finishPurchaseAttempt(gift.id);
-                                JSONObject purchasedGift = result.optJSONObject("gift");
-                                String serial = purchasedGift == null
-                                        ? ""
-                                        : purchasedGift.optString("serial_number", "");
-                                int balance = result.optInt("stars", -1);
-                                String confirmation = "Подарок куплен"
-                                        + (serial.length() > 0 ? " · " + serial : "")
-                                        + (balance >= 0 ? " · баланс " + balance + " Stars" : "");
-                                statusView.setText(confirmation);
-                                Toast.makeText(getContext(), confirmation, Toast.LENGTH_LONG).show();
-                                loadCatalog();
-                                if (onPurchaseComplete != null) {
-                                    onPurchaseComplete.run();
-                                }
-                            });
-                        }
+                .setPositiveButton("Себе", (dialog, which) -> performGiftPurchase(gift, null))
+                .setNeutralButton("Другу", (dialog, which) -> showFriendRecipientPrompt(gift))
+                .setOnCancelListener(dialog -> finishPurchaseAttempt(gift.id))
+                .show();
+    }
 
-                        @Override
-                        public void onError(String message) {
-                            AndroidUtilities.runOnUIThread(() -> {
-                                if (isDismissed()) {
-                                    return;
-                                }
-                                finishPurchaseAttempt(gift.id);
-                                statusView.setText("Покупка не выполнена: " + message);
-                            });
+    private void showFriendRecipientPrompt(WaysGramGiftCatalogClient.Gift gift) {
+        EditText recipientInput = new EditText(getContext());
+        recipientInput.setSingleLine(true);
+        recipientInput.setInputType(InputType.TYPE_CLASS_NUMBER);
+        recipientInput.setHint("ID пользователя WaysGram");
+        new AlertDialog.Builder(getContext())
+                .setTitle("Отправить подарок другу")
+                .setMessage("Введите ID аккаунта получателя WaysGram. Подарок будет записан в его инвентарь, а карточка появится в вашем чате.")
+                .setView(recipientInput)
+                .setNegativeButton("Отмена", (dialog, which) -> finishPurchaseAttempt(gift.id))
+                .setPositiveButton("Продолжить", (dialog, which) -> {
+                    try {
+                        long recipientId = Long.parseLong(recipientInput.getText().toString().trim());
+                        if (recipientId <= 0) {
+                            throw new NumberFormatException();
                         }
-                    });
+                        performGiftPurchase(gift, recipientId);
+                    } catch (NumberFormatException exception) {
+                        finishPurchaseAttempt(gift.id);
+                        Toast.makeText(getContext(), "Введите корректный ID аккаунта", Toast.LENGTH_LONG).show();
+                    }
                 })
                 .setOnCancelListener(dialog -> finishPurchaseAttempt(gift.id))
                 .show();
+    }
+
+    private void performGiftPurchase(WaysGramGiftCatalogClient.Gift gift, @Nullable Long recipientId) {
+        statusView.setText(recipientId == null ? "Покупаю подарок себе…" : "Отправляю подарок другу…");
+        catalogClient.purchaseGift(gift, recipientId, new WaysGramGiftCatalogClient.PurchaseCallback() {
+            @Override
+            public void onPurchased(JSONObject result) {
+                AndroidUtilities.runOnUIThread(() -> {
+                    if (isDismissed()) {
+                        return;
+                    }
+                    finishPurchaseAttempt(gift.id);
+                    JSONObject purchasedGift = result.optJSONObject("gift");
+                    String serial = purchasedGift == null
+                            ? ""
+                            : purchasedGift.optString("serial_number", "");
+                    int balance = result.optInt("stars", -1);
+                    String confirmation = recipientId == null ? "Подарок куплен" : "Подарок отправлен другу";
+                    confirmation += (serial.length() > 0 ? " · " + serial : "")
+                            + (balance >= 0 ? " · баланс " + balance + " Stars" : "");
+                    statusView.setText(confirmation);
+                    Toast.makeText(getContext(), confirmation, Toast.LENGTH_LONG).show();
+                    loadCatalog();
+                    if (onPurchaseComplete != null) {
+                        onPurchaseComplete.run();
+                    }
+                });
+            }
+
+            @Override
+            public void onError(String message) {
+                AndroidUtilities.runOnUIThread(() -> {
+                    if (isDismissed()) {
+                        return;
+                    }
+                    finishPurchaseAttempt(gift.id);
+                    statusView.setText("Покупка не выполнена: " + message);
+                });
+            }
+        });
     }
 
     private void finishPurchaseAttempt(String giftId) {
