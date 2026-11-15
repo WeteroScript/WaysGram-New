@@ -757,32 +757,32 @@ public final class WaysGramGiftCatalogSheet extends BottomSheet {
     private void showFriendRecipientPrompt(WaysGramGiftCatalogClient.Gift gift) {
         EditText recipientInput = new EditText(getContext());
         recipientInput.setSingleLine(true);
-        recipientInput.setInputType(InputType.TYPE_CLASS_NUMBER);
-        recipientInput.setHint("ID пользователя WaysGram");
+        recipientInput.setInputType(InputType.TYPE_CLASS_TEXT);
+        recipientInput.setHint("@username или ID пользователя");
         new AlertDialog.Builder(getContext())
                 .setTitle("Отправить подарок другу")
-                .setMessage("Введите ID аккаунта получателя WaysGram. Подарок будет записан в его инвентарь, а карточка появится в вашем чате.")
+                .setMessage("Введите @username или ID пользователя WaysGram. Подарок будет записан в его инвентарь, а карточка появится в вашем чате.")
                 .setView(recipientInput)
                 .setNegativeButton("Отмена", (dialog, which) -> finishPurchaseAttempt(gift.id))
                 .setPositiveButton("Продолжить", (dialog, which) -> {
                     try {
-                        long recipientId = Long.parseLong(recipientInput.getText().toString().trim());
-                        if (recipientId <= 0) {
+                        String recipient = recipientInput.getText().toString().trim();
+                        if (recipient.isEmpty()) {
                             throw new NumberFormatException();
                         }
-                        performGiftPurchase(gift, recipientId);
+                        performGiftPurchase(gift, recipient);
                     } catch (NumberFormatException exception) {
                         finishPurchaseAttempt(gift.id);
-                        Toast.makeText(getContext(), "Введите корректный ID аккаунта", Toast.LENGTH_LONG).show();
+                        Toast.makeText(getContext(), "Укажите @username или ID аккаунта", Toast.LENGTH_LONG).show();
                     }
                 })
                 .setOnCancelListener(dialog -> finishPurchaseAttempt(gift.id))
                 .show();
     }
 
-    private void performGiftPurchase(WaysGramGiftCatalogClient.Gift gift, @Nullable Long recipientId) {
-        statusView.setText(recipientId == null ? "Покупаю подарок себе…" : "Отправляю подарок другу…");
-        catalogClient.purchaseGift(gift, recipientId, new WaysGramGiftCatalogClient.PurchaseCallback() {
+    private void performGiftPurchase(WaysGramGiftCatalogClient.Gift gift, @Nullable String recipient) {
+        statusView.setText(recipient == null ? "Покупаю подарок себе…" : "Отправляю подарок другу…");
+        catalogClient.purchaseGift(gift, recipient, new WaysGramGiftCatalogClient.PurchaseCallback() {
             @Override
             public void onPurchased(JSONObject result) {
                 AndroidUtilities.runOnUIThread(() -> {
@@ -795,7 +795,7 @@ public final class WaysGramGiftCatalogSheet extends BottomSheet {
                             ? ""
                             : purchasedGift.optString("serial_number", "");
                     int balance = result.optInt("stars", -1);
-                    String confirmation = recipientId == null ? "Подарок куплен" : "Подарок отправлен другу";
+                    String confirmation = recipient == null ? "Подарок куплен" : "Подарок отправлен другу";
                     confirmation += (serial.length() > 0 ? " · " + serial : "")
                             + (balance >= 0 ? " · баланс " + balance + " Stars" : "");
                     statusView.setText(confirmation);
