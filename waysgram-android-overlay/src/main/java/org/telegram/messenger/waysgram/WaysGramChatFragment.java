@@ -3341,6 +3341,18 @@ public final class WaysGramChatFragment extends BaseFragment {
             if (!isGiftPurchaseEvent && !giftTelegramId.isEmpty()) {
                 giftInfo.append("\nTelegram Gift ID: ").append(giftTelegramId);
             }
+            if (giftLevel == 0 && giftTelegramMetadata != null
+                    && giftTelegramMetadata.optBoolean("can_upgrade", false)) {
+                int upgradePrice = giftTelegramMetadata.optInt("upgrade_star_count", 0);
+                int upgradeVariants = giftTelegramMetadata.optInt("upgrade_variants", 0);
+                giftInfo.append("\nПараметры Telegram-улучшения");
+                if (upgradePrice > 0) {
+                    giftInfo.append(" · ").append(upgradePrice).append(" Stars");
+                }
+                if (upgradeVariants > 0) {
+                    giftInfo.append(" · вариантов: ").append(upgradeVariants);
+                }
+            }
             if (giftAttributes != null
                     && "waysgram_internal".equals(giftAttributes.optString("upgrade_source", ""))) {
                 giftInfo.append("\nУлучшение выполнено внутри WaysGram");
