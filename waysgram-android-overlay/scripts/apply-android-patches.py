@@ -716,6 +716,10 @@ def verify_source(android_root: Path) -> None:
     gift_content = gift_sheet.read_text(encoding="utf-8")
     launch_content = launch_activity.read_text(encoding="utf-8")
 
+    for marker in ("WaysGramGiftMediaStore.get(", "WaysGramGiftMediaStore.getMetadata("):
+        if marker not in gift_content:
+            raise ValueError("WaysGram native GiftCell sticker or metadata binding is missing")
+
     gift_hits = [marker for marker in FORBIDDEN_GIFT_MARKERS if marker in gift_content]
     launch_hits = [marker for marker in FORBIDDEN_LAUNCH_MARKERS if marker in launch_content]
     if gift_hits or launch_hits:
