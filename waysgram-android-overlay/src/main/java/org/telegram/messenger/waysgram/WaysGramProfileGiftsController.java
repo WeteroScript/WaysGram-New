@@ -108,8 +108,8 @@ public final class WaysGramProfileGiftsController {
             String symbol = optText(traits, "symbol");
             String backdropName = backdropName(optText(traits, "backdrop"));
             String giftTitle = item.optString("gift_name", "Gift");
-            boolean isListed = item.optBoolean("is_listed", false);
-            boolean isAuctioned = item.optBoolean("is_auctioned", false);
+            boolean isListed = optBooleanLike(item, "is_listed");
+            boolean isAuctioned = optBooleanLike(item, "is_auctioned");
 
             WaysGramGiftMediaStore.putMetadata(
                     serial,
@@ -145,6 +145,24 @@ public final class WaysGramProfileGiftsController {
         }
         String value = object.optString(key, "").trim();
         return "null".equalsIgnoreCase(value) ? "" : value;
+    }
+
+    private static boolean optBooleanLike(JSONObject object, String key) {
+        if (object == null) {
+            return false;
+        }
+        Object value = object.opt(key);
+        if (value instanceof Boolean) {
+            return (Boolean) value;
+        }
+        if (value instanceof Number) {
+            return ((Number) value).intValue() != 0;
+        }
+        if (value instanceof String) {
+            String text = ((String) value).trim();
+            return "true".equalsIgnoreCase(text) || "1".equals(text);
+        }
+        return false;
     }
 
     private static String backdropName(String value) {
