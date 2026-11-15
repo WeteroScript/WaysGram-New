@@ -6,7 +6,6 @@ import android.graphics.Bitmap;
 import org.json.JSONArray;
 import org.json.JSONObject;
 import org.telegram.messenger.AndroidUtilities;
-import org.telegram.messenger.FileLog;
 import org.telegram.messenger.R;
 import org.telegram.tgnet.tl.TL_stars;
 import org.telegram.ui.ActionBar.BaseFragment;
@@ -73,7 +72,6 @@ public final class WaysGramProfileGiftsController {
                 AndroidUtilities.runOnUIThread(() -> {
                     loading = false;
                     client.close();
-                    FileLog.e("WaysGram inventory request failed: " + message);
                     showError(message);
                 });
             }
