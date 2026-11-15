@@ -100,6 +100,23 @@ def patch_profile_actions_visibility_source(original: str) -> str:
             original, action_position, action_position_patched,
             "native profile action z-order and visibility restoration"
         )
+
+    pager_indicator_anchor = "        avatarContainer2.addView(avatarsViewPagerIndicatorView);\\n"
+    pager_indicator_marker = "// WaysGram: place native profile actions above avatar pager indicator"
+    if pager_indicator_marker not in original:
+        pager_indicator_patched = (
+            pager_indicator_anchor
+            + "        // WaysGram: place native profile actions above avatar pager indicator\\n"
+            + "        if (actionsView != null) {\\n"
+            + "            actionsView.setAlpha(1.0f);\\n"
+            + "            actionsView.setVisibility(View.VISIBLE);\\n"
+            + "            actionsView.bringToFront();\\n"
+            + "        }\\n"
+        )
+        original = replace_exactly_once(
+            original, pager_indicator_anchor, pager_indicator_patched,
+            "initial native profile action z-order"
+        )
     return original
 
 
@@ -838,6 +855,7 @@ def verify_source(android_root: Path) -> None:
     if (
         "// WaysGram: restore profile action visibility" not in final_profile_activity
         or "WaysGram: keep native profile actions above avatar overlays" not in final_profile_activity
+        or "WaysGram: place native profile actions above avatar pager indicator" not in final_profile_activity
         or "actionsView.setAlpha(1.0f);" not in final_profile_activity
         or "actionsView.bringToFront();" not in final_profile_activity
         or 'user.phone.matches("[0-9]{8,15}")' not in final_profile_activity
