@@ -67,6 +67,7 @@ import org.json.JSONObject;
 import org.telegram.messenger.AndroidUtilities;
 import org.telegram.ui.ActionBar.BaseFragment;
 import org.telegram.ui.ActionBar.Theme;
+import org.telegram.ui.Gifts.GiftMessageView;
 
 import java.io.File;
 import java.text.DateFormat;
@@ -3290,22 +3291,32 @@ public final class WaysGramChatFragment extends BaseFragment {
             giftCard.setPadding(AndroidUtilities.dp(14), AndroidUtilities.dp(10),
                     AndroidUtilities.dp(14), AndroidUtilities.dp(10));
             GradientDrawable giftBackground = new GradientDrawable();
-            giftBackground.setColor(Theme.getColor(Theme.key_windowBackgroundWhite));
+            giftBackground.setColor(Theme.getColor(isGiftPurchaseEvent
+                    ? Theme.key_chat_serviceBackground : Theme.key_windowBackgroundWhite));
             giftBackground.setCornerRadius(AndroidUtilities.dp(14));
             giftCard.setBackground(giftBackground);
 
-            TextView giftTitle = new TextView(getParentActivity());
-            giftTitle.setText(isGiftPurchaseEvent
-                    ? "Вы приобрели коллекционный подарок" : giftEmoji + "  " + giftName);
-            giftTitle.setTextSize(isGiftPurchaseEvent ? 13 : 16);
-            giftTitle.setTypeface(android.graphics.Typeface.DEFAULT,
-                    isGiftPurchaseEvent ? android.graphics.Typeface.NORMAL : android.graphics.Typeface.BOLD);
-            giftTitle.setGravity(isGiftPurchaseEvent
-                    ? android.view.Gravity.CENTER : android.view.Gravity.START);
-            giftTitle.setTextColor(Theme.getColor(Theme.key_windowBackgroundWhiteBlackText));
-            giftCard.addView(giftTitle, new LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
-            ));
+            if (isGiftPurchaseEvent) {
+                GiftMessageView purchaseNotice = new GiftMessageView(getParentActivity());
+                purchaseNotice.setMessage("Вы приобрели коллекционный подарок");
+                purchaseNotice.setPadding(AndroidUtilities.dp(30), AndroidUtilities.dp(2),
+                        AndroidUtilities.dp(30), AndroidUtilities.dp(2));
+                LinearLayout.LayoutParams noticeParams = new LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT
+                );
+                noticeParams.gravity = Gravity.CENTER_HORIZONTAL;
+                giftCard.addView(purchaseNotice, noticeParams);
+            } else {
+                TextView giftTitle = new TextView(getParentActivity());
+                giftTitle.setText(giftEmoji + "  " + giftName);
+                giftTitle.setTextSize(16);
+                giftTitle.setTypeface(android.graphics.Typeface.DEFAULT, android.graphics.Typeface.BOLD);
+                giftTitle.setGravity(android.view.Gravity.START);
+                giftTitle.setTextColor(Theme.getColor(Theme.key_windowBackgroundWhiteBlackText));
+                giftCard.addView(giftTitle, new LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
+                ));
+            }
 
             if (isGiftPurchaseEvent) {
                 TextView giftNameView = new TextView(getParentActivity());
@@ -3313,7 +3324,7 @@ public final class WaysGramChatFragment extends BaseFragment {
                 giftNameView.setTextSize(17);
                 giftNameView.setTypeface(android.graphics.Typeface.DEFAULT, android.graphics.Typeface.BOLD);
                 giftNameView.setGravity(android.view.Gravity.CENTER);
-                giftNameView.setTextColor(Theme.getColor(Theme.key_windowBackgroundWhiteBlackText));
+                giftNameView.setTextColor(Theme.getColor(Theme.key_chat_serviceText));
                 giftCard.addView(giftNameView, new LinearLayout.LayoutParams(
                         ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
                 ));
@@ -3336,6 +3347,13 @@ public final class WaysGramChatFragment extends BaseFragment {
                     giftInfo.append(DateFormat.getDateTimeInstance(
                             DateFormat.SHORT, DateFormat.SHORT, Locale.getDefault()
                     ).format(new Date(purchasedAt * 1000L)));
+                }
+                int purchasePrice = giftAttributes == null ? 0 : giftAttributes.optInt("price_stars", 0);
+                if (purchasePrice > 0) {
+                    if (giftInfo.length() > 0) {
+                        giftInfo.append("\n");
+                    }
+                    giftInfo.append("Цена: ").append(purchasePrice).append(" WaysGram Stars");
                 }
             }
             if (!isGiftPurchaseEvent && !giftTelegramId.isEmpty()) {
@@ -3392,7 +3410,8 @@ public final class WaysGramChatFragment extends BaseFragment {
             giftDetails.setTextSize(12);
             giftDetails.setGravity(isGiftPurchaseEvent
                     ? android.view.Gravity.CENTER : android.view.Gravity.START);
-            giftDetails.setTextColor(Theme.getColor(Theme.key_windowBackgroundWhiteGrayText));
+            giftDetails.setTextColor(Theme.getColor(isGiftPurchaseEvent
+                    ? Theme.key_chat_serviceText : Theme.key_windowBackgroundWhiteGrayText));
             giftDetails.setPadding(0, AndroidUtilities.dp(5), 0, 0);
             giftCard.addView(giftDetails, new LinearLayout.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
