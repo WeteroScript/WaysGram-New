@@ -238,26 +238,63 @@ public final class WaysGramGiftCatalogClient implements AutoCloseable {
      * controlled only by the AuthBot administrator panel.
      */
     public void purchaseGift(Gift gift, PurchaseCallback callback) {
-        purchaseGift(gift, null, callback);
+        purchaseGift(gift, (String) null, callback);
     }
 
-    public void purchaseGift(Gift gift, @Nullable Long recipientId, PurchaseCallback callback) {
+    public void purchaseGift(Gift gift, @Nullable String recipient, PurchaseCallback callback) {
         if (gift == null || callback == null || !gift.forSale) {
             if (callback != null) {
                 callback.onError("Подарок сейчас недоступен для покупки");
             }
             return;
         }
-        if (recipientId != null && recipientId <= 0) {
-            callback.onError("Некорректный ID получателя");
+        String recipientQuery = recipient == null ? "" : recipient.trim();
+        if (recipientQuery.startsWith("@")) {
+            recipientQuery = recipientQuery.substring(1).trim();
+        }
+        if (recipient != null && recipientQuery.isEmpty()) {
+            callback.onError("Укажите получателя");
             return;
         }
+        final String lookup = recipientQuery;
         ioExecutor.execute(() -> {
-            String scope = gift.id + ":" + (recipientId == null ? "self" : recipientId);
+            String scope = gift.id + ":" + (lookup.isEmpty() ? "self" : lookup.toLowerCase(java.util.Locale.ROOT));
             String idempotencyKey = purchaseIdempotencyKeys.computeIfAbsent(
                     scope, ignored -> "wg-" + UUID.randomUUID().toString()
             );
             try {
+                Long recipientId = null;
+                if (!lookup.isEmpty()) {
+                    if (lookup.matches("[0-9]{1,20}")) {
+                        recipientId = Long.parseLong(lookup);
+                    } else {
+                        String query = URLEncoder.encode(lookup, "UTF-8").replace("+", "%20");
+                        JSONObject search = requestJson(getBaseUrl() + "/api/users?q=" + query);
+                        JSONArray users = search.optJSONArray("users");
+                        long exactId = 0;
+                        int exactMatches = 0;
+                        if (users != null) {
+                            for (int i = 0; i < users.length(); i++) {
+                                JSONObject candidate = users.optJSONObject(i);
+                                if (candidate == null) {
+                                    continue;
+                                }
+                                String username = candidate.optString("username", "");
+                                if (username.equalsIgnoreCase(lookup)) {
+                                    exactId = candidate.optLong("id", 0);
+                                    exactMatches++;
+                                }
+                            }
+                        }
+                        if (exactMatches != 1 || exactId <= 0) {
+                            throw new IOException("Пользователь с таким @username не найден");
+                        }
+                        recipientId = exactId;
+                    }
+                    if (recipientId <= 0) {
+                        throw new IOException("Некорректный ID получателя");
+                    }
+                }
                 String encodedGiftId = URLEncoder.encode(gift.id, "UTF-8").replace("+", "%20");
                 JSONObject payload = new JSONObject();
                 if (recipientId != null) {
@@ -272,7 +309,7 @@ public final class WaysGramGiftCatalogClient implements AutoCloseable {
                 purchaseIdempotencyKeys.remove(scope, idempotencyKey);
                 callback.onPurchased(response);
             } catch (Exception exception) {
-                // Keep the key for a possible safe retry after a network failure.
+                // Keep the same key so a retry cannot double-charge after a timeout.
                 callback.onError(toSafeError(exception));
             }
         });
