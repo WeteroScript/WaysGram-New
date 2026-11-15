@@ -464,7 +464,7 @@ def patch_profile_gifts_container_source(original: str) -> str:
 
 
 def patch_gift_sheet_source(original: str) -> str:
-    """Keep Telegram's GiftCell renderer, injecting WaysGram stickers and existing gift metadata views."""
+    """Keep Telegram's GiftCell renderer, injecting WaysGram stickers, emoji and metadata."""
     updated = original
 
     sticker_marker = "WaysGramGiftMediaStore.get("
@@ -479,71 +479,68 @@ def patch_gift_sheet_source(original: str) -> str:
         )
         updated = replace_exactly_once(updated, sticker_target, sticker_replacement, "native GiftCell WaysGram sticker binding")
 
-    reset_emoji_marker = "waysGramEmojiOverlay"
-    if reset_emoji_marker not in updated:
-        sticker_target = "            setSticker(userGift.gift.getDocument(), userGift);\\n"
-        reset_replacement = (
+    emoji_reset_marker = "waysGramEmojiOverlay"
+    if emoji_reset_marker not in updated:
+        sticker_target = "            setSticker(userGift.gift.getDocument(), userGift);\n"
+        sticker_replacement = (
             sticker_target
-            + "            View waysGramEmojiOverlay = card.findViewWithTag(\\"waysgramGiftEmoji\\");\\n"
-            + "            if (waysGramEmojiOverlay != null) waysGramEmojiOverlay.setVisibility(View.GONE);\\n"
+            + "            View waysGramEmojiOverlay = card.findViewWithTag(\"waysgramGiftEmoji\");\n"
+            + "            if (waysGramEmojiOverlay != null) waysGramEmojiOverlay.setVisibility(View.GONE);\n"
         )
         updated = replace_exactly_once(
-            updated, sticker_target, reset_replacement,
+            updated, sticker_target, sticker_replacement,
             "reset recycled WaysGram gift emoji overlay"
         )
 
     metadata_marker = "WaysGramGiftMediaStore.getMetadata("
     if metadata_marker not in updated:
         metadata_target = (
-            "            cardBackground.setStrokeColors(null);\\n"
-            "            titleView.setVisibility(View.GONE);\\n"
-            "            subtitleView.setVisibility(View.GONE);\\n"
+            "            cardBackground.setStrokeColors(null);\n"
+            "            titleView.setVisibility(View.GONE);\n"
+            "            subtitleView.setVisibility(View.GONE);\n"
         )
         metadata_replacement = (
             metadata_target
-            + "            if (userGift.gift.slug != null && userGift.gift.slug.startsWith(\\"waysgram://\\")) {\\n"
-            + "                String waysGramSerial = userGift.gift.slug.substring(\\"waysgram://\\".length());\\n"
-            + "                org.telegram.messenger.waysgram.WaysGramGiftMediaStore.GiftMetadata waysGramMetadata = org.telegram.messenger.waysgram.WaysGramGiftMediaStore.getMetadata(waysGramSerial);\\n"
-            + "                if (waysGramMetadata != null) {\\n"
-            + "                    titleView.setText(waysGramMetadata.title);\\n"
-            + "                    titleView.setMaxLines(1);\\n"
-            + "                    titleView.setEllipsize(android.text.TextUtils.TruncateAt.END);\\n"
-            + "                    titleView.setVisibility(View.VISIBLE);\\n"
-            + "                    subtitleView.setText(waysGramMetadata.subtitle);\\n"
-            + "                    subtitleView.setTextSize(TypedValue.COMPLEX_UNIT_DIP, 9.5f);\\n"
-            + "                    subtitleView.setMaxLines(2);\\n"
-            + "                    subtitleView.setEllipsize(android.text.TextUtils.TruncateAt.END);\\n"
-            + "                    subtitleView.setVisibility(View.VISIBLE);\\n"
-            + "                    priceLayout.setVisibility(View.GONE);\\n"
-            + "                    View waysGramEmojiExisting = card.findViewWithTag(\\"waysgramGiftEmoji\\");\\n"
-            + "                    android.widget.TextView waysGramEmojiView;\\n"
-            + "                    if (waysGramEmojiExisting instanceof android.widget.TextView) {\\n"
-            + "                        waysGramEmojiView = (android.widget.TextView) waysGramEmojiExisting;\\n"
-            + "                    } else {\\n"
-            + "                        waysGramEmojiView = new android.widget.TextView(getContext());\\n"
-            + "                        waysGramEmojiView.setTag(\\"waysgramGiftEmoji\\");\\n"
-            + "                        waysGramEmojiView.setTextSize(TypedValue.COMPLEX_UNIT_DIP, 30);\\n"
-            + "                        waysGramEmojiView.setGravity(android.view.Gravity.CENTER);\\n"
-            + "                        card.addView(waysGramEmojiView, new FrameLayout.LayoutParams(AndroidUtilities.dp(80), AndroidUtilities.dp(80), android.view.Gravity.CENTER));\\n"
-            + "                    }\\n"
-            + "                    waysGramEmojiView.setText(waysGramMetadata.emoji == null || waysGramMetadata.emoji.isEmpty() ? \\"🎁\\" : waysGramMetadata.emoji);\\n"
-            + "                    waysGramEmojiView.setTextColor(Theme.getColor(Theme.key_windowBackgroundWhiteBlackText, resourcesProvider));\\n"
-            + "                    android.graphics.Bitmap waysGramGiftBitmap = org.telegram.messenger.waysgram.WaysGramGiftMediaStore.get(waysGramSerial);\\n"
-            + "                    if (waysGramGiftBitmap != null) {\\n"
-            + "                        imageView.setImageBitmap(waysGramGiftBitmap);\\n"
-            + "                        imageView.setVisibility(View.VISIBLE);\\n"
-            + "                        waysGramEmojiView.setVisibility(View.GONE);\\n"
-            + "                    } else {\\n"
-            + "                        imageView.setVisibility(View.GONE);\\n"
-            + "                        waysGramEmojiView.setVisibility(View.VISIBLE);\\n"
-            + "                    }\\n"
-            + "                }\\n"
-            + "            }\\n"
+            + "            if (userGift.gift.slug != null && userGift.gift.slug.startsWith(\"waysgram://\")) {\n"
+            + "                String waysGramSerial = userGift.gift.slug.substring(\"waysgram://\".length());\n"
+            + "                org.telegram.messenger.waysgram.WaysGramGiftMediaStore.GiftMetadata waysGramMetadata = org.telegram.messenger.waysgram.WaysGramGiftMediaStore.getMetadata(waysGramSerial);\n"
+            + "                if (waysGramMetadata != null) {\n"
+            + "                    titleView.setText(waysGramMetadata.title);\n"
+            + "                    titleView.setMaxLines(1);\n"
+            + "                    titleView.setEllipsize(android.text.TextUtils.TruncateAt.END);\n"
+            + "                    titleView.setVisibility(View.VISIBLE);\n"
+            + "                    subtitleView.setText(waysGramMetadata.subtitle);\n"
+            + "                    subtitleView.setTextSize(TypedValue.COMPLEX_UNIT_DIP, 9.5f);\n"
+            + "                    subtitleView.setMaxLines(2);\n"
+            + "                    subtitleView.setEllipsize(android.text.TextUtils.TruncateAt.END);\n"
+            + "                    subtitleView.setVisibility(View.VISIBLE);\n"
+            + "                    priceLayout.setVisibility(View.GONE);\n"
+            + "                    View waysGramEmojiExisting = card.findViewWithTag(\"waysgramGiftEmoji\");\n"
+            + "                    android.widget.TextView waysGramEmojiView;\n"
+            + "                    if (waysGramEmojiExisting instanceof android.widget.TextView) {\n"
+            + "                        waysGramEmojiView = (android.widget.TextView) waysGramEmojiExisting;\n"
+            + "                    } else {\n"
+            + "                        waysGramEmojiView = new android.widget.TextView(getContext());\n"
+            + "                        waysGramEmojiView.setTag(\"waysgramGiftEmoji\");\n"
+            + "                        waysGramEmojiView.setTextSize(TypedValue.COMPLEX_UNIT_DIP, 30);\n"
+            + "                        waysGramEmojiView.setGravity(android.view.Gravity.CENTER);\n"
+            + "                        waysGramEmojiView.setTextColor(Theme.getColor(Theme.key_windowBackgroundWhiteBlackText, resourcesProvider));\n"
+            + "                        card.addView(waysGramEmojiView, new FrameLayout.LayoutParams(AndroidUtilities.dp(80), AndroidUtilities.dp(80), android.view.Gravity.CENTER));\n"
+            + "                    }\n"
+            + "                    waysGramEmojiView.setText(waysGramMetadata.emoji == null || waysGramMetadata.emoji.isEmpty() ? \"🎁\" : waysGramMetadata.emoji);\n"
+            + "                    android.graphics.Bitmap waysGramGiftBitmap = org.telegram.messenger.waysgram.WaysGramGiftMediaStore.get(waysGramSerial);\n"
+            + "                    if (waysGramGiftBitmap != null) {\n"
+            + "                        imageView.setImageBitmap(waysGramGiftBitmap);\n"
+            + "                        waysGramEmojiView.setVisibility(View.GONE);\n"
+            + "                    } else {\n"
+            + "                        waysGramEmojiView.setVisibility(View.VISIBLE);\n"
+            + "                    }\n"
+            + "                }\n"
+            + "            }\n"
         )
         updated = replace_exactly_once(updated, metadata_target, metadata_replacement, "native GiftCell WaysGram metadata and emoji binding")
 
     return updated
-
 
 def patch_push_service_source(original: str) -> str:
     """Route WaysGram FCM messages separately and refresh its secondary token."""
