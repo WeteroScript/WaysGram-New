@@ -420,22 +420,21 @@ def patch_profile_gifts_container_source(original: str) -> str:
         "disable native Telegram network fetches on WaysGram tab attach",
     )
 
-    updated = replace_exactly_once(
-        updated,
-        "        ProfileActivity.Button2 button2 = new ProfileActivity.Button2(context);\n"
-        "        BlurredBackgroundDrawable drawable = buttonGlassFactory.create(button2, new BlurredBackgroundColorProviderThemed(resourcesProvider, Theme.key_windowBackgroundWhite));\n"
-        "        drawable.setPadding(dp(8));\n"
-        "        drawable.setRadius(dp(22));\n"
-        "        button2.setBackground(drawable);\n",
-        "        ProfileActivity.Button2 button2 = new ProfileActivity.Button2(context);\n"
-        "        if (!waysGramInventory) {\n"
-        "            BlurredBackgroundDrawable drawable = buttonGlassFactory.create(button2, new BlurredBackgroundColorProviderThemed(resourcesProvider, Theme.key_windowBackgroundWhite));\n"
-        "            drawable.setPadding(dp(8));\n"
-        "            drawable.setRadius(dp(22));\n"
-        "            button2.setBackground(drawable);\n"
-        "        }\n",
-        "skip unused action button background for WaysGram inventory",
-    )
+    factory_pos = updated.find("buttonGlassFactory", constructor_start)
+    if factory_pos >= 0:
+        background_pos = updated.find(".setBackground(", factory_pos)
+        if background_pos < 0:
+            raise ValueError("ProfileGiftsContainer uses buttonGlassFactory but no matching background binding was found")
+        block_start = updated.rfind("\n", 0, factory_pos) + 1
+        background_line_end = updated.find("\n", background_pos)
+        block_end = len(updated) if background_line_end < 0 else background_line_end + 1
+        block = updated[block_start:block_end]
+        indent = block[:len(block) - len(block.lstrip(" \t"))]
+        wrapped = indent + "if (!waysGramInventory) {\n"
+        for line in block.splitlines(True):
+            wrapped += (indent + "    " + line[len(indent):]) if line.strip() else line
+        wrapped += indent + "}\n"
+        updated = updated[:block_start] + wrapped + updated[block_end:]
 
     method = (
         "    public void setWaysGramInventory(ArrayList<TL_stars.SavedStarGift> gifts) {\n"
