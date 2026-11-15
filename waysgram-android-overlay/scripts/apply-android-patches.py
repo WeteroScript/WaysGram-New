@@ -45,6 +45,35 @@ def patch_launch_source(original: str) -> str:
 
 
 
+def patch_profile_actions_visibility_source(original: str) -> str:
+    """Restore native profile action controls after an interrupted avatar animation."""
+    marker = "// WaysGram: restore profile action visibility"
+    if marker in original:
+        if "actionsView.setAlpha(1.0f);" not in original:
+            raise ValueError("ProfileActivity contains an incomplete action visibility patch")
+        return original
+
+    before = (
+        "        } else {\n"
+        "            actionsView.clipHeight = -1;\n"
+        "            float bottom = extraHeight + newTop - dp(hasMusic || hasBalance ? 25 : 0);\n"
+        "            float height = Math.min(dp(74), bottom - newTop);\n"
+        "            actionsView.updatePosition(bottom - height, height);\n"
+        "        }\n"
+    )
+    after = (
+        "        } else {\n"
+        "            actionsView.clipHeight = -1;\n"
+        "            float bottom = extraHeight + newTop - dp(hasMusic || hasBalance ? 25 : 0);\n"
+        "            float height = Math.min(dp(74), bottom - newTop);\n"
+        "            // WaysGram: restore profile action visibility\n"
+        "            actionsView.setAlpha(1.0f);\n"
+        "            actionsView.updatePosition(bottom - height, height);\n"
+        "        }\n"
+    )
+    return replace_exactly_once(original, before, after, "profile action visibility restoration")
+
+
 def patch_profile_gifts_source(original: str) -> str:
     """Add a native Telegram gifts container for the WaysGram-owned inventory tab."""
     tab_marker = "    public static final int TAB_POLL = 15;\n"
@@ -730,6 +759,20 @@ def verify_source(android_root: Path) -> None:
     for marker in ("TAB_WAYSGRAM_GIFTS", "WaysGramProfileGiftsController", "Мои подарки"):
         if marker not in final_profile_source:
             raise ValueError("WaysGram profile gift tab patch was not applied completely")
+
+    profile_activity = android_root / "TMessagesProj/src/main/java/org/telegram/ui/ProfileActivity.java"
+    if not profile_activity.is_file():
+        raise FileNotFoundError(f"Required native ProfileActivity source not found: {profile_activity}")
+    profile_activity_source = profile_activity.read_text(encoding="utf-8")
+    patched_profile_activity = patch_profile_actions_visibility_source(profile_activity_source)
+    if patched_profile_activity != profile_activity_source:
+        profile_activity.write_text(patched_profile_activity, encoding="utf-8")
+    final_profile_activity = profile_activity.read_text(encoding="utf-8")
+    if (
+        "// WaysGram: restore profile action visibility" not in final_profile_activity
+        or "actionsView.setAlpha(1.0f);" not in final_profile_activity
+    ):
+        raise ValueError("Native profile action visibility restoration was not applied")
 
     gifts_container = android_root / "TMessagesProj/src/main/java/org/telegram/ui/Gifts/ProfileGiftsContainer.java"
     if not gifts_container.is_file():
