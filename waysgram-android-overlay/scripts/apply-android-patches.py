@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Apply WaysGram integrations while preserving Telegram's original interface.
+"""Apply WaysGram integrations while preserving Telegram's native interface.
 
-Telegram Settings, login flow, main tabs, LaunchActivity and native GiftSheet
-remain untouched.
+The profile inventory reuses Telegram ProfileGiftsContainer and GiftCell; WaysGram
+provides only the inventory data and sticker bitmaps.
 """
 from __future__ import annotations
 
@@ -730,7 +730,7 @@ def main() -> None:
     args = parser.parse_args()
     verify_source(args.android_root)
     print(
-        "Verified: Telegram Settings, LaunchActivity, LoginActivity routing and native GiftSheet are preserved; WaysGram inventory is added as a separate tab in the current user profile."
+        "Verified: Telegram Settings, LaunchActivity and LoginActivity routing are preserved; WaysGram inventory uses Telegram native ProfileGiftsContainer and GiftCell."
     )
 
 
