@@ -184,7 +184,7 @@ public final class WaysGramProfileGiftsController {
         ).show();
     }
 
-    private ArrayList<TL_stars.SavedStarGift> toNativeGifts(JSONArray inventory) {
+    public static ArrayList<TL_stars.SavedStarGift> toNativeGifts(JSONArray inventory) {
         ArrayList<TL_stars.SavedStarGift> result = new ArrayList<>();
         int limit = Math.min(inventory.length(), MAX_VISIBLE_GIFTS);
         for (int i = 0; i < limit; i++) {
