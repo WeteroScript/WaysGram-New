@@ -464,19 +464,50 @@ def patch_profile_gifts_container_source(original: str) -> str:
 
 
 def patch_gift_sheet_source(original: str) -> str:
-    """Keep Telegram's GiftCell renderer, injecting only downloaded WaysGram sticker bitmaps."""
-    marker = "WaysGramGiftMediaStore.get("
-    if marker in original:
-        return original
-    target = "            setSticker(userGift.gift.getDocument(), userGift);\n"
-    replacement = (
-        target
-        + "            if (userGift.gift.slug != null && userGift.gift.slug.startsWith(\"waysgram://\")) {\n"
-        + "                android.graphics.Bitmap waysGramBitmap = org.telegram.messenger.waysgram.WaysGramGiftMediaStore.get(userGift.gift.slug.substring(\"waysgram://\".length()));\n"
-        + "                if (waysGramBitmap != null) imageView.setImageBitmap(waysGramBitmap);\n"
-        + "            }\n"
-    )
-    return replace_exactly_once(original, target, replacement, "native GiftCell WaysGram sticker binding")
+    """Keep Telegram's GiftCell renderer, injecting WaysGram stickers and existing gift metadata views."""
+    updated = original
+
+    sticker_marker = "WaysGramGiftMediaStore.get("
+    if sticker_marker not in updated:
+        sticker_target = "            setSticker(userGift.gift.getDocument(), userGift);\\n"
+        sticker_replacement = (
+            sticker_target
+            + "            if (userGift.gift.slug != null && userGift.gift.slug.startsWith(\\"waysgram://\\")) {\\n"
+            + "                android.graphics.Bitmap waysGramBitmap = org.telegram.messenger.waysgram.WaysGramGiftMediaStore.get(userGift.gift.slug.substring(\\"waysgram://\\".length()));\\n"
+            + "                if (waysGramBitmap != null) imageView.setImageBitmap(waysGramBitmap);\\n"
+            + "            }\\n"
+        )
+        updated = replace_exactly_once(updated, sticker_target, sticker_replacement, "native GiftCell WaysGram sticker binding")
+
+    metadata_marker = "WaysGramGiftMediaStore.getMetadata("
+    if metadata_marker not in updated:
+        metadata_target = (
+            "            cardBackground.setStrokeColors(null);\\n"
+            "            titleView.setVisibility(View.GONE);\\n"
+            "            subtitleView.setVisibility(View.GONE);\\n"
+        )
+        metadata_replacement = (
+            metadata_target
+            + "            if (userGift.gift.slug != null && userGift.gift.slug.startsWith(\\"waysgram://\\")) {\\n"
+            + "                String waysGramSerial = userGift.gift.slug.substring(\\"waysgram://\\".length());\\n"
+            + "                org.telegram.messenger.waysgram.WaysGramGiftMediaStore.GiftMetadata waysGramMetadata = org.telegram.messenger.waysgram.WaysGramGiftMediaStore.getMetadata(waysGramSerial);\\n"
+            + "                if (waysGramMetadata != null) {\\n"
+            + "                    titleView.setText(waysGramMetadata.title);\\n"
+            + "                    titleView.setMaxLines(1);\\n"
+            + "                    titleView.setEllipsize(android.text.TextUtils.TruncateAt.END);\\n"
+            + "                    titleView.setVisibility(View.VISIBLE);\\n"
+            + "                    subtitleView.setText(waysGramMetadata.subtitle);\\n"
+            + "                    subtitleView.setTextSize(TypedValue.COMPLEX_UNIT_DIP, 9.5f);\\n"
+            + "                    subtitleView.setMaxLines(2);\\n"
+            + "                    subtitleView.setEllipsize(android.text.TextUtils.TruncateAt.END);\\n"
+            + "                    subtitleView.setVisibility(View.VISIBLE);\\n"
+            + "                    priceLayout.setVisibility(View.GONE);\\n"
+            + "                }\\n"
+            + "            }\\n"
+        )
+        updated = replace_exactly_once(updated, metadata_target, metadata_replacement, "native GiftCell WaysGram metadata binding")
+
+    return updated
 
 
 def patch_push_service_source(original: str) -> str:
