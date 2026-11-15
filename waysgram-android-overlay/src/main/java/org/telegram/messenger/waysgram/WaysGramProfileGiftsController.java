@@ -247,7 +247,7 @@ public final class WaysGramProfileGiftsController {
 
         TL_stars.TL_starGiftAttributeBackdrop backdrop = new TL_stars.TL_starGiftAttributeBackdrop();
         backdrop.name = name;
-        backdrop.backdrop_id = stableBackdropId(name);
+        backdrop.backdrop_id = 0; // WaysGram API exposes the name and color, not Telegram's backdrop ID.
         backdrop.center_color = center;
         backdrop.edge_color = darken(center, 0.78f);
         backdrop.pattern_color = contrast;
@@ -260,11 +260,6 @@ public final class WaysGramProfileGiftsController {
         return (value >= '0' && value <= '9')
                 || (value >= 'a' && value <= 'f')
                 || (value >= 'A' && value <= 'F');
-    }
-
-    private static int stableBackdropId(String name) {
-        int value = name == null ? 1 : name.hashCode() & 0x7fffffff;
-        return value == 0 ? 1 : value;
     }
 
     private static int darken(int color, float factor) {
