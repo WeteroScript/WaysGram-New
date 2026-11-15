@@ -45,27 +45,34 @@ def patch_launch_source(original: str) -> str:
 
 
 def patch_profile_gifts_source(original: str) -> str:
-    """Add a WaysGram-only inventory tab beside Archived Stories in the current user's profile."""
+    """Add a native Telegram gifts container for the WaysGram-owned inventory tab."""
     tab_marker = "    public static final int TAB_POLL = 15;\n"
     tab_added = "    public static final int TAB_WAYSGRAM_GIFTS = 16;\n"
     field_marker = "    public ProfileGiftsContainer giftsContainer;\n"
-    field_added = field_marker + "    private org.telegram.messenger.waysgram.WaysGramProfileGiftsView waysGramGiftsContainer;\n"
+    field_added = (
+        field_marker
+        + "    private ProfileGiftsContainer waysGramGiftsContainer;\n"
+        + "    private org.telegram.messenger.waysgram.WaysGramProfileGiftsController waysGramGiftsController;\n"
+    )
     import_marker = "import org.telegram.messenger.AndroidUtilities;\n"
-    import_added = import_marker + "import org.telegram.messenger.waysgram.WaysGramProfileGiftsView;\n"
+    import_added = (
+        import_marker
+        + "import org.telegram.messenger.waysgram.WaysGramProfileGiftsController;\n"
+    )
 
     markers_present = (
         "TAB_WAYSGRAM_GIFTS",
         "waysGramGiftsContainer",
-        "WaysGramProfileGiftsView",
+        "WaysGramProfileGiftsController",
     )
     if all(marker in original for marker in markers_present):
         return original
     if any(marker in original for marker in markers_present):
         raise ValueError("SharedMediaLayout contains a partial WaysGram profile gifts tab patch")
 
-    updated = replace_exactly_once(original, import_marker, import_added, "profile gifts view import")
+    updated = replace_exactly_once(original, import_marker, import_added, "profile gifts controller import")
     updated = replace_exactly_once(updated, tab_marker, tab_marker + tab_added, "profile gifts tab ID")
-    updated = replace_exactly_once(updated, field_marker, field_added, "profile gifts view field")
+    updated = replace_exactly_once(updated, field_marker, field_added, "profile gifts container field")
 
     gifts_changed = (
         "        if (hasGifts != scrollSlidingTextTabStrip.hasTab(TAB_GIFTS)) {\n"
@@ -117,7 +124,11 @@ def patch_profile_gifts_source(original: str) -> str:
         "                    mediaPages[a].listView.setAdapter(null);\n"
         "                }\n"
         "                if (waysGramGiftsContainer == null) {\n"
-        "                    waysGramGiftsContainer = new WaysGramProfileGiftsView(getContext());\n"
+        "                    waysGramGiftsContainer = new ProfileGiftsContainer(profileActivity, context,\n"
+        "                            profileActivity.getCurrentAccount(), ((ProfileActivity) profileActivity).getDialogId(),\n"
+        "                            resourcesProvider, iBlur3FactoryLiquidGlass, true);\n"
+        "                    waysGramGiftsController = new WaysGramProfileGiftsController(\n"
+        "                            getContext(), profileActivity, waysGramGiftsContainer);\n"
         "                }\n"
         "                if (waysGramGiftsContainer.getParent() != mediaPages[a]) {\n"
         "                    AndroidUtilities.removeFromParent(waysGramGiftsContainer);\n"
@@ -125,13 +136,13 @@ def patch_profile_gifts_source(original: str) -> str:
         "                            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));\n"
         "                    mediaPages[a].emptyView.setVisibility(View.INVISIBLE);\n"
         "                }\n"
-        "                waysGramGiftsContainer.refresh();\n"
+        "                waysGramGiftsController.refresh();\n"
         "            }\n"
     )
     updated = replace_exactly_once(
         updated, native_page_branch,
         native_page_branch[:-len("            }\n")] + custom_page_branch,
-        "profile gifts inventory page"
+        "native Telegram profile gifts container"
     )
 
     native_cleanup = (
@@ -191,6 +202,262 @@ def patch_profile_gifts_source(original: str) -> str:
 
     return updated
 
+
+
+def patch_profile_gifts_container_source(original: str) -> str:
+    """Let the original Telegram profile gifts UI render a separate WaysGram inventory."""
+    markers = (
+        "private final boolean waysGramInventory;",
+        "setWaysGramInventory(ArrayList<TL_stars.SavedStarGift> gifts)",
+    )
+    if all(marker in original for marker in markers):
+        return original
+    if any(marker in original for marker in markers):
+        raise ValueError("ProfileGiftsContainer contains a partial WaysGram inventory patch")
+
+    updated = replace_exactly_once(
+        original,
+        "    private final long dialogId;\n",
+        "    private final long dialogId;\n    private final boolean waysGramInventory;\n",
+        "native gifts container inventory mode field",
+    )
+
+    signature = (
+        "    public ProfileGiftsContainer(\n"
+        "        BaseFragment fragment,\n"
+        "        Context context,\n"
+        "        int currentAccount,\n"
+        "        long did,\n"
+        "        Theme.ResourcesProvider resourcesProvider,\n"
+        "        BlurredBackgroundDrawableViewFactory buttonGlassFactory\n"
+        "    ) {\n"
+        "        super(context);\n"
+    )
+    overload = (
+        "    public ProfileGiftsContainer(\n"
+        "        BaseFragment fragment,\n"
+        "        Context context,\n"
+        "        int currentAccount,\n"
+        "        long did,\n"
+        "        Theme.ResourcesProvider resourcesProvider,\n"
+        "        BlurredBackgroundDrawableViewFactory buttonGlassFactory\n"
+        "    ) {\n"
+        "        this(fragment, context, currentAccount, did, resourcesProvider, buttonGlassFactory, false);\n"
+        "    }\n\n"
+        "    public ProfileGiftsContainer(\n"
+        "        BaseFragment fragment,\n"
+        "        Context context,\n"
+        "        int currentAccount,\n"
+        "        long did,\n"
+        "        Theme.ResourcesProvider resourcesProvider,\n"
+        "        BlurredBackgroundDrawableViewFactory buttonGlassFactory,\n"
+        "        boolean waysGramInventory\n"
+        "    ) {\n"
+        "        super(context);\n"
+    )
+    updated = replace_exactly_once(updated, signature, overload, "native gifts container constructor overload")
+    updated = replace_exactly_once(
+        updated,
+        "        this.fragment = fragment;\n\n        this.currentAccount = currentAccount;\n",
+        "        this.fragment = fragment;\n        this.waysGramInventory = waysGramInventory;\n\n        this.currentAccount = currentAccount;\n",
+        "native gifts container inventory mode initialization",
+    )
+
+    native_store = (
+        "        StarsController.getInstance(currentAccount).invalidateProfileGifts(dialogId);\n"
+        "        this.list = StarsController.getInstance(currentAccount).getProfileGiftsList(dialogId);\n"
+        "        this.collections = StarsController.getInstance(currentAccount).getProfileGiftCollectionsList(dialogId, true);\n"
+        "        this.collections.all = list;\n"
+        "        this.list.shown = true;\n"
+        "        if (fragment instanceof ProfileActivity && ((ProfileActivity) fragment).openGiftsUpgradable) {\n"
+        "            this.list.setFilters(StarsController.GiftsList.INCLUDE_TYPE_UPGRADABLE_FLAG);\n"
+        "        } else {\n"
+        "            this.list.resetFilters();\n"
+        "        }\n"
+        "        this.list.load();\n"
+    )
+    external_store = (
+        "        if (waysGramInventory) {\n"
+        "            this.list = new StarsController.GiftsList(currentAccount, dialogId, false);\n"
+        "            this.collections = new StarsController.GiftsCollections(currentAccount, dialogId, false);\n"
+        "            this.list.endReached = true;\n"
+        "            this.collections.loaded = true;\n"
+        "        } else {\n"
+        "            StarsController.getInstance(currentAccount).invalidateProfileGifts(dialogId);\n"
+        "            this.list = StarsController.getInstance(currentAccount).getProfileGiftsList(dialogId);\n"
+        "            this.collections = StarsController.getInstance(currentAccount).getProfileGiftCollectionsList(dialogId, true);\n"
+        "        }\n"
+        "        this.collections.all = list;\n"
+        "        this.list.shown = !waysGramInventory;\n"
+        "        if (!waysGramInventory) {\n"
+        "            if (fragment instanceof ProfileActivity && ((ProfileActivity) fragment).openGiftsUpgradable) {\n"
+        "                this.list.setFilters(StarsController.GiftsList.INCLUDE_TYPE_UPGRADABLE_FLAG);\n"
+        "            } else {\n"
+        "                this.list.resetFilters();\n"
+        "            }\n"
+        "            this.list.load();\n"
+        "        }\n"
+    )
+    updated = replace_exactly_once(updated, native_store, external_store, "native versus WaysGram gifts data source")
+
+    scroll_load = (
+        "                    if (isAttachedToWindow() && (!listView.canScrollVertically(1) || isLoadingVisible())) {\n"
+        "                        list.load();\n"
+        "                    }\n"
+    )
+    updated = replace_exactly_once(
+        updated, scroll_load,
+        "                    if (!parent.waysGramInventory && isAttachedToWindow() && (!listView.canScrollVertically(1) || isLoadingVisible())) {\n"
+        "                        list.load();\n"
+        "                    }\n",
+        "disable Telegram pagination for WaysGram gifts",
+    )
+    bind_load = (
+        "            if (list != null) {\n"
+        "                list.load();\n"
+        "            }\n"
+        "            update(false);\n"
+    )
+    updated = replace_exactly_once(
+        updated, bind_load,
+        "            if (list != null && !parent.waysGramInventory) {\n"
+        "                list.load();\n"
+        "            }\n"
+        "            update(false);\n",
+        "disable Telegram initial page load for WaysGram gifts",
+    )
+    scroll_load_2 = (
+        "                if (list != null && isAttachedToWindow() && (!listView.canScrollVertically(1) || isLoadingVisible())) {\n"
+        "                    list.load();\n"
+        "                }\n"
+    )
+    updated = replace_exactly_once(
+        updated, scroll_load_2,
+        "                if (!parent.waysGramInventory && list != null && isAttachedToWindow() && (!listView.canScrollVertically(1) || isLoadingVisible())) {\n"
+        "                    list.load();\n"
+        "                }\n",
+        "disable Telegram scroll pagination for WaysGram gifts",
+    )
+
+    click_anchor = "        void onItemClick(UItem item, View view, int position, float x, float y) {\n            if (list == null) return;\n"
+    updated = replace_exactly_once(
+        updated, click_anchor,
+        "        void onItemClick(UItem item, View view, int position, float x, float y) {\n"
+        "            if (parent.waysGramInventory || list == null) return;\n",
+        "prevent Telegram-side gift actions on WaysGram inventory",
+    )
+    long_press_anchor = "        public boolean onItemLongPress(UItem item, View view, int position, float x, float y) {\n            if (list == null) return false;\n"
+    updated = replace_exactly_once(
+        updated, long_press_anchor,
+        "        public boolean onItemLongPress(UItem item, View view, int position, float x, float y) {\n"
+        "            if (parent.waysGramInventory || list == null) return false;\n",
+        "prevent Telegram-side gift menu on WaysGram inventory",
+    )
+
+    updated = replace_exactly_once(
+        updated,
+        "    public boolean canAdd() {\n        if (!collections.isMine()) return false;\n",
+        "    public boolean canAdd() {\n        if (waysGramInventory || !collections.isMine()) return false;\n",
+        "disable Telegram collections for WaysGram gifts",
+    )
+    updated = replace_exactly_once(
+        updated,
+        "    public void updateButton() {\n        if (viewPager == null) return;\n",
+        "    public void updateButton() {\n"
+        "        if (waysGramInventory) {\n"
+        "            if (buttonContainer != null) buttonContainer.setVisibility(View.GONE);\n"
+        "            if (bulletinContainer != null) bulletinContainer.setVisibility(View.GONE);\n"
+        "            if (checkboxLayout != null) checkboxLayout.setVisibility(View.GONE);\n"
+        "            return;\n"
+        "        }\n"
+        "        if (viewPager == null) return;\n",
+        "hide native Telegram gift purchase button for WaysGram inventory",
+    )
+    updated = replace_exactly_once(
+        updated,
+        "    public boolean canFilter() {\n        return true;\n",
+        "    public boolean canFilter() {\n        return !waysGramInventory;\n",
+        "disable unsupported Telegram gift filters for WaysGram",
+    )
+    updated = replace_exactly_once(
+        updated,
+        "    public boolean canFilterHidden() {\n        if (dialogId == UserConfig.getInstance(currentAccount).getClientUserId()) return true;\n",
+        "    public boolean canFilterHidden() {\n        if (waysGramInventory) return false;\n"
+        "        if (dialogId == UserConfig.getInstance(currentAccount).getClientUserId()) return true;\n",
+        "disable hidden gift filter for WaysGram inventory",
+    )
+    updated = replace_exactly_once(
+        updated,
+        "    public boolean canReorder() {\n        if (dialogId >= 0) return dialogId == 0 || dialogId == UserConfig.getInstance(currentAccount).getClientUserId();\n",
+        "    public boolean canReorder() {\n        if (waysGramInventory) return false;\n"
+        "        if (dialogId >= 0) return dialogId == 0 || dialogId == UserConfig.getInstance(currentAccount).getClientUserId();\n",
+        "disable Telegram gift reordering for WaysGram inventory",
+    )
+
+    attach_list = (
+        "        if (list != null) {\n"
+        "            list.shown = true;\n"
+        "            list.load();\n"
+        "        }\n"
+        "        if (collections != null) {\n"
+        "            collections.shown = true;\n"
+        "            collections.load();\n"
+        "        }\n"
+    )
+    updated = replace_exactly_once(
+        updated, attach_list,
+        "        if (list != null) {\n"
+        "            list.shown = !waysGramInventory;\n"
+        "            if (!waysGramInventory) list.load();\n"
+        "        }\n"
+        "        if (collections != null) {\n"
+        "            collections.shown = !waysGramInventory;\n"
+        "            if (!waysGramInventory) collections.load();\n"
+        "        }\n",
+        "disable native Telegram network fetches on WaysGram tab attach",
+    )
+
+    method = (
+        "    public void setWaysGramInventory(ArrayList<TL_stars.SavedStarGift> gifts) {\n"
+        "        if (!waysGramInventory) return;\n"
+        "        list.gifts.clear();\n"
+        "        if (gifts != null) list.gifts.addAll(gifts);\n"
+        "        list.totalCount = list.gifts.size();\n"
+        "        list.endReached = true;\n"
+        "        list.loading = false;\n"
+        "        list.lastOffset = null;\n"
+        "        list.notifyUpdate();\n"
+        "        Page page = getCurrentPage();\n"
+        "        if (page != null) page.update(false);\n"
+        "        updateButton();\n"
+        "    }\n\n"
+        "    public void refreshWaysGramGiftViews() {\n"
+        "        if (!waysGramInventory) return;\n"
+        "        Page page = getCurrentPage();\n"
+        "        if (page != null) page.update(false);\n"
+        "    }\n\n"
+    )
+    insert_at = updated.rfind("\n}")
+    if insert_at < 0:
+        raise ValueError("ProfileGiftsContainer closing brace not found")
+    updated = updated[:insert_at] + "\n\n" + method + updated[insert_at:]
+    return updated
+
+
+def patch_gift_sheet_source(original: str) -> str:
+    """Keep Telegram's GiftCell renderer, injecting only downloaded WaysGram sticker bitmaps."""
+    marker = "WaysGramGiftMediaStore.get("
+    if marker in original:
+        return original
+    target = "            setSticker(userGift.gift.getDocument(), userGift);\n"
+    replacement = (
+        target
+        + "            if (userGift.gift.slug != null && userGift.gift.slug.startsWith(\"waysgram://\")) {\n"
+        + "                android.graphics.Bitmap waysGramBitmap = org.telegram.messenger.waysgram.WaysGramGiftMediaStore.get(userGift.gift.slug.substring(\"waysgram://\".length()));\n"
+        + "                if (waysGramBitmap != null) imageView.setImageBitmap(waysGramBitmap);\n"
+        + "            }\n"
+    )
+    return replace_exactly_once(original, target, replacement, "native GiftCell WaysGram sticker binding")
 
 
 def patch_push_service_source(original: str) -> str:
@@ -378,9 +645,23 @@ def verify_source(android_root: Path) -> None:
     if patched_profile_source != profile_source:
         profile_layout.write_text(patched_profile_source, encoding="utf-8")
     final_profile_source = profile_layout.read_text(encoding="utf-8")
-    for marker in ("TAB_WAYSGRAM_GIFTS", "WaysGramProfileGiftsView", "Мои подарки"):
+    for marker in ("TAB_WAYSGRAM_GIFTS", "WaysGramProfileGiftsController", "Мои подарки"):
         if marker not in final_profile_source:
             raise ValueError("WaysGram profile gift tab patch was not applied completely")
+
+    gifts_container = android_root / "TMessagesProj/src/main/java/org/telegram/ui/Gifts/ProfileGiftsContainer.java"
+    if not gifts_container.is_file():
+        raise FileNotFoundError(f"Required native profile gifts container not found: {gifts_container}")
+    gifts_container_source = gifts_container.read_text(encoding="utf-8")
+    patched_gifts_container = patch_profile_gifts_container_source(gifts_container_source)
+    if patched_gifts_container != gifts_container_source:
+        gifts_container.write_text(patched_gifts_container, encoding="utf-8")
+
+    gift_content = gift_sheet.read_text(encoding="utf-8")
+    patched_gift_content = patch_gift_sheet_source(gift_content)
+    if patched_gift_content != gift_content:
+        gift_sheet.write_text(patched_gift_content, encoding="utf-8")
+        gift_content = patched_gift_content
 
     gift_content = gift_sheet.read_text(encoding="utf-8")
     launch_content = launch_activity.read_text(encoding="utf-8")
