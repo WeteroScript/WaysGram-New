@@ -238,29 +238,41 @@ public final class WaysGramGiftCatalogClient implements AutoCloseable {
      * controlled only by the AuthBot administrator panel.
      */
     public void purchaseGift(Gift gift, PurchaseCallback callback) {
+        purchaseGift(gift, null, callback);
+    }
+
+    public void purchaseGift(Gift gift, @Nullable Long recipientId, PurchaseCallback callback) {
         if (gift == null || callback == null || !gift.forSale) {
             if (callback != null) {
                 callback.onError("Подарок сейчас недоступен для покупки");
             }
             return;
         }
+        if (recipientId != null && recipientId <= 0) {
+            callback.onError("Некорректный ID получателя");
+            return;
+        }
         ioExecutor.execute(() -> {
+            String scope = gift.id + ":" + (recipientId == null ? "self" : recipientId);
+            String idempotencyKey = purchaseIdempotencyKeys.computeIfAbsent(
+                    scope, ignored -> "wg-" + UUID.randomUUID().toString()
+            );
             try {
                 String encodedGiftId = URLEncoder.encode(gift.id, "UTF-8").replace("+", "%20");
                 JSONObject payload = new JSONObject();
-                String idempotencyKey = purchaseIdempotencyKeys.computeIfAbsent(
-                        gift.id,
-                        ignored -> "wg-" + UUID.randomUUID().toString()
-                );
+                if (recipientId != null) {
+                    payload.put("recipient_id", recipientId);
+                }
                 JSONObject response = requestJson(
                         getBaseUrl() + "/api/telegram/gifts/" + encodedGiftId + "/purchase",
                         "POST",
                         payload.toString(),
                         idempotencyKey
                 );
-                purchaseIdempotencyKeys.remove(gift.id, idempotencyKey);
+                purchaseIdempotencyKeys.remove(scope, idempotencyKey);
                 callback.onPurchased(response);
             } catch (Exception exception) {
+                // Keep the key for a possible safe retry after a network failure.
                 callback.onError(toSafeError(exception));
             }
         });
