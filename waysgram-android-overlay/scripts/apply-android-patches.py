@@ -83,17 +83,17 @@ def patch_profile_actions_visibility_source(original: str) -> str:
         original = replace_exactly_once(original, before, after, "profile action visibility restoration")
 
     action_position = (
-        "            actionsView.updatePosition(bottom - height, height);\\n"
+        "            actionsView.updatePosition(bottom - height, height);\n"
     )
     action_position_patched = (
         action_position
-        + "            // WaysGram: keep native profile actions above avatar overlays\\n"
-        + "            if (!openAnimationInProgress) {\\n"
-        + "                actionsView.setAlpha(1.0f);\\n"
-        + "                actionsView.setVisibility(View.VISIBLE);\\n"
-        + "            }\\n"
-        + "            actionsView.bringToFront();\\n"
-        + "            actionsView.invalidate();\\n"
+        + "            // WaysGram: keep native profile actions above avatar overlays\n"
+        + "            if (!openAnimationInProgress) {\n"
+        + "                actionsView.setAlpha(1.0f);\n"
+        + "                actionsView.setVisibility(View.VISIBLE);\n"
+        + "            }\n"
+        + "            actionsView.bringToFront();\n"
+        + "            actionsView.invalidate();\n"
     )
     if "WaysGram: keep native profile actions above avatar overlays" not in original:
         original = replace_exactly_once(
@@ -107,16 +107,16 @@ def patch_profile_phone_source(original: str) -> str:
     """Prevent invalid API placeholder strings from becoming Telegram phone rows."""
     marker = "// WaysGram: ignore invalid Telegram phone placeholders"
     if marker in original:
-        if 'user.phone.matches("[0-9]{8,15}")' not in original:
+        if "user.phone.matches('[0-9]{8,15}')" not in original:
             raise ValueError("ProfileActivity contains an incomplete phone placeholder patch")
         return original
 
     old_has_phone = (
-        "                boolean hasPhone = user != null && (!TextUtils.isEmpty(user.phone) || !TextUtils.isEmpty(vcardPhone));\\n"
+        "                boolean hasPhone = user != null && (!TextUtils.isEmpty(user.phone) || !TextUtils.isEmpty(vcardPhone));\n"
     )
     new_has_phone = (
-        "                // WaysGram: ignore invalid Telegram phone placeholders\\n"
-        "                boolean hasPhone = user != null && ((user.phone != null && user.phone.matches(\\"[0-9]{8,15}\\")) || (vcardPhone != null && vcardPhone.matches(\\"[0-9]{8,15}\\")));\\n"
+        "                // WaysGram: ignore invalid Telegram phone placeholders\n"
+        "                boolean hasPhone = user != null && ((user.phone != null && user.phone.matches('[0-9]{8,15}')) || (vcardPhone != null && vcardPhone.matches('[0-9]{8,15}')));\n"
     )
     original = replace_exactly_once(
         original, old_has_phone, new_has_phone,
@@ -125,18 +125,17 @@ def patch_profile_phone_source(original: str) -> str:
 
     original = replace_exactly_once(
         original,
-        "                        if (user != null && !TextUtils.isEmpty(vcardPhone)) {\\n",
-        "                        if (user != null && vcardPhone != null && vcardPhone.matches(\\"[0-9]{8,15}\\")) {\\n",
+        "                        if (user != null && !TextUtils.isEmpty(vcardPhone)) {\n",
+        "                        if (user != null && vcardPhone != null && vcardPhone.matches('[0-9]{8,15}')) {\n",
         "valid vCard profile phone display"
     )
     original = replace_exactly_once(
         original,
-        "                        } else if (user != null && !TextUtils.isEmpty(user.phone)) {\\n",
-        "                        } else if (user != null && user.phone != null && user.phone.matches(\\"[0-9]{8,15}\\")) {\\n",
+        "                        } else if (user != null && !TextUtils.isEmpty(user.phone)) {\n",
+        "                        } else if (user != null && user.phone != null && user.phone.matches('[0-9]{8,15}')) {\n",
         "valid Telegram profile phone display"
     )
     return original
-
 
 def patch_profile_gifts_source(original: str) -> str:
     """Add a native Telegram gifts container for the WaysGram-owned inventory tab."""
