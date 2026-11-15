@@ -124,35 +124,35 @@ public final class WaysGramHomeFragment extends BaseFragment {
                 new WaysGramGiftCatalogSheet(context, sessionStore, resourceProvider, this::loadProfile).show()
         );
 
-        addButton(context, content, "Редактировать профиль", this::showProfileEditor);
-        addButton(context, content, "Фото профиля", this::showAvatarActions);
-        addButton(context, content, "Активные сеансы", this::showSessions);
-        addButton(context, content, "Контакты", () ->
+        addButton(context, profileMenuContainer, "Редактировать профиль", this::showProfileEditor);
+        addButton(context, profileMenuContainer, "Фото профиля", this::showAvatarActions);
+        addButton(context, profileMenuContainer, "Активные сеансы", this::showSessions);
+        addButton(context, profileMenuContainer, "Контакты", () ->
                 presentFragment(new WaysGramDirectoryFragment(WaysGramDirectoryFragment.TYPE_CONTACTS), false)
         );
-        addButton(context, content, "Чёрный список", () ->
+        addButton(context, profileMenuContainer, "Чёрный список", () ->
                 presentFragment(new WaysGramDirectoryFragment(WaysGramDirectoryFragment.TYPE_BLOCKS), false)
         );
-        addButton(context, content, "Сообщения", () ->
+        addButton(context, profileMenuContainer, "Сообщения", () ->
                 presentFragment(new WaysGramDirectoryFragment(WaysGramDirectoryFragment.TYPE_CONVERSATIONS), false)
         );
-        addButton(context, content, "Облачные файлы", () ->
+        addButton(context, profileMenuContainer, "Облачные файлы", () ->
                 presentFragment(new WaysGramCloudStorageFragment(), false)
         );
-        addButton(context, content, "Группы", () ->
+        addButton(context, profileMenuContainer, "Группы", () ->
                 presentFragment(new WaysGramDirectoryFragment(WaysGramDirectoryFragment.TYPE_GROUPS), false)
         );
-        addButton(context, content, "Каналы", () ->
+        addButton(context, profileMenuContainer, "Каналы", () ->
                 presentFragment(new WaysGramDirectoryFragment(WaysGramDirectoryFragment.TYPE_CHANNELS), false)
         );
-        addButton(context, content, "BotFather · Мои боты", () ->
+        addButton(context, profileMenuContainer, "BotFather · Мои боты", () ->
                 presentFragment(new WaysGramBotsFragment(), false)
         );
-        addButton(context, content, "Подарки WaysGram", () ->
+        addButton(context, profileMenuContainer, "Подарки WaysGram", () ->
                 new WaysGramGiftCatalogSheet(context, sessionStore, resourceProvider, this::loadProfile).show()
         );
-        addButton(context, content, "Обновить профиль и баланс", this::loadProfile);
-        addButton(context, content, "Выйти из WaysGram", this::logout);
+        addButton(context, profileMenuContainer, "Обновить профиль и баланс", this::loadProfile);
+        addButton(context, profileMenuContainer, "Выйти из WaysGram", this::logout);
 
         fragmentView = scroll;
         loadProfile();
