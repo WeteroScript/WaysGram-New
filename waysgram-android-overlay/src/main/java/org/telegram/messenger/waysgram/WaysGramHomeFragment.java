@@ -74,7 +74,7 @@ public final class WaysGramHomeFragment extends BaseFragment {
     @Override
     public View createView(Context context) {
         actionBar.setTitle("WaysGram");
-        sessionStore = WaysGramSessionStore.getInstance(context);
+        sessionStore = WaysGramSessionStore.getInstance(context, currentAccount);
         apiClient = new WaysGramApiClient(sessionStore);
 
         ScrollView scroll = new ScrollView(context);
@@ -121,7 +121,7 @@ public final class WaysGramHomeFragment extends BaseFragment {
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
         ));
         addButton(context, profileMenuContainer, "Открыть инвентарь подарков", () ->
-                new WaysGramGiftCatalogSheet(context, sessionStore, resourceProvider, this::loadProfile).show()
+                new WaysGramGiftCatalogSheet(context, sessionStore, currentAccount, resourceProvider, this::loadProfile).show()
         );
 
         addButton(context, profileMenuContainer, "Редактировать профиль", this::showProfileEditor);
@@ -149,7 +149,7 @@ public final class WaysGramHomeFragment extends BaseFragment {
                 presentFragment(new WaysGramBotsFragment(), false)
         );
         addButton(context, profileMenuContainer, "Подарки WaysGram", () ->
-                new WaysGramGiftCatalogSheet(context, sessionStore, resourceProvider, this::loadProfile).show()
+                new WaysGramGiftCatalogSheet(context, sessionStore, currentAccount, resourceProvider, this::loadProfile).show()
         );
         addButton(context, profileMenuContainer, "Обновить профиль и баланс", this::loadProfile);
         addButton(context, profileMenuContainer, "Выйти из WaysGram", this::logout);
@@ -260,7 +260,7 @@ public final class WaysGramHomeFragment extends BaseFragment {
                 statusView.setText(message);
                 if (statusCode == 401) {
                     sessionStore.clearSession();
-                    presentFragment(new WaysGramLoginFragment(), true);
+                    presentFragment(new WaysGramLoginFragment(currentAccount), true);
                 }
             }
         });
@@ -278,7 +278,7 @@ public final class WaysGramHomeFragment extends BaseFragment {
                 }
                 if (statusCode == 401 && getParentActivity() != null) {
                     sessionStore.clearSession();
-                    presentFragment(new WaysGramLoginFragment(), true);
+                    presentFragment(new WaysGramLoginFragment(currentAccount), true);
                 }
             }
         });
@@ -474,7 +474,7 @@ public final class WaysGramHomeFragment extends BaseFragment {
             public void onError(String message, int statusCode) {
                 if (statusCode == 401 && getParentActivity() != null) {
                     sessionStore.clearSession();
-                    presentFragment(new WaysGramLoginFragment(), true);
+                    presentFragment(new WaysGramLoginFragment(currentAccount), true);
                 }
             }
         });
@@ -499,7 +499,7 @@ public final class WaysGramHomeFragment extends BaseFragment {
             public void onError(String message, int statusCode) {
                 if (statusCode == 401 && getParentActivity() != null) {
                     sessionStore.clearSession();
-                    presentFragment(new WaysGramLoginFragment(), true);
+                    presentFragment(new WaysGramLoginFragment(currentAccount), true);
                 }
             }
         });
@@ -524,7 +524,7 @@ public final class WaysGramHomeFragment extends BaseFragment {
             public void onError(String message, int statusCode) {
                 if (statusCode == 401 && getParentActivity() != null) {
                     sessionStore.clearSession();
-                    presentFragment(new WaysGramLoginFragment(), true);
+                    presentFragment(new WaysGramLoginFragment(currentAccount), true);
                 }
             }
         });
@@ -552,7 +552,7 @@ public final class WaysGramHomeFragment extends BaseFragment {
                 eventsInitializing = false;
                 if (statusCode == 401 && getParentActivity() != null) {
                     sessionStore.clearSession();
-                    presentFragment(new WaysGramLoginFragment(), true);
+                    presentFragment(new WaysGramLoginFragment(currentAccount), true);
                 } else {
                     scheduleEventRetry(4000);
                 }
@@ -607,7 +607,7 @@ public final class WaysGramHomeFragment extends BaseFragment {
                         eventPollInFlight = false;
                         if (statusCode == 401 && getParentActivity() != null) {
                             sessionStore.clearSession();
-                            presentFragment(new WaysGramLoginFragment(), true);
+                            presentFragment(new WaysGramLoginFragment(currentAccount), true);
                         } else {
                             scheduleEventRetry(4000);
                         }
@@ -901,7 +901,7 @@ public final class WaysGramHomeFragment extends BaseFragment {
                 statusView.setText(message);
                 if (statusCode == 401) {
                     sessionStore.clearSession();
-                    presentFragment(new WaysGramLoginFragment(), true);
+                    presentFragment(new WaysGramLoginFragment(currentAccount), true);
                 }
             }
         });
@@ -936,7 +936,7 @@ public final class WaysGramHomeFragment extends BaseFragment {
                                     statusView.setText(message);
                                     if (statusCode == 401) {
                                         sessionStore.clearSession();
-                                        presentFragment(new WaysGramLoginFragment(), true);
+                                        presentFragment(new WaysGramLoginFragment(currentAccount), true);
                                     }
                                 }
                             });
@@ -958,7 +958,7 @@ public final class WaysGramHomeFragment extends BaseFragment {
                 statusView.setText(message);
                 if (statusCode == 401) {
                     sessionStore.clearSession();
-                    presentFragment(new WaysGramLoginFragment(), true);
+                    presentFragment(new WaysGramLoginFragment(currentAccount), true);
                 }
             }
         });
@@ -969,7 +969,7 @@ public final class WaysGramHomeFragment extends BaseFragment {
             @Override
             public void onSuccess(JSONObject response) {
                 sessionStore.clearSession();
-                presentFragment(new WaysGramLoginFragment(), true);
+                presentFragment(new WaysGramLoginFragment(currentAccount), true);
             }
 
             @Override
@@ -977,7 +977,7 @@ public final class WaysGramHomeFragment extends BaseFragment {
                 // Clear local credentials even when the server cannot be reached.
                 sessionStore.clearSession();
                 Toast.makeText(getParentActivity(), "Локальная сессия очищена", Toast.LENGTH_SHORT).show();
-                presentFragment(new WaysGramLoginFragment(), true);
+                presentFragment(new WaysGramLoginFragment(currentAccount), true);
             }
         });
     }
