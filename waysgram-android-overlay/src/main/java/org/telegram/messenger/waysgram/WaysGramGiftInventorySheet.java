@@ -37,6 +37,7 @@ public final class WaysGramGiftInventorySheet extends BottomSheet {
     private static final int MAX_STICKER_DOWNLOADS = 200;
 
     private final WaysGramGiftCatalogClient catalogClient;
+    private final int telegramAccount;
     private final WaysGramApiClient imageClient;
     private final Theme.ResourcesProvider resourcesProvider;
     private final GiftSelectedListener listener;
@@ -58,6 +59,7 @@ public final class WaysGramGiftInventorySheet extends BottomSheet {
         super(context, false, resourcesProvider);
         this.resourcesProvider = resourcesProvider;
         this.listener = listener;
+        this.telegramAccount = telegramAccount;
         catalogClient = new WaysGramGiftCatalogClient(sessionProvider);
         imageClient = new WaysGramApiClient(sessionProvider);
 
