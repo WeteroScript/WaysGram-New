@@ -760,19 +760,18 @@ def patch_profile_gifts_container_source(original: str) -> str:
 
 
 
-def patch_star_gift_sheet_source(original: str) -> str:
-    """Route WaysGram gift detail and upgrade actions to the WaysGram API."""
-    marker = "private void performWaysGramGiftUpgrade(String serial)"
+def patch_star_gift_sheet_display_source(original: str) -> str:
+    """Render WaysGram-owned gifts in Telegram's native detail sheet without Telegram ownership actions."""
+    marker = "private boolean isWaysGramGift()"
     if marker in original:
         required = (
             "private String waysGramGiftSerial()",
-            "confirmWaysGramGiftUpgrade(waysGramSerial);",
-            "if (isWaysGramGift()) return false;",
-            "WaysGramGiftCatalogClient",
             "topView.buttonsLayout.setVisibility(View.GONE);",
+            "if (isWaysGramGift()) return false;",
+            "if (isWaysGramGift()) return null;",
         )
         if not all(value in original for value in required):
-            raise ValueError("StarGiftSheet contains an incomplete WaysGram upgrade route")
+            raise ValueError("StarGiftSheet contains an incomplete WaysGram display patch")
         return original
 
     methods = (
@@ -790,61 +789,14 @@ def patch_star_gift_sheet_source(original: str) -> str:
         "    private boolean isWaysGramGift() {\n"
         "        return waysGramGiftSerial() != null;\n"
         "    }\n\n"
-        "    private void confirmWaysGramGiftUpgrade(String serial) {\n"
-        "        long price = savedStarGift != null && savedStarGift.gift != null\n"
-        "                ? Math.max(0L, savedStarGift.gift.upgrade_stars) : 0L;\n"
-        "        String message = price > 0\n"
-        "                ? \"Стоимость улучшения: \" + LocaleController.formatNumber(price, ',') + \" WaysGram Stars. Списание будет выполнено внутри WaysGram.\"\n"
-        "                : \"Для этого подарка сейчас нет доступного улучшения.\";\n"
-        "        new AlertDialog.Builder(getContext(), resourcesProvider)\n"
-        "                .setTitle(\"Улучшить подарок\")\n"
-        "                .setMessage(message)\n"
-        "                .setNegativeButton(getString(R.string.Cancel), null)\n"
-        "                .setPositiveButton(\"Улучшить\", (dialog, which) -> {\n"
-        "                    if (price > 0) performWaysGramGiftUpgrade(serial);\n"
-        "                })\n"
-        "                .show();\n"
-        "    }\n\n"
-        "    private void performWaysGramGiftUpgrade(String serial) {\n"
-        "        final org.telegram.messenger.waysgram.WaysGramGiftCatalogClient client =\n"
-        "                new org.telegram.messenger.waysgram.WaysGramGiftCatalogClient(\n"
-        "                        org.telegram.messenger.waysgram.WaysGramSessionStore.getInstance(getContext(), currentAccount));\n"
-        "        client.upgradeGift(serial, new org.telegram.messenger.waysgram.WaysGramGiftCatalogClient.ActionCallback() {\n"
-        "            @Override\n"
-        "            public void onComplete(org.json.JSONObject result) {\n"
-        "                client.close();\n"
-        "                AndroidUtilities.runOnUIThread(() -> {\n"
-        "                    if (isDismissed()) return;\n"
-        "                    if (onGiftUpdatedListener != null) onGiftUpdatedListener.run();\n"
-        "                    android.widget.Toast.makeText(getContext(), \"Подарок улучшен\", android.widget.Toast.LENGTH_LONG).show();\n"
-        "                    dismiss();\n"
-        "                });\n"
-        "            }\n\n"
-        "            @Override\n"
-        "            public void onError(String message) {\n"
-        "                client.close();\n"
-        "                AndroidUtilities.runOnUIThread(() -> {\n"
-        "                    if (!isDismissed()) {\n"
-        "                        android.widget.Toast.makeText(getContext(), \"Не удалось улучшить подарок: \" + message, android.widget.Toast.LENGTH_LONG).show();\n"
-        "                    }\n"
-        "                });\n"
-        "            }\n"
-        "        });\n"
-        "    }\n\n"
-    )
-    open_upgrade = (
-        "    private void openUpgrade() {\n"
-        "        final String waysGramSerial = waysGramGiftSerial();\n"
-        "        if (waysGramSerial != null) {\n"
-        "            confirmWaysGramGiftUpgrade(waysGramSerial);\n"
-        "            return;\n"
-        "        }\n"
     )
     original = replace_exactly_once(
-        original, "    private void openUpgrade() {\n",
-        methods + open_upgrade[len("    private void openUpgrade() {\n"):],
-        "native gift upgrade entry point routing"
+        original,
+        "    private boolean canDelete() {\n",
+        methods + "    private boolean canDelete() {\n",
+        "WaysGram native detail identity helpers"
     )
+
     waysgram_detail_ui = (
         "        if (isWaysGramGift()) {\n"
         "            topView.setShowOptions(false);\n"
@@ -876,7 +828,7 @@ def patch_star_gift_sheet_source(original: str) -> str:
         original,
         "        if (savedStarGift.refunded) {\n",
         waysgram_detail_ui + "        if (savedStarGift.refunded) {\n",
-        "native WaysGram detail display and action isolation"
+        "native WaysGram detail artwork and action isolation"
     )
     original = replace_exactly_once(
         original,
@@ -1224,15 +1176,15 @@ def verify_source(android_root: Path) -> None:
     if not star_gift_sheet.is_file():
         raise FileNotFoundError(f"Required native StarGiftSheet source not found: {star_gift_sheet}")
     star_gift_source = star_gift_sheet.read_text(encoding="utf-8")
-    patched_star_gift_source = patch_star_gift_sheet_source(star_gift_source)
+    patched_star_gift_source = patch_star_gift_sheet_display_source(star_gift_source)
     if patched_star_gift_source != star_gift_source:
         star_gift_sheet.write_text(patched_star_gift_source, encoding="utf-8")
     final_star_gift_source = star_gift_sheet.read_text(encoding="utf-8")
     for marker in (
         "private String waysGramGiftSerial()",
-        "confirmWaysGramGiftUpgrade(waysGramSerial);",
+        "topView.buttonsLayout.setVisibility(View.GONE);",
         "if (isWaysGramGift()) return false;",
-        "WaysGramGiftCatalogClient",
+        "if (isWaysGramGift()) return null;",
     ):
         if marker not in final_star_gift_source:
             raise ValueError("WaysGram native card detail and upgrade routing is incomplete")
