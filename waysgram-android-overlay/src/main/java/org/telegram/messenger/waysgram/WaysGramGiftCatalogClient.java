@@ -169,6 +169,8 @@ public final class WaysGramGiftCatalogClient implements AutoCloseable {
     private final ExecutorService ioExecutor;
     private final ConcurrentHashMap<String, String> purchaseIdempotencyKeys = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, String> upgradeIdempotencyKeys = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<String, Boolean> inFlightPurchaseScopes = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<String, Boolean> inFlightUpgradeSerials = new ConcurrentHashMap<>();
 
     public WaysGramGiftCatalogClient(SessionProvider sessionProvider) {
         if (sessionProvider == null) {
@@ -258,11 +260,15 @@ public final class WaysGramGiftCatalogClient implements AutoCloseable {
             return;
         }
         final String lookup = recipientQuery;
+        final String scope = gift.id + ":" + (lookup.isEmpty() ? "self" : lookup.toLowerCase(java.util.Locale.ROOT));
+        final String idempotencyKey = purchaseIdempotencyKeys.computeIfAbsent(
+                scope, ignored -> "wg-" + UUID.randomUUID().toString()
+        );
+        if (inFlightPurchaseScopes.putIfAbsent(scope, Boolean.TRUE) != null) {
+            callback.onError("Покупка этого подарка уже выполняется");
+            return;
+        }
         ioExecutor.execute(() -> {
-            String scope = gift.id + ":" + (lookup.isEmpty() ? "self" : lookup.toLowerCase(java.util.Locale.ROOT));
-            String idempotencyKey = purchaseIdempotencyKeys.computeIfAbsent(
-                    scope, ignored -> "wg-" + UUID.randomUUID().toString()
-            );
             try {
                 Long recipientId = null;
                 if (!lookup.isEmpty()) {
@@ -312,6 +318,8 @@ public final class WaysGramGiftCatalogClient implements AutoCloseable {
             } catch (Exception exception) {
                 // Keep the same key so a retry cannot double-charge after a timeout.
                 callback.onError(toSafeError(exception));
+            } finally {
+                inFlightPurchaseScopes.remove(scope);
             }
         });
     }
@@ -387,6 +395,10 @@ public final class WaysGramGiftCatalogClient implements AutoCloseable {
             callback.onError("Не указан серийный номер подарка");
             return;
         }
+        if (inFlightUpgradeSerials.putIfAbsent(giftSerial, Boolean.TRUE) != null) {
+            callback.onError("Улучшение этого подарка уже выполняется");
+            return;
+        }
         String idempotencyKey = upgradeIdempotencyKeys.computeIfAbsent(
                 giftSerial,
                 ignored -> "wg-gift-upgrade-" + UUID.randomUUID()
@@ -400,12 +412,14 @@ public final class WaysGramGiftCatalogClient implements AutoCloseable {
                     @Override
                     public void onComplete(JSONObject result) {
                         upgradeIdempotencyKeys.remove(giftSerial, idempotencyKey);
+                        inFlightUpgradeSerials.remove(giftSerial);
                         callback.onComplete(result);
                     }
 
                     @Override
                     public void onError(String message) {
                         // Retain the key so a retry after a lost response cannot charge twice.
+                        inFlightUpgradeSerials.remove(giftSerial);
                         callback.onError(message);
                     }
                 }
