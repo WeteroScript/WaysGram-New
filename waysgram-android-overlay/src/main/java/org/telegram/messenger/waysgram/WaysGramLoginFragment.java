@@ -17,12 +17,19 @@ import org.telegram.ui.ActionBar.Theme;
 /** Initial WaysGram sign-in screen shown before Telegram's legacy login view. */
 public final class WaysGramLoginFragment extends BaseFragment {
     private WaysGramSessionStore sessionStore;
+    private final Runnable onLoginSuccess;
 
     public WaysGramLoginFragment() {
+        this.onLoginSuccess = null;
     }
 
     public WaysGramLoginFragment(int telegramAccount) {
+        this(telegramAccount, null);
+    }
+
+    public WaysGramLoginFragment(int telegramAccount, Runnable onLoginSuccess) {
         setCurrentAccount(telegramAccount);
+        this.onLoginSuccess = onLoginSuccess;
     }
 
     @Override
@@ -108,6 +115,11 @@ public final class WaysGramLoginFragment extends BaseFragment {
 
     private void openLoginSheet(Context context) {
         new WaysGramLoginSheet(context, sessionStore, resourceProvider, () -> {
+            if (onLoginSuccess != null) {
+                removeSelfFromStack();
+                onLoginSuccess.run();
+                return;
+            }
             WaysGramHomeFragment home = new WaysGramHomeFragment();
             home.setCurrentAccount(currentAccount);
             presentFragment(home, true);

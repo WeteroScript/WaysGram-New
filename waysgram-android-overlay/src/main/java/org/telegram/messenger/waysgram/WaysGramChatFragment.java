@@ -66,7 +66,11 @@ import org.json.JSONArray;
 import org.json.JSONObject;
 import org.telegram.messenger.AndroidUtilities;
 import org.telegram.messenger.LocaleController;
+import org.telegram.messenger.MessageObject;
+import org.telegram.messenger.UserConfig;
 import org.telegram.messenger.R;
+import org.telegram.tgnet.TLRPC;
+import org.telegram.tgnet.tl.TL_stars;
 import org.telegram.ui.ActionBar.BaseFragment;
 import org.telegram.ui.ActionBar.Theme;
 import org.telegram.ui.Gifts.GiftMessageView;
@@ -3100,6 +3104,68 @@ public final class WaysGramChatFragment extends BaseFragment {
         });
     }
 
+    private CharSequence createNativeGiftPurchaseNotice(
+            JSONObject message,
+            long senderId,
+            String giftName,
+            String telegramGiftId,
+            int purchasePrice,
+            String fallbackText
+    ) {
+        try {
+            int account = getCurrentAccount();
+            long dialogPeerId = savedMessages
+                    ? UserConfig.getInstance(account).getClientUserId()
+                    : peerId;
+            long nativeGiftId;
+            try {
+                nativeGiftId = Long.parseLong(telegramGiftId);
+            } catch (NumberFormatException ignored) {
+                nativeGiftId = Integer.toUnsignedLong(
+                        (telegramGiftId == null ? giftName : telegramGiftId).hashCode()
+                ) + 1L;
+            }
+            if (nativeGiftId <= 0) {
+                nativeGiftId = 1L;
+            }
+
+            TLRPC.TL_peerUser dialogPeer = new TLRPC.TL_peerUser();
+            dialogPeer.user_id = dialogPeerId;
+            TLRPC.TL_peerUser senderPeer = new TLRPC.TL_peerUser();
+            senderPeer.user_id = senderId;
+
+            TL_stars.TL_starGift nativeGift = new TL_stars.TL_starGift();
+            nativeGift.id = nativeGiftId;
+            nativeGift.gift_id = nativeGiftId;
+            nativeGift.title = giftName == null ? "Подарок" : giftName;
+            nativeGift.slug = "waysgram://" + nativeGiftId;
+            nativeGift.stars = Math.max(0, purchasePrice);
+            // Used only to obtain Telegram's localized system-action text. It is not serialized or sent to Telegram.
+
+            TLRPC.TL_messageActionStarGift action = new TLRPC.TL_messageActionStarGift();
+            action.gift = nativeGift;
+            action.from_id = senderPeer;
+
+            TLRPC.TL_messageService serviceMessage = new TLRPC.TL_messageService();
+            long messageId = message == null ? 0L : message.optLong("id", 0L);
+            long createdAt = message == null ? 0L : message.optLong("created_at", 0L);
+            serviceMessage.id = (int) Math.max(1L, Math.min(Integer.MAX_VALUE, messageId));
+            serviceMessage.date = (int) Math.max(0L, Math.min(Integer.MAX_VALUE, createdAt));
+            serviceMessage.peer_id = dialogPeer;
+            serviceMessage.from_id = senderPeer;
+            serviceMessage.flags |= TLRPC.MESSAGE_FLAG_HAS_FROM_ID;
+            serviceMessage.out = senderId == UserConfig.getInstance(account).getClientUserId();
+            serviceMessage.action = action;
+
+            MessageObject nativeEvent = new MessageObject(account, serviceMessage, false, false);
+            return nativeEvent.messageText == null || nativeEvent.messageText.length() == 0
+                    ? fallbackText
+                    : nativeEvent.messageText;
+        } catch (Exception ignored) {
+            return fallbackText;
+        }
+    }
+
     private void addMessage(JSONObject message) {
         String albumId = message.optString("media_album_id", "");
         boolean isAlbum = albumId.matches("[a-f0-9]{32}");
@@ -3134,7 +3200,8 @@ public final class WaysGramChatFragment extends BaseFragment {
                 || message.optInt("media_album_index", 0) == 0;
         JSONObject giftAttributesForMessage = message.optJSONObject("gift_attributes");
         boolean isGiftPurchaseEvent = (giftAttributesForMessage != null
-                && "purchase".equals(giftAttributesForMessage.optString("event_type", "")))
+                && ("purchase".equals(giftAttributesForMessage.optString("event_type", ""))
+                || "star_gift_purchase".equals(giftAttributesForMessage.optString("native_action", ""))))
                 || message.optString("body", "").startsWith(
                         "Вы приобрели коллекционный подарок «"
                 );
@@ -3317,7 +3384,7 @@ public final class WaysGramChatFragment extends BaseFragment {
                         "Gift2StarsCount", Math.max(0, purchasePrice)
                 );
                 String purchaseNoticeText;
-                if (sender == recipient) {
+                if (sender == recipient || (savedMessages && sender == UserConfig.getInstance(getCurrentAccount()).getClientUserId())) {
                     purchaseNoticeText = LocaleController.getString(R.string.ActionGiftSelf);
                 } else if (sender == peerId) {
                     purchaseNoticeText = LocaleController.getString(R.string.ActionGiftInbound)
@@ -3326,6 +3393,9 @@ public final class WaysGramChatFragment extends BaseFragment {
                     purchaseNoticeText = LocaleController.getString(R.string.ActionGiftOutbound);
                 }
                 purchaseNoticeText = purchaseNoticeText.replace("un2", starsText);
+                purchaseNoticeText = createNativeGiftPurchaseNotice(
+                        message, sender, giftName, giftTelegramId, purchasePrice, purchaseNoticeText
+                ).toString();
                 purchaseNotice.setMessage(AndroidUtilities.replaceTags(purchaseNoticeText));
                 purchaseNotice.setPadding(AndroidUtilities.dp(30), AndroidUtilities.dp(2),
                         AndroidUtilities.dp(30), AndroidUtilities.dp(2));

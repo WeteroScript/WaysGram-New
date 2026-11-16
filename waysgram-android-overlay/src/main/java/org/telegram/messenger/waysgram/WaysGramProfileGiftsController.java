@@ -92,7 +92,7 @@ public final class WaysGramProfileGiftsController {
                                 && fragment.getParentActivity() != null) {
                             loginRedirected = true;
                             fragment.presentFragment(
-                                    new WaysGramLoginFragment(sessionStore.getTelegramAccount()), true);
+                                    new WaysGramLoginFragment(sessionStore.getTelegramAccount(), this::refresh), true);
                         }
                         return;
                     }
