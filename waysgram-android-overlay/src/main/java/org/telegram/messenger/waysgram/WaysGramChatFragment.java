@@ -65,6 +65,8 @@ import android.text.style.UnderlineSpan;
 import org.json.JSONArray;
 import org.json.JSONObject;
 import org.telegram.messenger.AndroidUtilities;
+import org.telegram.messenger.LocaleController;
+import org.telegram.messenger.R;
 import org.telegram.ui.ActionBar.BaseFragment;
 import org.telegram.ui.ActionBar.Theme;
 import org.telegram.ui.Gifts.GiftMessageView;
@@ -3298,16 +3300,22 @@ public final class WaysGramChatFragment extends BaseFragment {
 
             if (isGiftPurchaseEvent) {
                 GiftMessageView purchaseNotice = new GiftMessageView(getParentActivity());
+                int purchasePrice = giftAttributes == null
+                        ? 0 : giftAttributes.optInt("price_stars", 0);
+                String starsText = LocaleController.formatPluralStringComma(
+                        "Gift2StarsCount", Math.max(0, purchasePrice)
+                );
                 String purchaseNoticeText;
                 if (sender == recipient) {
-                    purchaseNoticeText = "Вы приобрели коллекционный подарок";
+                    purchaseNoticeText = LocaleController.getString(R.string.ActionGiftSelf);
                 } else if (sender == peerId) {
-                    purchaseNoticeText = (peerTitle.isEmpty() ? "Пользователь" : peerTitle)
-                            + " отправил вам подарок";
+                    purchaseNoticeText = LocaleController.getString(R.string.ActionGiftInbound)
+                            .replace("un1", peerTitle.isEmpty() ? "Пользователь" : peerTitle);
                 } else {
-                    purchaseNoticeText = "Вы отправили подарок";
+                    purchaseNoticeText = LocaleController.getString(R.string.ActionGiftOutbound);
                 }
-                purchaseNotice.setMessage(purchaseNoticeText);
+                purchaseNoticeText = purchaseNoticeText.replace("un2", starsText);
+                purchaseNotice.setMessage(AndroidUtilities.replaceTags(purchaseNoticeText));
                 purchaseNotice.setPadding(AndroidUtilities.dp(30), AndroidUtilities.dp(2),
                         AndroidUtilities.dp(30), AndroidUtilities.dp(2));
                 LinearLayout.LayoutParams noticeParams = new LinearLayout.LayoutParams(
@@ -3357,7 +3365,6 @@ public final class WaysGramChatFragment extends BaseFragment {
                             DateFormat.SHORT, DateFormat.SHORT, Locale.getDefault()
                     ).format(new Date(purchasedAt * 1000L)));
                 }
-                int purchasePrice = giftAttributes == null ? 0 : giftAttributes.optInt("price_stars", 0);
                 if (purchasePrice > 0) {
                     if (giftInfo.length() > 0) {
                         giftInfo.append("\n");
