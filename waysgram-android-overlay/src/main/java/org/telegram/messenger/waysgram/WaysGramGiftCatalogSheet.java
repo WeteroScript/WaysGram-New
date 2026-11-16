@@ -62,6 +62,7 @@ public final class WaysGramGiftCatalogSheet extends BottomSheet {
     private final Set<String> purchasingGiftIds = new HashSet<>();
     private WaysGramGiftInventorySheet inventorySheet;
     private final WaysGramGiftCatalogClient.SessionProvider sessionProvider;
+    private final int telegramAccount;
 
     public WaysGramGiftCatalogSheet(
             Context context,
@@ -83,6 +84,7 @@ public final class WaysGramGiftCatalogSheet extends BottomSheet {
         this.resourcesProvider = resourcesProvider;
         this.onPurchaseComplete = onPurchaseComplete;
         this.sessionProvider = sessionProvider;
+        this.telegramAccount = telegramAccount;
         catalogClient = new WaysGramGiftCatalogClient(sessionProvider);
         adapter = new GiftAdapter();
 
