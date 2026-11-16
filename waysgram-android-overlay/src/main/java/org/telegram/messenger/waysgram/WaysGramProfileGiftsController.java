@@ -3,14 +3,6 @@ package org.telegram.messenger.waysgram;
 import android.content.Context;
 import android.graphics.Bitmap;
 import android.graphics.Color;
-import android.view.Gravity;
-import android.view.View;
-import android.view.ViewGroup;
-import android.widget.Button;
-import android.widget.FrameLayout;
-import android.widget.LinearLayout;
-import android.widget.TextView;
-
 import org.json.JSONArray;
 import org.json.JSONObject;
 import org.telegram.messenger.AndroidUtilities;
@@ -18,7 +10,6 @@ import org.telegram.messenger.R;
 import org.telegram.messenger.UserConfig;
 import org.telegram.tgnet.tl.TL_stars;
 import org.telegram.ui.ActionBar.BaseFragment;
-import org.telegram.ui.ActionBar.Theme;
 import org.telegram.ui.Components.BulletinFactory;
 import org.telegram.ui.Gifts.ProfileGiftsContainer;
 
@@ -37,12 +28,10 @@ public final class WaysGramProfileGiftsController {
     private static final int MAX_STICKER_DOWNLOADS = MAX_VISIBLE_GIFTS;
 
     private final Context appContext;
-    private final Context uiContext;
     private final BaseFragment fragment;
     private final ProfileGiftsContainer container;
     private final WaysGramSessionStore sessionStore;
     private final WaysGramApiClient imageClient;
-    private View sessionOverlay;
     private boolean loading;
 
     public WaysGramProfileGiftsController(
@@ -54,22 +43,15 @@ public final class WaysGramProfileGiftsController {
             throw new IllegalArgumentException("WaysGram profile gifts dependencies are required");
         }
         appContext = context.getApplicationContext();
-        uiContext = context;
         this.fragment = fragment;
         this.container = container;
         sessionStore = WaysGramSessionStore.getInstance(appContext,
                 fragment == null ? UserConfig.selectedAccount : fragment.getCurrentAccount());
         imageClient = new WaysGramApiClient(sessionStore);
-        createSessionOverlay();
     }
 
     public void refresh() {
         if (loading) {
-            return;
-        }
-        if (!sessionStore.hasSession()) {
-            container.setWaysGramInventory(new ArrayList<>());
-            setSessionRequired(true);
             return;
         }
         loading = true;
@@ -84,7 +66,6 @@ public final class WaysGramProfileGiftsController {
                     WaysGramGiftMediaStore.clear();
                     ArrayList<TL_stars.SavedStarGift> nativeGifts = toNativeGifts(inventory);
                     container.setWaysGramInventory(nativeGifts);
-                    setSessionRequired(false);
                     downloadGiftStickers(inventory);
                 });
             }
@@ -94,96 +75,19 @@ public final class WaysGramProfileGiftsController {
                 AndroidUtilities.runOnUIThread(() -> {
                     loading = false;
                     client.close();
-                    if (message != null && (message.contains("WaysGram session is missing") || message.contains("HTTP 401"))) {
+                    if (message != null && message.contains("HTTP 401")) {
                         sessionStore.clearSession();
+                    }
+                    if (message != null && (message.contains("WaysGram session is missing")
+                            || message.contains("HTTP 401"))) {
                         container.setWaysGramInventory(new ArrayList<>());
-                        setSessionRequired(true);
+                        showError(message);
                         return;
                     }
-                    showSessionRequired(false);
                     showError(message);
                 });
             }
         });
-    }
-
-    private void createSessionOverlay() {
-        LinearLayout content = new LinearLayout(uiContext);
-        content.setOrientation(LinearLayout.VERTICAL);
-        content.setGravity(Gravity.CENTER);
-        content.setPadding(
-                AndroidUtilities.dp(28),
-                AndroidUtilities.dp(20),
-                AndroidUtilities.dp(28),
-                AndroidUtilities.dp(20)
-        );
-
-        TextView title = new TextView(uiContext);
-        title.setText("Вход в WaysGram");
-        title.setTextSize(18);
-        title.setTypeface(android.graphics.Typeface.DEFAULT, android.graphics.Typeface.BOLD);
-        title.setTextColor(Theme.getColor(Theme.key_windowBackgroundWhiteBlackText));
-        title.setGravity(Gravity.CENTER);
-        content.addView(title, new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.WRAP_CONTENT
-        ));
-
-        TextView description = new TextView(uiContext);
-        description.setText("Чтобы загрузить ваши подарки, войдите в отдельную сессию WaysGram. Сессия Telegram не затрагивается.");
-        description.setTextSize(14);
-        description.setTextColor(Theme.getColor(Theme.key_windowBackgroundWhiteGrayText));
-        description.setGravity(Gravity.CENTER);
-        LinearLayout.LayoutParams descriptionParams = new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.WRAP_CONTENT
-        );
-        descriptionParams.topMargin = AndroidUtilities.dp(8);
-        content.addView(description, descriptionParams);
-
-        Button loginButton = new Button(uiContext);
-        loginButton.setText("Войти в WaysGram");
-        loginButton.setAllCaps(false);
-        LinearLayout.LayoutParams buttonParams = new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.WRAP_CONTENT,
-                ViewGroup.LayoutParams.WRAP_CONTENT
-        );
-        buttonParams.topMargin = AndroidUtilities.dp(16);
-        content.addView(loginButton, buttonParams);
-        loginButton.setOnClickListener(view -> openWaysGramLogin());
-
-        sessionOverlay = content;
-        sessionOverlay.setVisibility(View.GONE);
-        container.addView(sessionOverlay, new FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                Gravity.CENTER
-        ));
-    }
-
-    private void setSessionRequired(boolean required) {
-        showSessionRequired(required);
-    }
-
-    private void showSessionRequired(boolean required) {
-        if (sessionOverlay != null) {
-            sessionOverlay.setVisibility(required ? View.VISIBLE : View.GONE);
-        }
-    }
-
-    private void openWaysGramLogin() {
-        if (fragment == null || fragment.getParentActivity() == null) {
-            return;
-        }
-        new WaysGramLoginSheet(
-                fragment.getParentActivity(),
-                sessionStore,
-                null,
-                () -> {
-                    showSessionRequired(false);
-                    refresh();
-                }
-        ).show();
     }
 
     public static ArrayList<TL_stars.SavedStarGift> toNativeGifts(JSONArray inventory) {
@@ -474,8 +378,9 @@ public final class WaysGramProfileGiftsController {
 
     private void showError(String message) {
         String text;
-        if (message != null && message.contains("HTTP 401")) {
-            text = "Сессия WaysGram недействительна. Войдите в WaysGram повторно.";
+        if (message != null && (message.contains("HTTP 401")
+                || message.contains("WaysGram session is missing"))) {
+            text = "Не удалось получить доступ к инвентарю WaysGram.";
         } else if (message != null && message.contains("HTTP 404")) {
             text = "Сервер не поддерживает загрузку инвентаря. Обновите AuthBot на сервере.";
         } else if (message != null && message.contains("HTTP 403")) {
