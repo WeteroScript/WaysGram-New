@@ -146,6 +146,10 @@ public final class WaysGramProfileGiftsController {
             String giftTitle = catalogTitle.isEmpty()
                     ? optText(item, "gift_name")
                     : catalogTitle;
+            if ("Подарок Telegram".equalsIgnoreCase(giftTitle)
+                    || "Telegram Gift".equalsIgnoreCase(giftTitle)) {
+                giftTitle = "";
+            }
             if (giftTitle.isEmpty()) {
                 giftTitle = giftEmoji.isEmpty() ? "Подарок" : giftEmoji;
             }
