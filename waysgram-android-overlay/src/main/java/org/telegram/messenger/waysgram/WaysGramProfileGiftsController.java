@@ -56,7 +56,8 @@ public final class WaysGramProfileGiftsController {
         uiContext = context;
         this.fragment = fragment;
         this.container = container;
-        sessionStore = WaysGramSessionStore.getInstance(appContext);
+        sessionStore = WaysGramSessionStore.getInstance(appContext,
+                fragment == null ? UserConfig.selectedAccount : fragment.getCurrentAccount());
         imageClient = new WaysGramApiClient(sessionStore);
         createSessionOverlay();
     }
