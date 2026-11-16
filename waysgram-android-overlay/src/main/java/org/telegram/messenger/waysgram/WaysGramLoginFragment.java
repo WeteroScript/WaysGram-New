@@ -18,6 +18,13 @@ import org.telegram.ui.ActionBar.Theme;
 public final class WaysGramLoginFragment extends BaseFragment {
     private WaysGramSessionStore sessionStore;
 
+    public WaysGramLoginFragment() {
+    }
+
+    public WaysGramLoginFragment(int telegramAccount) {
+        setCurrentAccount(telegramAccount);
+    }
+
     @Override
     public boolean onFragmentCreate() {
         return true;
@@ -26,7 +33,7 @@ public final class WaysGramLoginFragment extends BaseFragment {
     @Override
     public View createView(Context context) {
         actionBar.setTitle("WaysGram");
-        sessionStore = WaysGramSessionStore.getInstance(context);
+        sessionStore = WaysGramSessionStore.getInstance(context, currentAccount);
 
         ScrollView scroll = new ScrollView(context);
         scroll.setFillViewport(true);
@@ -100,8 +107,10 @@ public final class WaysGramLoginFragment extends BaseFragment {
     }
 
     private void openLoginSheet(Context context) {
-        new WaysGramLoginSheet(context, sessionStore, resourceProvider, () ->
-                presentFragment(new WaysGramHomeFragment(), true)
-        ).show();
+        new WaysGramLoginSheet(context, sessionStore, resourceProvider, () -> {
+            WaysGramHomeFragment home = new WaysGramHomeFragment();
+            home.setCurrentAccount(currentAccount);
+            presentFragment(home, true);
+        }).show();
     }
 }

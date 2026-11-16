@@ -7,6 +7,11 @@ import android.security.keystore.KeyProperties;
 import android.util.Base64;
 import android.util.Log;
 
+import org.telegram.messenger.UserConfig;
+
+import java.util.HashMap;
+import java.util.Map;
+
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.security.GeneralSecurityException;
@@ -24,36 +29,62 @@ import javax.crypto.spec.GCMParameterSpec;
  * session. It never reads or writes Telegram user authorization data.
  */
 public final class WaysGramSessionStore implements WaysGramGiftCatalogClient.SessionProvider {
-    private static final String PREFS_NAME = "waysgram_private_session";
+    private static final String LEGACY_PREFS_NAME = "waysgram_private_session";
+    private static final String ACCOUNT_PREFS_PREFIX = "waysgram_private_session_account_";
+    private static final String MIGRATION_PREFS_NAME = "waysgram_session_migration";
+    private static final String PREF_MIGRATED = "legacy_session_migrated";
     private static final String KEY_ALIAS = "org.telegram.messenger.WaysGramSession.v1";
     private static final String PREF_API_BASE = "api_base_encrypted";
     private static final String PREF_SESSION_TOKEN = "session_token_encrypted";
     private static final String TAG = "WaysGramSessionStore";
     private static final int GCM_TAG_BITS = 128;
 
-    private static volatile WaysGramSessionStore instance;
+    private static final Map<Integer, WaysGramSessionStore> INSTANCES = new HashMap<>();
 
     private final SharedPreferences preferences;
+    private final int telegramAccount;
 
-    private WaysGramSessionStore(Context context) {
-        preferences = context.getApplicationContext().getSharedPreferences(
-                PREFS_NAME,
+    private WaysGramSessionStore(Context context, int telegramAccount) {
+        Context appContext = context.getApplicationContext();
+        this.telegramAccount = telegramAccount;
+        preferences = appContext.getSharedPreferences(
+                ACCOUNT_PREFS_PREFIX + telegramAccount,
                 Context.MODE_PRIVATE
         );
+        migrateLegacySessionOnce(appContext);
     }
 
     public static WaysGramSessionStore getInstance(Context context) {
-        WaysGramSessionStore value = instance;
+        return getInstance(context, UserConfig.selectedAccount);
+    }
+
+    public static synchronized WaysGramSessionStore getInstance(Context context, int telegramAccount) {
+        WaysGramSessionStore value = INSTANCES.get(telegramAccount);
         if (value == null) {
-            synchronized (WaysGramSessionStore.class) {
-                value = instance;
-                if (value == null) {
-                    value = new WaysGramSessionStore(context);
-                    instance = value;
-                }
-            }
+            value = new WaysGramSessionStore(context, telegramAccount);
+            INSTANCES.put(telegramAccount, value);
         }
         return value;
+    }
+
+    public int getTelegramAccount() {
+        return telegramAccount;
+    }
+
+    private void migrateLegacySessionOnce(Context context) {
+        SharedPreferences migration = context.getSharedPreferences(MIGRATION_PREFS_NAME, Context.MODE_PRIVATE);
+        if (migration.getBoolean(PREF_MIGRATED, false)) {
+            return;
+        }
+        SharedPreferences legacy = context.getSharedPreferences(LEGACY_PREFS_NAME, Context.MODE_PRIVATE);
+        if (!preferences.contains(PREF_SESSION_TOKEN)
+                && legacy.contains(PREF_SESSION_TOKEN)) {
+            preferences.edit()
+                    .putString(PREF_API_BASE, legacy.getString(PREF_API_BASE, null))
+                    .putString(PREF_SESSION_TOKEN, legacy.getString(PREF_SESSION_TOKEN, null))
+                    .commit();
+        }
+        migration.edit().putBoolean(PREF_MIGRATED, true).commit();
     }
 
     /**
