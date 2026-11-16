@@ -180,6 +180,7 @@ public final class WaysGramProfileGiftsController {
                 TLRPC.TL_peerUser ownerPeer = new TLRPC.TL_peerUser();
                 ownerPeer.user_id = UserConfig.getInstance(currentAccount).getClientUserId();
                 uniqueGift.owner_id = ownerPeer;
+                uniqueGift.flags |= 1; // owner_id is present in the native unique-gift model.
                 TL_stars.starGiftAttributeBackdrop nativeBackdrop = createNativeBackdrop(traits, rarity);
                 if (nativeBackdrop != null) {
                     uniqueGift.attributes.add(nativeBackdrop);
