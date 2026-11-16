@@ -195,7 +195,7 @@ public final class WaysGramGiftCatalogClient implements AutoCloseable {
         ioExecutor.execute(() -> {
             try {
                 String baseUrl = getBaseUrl();
-                JSONObject response = requestJson(baseUrl + "/api/telegram/gifts?all=1");
+                JSONObject response = requestJson(baseUrl + "/api/telegram/gifts");
                 JSONArray source = response.optJSONArray("gifts");
                 if (source == null) {
                     throw new IOException("WaysGram returned no gift list");
