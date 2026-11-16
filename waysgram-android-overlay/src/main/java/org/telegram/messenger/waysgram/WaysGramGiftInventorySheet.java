@@ -52,6 +52,7 @@ public final class WaysGramGiftInventorySheet extends BottomSheet {
     public WaysGramGiftInventorySheet(
             Context context,
             WaysGramGiftCatalogClient.SessionProvider sessionProvider,
+            int telegramAccount,
             Theme.ResourcesProvider resourcesProvider,
             GiftSelectedListener listener
     ) {
@@ -59,7 +60,7 @@ public final class WaysGramGiftInventorySheet extends BottomSheet {
         this.resourcesProvider = resourcesProvider;
         this.listener = listener;
         catalogClient = new WaysGramGiftCatalogClient(sessionProvider);
-        imageClient = new WaysGramApiClient(WaysGramSessionStore.getInstance(context));
+        imageClient = new WaysGramApiClient(sessionProvider);
 
         setTitle("Мои подарки", true);
         setApplyTopPadding(false);
@@ -88,7 +89,7 @@ public final class WaysGramGiftInventorySheet extends BottomSheet {
 
         FrameLayout listContainer = new FrameLayout(context);
         listView = new UniversalRecyclerView(
-                context, UserConfig.selectedAccount, 0, false,
+                context, telegramAccount, 0, false,
                 this::fillItems, this::onItemClick, this::onItemLongPress,
                 resourcesProvider, 3, LinearLayoutManager.VERTICAL);
         listView.adapter.setApplyBackground(false);
@@ -134,6 +135,10 @@ public final class WaysGramGiftInventorySheet extends BottomSheet {
                     nativeGifts.clear();
                     nativeGifts.addAll(WaysGramProfileGiftsController.toNativeGifts(gifts));
                     statusView.setVisibility(View.GONE);
+                    int spanCount = Math.max(1, Math.min(3, nativeGifts.size()));
+                    if (listView.getSpanCount() != spanCount) {
+                        listView.setSpanCount(spanCount);
+                    }
                     listView.adapter.update(false);
                     downloadGiftStickers(gifts);
                 });
@@ -153,11 +158,10 @@ public final class WaysGramGiftInventorySheet extends BottomSheet {
     private void fillItems(ArrayList<UItem> items, UniversalAdapter adapter) {
         if (nativeGifts.isEmpty()) return;
         // Telegram profile inventory uses the same 12dp top inset and native GiftCell factory.
-        items.add(UItem.asSpace(AndroidUtilities.dp(12)));
         for (TL_stars.SavedStarGift gift : nativeGifts) {
             items.add(GiftSheet.GiftCell.Factory.asStarGift(0, gift, true, false, false));
         }
-        items.add(UItem.asSpace(AndroidUtilities.dp(24)));
+        items.add(UItem.asSpace(AndroidUtilities.dp(24 + 48 + 10)));
     }
 
     private void onItemClick(UItem item, View view, int position, float x, float y) {
