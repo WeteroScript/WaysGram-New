@@ -210,14 +210,26 @@ public final class WaysGramGiftCatalogSheet extends BottomSheet {
 
     private void showGiftActions(JSONObject gift) {
         String serial = gift.optString("serial_number", "");
-        String name = gift.optString("gift_name", "Подарок WaysGram");
+        JSONObject telegramGift = gift.optJSONObject("telegram_gift");
+        String name = telegramGift == null ? "" : telegramGift.optString("title", "").trim();
+        if (name.isEmpty() || "null".equalsIgnoreCase(name)) {
+            name = gift.optString("gift_name", "").trim();
+        }
+        if (name.isEmpty() || "null".equalsIgnoreCase(name)) {
+            name = gift.optString("gift_emoji", "").trim();
+        }
+        if (name.isEmpty() || "null".equalsIgnoreCase(name)) {
+            name = "Подарок";
+        }
         if (serial.isEmpty()) {
             return;
         }
         ArrayList<String> actions = new ArrayList<>();
         boolean listed = gift.optInt("is_listed", gift.optBoolean("is_listed", false) ? 1 : 0) == 1;
         boolean auctioned = gift.optInt("is_auctioned", gift.optBoolean("is_auctioned", false) ? 1 : 0) == 1;
-        boolean canUpgrade = gift.optString("telegram_gift_id", "").length() > 0;
+        boolean canUpgrade = gift.optBoolean("can_upgrade", false)
+                && gift.optInt("upgrade_level", 0) == 0
+                && gift.optString("telegram_gift_id", "").length() > 0;
         boolean auctionEligible = gift.optInt(
                 "auction_eligible", gift.optBoolean("auction_eligible", false) ? 1 : 0
         ) == 1;
