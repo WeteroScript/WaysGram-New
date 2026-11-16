@@ -162,6 +162,8 @@ def patch_profile_phone_null_source(original: str) -> str:
         required = (
             'user.phone.matches("[0-9]{8,15}")',
             'user.phone == null || !user.phone.matches("[0-9]{8,15}")',
+            'profilePhone != null && profilePhone.matches("[0-9]{8,15}")',
+            'format("+" + profilePhone)',
         )
         if not all(value in original for value in required):
             raise ValueError("ProfileActivity contains an incomplete phone placeholder guard")
@@ -182,11 +184,22 @@ def patch_profile_phone_null_source(original: str) -> str:
         "                        if (user != null && user.phone != null && user.phone.length() != 0) {\n"
     )
     number_after = (
-        "                        if (user != null && user.phone != null && user.phone.matches(\"[0-9]{8,15}\")) {\n"
+        "                        String profilePhone = myProfile ? waysGramStablePhone : (user == null ? \"\" : user.phone);\n"
+        "                        if (user != null && profilePhone != null && profilePhone.matches(\"[0-9]{8,15}\")) {\n"
     )
     original = replace_exactly_once(
         original, number_before, number_after,
-        "reject invalid phone in own profile number row"
+        "use validated persisted phone in own profile number row"
+    )
+    number_value_before = (
+        "                            value = PhoneFormat.getInstance().format(\"+\" + user.phone);\n"
+    )
+    number_value_after = (
+        "                            value = PhoneFormat.getInstance().format(\"+\" + profilePhone);\n"
+    )
+    original = replace_exactly_once(
+        original, number_value_before, number_value_after,
+        "format validated own profile phone"
     )
 
     click_before = (
