@@ -576,8 +576,8 @@ public final class WaysGramApiClient implements AutoCloseable {
                 throw new IOException("Стикер подарка не является статическим изображением");
             }
             options.inSampleSize = 1;
-            while (options.outWidth / options.inSampleSize > 384
-                    || options.outHeight / options.inSampleSize > 384) {
+            while (options.outWidth / options.inSampleSize > 256
+                    || options.outHeight / options.inSampleSize > 256) {
                 options.inSampleSize *= 2;
             }
             options.inJustDecodeBounds = false;
