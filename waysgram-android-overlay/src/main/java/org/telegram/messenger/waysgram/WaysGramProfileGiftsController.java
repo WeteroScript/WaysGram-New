@@ -7,6 +7,7 @@ import org.json.JSONArray;
 import org.json.JSONObject;
 import org.telegram.messenger.AndroidUtilities;
 import org.telegram.messenger.R;
+import org.telegram.messenger.UserConfig;
 import org.telegram.tgnet.tl.TL_stars;
 import org.telegram.ui.ActionBar.BaseFragment;
 import org.telegram.ui.Components.BulletinFactory;
@@ -45,7 +46,7 @@ public final class WaysGramProfileGiftsController {
         this.fragment = fragment;
         this.container = container;
         sessionStore = WaysGramSessionStore.getInstance(appContext,
-                fragment == null ? org.telegram.messenger.UserConfig.selectedAccount : fragment.getCurrentAccount());
+                fragment == null ? UserConfig.selectedAccount : fragment.getCurrentAccount());
         imageClient = new WaysGramApiClient(sessionStore);
     }
 
