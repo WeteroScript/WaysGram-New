@@ -120,6 +120,130 @@ def patch_profile_actions_visibility_source(original: str) -> str:
     return original
 
 
+
+def patch_profile_image_updater_source(original: str) -> str:
+    """Initialize Telegram's existing profile action controls after self detection."""
+    marker = "// WaysGram: initialize native profile actions after self detection"
+    if marker in original:
+        required = (
+            "if (myProfile && userId != 0 && imageUpdater == null)",
+            "imageUpdater = new ImageUpdater(true, ImageUpdater.FOR_TYPE_USER, true);",
+            "imageUpdater.setDelegate(this);",
+        )
+        if not all(value in original for value in required):
+            raise ValueError("ProfileActivity contains an incomplete late profile action initializer")
+        return original
+
+    before = (
+        "        if ((userId == selfId || dialogId == selfId) && !myProfile) {\n"
+        "            myProfile = true;\n"
+        "            // AndroidUtilities.printStackTrace(\"myProfile flag debug\");\n"
+        "        }\n"
+    )
+    after = before + (
+        "        // WaysGram: initialize native profile actions after self detection\n"
+        "        if (myProfile && userId != 0 && imageUpdater == null) {\n"
+        "            imageUpdater = new ImageUpdater(true, ImageUpdater.FOR_TYPE_USER, true);\n"
+        "            imageUpdater.setOpenWithFrontfaceCamera(true);\n"
+        "            imageUpdater.parentFragment = this;\n"
+        "            imageUpdater.setDelegate(this);\n"
+        "        }\n"
+    )
+    return replace_exactly_once(
+        original, before, after,
+        "late initialization of native profile action controls"
+    )
+
+
+def patch_profile_phone_null_source(original: str) -> str:
+    """Reject placeholder strings such as 'null' in every profile phone display path."""
+    marker = "// WaysGram: reject non-numeric phone placeholders"
+    if marker in original:
+        required = (
+            'user.phone.matches("[0-9]{8,15}")',
+            'user.phone == null || !user.phone.matches("[0-9]{8,15}")',
+            'profilePhone != null && profilePhone.matches("[0-9]{8,15}")',
+            'String copyPhone = myProfile ? waysGramStablePhone : user.phone;',
+            'copyPhone.matches("[0-9]{8,15}")',
+            'format("+" + profilePhone)',
+        )
+        if not all(value in original for value in required):
+            raise ValueError("ProfileActivity contains an incomplete phone placeholder guard")
+        return original
+
+    header_before = (
+        "                } else if (a == 0 && user.id != getUserConfig().getClientUserId() && !MessagesController.isSupportUser(user) && user.phone != null && user.phone.length() != 0 && getContactsController().contactsDict.get(user.id) == null &&\n"
+    )
+    header_after = (
+        "                } else if (a == 0 && user.id != getUserConfig().getClientUserId() && !MessagesController.isSupportUser(user) && user.phone != null && user.phone.matches(\"[0-9]{8,15}\") && getContactsController().contactsDict.get(user.id) == null &&\n"
+    )
+    original = replace_exactly_once(
+        original, header_before, header_after,
+        "reject invalid phone in profile header"
+    )
+
+    number_before = (
+        "                        if (user != null && user.phone != null && user.phone.length() != 0) {\n"
+    )
+    number_after = (
+        "                        String profilePhone = myProfile ? waysGramStablePhone : (user == null ? \"\" : user.phone);\n"
+        "                        if (user != null && profilePhone != null && profilePhone.matches(\"[0-9]{8,15}\")) {\n"
+    )
+    original = replace_exactly_once(
+        original, number_before, number_after,
+        "use validated persisted phone in own profile number row"
+    )
+    number_value_before = (
+        "                            value = PhoneFormat.getInstance().format(\"+\" + user.phone);\n"
+    )
+    number_value_after = (
+        "                            value = PhoneFormat.getInstance().format(\"+\" + profilePhone);\n"
+    )
+    original = replace_exactly_once(
+        original, number_value_before, number_value_after,
+        "format validated own profile phone"
+    )
+
+    click_before = (
+        "            if (user == null || user.phone == null || user.phone.length() == 0 || getParentActivity() == null) {\n"
+    )
+    click_after = (
+        "            if (user == null || user.phone == null || !user.phone.matches(\"[0-9]{8,15}\") || getParentActivity() == null) {\n"
+    )
+    original = replace_exactly_once(
+        original, click_before, click_after,
+        "reject invalid phone in profile phone actions"
+    )
+
+    share_phone_anchor = "if (!TextUtils.isEmpty(user.phone)) {"
+    if original.count(share_phone_anchor) != 2:
+        raise ValueError("Expected two profile share-contact phone checks")
+    original = original.replace(
+        share_phone_anchor,
+        'if (user.phone != null && user.phone.matches("[0-9]{8,15}")) {'
+    )
+
+    copy_phone_before = "            textToCopy = user.phone;\n"
+    copy_phone_after = (
+        "            String copyPhone = myProfile ? waysGramStablePhone : user.phone;\n"
+        "            textToCopy = copyPhone != null && copyPhone.matches(\"[0-9]{8,15}\") ? copyPhone : \"\";\n"
+    )
+    original = replace_exactly_once(
+        original, copy_phone_before, copy_phone_after,
+        "copy only a validated profile phone"
+    )
+
+    display_anchor = (
+        "                    nameTextView[a].setText(PhoneFormat.getInstance().format(\"+\" + user.phone));\n"
+    )
+    original = replace_exactly_once(
+        original, display_anchor,
+        display_anchor + "                    // WaysGram: reject non-numeric phone placeholders\n",
+        "phone display placeholder guard marker"
+    )
+    return original
+
+
 def patch_profile_phone_source(original: str) -> str:
     """Use the persisted self phone instead of a transient cached profile value."""
     marker = "// WaysGram: use persisted self phone while profile refreshes"
@@ -153,6 +277,9 @@ def patch_profile_phone_source(original: str) -> str:
         "            }\n"
         "            if (UserObject.isUserSelf(user)) {\n"
         "                waysGramStablePhone = getUserConfig().getClientPhone();\n"
+        "                if (waysGramStablePhone == null || !waysGramStablePhone.matches(\"[0-9]{8,15}\")) {\n"
+        "                    waysGramStablePhone = \"\";\n"
+        "                }\n"
         "            }\n",
         "stable self phone snapshot before loading full profile"
     )
@@ -278,6 +405,7 @@ def patch_profile_gifts_source(original: str) -> str:
         "                            resourcesProvider, true);\n"
         "                    waysGramGiftsController = new WaysGramProfileGiftsController(\n"
         "                            getContext(), profileActivity, waysGramGiftsContainer);\n"
+        "                    waysGramGiftsContainer.setWaysGramGiftUpdatedListener(waysGramGiftsController::refresh);\n"
         "                }\n"
         "                if (waysGramGiftsContainer.getParent() != mediaPages[a]) {\n"
         "                    AndroidUtilities.removeFromParent(waysGramGiftsContainer);\n"
@@ -358,6 +486,7 @@ def patch_profile_gifts_container_source(original: str) -> str:
     markers = (
         "private final boolean waysGramInventory;",
         "setWaysGramInventory(ArrayList<TL_stars.SavedStarGift> gifts)",
+        "setWaysGramGiftUpdatedListener(Runnable listener)",
     )
     if all(marker in original for marker in markers):
         return original
@@ -367,7 +496,7 @@ def patch_profile_gifts_container_source(original: str) -> str:
     updated = replace_exactly_once(
         original,
         "    private final long dialogId;\n",
-        "    private final long dialogId;\n    private final boolean waysGramInventory;\n",
+        "    private final long dialogId;\n    private final boolean waysGramInventory;\n    private Runnable waysGramGiftUpdatedListener;\n",
         "native gifts container inventory mode field",
     )
 
@@ -489,10 +618,26 @@ def patch_profile_gifts_container_source(original: str) -> str:
     )
     if click_match is None:
         raise ValueError("Could not locate native gift item click handler")
-    click_insert = (
-        "\n" + click_match.group("indent") + "    if (parent.waysGramInventory || list == null) return;"
+    gift_update_callback = (
+        "                        .setOnGiftUpdatedListener(() -> {\n"
+        "                            update(false);\n"
+        "                        })\n"
     )
-    updated = updated[:click_match.end()] + click_insert + updated[click_match.end():]
+    gift_update_callback_patched = (
+        "                        .setOnGiftUpdatedListener(() -> {\n"
+        "                            update(false);\n"
+        "                            if (parent.waysGramInventory && parent.waysGramGiftUpdatedListener != null) {\n"
+        "                                parent.waysGramGiftUpdatedListener.run();\n"
+        "                            }\n"
+        "                        })\n"
+    )
+    if "parent.waysGramGiftUpdatedListener.run();" not in updated:
+        updated = replace_exactly_once(
+            updated, gift_update_callback, gift_update_callback_patched,
+            "refresh WaysGram inventory after native detail sheet update"
+        )
+
+    # Keep the original click handler: WaysGram cards open the native Telegram detail sheet.
 
     long_press_match = re.search(
         r"(?m)^(?P<indent>[ \t]*)(?:(?:public|private|protected)\s+)?boolean\s+onItemLongPress\s*\([^)]*\)\s*\{",
@@ -585,6 +730,9 @@ def patch_profile_gifts_container_source(original: str) -> str:
         updated = updated[:block_start] + wrapped + updated[block_end:]
 
     method = (
+        "    public void setWaysGramGiftUpdatedListener(Runnable listener) {\n"
+        "        this.waysGramGiftUpdatedListener = listener;\n"
+        "    }\n\n"
         "    public void setWaysGramInventory(ArrayList<TL_stars.SavedStarGift> gifts) {\n"
         "        if (!waysGramInventory) return;\n"
         "        list.gifts.clear();\n"
@@ -610,6 +758,100 @@ def patch_profile_gifts_container_source(original: str) -> str:
     updated = updated[:insert_at] + "\n\n" + method + updated[insert_at:]
     return updated
 
+
+
+def patch_star_gift_sheet_display_source(original: str) -> str:
+    """Render WaysGram-owned gifts in Telegram's native detail sheet without Telegram ownership actions."""
+    marker = "private boolean isWaysGramGift()"
+    if marker in original:
+        required = (
+            "private String waysGramGiftSerial()",
+            "topView.buttonsLayout.setVisibility(View.GONE);",
+            "if (isWaysGramGift()) return false;",
+            "if (isWaysGramGift()) return null;",
+        )
+        if not all(value in original for value in required):
+            raise ValueError("StarGiftSheet contains an incomplete WaysGram display patch")
+        return original
+
+    methods = (
+        "    private String waysGramGiftSerial() {\n"
+        "        if (savedStarGift == null || savedStarGift.gift == null || TextUtils.isEmpty(savedStarGift.gift.slug)) {\n"
+        "            return null;\n"
+        "        }\n"
+        "        final String prefix = \"waysgram://\";\n"
+        "        if (!savedStarGift.gift.slug.startsWith(prefix)) {\n"
+        "            return null;\n"
+        "        }\n"
+        "        String serial = savedStarGift.gift.slug.substring(prefix.length()).trim();\n"
+        "        return serial.isEmpty() ? null : serial;\n"
+        "    }\n\n"
+        "    private boolean isWaysGramGift() {\n"
+        "        return waysGramGiftSerial() != null;\n"
+        "    }\n\n"
+    )
+    original = replace_exactly_once(
+        original,
+        "    private boolean canDelete() {\n",
+        methods + "    private boolean canDelete() {\n",
+        "WaysGram native detail identity helpers"
+    )
+
+    waysgram_detail_ui = (
+        "        if (isWaysGramGift()) {\n"
+        "            topView.setShowOptions(false);\n"
+        "            topView.buttonsLayout.setVisibility(View.GONE);\n"
+        "            String waysGramSerial = waysGramGiftSerial();\n"
+        "            org.telegram.messenger.waysgram.WaysGramGiftMediaStore.GiftMetadata waysGramMetadata = org.telegram.messenger.waysgram.WaysGramGiftMediaStore.getMetadata(waysGramSerial);\n"
+        "            android.graphics.Bitmap waysGramBitmap = org.telegram.messenger.waysgram.WaysGramGiftMediaStore.get(waysGramSerial);\n"
+        "            View waysGramEmojiExisting = topView.imageLayout.findViewWithTag(\"waysgramGiftDetailEmoji\");\n"
+        "            android.widget.TextView waysGramEmojiView;\n"
+        "            if (waysGramEmojiExisting instanceof android.widget.TextView) {\n"
+        "                waysGramEmojiView = (android.widget.TextView) waysGramEmojiExisting;\n"
+        "            } else {\n"
+        "                waysGramEmojiView = new android.widget.TextView(getContext());\n"
+        "                waysGramEmojiView.setTag(\"waysgramGiftDetailEmoji\");\n"
+        "                waysGramEmojiView.setTextSize(TypedValue.COMPLEX_UNIT_DIP, 52);\n"
+        "                waysGramEmojiView.setGravity(Gravity.CENTER);\n"
+        "                topView.imageLayout.addView(waysGramEmojiView, new FrameLayout.LayoutParams(dp(112), dp(112), Gravity.CENTER));\n"
+        "            }\n"
+        "            waysGramEmojiView.setText(waysGramMetadata == null || TextUtils.isEmpty(waysGramMetadata.emoji) ? \"🎁\" : waysGramMetadata.emoji);\n"
+        "            if (waysGramBitmap != null && topView.imageView[0] != null) {\n"
+        "                topView.imageView[0].getImageReceiver().setImageBitmap(waysGramBitmap);\n"
+        "                waysGramEmojiView.setVisibility(View.GONE);\n"
+        "            } else {\n"
+        "                waysGramEmojiView.setVisibility(View.VISIBLE);\n"
+        "            }\n"
+        "        }\n\n"
+    )
+    original = replace_exactly_once(
+        original,
+        "        if (savedStarGift.refunded) {\n",
+        waysgram_detail_ui + "        if (savedStarGift.refunded) {\n",
+        "native WaysGram detail artwork and action isolation"
+    )
+    original = replace_exactly_once(
+        original,
+        "    private boolean canDelete() {\n        if (walletCollectible != null || getInputStarGift() == null) return false;\n",
+        "    private boolean canDelete() {\n        if (isWaysGramGift()) return false;\n"
+        "        if (walletCollectible != null || getInputStarGift() == null) return false;\n",
+        "prevent Telegram-native deletion of WaysGram gifts"
+    )
+    original = replace_exactly_once(
+        original,
+        "    public boolean canTransfer() {\n        if (getInputStarGift() == null) return false;\n",
+        "    public boolean canTransfer() {\n        if (isWaysGramGift()) return false;\n"
+        "        if (getInputStarGift() == null) return false;\n",
+        "prevent Telegram-native transfer of WaysGram gifts"
+    )
+    original = replace_exactly_once(
+        original,
+        "    private String getLink() {\n        final TL_stars.StarGift starGift = getGift();\n",
+        "    private String getLink() {\n        if (isWaysGramGift()) return null;\n"
+        "        final TL_stars.StarGift starGift = getGift();\n",
+        "prevent invalid Telegram NFT links for WaysGram gifts"
+    )
+    return original
 
 def patch_gift_sheet_source(original: str) -> str:
     """Keep Telegram's GiftCell renderer, injecting WaysGram stickers, emoji and metadata."""
@@ -887,9 +1129,17 @@ def verify_source(android_root: Path) -> None:
     if patched_profile_activity != profile_activity_source:
         profile_activity.write_text(patched_profile_activity, encoding="utf-8")
     final_profile_activity = profile_activity.read_text(encoding="utf-8")
+    patched_image_updater = patch_profile_image_updater_source(final_profile_activity)
+    if patched_image_updater != final_profile_activity:
+        profile_activity.write_text(patched_image_updater, encoding="utf-8")
+    final_profile_activity = profile_activity.read_text(encoding="utf-8")
     patched_profile_phone = patch_profile_phone_source(final_profile_activity)
     if patched_profile_phone != final_profile_activity:
         profile_activity.write_text(patched_profile_phone, encoding="utf-8")
+    final_profile_activity = profile_activity.read_text(encoding="utf-8")
+    patched_phone_placeholders = patch_profile_phone_null_source(final_profile_activity)
+    if patched_phone_placeholders != final_profile_activity:
+        profile_activity.write_text(patched_phone_placeholders, encoding="utf-8")
     final_profile_activity = profile_activity.read_text(encoding="utf-8")
     if (
         "// WaysGram: restore profile action visibility" not in final_profile_activity
@@ -900,6 +1150,13 @@ def verify_source(android_root: Path) -> None:
         or 'profilePhone.matches("[0-9]{8,15}")' not in final_profile_activity
         or "WaysGram: use persisted self phone while profile refreshes" not in final_profile_activity
         or "waysGramStablePhone = getUserConfig().getClientPhone();" not in final_profile_activity
+        or "WaysGram: initialize native profile actions after self detection" not in final_profile_activity
+        or "if (myProfile && userId != 0 && imageUpdater == null)" not in final_profile_activity
+        or "WaysGram: reject non-numeric phone placeholders" not in final_profile_activity
+        or 'user.phone.matches("[0-9]{8,15}")' not in final_profile_activity
+        or "String copyPhone = myProfile ? waysGramStablePhone : user.phone;" not in final_profile_activity
+        or 'copyPhone != null && copyPhone.matches("[0-9]{8,15}")' not in final_profile_activity
+        or 'if (user.phone != null && user.phone.matches("[0-9]{8,15}"))' not in final_profile_activity
     ):
         raise ValueError("Native profile actions or phone placeholder patch was not applied")
 
@@ -910,6 +1167,53 @@ def verify_source(android_root: Path) -> None:
     patched_gifts_container = patch_profile_gifts_container_source(gifts_container_source)
     if patched_gifts_container != gifts_container_source:
         gifts_container.write_text(patched_gifts_container, encoding="utf-8")
+    final_gifts_container = gifts_container.read_text(encoding="utf-8")
+    if (
+        "setWaysGramGiftUpdatedListener(Runnable listener)" not in final_gifts_container
+        or "parent.waysGramGiftUpdatedListener.run();" not in final_gifts_container
+        or "if (parent.waysGramInventory || list == null) return;" in final_gifts_container
+    ):
+        raise ValueError("WaysGram profile gift cards must open native details and refresh inventory")
+
+    star_gift_sheet = android_root / "TMessagesProj/src/main/java/org/telegram/ui/Stars/StarGiftSheet.java"
+    if not star_gift_sheet.is_file():
+        raise FileNotFoundError(f"Required native StarGiftSheet source not found: {star_gift_sheet}")
+    star_gift_source = star_gift_sheet.read_text(encoding="utf-8")
+    patched_star_gift_source = patch_star_gift_sheet_display_source(star_gift_source)
+    if patched_star_gift_source != star_gift_source:
+        star_gift_sheet.write_text(patched_star_gift_source, encoding="utf-8")
+    final_star_gift_source = star_gift_sheet.read_text(encoding="utf-8")
+    for marker in (
+        "private String waysGramGiftSerial()",
+        "topView.buttonsLayout.setVisibility(View.GONE);",
+        "if (isWaysGramGift()) return false;",
+        "if (isWaysGramGift()) return null;",
+    ):
+        if marker not in final_star_gift_source:
+            raise ValueError("WaysGram native card detail rendering is incomplete")
+    if "performWaysGramGiftUpgrade" in final_star_gift_source:
+        raise ValueError("WaysGram profile detail must not route to paid randomized upgrades")
+
+    gift_controller = android_root / "TMessagesProj/src/main/java/org/telegram/messenger/waysgram/WaysGramProfileGiftsController.java"
+    if not gift_controller.is_file():
+        raise FileNotFoundError(f"Required WaysGram profile gift controller not found: {gift_controller}")
+    controller_source = gift_controller.read_text(encoding="utf-8")
+    for marker in (
+        "TL_stars.TL_starGift regularGift = new TL_stars.TL_starGift();",
+        "if (isCollectible)",
+        "savedGift.flags |= 2;",
+        "uniqueGift.flags |= 1;",
+        "boolean canUpgrade = false;",
+    ):
+        if marker not in controller_source:
+            raise ValueError("WaysGram gift inventory native model mapping is incomplete")
+
+    gift_inventory_sheet = android_root / "TMessagesProj/src/main/java/org/telegram/messenger/waysgram/WaysGramGiftInventorySheet.java"
+    if not gift_inventory_sheet.is_file():
+        raise FileNotFoundError(f"Required WaysGram gift inventory sheet not found: {gift_inventory_sheet}")
+    inventory_sheet_source = gift_inventory_sheet.read_text(encoding="utf-8")
+    if "String slug = savedGift.gift.slug;" not in inventory_sheet_source:
+        raise ValueError("WaysGram ordinary gift cards are not selectable")
 
     gift_content = gift_sheet.read_text(encoding="utf-8")
     patched_gift_content = patch_gift_sheet_source(gift_content)

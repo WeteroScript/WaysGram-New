@@ -210,7 +210,19 @@ public final class WaysGramGiftCatalogSheet extends BottomSheet {
 
     private void showGiftActions(JSONObject gift) {
         String serial = gift.optString("serial_number", "");
-        String name = gift.optString("gift_name", "Подарок WaysGram");
+        JSONObject telegramGift = gift.optJSONObject("telegram_gift");
+        String name = telegramGift == null ? "" : telegramGift.optString("title", "").trim();
+        if (name.isEmpty() || "null".equalsIgnoreCase(name)
+                || "Подарок Telegram".equalsIgnoreCase(name) || "Telegram Gift".equalsIgnoreCase(name)) {
+            name = gift.optString("gift_name", "").trim();
+        }
+        if (name.isEmpty() || "null".equalsIgnoreCase(name)
+                || "Подарок Telegram".equalsIgnoreCase(name) || "Telegram Gift".equalsIgnoreCase(name)) {
+            name = gift.optString("gift_emoji", "").trim();
+        }
+        if (name.isEmpty() || "null".equalsIgnoreCase(name)) {
+            name = "Подарок";
+        }
         if (serial.isEmpty()) {
             return;
         }

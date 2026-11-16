@@ -8,6 +8,7 @@ import org.json.JSONObject;
 import org.telegram.messenger.AndroidUtilities;
 import org.telegram.messenger.R;
 import org.telegram.messenger.UserConfig;
+import org.telegram.tgnet.TLRPC;
 import org.telegram.tgnet.tl.TL_stars;
 import org.telegram.ui.ActionBar.BaseFragment;
 import org.telegram.ui.Components.BulletinFactory;
@@ -64,7 +65,8 @@ public final class WaysGramProfileGiftsController {
                     client.close();
                     JSONArray inventory = gifts == null ? new JSONArray() : gifts;
                     WaysGramGiftMediaStore.clear();
-                    ArrayList<TL_stars.SavedStarGift> nativeGifts = toNativeGifts(inventory);
+                    ArrayList<TL_stars.SavedStarGift> nativeGifts = toNativeGifts(inventory,
+                            fragment == null ? UserConfig.selectedAccount : fragment.getCurrentAccount());
                     container.setWaysGramInventory(nativeGifts);
                     downloadGiftStickers(inventory);
                 });
@@ -91,6 +93,10 @@ public final class WaysGramProfileGiftsController {
     }
 
     public static ArrayList<TL_stars.SavedStarGift> toNativeGifts(JSONArray inventory) {
+        return toNativeGifts(inventory, UserConfig.selectedAccount);
+    }
+
+    public static ArrayList<TL_stars.SavedStarGift> toNativeGifts(JSONArray inventory, int currentAccount) {
         ArrayList<TL_stars.SavedStarGift> result = new ArrayList<>();
         int limit = Math.min(inventory.length(), MAX_VISIBLE_GIFTS);
         for (int i = 0; i < limit; i++) {
@@ -105,12 +111,26 @@ public final class WaysGramProfileGiftsController {
             }
 
             long uniqueId = positiveLong(item, "id", stableId(serial));
-            long telegramGiftId = positiveLong(item, "telegram_gift_id", uniqueId);
+            JSONObject telegramGift = item.optJSONObject("telegram_gift");
+            String telegramGiftIdText = optText(item, "telegram_gift_id");
+            if (telegramGiftIdText.isEmpty()) {
+                telegramGiftIdText = optText(telegramGift, "id");
+            }
+            boolean hasTelegramGiftId = !telegramGiftIdText.isEmpty();
+            long telegramGiftId = uniqueId;
+            if (hasTelegramGiftId) {
+                try {
+                    long parsedGiftId = Long.parseLong(telegramGiftIdText);
+                    if (parsedGiftId > 0) telegramGiftId = parsedGiftId;
+                    else hasTelegramGiftId = false;
+                } catch (NumberFormatException ignored) {
+                    hasTelegramGiftId = false;
+                }
+            }
             int serialNumber = serialNumber(item, serial);
             long acquiredAt = Math.max(0L, item.optLong("acquired_at", 0L));
             JSONObject attributes = item.optJSONObject("attributes");
             JSONObject traits = attributes == null ? null : attributes.optJSONObject("collectible_traits");
-            JSONObject telegramGift = item.optJSONObject("telegram_gift");
             int upgradeLevel = item.has("upgrade_level")
                     ? Math.max(0, item.optInt("upgrade_level", 0))
                     : Math.max(0, attributes == null ? 0 : attributes.optInt("upgrade_level", 0));
@@ -126,15 +146,20 @@ public final class WaysGramProfileGiftsController {
             String giftTitle = catalogTitle.isEmpty()
                     ? optText(item, "gift_name")
                     : catalogTitle;
+            if ("Подарок Telegram".equalsIgnoreCase(giftTitle)
+                    || "Telegram Gift".equalsIgnoreCase(giftTitle)) {
+                giftTitle = "";
+            }
             if (giftTitle.isEmpty()) {
-                giftTitle = giftEmoji.isEmpty() ? "Gift" : giftEmoji;
+                giftTitle = giftEmoji.isEmpty() ? "Подарок" : giftEmoji;
             }
             int telegramUpgradePrice = telegramGift == null
                     ? 0 : Math.max(0, telegramGift.optInt("upgrade_star_count", 0));
             int telegramUpgradeVariants = telegramGift == null
                     ? 0 : Math.max(0, telegramGift.optInt("upgrade_variants", 0));
-            boolean canUpgrade = optBooleanLike(item, "can_upgrade")
-                    || (telegramUpgradePrice > 0 && upgradeLevel == 0);
+            // Keep paid, chance-based trait upgrades out of the profile detail flow.
+            boolean canUpgrade = false;
+            boolean isCollectible = upgradeLevel > 0 || (traits != null && traits.length() > 0);
             boolean isListed = optBooleanLike(item, "is_listed");
             boolean isAuctioned = optBooleanLike(item, "is_auctioned");
 
@@ -149,22 +174,44 @@ public final class WaysGramProfileGiftsController {
                     giftEmoji
             );
 
-            TL_stars.TL_starGiftUnique nativeGift = new TL_stars.TL_starGiftUnique();
-            nativeGift.id = uniqueId;
-            nativeGift.gift_id = telegramGiftId;
-            nativeGift.title = giftTitle;
-            nativeGift.slug = "waysgram://" + serial;
-            nativeGift.num = serialNumber;
-            TL_stars.starGiftAttributeBackdrop nativeBackdrop = createNativeBackdrop(traits, rarity);
-            if (nativeBackdrop != null) {
-                nativeGift.attributes.add(nativeBackdrop);
+            TL_stars.StarGift nativeGift;
+            if (isCollectible) {
+                TL_stars.TL_starGiftUnique uniqueGift = new TL_stars.TL_starGiftUnique();
+                uniqueGift.id = uniqueId;
+                uniqueGift.gift_id = telegramGiftId;
+                uniqueGift.title = giftTitle;
+                uniqueGift.slug = "waysgram://" + serial;
+                uniqueGift.num = serialNumber;
+                TLRPC.TL_peerUser ownerPeer = new TLRPC.TL_peerUser();
+                ownerPeer.user_id = UserConfig.getInstance(currentAccount).getClientUserId();
+                uniqueGift.owner_id = ownerPeer;
+                uniqueGift.flags |= 1; // owner_id is present in the native unique-gift model.
+                TL_stars.starGiftAttributeBackdrop nativeBackdrop = createNativeBackdrop(traits, rarity);
+                if (nativeBackdrop != null) {
+                    uniqueGift.attributes.add(nativeBackdrop);
+                }
+                nativeGift = uniqueGift;
+            } else {
+                TL_stars.TL_starGift regularGift = new TL_stars.TL_starGift();
+                regularGift.id = telegramGiftId;
+                regularGift.gift_id = telegramGiftId;
+                regularGift.title = giftTitle;
+                regularGift.slug = "waysgram://" + serial;
+                regularGift.can_upgrade = canUpgrade;
+                regularGift.upgrade_stars = telegramUpgradePrice;
+                regularGift.upgrade_variants = telegramUpgradeVariants;
+                nativeGift = regularGift;
             }
 
             TL_stars.TL_savedStarGift savedGift = new TL_stars.TL_savedStarGift();
             savedGift.date = (int) Math.min(Integer.MAX_VALUE, acquiredAt);
             savedGift.gift = nativeGift;
             savedGift.saved_id = uniqueId;
-            savedGift.gift_num = serialNumber;
+            savedGift.gift_num = isCollectible ? serialNumber : 0;
+            TLRPC.TL_peerUser senderPeer = new TLRPC.TL_peerUser();
+            senderPeer.user_id = UserConfig.getInstance(currentAccount).getClientUserId();
+            savedGift.from_id = senderPeer;
+            savedGift.flags |= 2; // from_id is present; Telegram uses it to identify the owner profile.
             savedGift.can_upgrade = canUpgrade;
             result.add(savedGift);
         }

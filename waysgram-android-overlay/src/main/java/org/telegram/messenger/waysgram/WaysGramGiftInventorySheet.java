@@ -134,7 +134,7 @@ public final class WaysGramGiftInventorySheet extends BottomSheet {
                         if (!serial.isEmpty()) giftsBySerial.put(serial, item);
                     }
                     nativeGifts.clear();
-                    nativeGifts.addAll(WaysGramProfileGiftsController.toNativeGifts(gifts));
+                    nativeGifts.addAll(WaysGramProfileGiftsController.toNativeGifts(gifts, telegramAccount));
                     statusView.setVisibility(View.GONE);
                     int spanCount = Math.max(1, Math.min(3, nativeGifts.size()));
                     if (listView.getSpanCount() != spanCount) {
@@ -169,8 +169,8 @@ public final class WaysGramGiftInventorySheet extends BottomSheet {
     private void onItemClick(UItem item, View view, int position, float x, float y) {
         if (!(item.object instanceof TL_stars.SavedStarGift)) return;
         TL_stars.SavedStarGift savedGift = (TL_stars.SavedStarGift) item.object;
-        if (!(savedGift.gift instanceof TL_stars.TL_starGiftUnique)) return;
-        String slug = ((TL_stars.TL_starGiftUnique) savedGift.gift).slug;
+        if (savedGift.gift == null) return;
+        String slug = savedGift.gift.slug;
         if (slug == null || !slug.startsWith("waysgram://")) return;
         JSONObject source = giftsBySerial.get(slug.substring("waysgram://".length()));
         if (source != null && listener != null) {
