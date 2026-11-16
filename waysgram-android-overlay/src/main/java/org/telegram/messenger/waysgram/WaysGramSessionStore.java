@@ -32,7 +32,7 @@ public final class WaysGramSessionStore implements WaysGramGiftCatalogClient.Ses
     private static final String LEGACY_PREFS_NAME = "waysgram_private_session";
     private static final String ACCOUNT_PREFS_PREFIX = "waysgram_private_session_account_";
     private static final String MIGRATION_PREFS_NAME = "waysgram_session_migration";
-    private static final String PREF_MIGRATED = "legacy_session_migrated";
+    private static final String PREF_MIGRATED_PREFIX = "legacy_session_migrated_account_";
     private static final String KEY_ALIAS = "org.telegram.messenger.WaysGramSession.v1";
     private static final String PREF_API_BASE = "api_base_encrypted";
     private static final String PREF_SESSION_TOKEN = "session_token_encrypted";
@@ -73,18 +73,47 @@ public final class WaysGramSessionStore implements WaysGramGiftCatalogClient.Ses
 
     private void migrateLegacySessionOnce(Context context) {
         SharedPreferences migration = context.getSharedPreferences(MIGRATION_PREFS_NAME, Context.MODE_PRIVATE);
-        if (migration.getBoolean(PREF_MIGRATED, false)) {
+        // The legacy session was shared by the whole app. Migration therefore
+        // has to be tracked per Telegram account, not once globally: otherwise
+        // whichever account initializes first consumes the one-time migration
+        // and every other account starts without the existing WaysGram session.
+        String migrationKey = PREF_MIGRATED_PREFIX + telegramAccount;
+        if (migration.getBoolean(migrationKey, false)) {
             return;
         }
+
         SharedPreferences legacy = context.getSharedPreferences(LEGACY_PREFS_NAME, Context.MODE_PRIVATE);
-        if (!preferences.contains(PREF_SESSION_TOKEN)
-                && legacy.contains(PREF_SESSION_TOKEN)) {
-            preferences.edit()
-                    .putString(PREF_API_BASE, legacy.getString(PREF_API_BASE, null))
-                    .putString(PREF_SESSION_TOKEN, legacy.getString(PREF_SESSION_TOKEN, null))
-                    .commit();
+        String legacyToken = legacy.getString(PREF_SESSION_TOKEN, null);
+        String legacyBase = legacy.getString(PREF_API_BASE, null);
+        boolean needsToken = !hasText(preferences.getString(PREF_SESSION_TOKEN, null));
+        boolean needsBase = !hasText(preferences.getString(PREF_API_BASE, null));
+        boolean migratedValues = false;
+
+        if ((needsToken && hasText(legacyToken)) || (needsBase && hasText(legacyBase))) {
+            SharedPreferences.Editor editor = preferences.edit();
+            if (needsBase && hasText(legacyBase)) {
+                editor.putString(PREF_API_BASE, legacyBase);
+                migratedValues = true;
+            }
+            if (needsToken && hasText(legacyToken)) {
+                editor.putString(PREF_SESSION_TOKEN, legacyToken);
+                migratedValues = true;
+            }
+            if (migratedValues && !editor.commit()) {
+                Log.e(TAG, "Unable to migrate the existing WaysGram session for Telegram account "
+                        + telegramAccount);
+                return;
+            }
         }
-        migration.edit().putBoolean(PREF_MIGRATED, true).commit();
+
+        if (!migration.edit().putBoolean(migrationKey, true).commit()) {
+            Log.e(TAG, "Unable to persist WaysGram session migration state for Telegram account "
+                    + telegramAccount);
+        }
+    }
+
+    private static boolean hasText(String value) {
+        return value != null && !value.trim().isEmpty();
     }
 
     /**
