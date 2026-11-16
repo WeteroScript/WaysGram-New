@@ -341,8 +341,39 @@ def patch_profile_gifts_source(original: str) -> str:
         "waysGramGiftsContainer",
         "WaysGramProfileGiftsController",
     )
+    initial_padding_marker = "waysGramGiftsContainer.setPaddingTop("
+    animated_padding_marker = (
+        "waysGramGiftsContainer.setPaddingTop(dp(48) + "
+        "(int) topPanelLayout.getAnimatedHeightWithPadding(dp(7)))"
+    )
     if all(marker in original for marker in markers_present):
-        return original
+        updated = original
+        if initial_padding_marker not in updated:
+            listener_anchor = (
+                "                    waysGramGiftsContainer.setWaysGramGiftUpdatedListener(waysGramGiftsController::refresh);\n"
+            )
+            updated = replace_exactly_once(
+                updated, listener_anchor,
+                listener_anchor
+                + "                    waysGramGiftsContainer.setPaddingTop(\n"
+                + "                            dp(48) + (topPanelLayout != null ? ((int) topPanelLayout.getAnimatedHeightWithPadding(0)) : 0));\n",
+                "existing WaysGram profile gifts initial top padding",
+            )
+        if animated_padding_marker not in updated:
+            native_padding = (
+                "                if (giftsContainer != null) {\n"
+                "                    giftsContainer.setPaddingTop(dp(48) + (int) topPanelLayout.getAnimatedHeightWithPadding(dp(7)));\n"
+                "                }\n"
+            )
+            updated = replace_exactly_once(
+                updated, native_padding,
+                native_padding
+                + "                if (waysGramGiftsContainer != null) {\n"
+                + "                    waysGramGiftsContainer.setPaddingTop(dp(48) + (int) topPanelLayout.getAnimatedHeightWithPadding(dp(7)));\n"
+                + "                }\n",
+                "existing WaysGram profile gifts animated top padding",
+            )
+        return updated
     if any(marker in original for marker in markers_present):
         raise ValueError("SharedMediaLayout contains a partial WaysGram profile gifts tab patch")
 
@@ -406,6 +437,8 @@ def patch_profile_gifts_source(original: str) -> str:
         "                    waysGramGiftsController = new WaysGramProfileGiftsController(\n"
         "                            getContext(), profileActivity, waysGramGiftsContainer);\n"
         "                    waysGramGiftsContainer.setWaysGramGiftUpdatedListener(waysGramGiftsController::refresh);\n"
+        "                    waysGramGiftsContainer.setPaddingTop(\n"
+        "                            dp(48) + (topPanelLayout != null ? ((int) topPanelLayout.getAnimatedHeightWithPadding(0)) : 0));\n"
         "                }\n"
         "                if (waysGramGiftsContainer.getParent() != mediaPages[a]) {\n"
         "                    AndroidUtilities.removeFromParent(waysGramGiftsContainer);\n"
@@ -420,6 +453,20 @@ def patch_profile_gifts_source(original: str) -> str:
         updated, native_page_branch,
         native_page_branch[:-len("            }\n")] + custom_page_branch,
         "native Telegram profile gifts container"
+    )
+
+    native_padding = (
+        "                if (giftsContainer != null) {\n"
+        "                    giftsContainer.setPaddingTop(dp(48) + (int) topPanelLayout.getAnimatedHeightWithPadding(dp(7)));\n"
+        "                }\n"
+    )
+    updated = replace_exactly_once(
+        updated, native_padding,
+        native_padding
+        + "                if (waysGramGiftsContainer != null) {\n"
+        + "                    waysGramGiftsContainer.setPaddingTop(dp(48) + (int) topPanelLayout.getAnimatedHeightWithPadding(dp(7)));\n"
+        + "                }\n",
+        "synchronize WaysGram top padding with Telegram animated profile header",
     )
 
     native_cleanup = (
@@ -1117,9 +1164,15 @@ def verify_source(android_root: Path) -> None:
     if patched_profile_source != profile_source:
         profile_layout.write_text(patched_profile_source, encoding="utf-8")
     final_profile_source = profile_layout.read_text(encoding="utf-8")
-    for marker in ("TAB_WAYSGRAM_GIFTS", "WaysGramProfileGiftsController", "Мои подарки"):
+    for marker in (
+        "TAB_WAYSGRAM_GIFTS",
+        "WaysGramProfileGiftsController",
+        "Мои подарки",
+        "waysGramGiftsContainer.setPaddingTop(",
+        "waysGramGiftsContainer.setPaddingTop(dp(48) + (int) topPanelLayout.getAnimatedHeightWithPadding(dp(7)))",
+    ):
         if marker not in final_profile_source:
-            raise ValueError("WaysGram profile gift tab patch was not applied completely")
+            raise ValueError("WaysGram profile gift tab or native top spacing patch was not applied completely")
 
     profile_activity = android_root / "TMessagesProj/src/main/java/org/telegram/ui/ProfileActivity.java"
     if not profile_activity.is_file():
