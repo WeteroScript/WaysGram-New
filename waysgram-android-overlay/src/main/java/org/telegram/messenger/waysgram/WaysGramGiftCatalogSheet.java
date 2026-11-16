@@ -854,8 +854,13 @@ public final class WaysGramGiftCatalogSheet extends BottomSheet {
                         if (!isDismissed() && bitmap != null && !bitmap.isRecycled()) {
                             failedStickers.remove(gift.id);
                             setSticker(gift.id, bitmap);
-                        } else if (bitmap != null && !bitmap.isRecycled()) {
-                            bitmap.recycle();
+                        } else {
+                            if (!isDismissed()) {
+                                failedStickers.add(gift.id);
+                            }
+                            if (bitmap != null && !bitmap.isRecycled()) {
+                                bitmap.recycle();
+                            }
                         }
                     });
                 }
