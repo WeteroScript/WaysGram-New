@@ -244,6 +244,9 @@ def patch_profile_phone_source(original: str) -> str
         "            }\n"
         "            if (UserObject.isUserSelf(user)) {\n"
         "                waysGramStablePhone = getUserConfig().getClientPhone();\n"
+        "                if (waysGramStablePhone == null || !waysGramStablePhone.matches(\"[0-9]{8,15}\")) {\n"
+        "                    waysGramStablePhone = \"\";\n"
+        "                }\n"
         "            }\n",
         "stable self phone snapshot before loading full profile"
     )
@@ -1107,9 +1110,17 @@ def verify_source(android_root: Path) -> None:
     if patched_profile_activity != profile_activity_source:
         profile_activity.write_text(patched_profile_activity, encoding="utf-8")
     final_profile_activity = profile_activity.read_text(encoding="utf-8")
+    patched_image_updater = patch_profile_image_updater_source(final_profile_activity)
+    if patched_image_updater != final_profile_activity:
+        profile_activity.write_text(patched_image_updater, encoding="utf-8")
+    final_profile_activity = profile_activity.read_text(encoding="utf-8")
     patched_profile_phone = patch_profile_phone_source(final_profile_activity)
     if patched_profile_phone != final_profile_activity:
         profile_activity.write_text(patched_profile_phone, encoding="utf-8")
+    final_profile_activity = profile_activity.read_text(encoding="utf-8")
+    patched_phone_placeholders = patch_profile_phone_null_source(final_profile_activity)
+    if patched_phone_placeholders != final_profile_activity:
+        profile_activity.write_text(patched_phone_placeholders, encoding="utf-8")
     final_profile_activity = profile_activity.read_text(encoding="utf-8")
     if (
         "// WaysGram: restore profile action visibility" not in final_profile_activity
@@ -1120,6 +1131,10 @@ def verify_source(android_root: Path) -> None:
         or 'profilePhone.matches("[0-9]{8,15}")' not in final_profile_activity
         or "WaysGram: use persisted self phone while profile refreshes" not in final_profile_activity
         or "waysGramStablePhone = getUserConfig().getClientPhone();" not in final_profile_activity
+        or "WaysGram: initialize native profile actions after self detection" not in final_profile_activity
+        or "if (myProfile && userId != 0 && imageUpdater == null)" not in final_profile_activity
+        or "WaysGram: reject non-numeric phone placeholders" not in final_profile_activity
+        or 'user.phone.matches("[0-9]{8,15}")' not in final_profile_activity
     ):
         raise ValueError("Native profile actions or phone placeholder patch was not applied")
 
@@ -1130,6 +1145,30 @@ def verify_source(android_root: Path) -> None:
     patched_gifts_container = patch_profile_gifts_container_source(gifts_container_source)
     if patched_gifts_container != gifts_container_source:
         gifts_container.write_text(patched_gifts_container, encoding="utf-8")
+    final_gifts_container = gifts_container.read_text(encoding="utf-8")
+    if (
+        "setWaysGramGiftUpdatedListener(Runnable listener)" not in final_gifts_container
+        or "parent.waysGramGiftUpdatedListener.run();" not in final_gifts_container
+        or "if (parent.waysGramInventory || list == null) return;" in final_gifts_container
+    ):
+        raise ValueError("WaysGram profile gift cards must open native details and refresh inventory")
+
+    star_gift_sheet = android_root / "TMessagesProj/src/main/java/org/telegram/ui/Stars/StarGiftSheet.java"
+    if not star_gift_sheet.is_file():
+        raise FileNotFoundError(f"Required native StarGiftSheet source not found: {star_gift_sheet}")
+    star_gift_source = star_gift_sheet.read_text(encoding="utf-8")
+    patched_star_gift_source = patch_star_gift_sheet_source(star_gift_source)
+    if patched_star_gift_source != star_gift_source:
+        star_gift_sheet.write_text(patched_star_gift_source, encoding="utf-8")
+    final_star_gift_source = star_gift_sheet.read_text(encoding="utf-8")
+    for marker in (
+        "private String waysGramGiftSerial()",
+        "confirmWaysGramGiftUpgrade(waysGramSerial);",
+        "if (isWaysGramGift()) return false;",
+        "WaysGramGiftCatalogClient",
+    ):
+        if marker not in final_star_gift_source:
+            raise ValueError("WaysGram native card detail and upgrade routing is incomplete")
 
     gift_content = gift_sheet.read_text(encoding="utf-8")
     patched_gift_content = patch_gift_sheet_source(gift_content)
