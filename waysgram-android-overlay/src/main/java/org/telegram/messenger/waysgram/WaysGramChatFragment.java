@@ -3378,24 +3378,31 @@ public final class WaysGramChatFragment extends BaseFragment {
 
             int purchasePrice = giftAttributes == null
                     ? 0 : giftAttributes.optInt("price_stars", 0);
+            int purchasePriceGrams = giftAttributes == null
+                    ? 0 : giftAttributes.optInt("price_grams", 0);
             if (isGiftPurchaseEvent) {
                 GiftMessageView purchaseNotice = new GiftMessageView(getParentActivity());
-                String starsText = LocaleController.formatPluralStringComma(
-                        "Gift2StarsCount", Math.max(0, purchasePrice)
-                );
                 String purchaseNoticeText;
-                if (sender == recipient || (savedMessages && sender == UserConfig.getInstance(getCurrentAccount()).getClientUserId())) {
-                    purchaseNoticeText = LocaleController.getString(R.string.ActionGiftSelf);
-                } else if (sender == peerId) {
-                    purchaseNoticeText = LocaleController.getString(R.string.ActionGiftInbound)
-                            .replace("un1", peerTitle.isEmpty() ? "Пользователь" : peerTitle);
+                if (purchasePriceGrams > 0) {
+                    purchaseNoticeText = "Вы приобрели коллекционный подарок за "
+                            + purchasePriceGrams + " Gram";
                 } else {
-                    purchaseNoticeText = LocaleController.getString(R.string.ActionGiftOutbound);
+                    String starsText = LocaleController.formatPluralStringComma(
+                            "Gift2StarsCount", Math.max(0, purchasePrice)
+                    );
+                    if (sender == recipient || (savedMessages && sender == UserConfig.getInstance(getCurrentAccount()).getClientUserId())) {
+                        purchaseNoticeText = LocaleController.getString(R.string.ActionGiftSelf);
+                    } else if (sender == peerId) {
+                        purchaseNoticeText = LocaleController.getString(R.string.ActionGiftInbound)
+                                .replace("un1", peerTitle.isEmpty() ? "Пользователь" : peerTitle);
+                    } else {
+                        purchaseNoticeText = LocaleController.getString(R.string.ActionGiftOutbound);
+                    }
+                    purchaseNoticeText = purchaseNoticeText.replace("un2", starsText);
+                    purchaseNoticeText = createNativeGiftPurchaseNotice(
+                            message, sender, giftName, giftTelegramId, purchasePrice, purchaseNoticeText
+                    ).toString();
                 }
-                purchaseNoticeText = purchaseNoticeText.replace("un2", starsText);
-                purchaseNoticeText = createNativeGiftPurchaseNotice(
-                        message, sender, giftName, giftTelegramId, purchasePrice, purchaseNoticeText
-                ).toString();
                 purchaseNotice.setMessage(AndroidUtilities.replaceTags(purchaseNoticeText));
                 purchaseNotice.setPadding(AndroidUtilities.dp(30), AndroidUtilities.dp(2),
                         AndroidUtilities.dp(30), AndroidUtilities.dp(2));
@@ -3451,6 +3458,12 @@ public final class WaysGramChatFragment extends BaseFragment {
                         giftInfo.append("\n");
                     }
                     giftInfo.append("Цена: ").append(purchasePrice).append(" WaysGram Stars");
+                }
+                if (purchasePriceGrams > 0) {
+                    if (giftInfo.length() > 0) {
+                        giftInfo.append("\n");
+                    }
+                    giftInfo.append("Цена: ").append(purchasePriceGrams).append(" Gram");
                 }
             }
             if (!isGiftPurchaseEvent && !giftTelegramId.isEmpty()) {
