@@ -211,7 +211,7 @@ def patch_profile_phone_null_source(original: str) -> str:
     return original
 
 
-def patch_profile_phone_source(original: str) -> str
+def patch_profile_phone_source(original: str) -> str:
     """Use the persisted self phone instead of a transient cached profile value."""
     marker = "// WaysGram: use persisted self phone while profile refreshes"
     if marker in original:
