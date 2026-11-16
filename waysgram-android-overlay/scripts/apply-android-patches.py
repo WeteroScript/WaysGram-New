@@ -163,6 +163,8 @@ def patch_profile_phone_null_source(original: str) -> str:
             'user.phone.matches("[0-9]{8,15}")',
             'user.phone == null || !user.phone.matches("[0-9]{8,15}")',
             'profilePhone != null && profilePhone.matches("[0-9]{8,15}")',
+            'String copyPhone = myProfile ? waysGramStablePhone : user.phone;',
+            'copyPhone.matches("[0-9]{8,15}")',
             'format("+" + profilePhone)',
         )
         if not all(value in original for value in required):
@@ -211,6 +213,24 @@ def patch_profile_phone_null_source(original: str) -> str:
     original = replace_exactly_once(
         original, click_before, click_after,
         "reject invalid phone in profile phone actions"
+    )
+
+    share_phone_anchor = "if (!TextUtils.isEmpty(user.phone)) {"
+    if original.count(share_phone_anchor) != 2:
+        raise ValueError("Expected two profile share-contact phone checks")
+    original = original.replace(
+        share_phone_anchor,
+        'if (user.phone != null && user.phone.matches("[0-9]{8,15}")) {'
+    )
+
+    copy_phone_before = "            textToCopy = user.phone;\n"
+    copy_phone_after = (
+        "            String copyPhone = myProfile ? waysGramStablePhone : user.phone;\n"
+        "            textToCopy = copyPhone != null && copyPhone.matches(\"[0-9]{8,15}\") ? copyPhone : \"\";\n"
+    )
+    original = replace_exactly_once(
+        original, copy_phone_before, copy_phone_after,
+        "copy only a validated profile phone"
     )
 
     display_anchor = (
