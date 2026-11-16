@@ -3276,12 +3276,34 @@ public final class WaysGramChatFragment extends BaseFragment {
                     message.optInt("gift_upgrade_level", 0),
                     giftAttributes == null ? 0 : giftAttributes.optInt("upgrade_level", 0)
             );
-            String giftName = message.optString("gift_name", "Подарок WaysGram");
-            String giftTelegramId = message.optString("gift_telegram_gift_id", "");
+            String giftName = message.optString("gift_name", "").trim();
+            String giftTelegramId = message.optString("gift_telegram_gift_id", "").trim();
             JSONObject giftTelegramMetadata = message.optJSONObject("gift_telegram_metadata");
             String giftEmoji = message.optString("gift_emoji", "").trim();
-            if (giftEmoji.isEmpty() && giftTelegramMetadata != null) {
-                giftEmoji = giftTelegramMetadata.optString("emoji", "").trim();
+            String telegramTitle = "";
+            if (giftTelegramMetadata != null) {
+                if (giftEmoji.isEmpty()) {
+                    giftEmoji = giftTelegramMetadata.optString("emoji", "").trim();
+                }
+                telegramTitle = giftTelegramMetadata.optString("title", "").trim();
+            }
+            boolean genericGiftName = giftName.isEmpty()
+                    || "Подарок Telegram".equalsIgnoreCase(giftName)
+                    || "Подарок WaysGram".equalsIgnoreCase(giftName)
+                    || "Gift".equalsIgnoreCase(giftName);
+            if (genericGiftName) {
+                if (!telegramTitle.isEmpty()
+                        && !"Подарок Telegram".equalsIgnoreCase(telegramTitle)
+                        && !"Подарок WaysGram".equalsIgnoreCase(telegramTitle)
+                        && !"Gift".equalsIgnoreCase(telegramTitle)) {
+                    giftName = telegramTitle;
+                } else if (!giftEmoji.isEmpty() && !"null".equalsIgnoreCase(giftEmoji)) {
+                    giftName = giftEmoji;
+                } else if (!giftTelegramId.isEmpty()) {
+                    giftName = "Подарок #" + giftTelegramId;
+                } else {
+                    giftName = "Коллекционный подарок";
+                }
             }
             if (giftEmoji.isEmpty() || "null".equalsIgnoreCase(giftEmoji)) {
                 giftEmoji = "🎁";
