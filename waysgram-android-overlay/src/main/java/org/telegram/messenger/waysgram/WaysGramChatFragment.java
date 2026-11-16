@@ -3298,10 +3298,10 @@ public final class WaysGramChatFragment extends BaseFragment {
             giftBackground.setCornerRadius(AndroidUtilities.dp(14));
             giftCard.setBackground(giftBackground);
 
+            int purchasePrice = giftAttributes == null
+                    ? 0 : giftAttributes.optInt("price_stars", 0);
             if (isGiftPurchaseEvent) {
                 GiftMessageView purchaseNotice = new GiftMessageView(getParentActivity());
-                int purchasePrice = giftAttributes == null
-                        ? 0 : giftAttributes.optInt("price_stars", 0);
                 String starsText = LocaleController.formatPluralStringComma(
                         "Gift2StarsCount", Math.max(0, purchasePrice)
                 );

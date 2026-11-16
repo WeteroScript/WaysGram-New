@@ -80,13 +80,13 @@ public final class WaysGramApiClient implements AutoCloseable {
         });
     }
 
-    private final WaysGramSessionStore sessionStore;
+    private final WaysGramGiftCatalogClient.SessionProvider sessionStore;
     private final ExecutorService ioExecutor;
     private final ExecutorService longPollExecutor;
     private final ExecutorService eventPollExecutor;
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
 
-    public WaysGramApiClient(WaysGramSessionStore sessionStore) {
+    public WaysGramApiClient(WaysGramGiftCatalogClient.SessionProvider sessionStore) {
         if (sessionStore == null) {
             throw new IllegalArgumentException("WaysGramSessionStore is required");
         }
