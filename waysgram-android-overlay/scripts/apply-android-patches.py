@@ -796,7 +796,22 @@ def patch_profile_gifts_container_source(original: str) -> str:
         "    public void refreshWaysGramGiftViews() {\n"
         "        if (!waysGramInventory) return;\n"
         "        Page page = getCurrentPage();\n"
-        "        if (page != null) page.update(false);\n"
+        "        if (page != null) {\n"
+        "            page.update(false);\n"
+        "            for (int i = 0; i < page.listView.getChildCount(); i++) {\n"
+        "                android.view.View child = page.listView.getChildAt(i);\n"
+        "                if (!(child instanceof GiftSheet.GiftCell)) continue;\n"
+        "                GiftSheet.GiftCell cell = (GiftSheet.GiftCell) child;\n"
+        "                TL_stars.SavedStarGift savedGift = cell.getSavedGift();\n"
+        "                if (savedGift == null || savedGift.gift == null || savedGift.gift.slug == null || !savedGift.gift.slug.startsWith(\"waysgram://\")) continue;\n"
+        "                String serial = savedGift.gift.slug.substring(\"waysgram://\".length()).trim();\n"
+        "                android.graphics.Bitmap bitmap = org.telegram.messenger.waysgram.WaysGramGiftMediaStore.get(serial);\n"
+        "                if (bitmap != null && !bitmap.isRecycled()) {\n"
+        "                    cell.imageView.getImageReceiver().setImageBitmap(bitmap);\n"
+        "                    cell.imageView.invalidate();\n"
+        "                }\n"
+        "            }\n"
+        "        }\n"
         "    }\n\n"
     )
     insert_at = updated.rfind("\n}")
@@ -809,36 +824,36 @@ def patch_profile_gifts_container_source(original: str) -> str:
 
 
 def patch_gift_sheet_profile_art_source(original: str) -> str:
-    """Bind cached WaysGram sticker bitmaps to Telegram's recycled native GiftCell."""
-    marker = "// WaysGram profile gift artwork binding"
+    """Bind cached WaysGram artwork to the SavedStarGift overload used by profile cards."""
+    marker = "// WaysGram saved profile gift artwork binding"
     if marker in original:
         required = (
-            'gift.slug.startsWith("waysgram://")',
+            'userGift.gift.slug.startsWith("waysgram://")',
             "WaysGramGiftMediaStore.get(waysGramSerial)",
             "imageView.getImageReceiver().setImageBitmap(waysGramBitmap);",
         )
         if not all(value in original for value in required):
-            raise ValueError("GiftSheet contains an incomplete WaysGram artwork binding")
+            raise ValueError("GiftSheet contains an incomplete SavedStarGift artwork binding")
         return original
 
-    needle = "            setSticker(gift.getDocument(), gift);\\n"
+    needle = "            setSticker(userGift.gift.getDocument(), userGift);\n"
     replacement = (
         needle
-        + "            " + marker + "\\n"
-        + "            if (gift.slug != null && gift.slug.startsWith(\\"waysgram://\\")) {\\n"
-        + "                String waysGramSerial = gift.slug.substring(\\"waysgram://\\".length()).trim();\\n"
-        + "                android.graphics.Bitmap waysGramBitmap = org.telegram.messenger.waysgram.WaysGramGiftMediaStore.get(waysGramSerial);\\n"
-        + "                if (waysGramBitmap != null && !waysGramBitmap.isRecycled()) {\\n"
-        + "                    imageView.getImageReceiver().setImageBitmap(waysGramBitmap);\\n"
-        + "                    imageView.invalidate();\\n"
-        + "                }\\n"
-        + "            }\\n"
+        + "            " + marker + "\n"
+        + "            if (userGift.gift != null && userGift.gift.slug != null && userGift.gift.slug.startsWith(\"waysgram://\")) {\n"
+        + "                String waysGramSerial = userGift.gift.slug.substring(\"waysgram://\".length()).trim();\n"
+        + "                android.graphics.Bitmap waysGramBitmap = org.telegram.messenger.waysgram.WaysGramGiftMediaStore.get(waysGramSerial);\n"
+        + "                if (waysGramBitmap != null && !waysGramBitmap.isRecycled()) {\n"
+        + "                    imageView.getImageReceiver().setImageBitmap(waysGramBitmap);\n"
+        + "                    imageView.invalidate();\n"
+        + "                }\n"
+        + "            }\n"
     )
     return replace_exactly_once(
         original,
         needle,
         replacement,
-        "native GiftCell WaysGram bitmap binding"
+        "native SavedStarGift profile bitmap binding"
     )
 
 
@@ -1198,8 +1213,8 @@ def verify_source(android_root: Path) -> None:
         gift_sheet.write_text(patched_gift_sheet_source, encoding="utf-8")
     final_gift_sheet_source = gift_sheet.read_text(encoding="utf-8")
     for marker in (
-        "// WaysGram profile gift artwork binding",
-        'gift.slug.startsWith("waysgram://")',
+        "// WaysGram saved profile gift artwork binding",
+        'userGift.gift.slug.startsWith("waysgram://")',
         "WaysGramGiftMediaStore.get(waysGramSerial)",
         "imageView.getImageReceiver().setImageBitmap(waysGramBitmap);",
     ):
@@ -1275,6 +1290,8 @@ def verify_source(android_root: Path) -> None:
         "setWaysGramGiftUpdatedListener(Runnable listener)" not in final_gifts_container
         or "parent.waysGramGiftUpdatedListener.run();" not in final_gifts_container
         or "if (parent.waysGramInventory || list == null) return;" in final_gifts_container
+        or "page.listView.getChildCount()" not in final_gifts_container
+        or "cell.imageView.getImageReceiver().setImageBitmap(bitmap);" not in final_gifts_container
     ):
         raise ValueError("WaysGram profile gift cards must open native details and refresh inventory")
 
