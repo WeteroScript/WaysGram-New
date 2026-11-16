@@ -212,10 +212,12 @@ public final class WaysGramGiftCatalogSheet extends BottomSheet {
         String serial = gift.optString("serial_number", "");
         JSONObject telegramGift = gift.optJSONObject("telegram_gift");
         String name = telegramGift == null ? "" : telegramGift.optString("title", "").trim();
-        if (name.isEmpty() || "null".equalsIgnoreCase(name)) {
+        if (name.isEmpty() || "null".equalsIgnoreCase(name)
+                || "Подарок Telegram".equalsIgnoreCase(name) || "Telegram Gift".equalsIgnoreCase(name)) {
             name = gift.optString("gift_name", "").trim();
         }
-        if (name.isEmpty() || "null".equalsIgnoreCase(name)) {
+        if (name.isEmpty() || "null".equalsIgnoreCase(name)
+                || "Подарок Telegram".equalsIgnoreCase(name) || "Telegram Gift".equalsIgnoreCase(name)) {
             name = gift.optString("gift_emoji", "").trim();
         }
         if (name.isEmpty() || "null".equalsIgnoreCase(name)) {
