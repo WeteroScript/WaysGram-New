@@ -736,6 +736,7 @@ def patch_star_gift_sheet_source(original: str) -> str:
             "confirmWaysGramGiftUpgrade(waysGramSerial);",
             "if (isWaysGramGift()) return false;",
             "WaysGramGiftCatalogClient",
+            "topView.buttonsLayout.setVisibility(View.GONE);",
         )
         if not all(value in original for value in required):
             raise ValueError("StarGiftSheet contains an incomplete WaysGram upgrade route")
@@ -810,6 +811,23 @@ def patch_star_gift_sheet_source(original: str) -> str:
         original, "    private void openUpgrade() {\n",
         methods + open_upgrade[len("    private void openUpgrade() {\n"):],
         "native gift upgrade entry point routing"
+    )
+    waysgram_detail_ui = (
+        "        if (isWaysGramGift()) {\n"
+        "            topView.setShowOptions(false);\n"
+        "            topView.buttonsLayout.setVisibility(View.GONE);\n"
+        "            String waysGramSerial = waysGramGiftSerial();\n"
+        "            android.graphics.Bitmap waysGramBitmap = org.telegram.messenger.waysgram.WaysGramGiftMediaStore.get(waysGramSerial);\n"
+        "            if (waysGramBitmap != null && topView.imageView[0] != null) {\n"
+        "                topView.imageView[0].getImageReceiver().setImageBitmap(waysGramBitmap);\n"
+        "            }\n"
+        "        }\n\n"
+    )
+    original = replace_exactly_once(
+        original,
+        "        if (savedStarGift.refunded) {\n",
+        waysgram_detail_ui + "        if (savedStarGift.refunded) {\n",
+        "native WaysGram detail display and action isolation"
     )
     original = replace_exactly_once(
         original,
