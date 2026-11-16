@@ -55,7 +55,7 @@ public final class WaysGramGiftMediaStore {
         if (serial == null || serial.isEmpty()) {
             return;
         }
-        String safeTitle = title == null || title.trim().isEmpty() ? "Gift" : title.trim();
+        String safeTitle = title == null || title.trim().isEmpty() ? "Подарок" : title.trim();
         String safeSubtitle = subtitle == null ? "" : subtitle.trim();
         METADATA.put(serial, new GiftMetadata(safeTitle, safeSubtitle, emoji));
     }
