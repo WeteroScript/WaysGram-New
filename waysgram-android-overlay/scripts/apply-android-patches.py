@@ -851,7 +851,7 @@ def patch_star_gift_sheet_source(original: str) -> str:
         "                waysGramEmojiView.setVisibility(View.VISIBLE);\n"
         "            }\n"
         "        }\n\n"
-        ")
+    )
     original = replace_exactly_once(
         original,
         "        if (savedStarGift.refunded) {\n",
