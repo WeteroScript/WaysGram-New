@@ -14,7 +14,6 @@ import androidx.recyclerview.widget.LinearLayoutManager;
 import org.json.JSONArray;
 import org.json.JSONObject;
 import org.telegram.messenger.AndroidUtilities;
-import org.telegram.messenger.UserConfig;
 import org.telegram.tgnet.tl.TL_stars;
 import org.telegram.ui.ActionBar.BottomSheet;
 import org.telegram.ui.ActionBar.Theme;
@@ -96,7 +95,7 @@ public final class WaysGramGiftInventorySheet extends BottomSheet {
         listView.setSelectorType(9);
         listView.setSelectorDrawableColor(0);
         listView.setPadding(AndroidUtilities.dp(9), AndroidUtilities.dp(12),
-                AndroidUtilities.dp(9), AndroidUtilities.dp(24));
+                AndroidUtilities.dp(9), AndroidUtilities.dp(30 + 56));
         listView.setClipToPadding(false);
         listView.setClipChildren(false);
         listContainer.addView(listView, new FrameLayout.LayoutParams(
@@ -158,6 +157,7 @@ public final class WaysGramGiftInventorySheet extends BottomSheet {
     private void fillItems(ArrayList<UItem> items, UniversalAdapter adapter) {
         if (nativeGifts.isEmpty()) return;
         // Telegram profile inventory uses the same 12dp top inset and native GiftCell factory.
+        items.add(UItem.asSpace(AndroidUtilities.dp(12)));
         for (TL_stars.SavedStarGift gift : nativeGifts) {
             items.add(GiftSheet.GiftCell.Factory.asStarGift(0, gift, true, false, false));
         }
