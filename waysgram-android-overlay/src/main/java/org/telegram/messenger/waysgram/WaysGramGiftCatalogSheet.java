@@ -21,6 +21,7 @@ import android.widget.LinearLayout;
 import android.widget.ProgressBar;
 import android.widget.TextView;
 import android.widget.Toast;
+import android.util.LruCache;
 
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
@@ -28,7 +29,6 @@ import androidx.recyclerview.widget.LinearLayoutManager;
 import androidx.recyclerview.widget.RecyclerView;
 
 import org.telegram.messenger.AndroidUtilities;
-import org.telegram.messenger.UserConfig;
 import org.telegram.ui.Components.AnimatedFileDrawable;
 import org.telegram.ui.ActionBar.BottomSheet;
 import org.telegram.ui.ActionBar.Theme;
@@ -37,10 +37,8 @@ import org.json.JSONArray;
 
 import java.text.DateFormat;
 import java.util.ArrayList;
-import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
-import java.util.Map;
 import java.util.Set;
 import java.util.Date;
 
@@ -776,12 +774,21 @@ public final class WaysGramGiftCatalogSheet extends BottomSheet {
     }
 
     private final class GiftAdapter extends RecyclerView.Adapter<GiftHolder> {
+        private static final int MAX_STICKER_CACHE_BYTES = 8 * 1024 * 1024;
         private final ArrayList<WaysGramGiftCatalogClient.Gift> items = new ArrayList<>();
-        private final Map<String, Bitmap> stickers = new HashMap<>();
+        private final LruCache<String, Bitmap> stickers = new LruCache<String, Bitmap>(MAX_STICKER_CACHE_BYTES) {
+            @Override
+            protected int sizeOf(String key, Bitmap value) {
+                return Math.max(1, value == null ? 1 : value.getByteCount());
+            }
+        };
         private final Set<String> requestedStickers = new HashSet<>();
+        private final Set<String> failedStickers = new HashSet<>();
 
         void setItems(List<WaysGramGiftCatalogClient.Gift> gifts) {
             items.clear();
+            requestedStickers.clear();
+            failedStickers.clear();
             if (gifts != null) {
                 items.addAll(gifts);
             }
@@ -795,10 +802,10 @@ public final class WaysGramGiftCatalogSheet extends BottomSheet {
         }
 
         void setSticker(String giftId, Bitmap bitmap) {
-            Bitmap previous = stickers.put(giftId, bitmap);
-            if (previous != null && previous != bitmap && !previous.isRecycled()) {
-                previous.recycle();
+            if (bitmap == null || bitmap.isRecycled()) {
+                return;
             }
+            stickers.put(giftId, bitmap);
             for (int i = 0; i < items.size(); i++) {
                 if (giftId.equals(items.get(i).id)) {
                     notifyItemChanged(i);
@@ -815,43 +822,78 @@ public final class WaysGramGiftCatalogSheet extends BottomSheet {
 
         @Override
         public void onBindViewHolder(@NonNull GiftHolder holder, int position) {
+            if (position < 0 || position >= items.size()) {
+                return;
+            }
             WaysGramGiftCatalogClient.Gift gift = items.get(position);
             holder.bind(gift, stickers.get(gift.id));
             requestSticker(gift);
         }
 
+        @Override
+        public void onViewRecycled(@NonNull GiftHolder holder) {
+            holder.clearSticker();
+            super.onViewRecycled(holder);
+        }
+
         private void requestSticker(WaysGramGiftCatalogClient.Gift gift) {
-            if (gift.stickerUrl.length() == 0
-                    || stickers.containsKey(gift.id) || !requestedStickers.add(gift.id)) {
+            if (gift == null || gift.stickerUrl.length() == 0
+                    || stickers.get(gift.id) != null || failedStickers.contains(gift.id)
+                    || !requestedStickers.add(gift.id)) {
                 return;
             }
             catalogClient.downloadSticker(gift, new WaysGramGiftCatalogClient.StickerCallback() {
                 @Override
                 public void onLoaded(byte[] bytes, String mimeType) {
-                    Bitmap bitmap = decodeStickerPreview(gift, bytes);
-                    if (bitmap == null) {
+                    if (isDismissed()) {
                         return;
                     }
+                    Bitmap bitmap = decodeStickerPreview(gift, bytes);
                     AndroidUtilities.runOnUIThread(() -> {
-                        if (!isDismissed()) {
+                        requestedStickers.remove(gift.id);
+                        if (!isDismissed() && bitmap != null && !bitmap.isRecycled()) {
+                            failedStickers.remove(gift.id);
                             setSticker(gift.id, bitmap);
                         } else {
-                            bitmap.recycle();
+                            if (!isDismissed()) {
+                                failedStickers.add(gift.id);
+                            }
+                            if (bitmap != null && !bitmap.isRecycled()) {
+                                bitmap.recycle();
+                            }
                         }
                     });
                 }
 
                 @Override
                 public void onError(String message) {
-                    // Keep the emoji placeholder if Telegram cannot deliver this sticker.
+                    AndroidUtilities.runOnUIThread(() -> {
+                        requestedStickers.remove(gift.id);
+                        failedStickers.add(gift.id);
+                    });
                 }
             });
         }
 
         private Bitmap decodeStickerPreview(WaysGramGiftCatalogClient.Gift gift, byte[] bytes) {
-            Bitmap bitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.length);
-            if (bitmap != null) {
-                return bitmap;
+            if (bytes == null || bytes.length == 0) {
+                return null;
+            }
+            BitmapFactory.Options bounds = new BitmapFactory.Options();
+            bounds.inJustDecodeBounds = true;
+            BitmapFactory.decodeByteArray(bytes, 0, bytes.length, bounds);
+            if (bounds.outWidth > 0 && bounds.outHeight > 0) {
+                int sampleSize = 1;
+                while (Math.max(bounds.outWidth, bounds.outHeight) / sampleSize > 256) {
+                    sampleSize *= 2;
+                }
+                BitmapFactory.Options decode = new BitmapFactory.Options();
+                decode.inSampleSize = sampleSize;
+                decode.inPreferredConfig = Bitmap.Config.ARGB_8888;
+                Bitmap bitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.length, decode);
+                if (bitmap != null) {
+                    return bitmap;
+                }
             }
             File previewFile = null;
             AnimatedFileDrawable drawable = null;
@@ -867,7 +909,7 @@ public final class WaysGramGiftCatalogSheet extends BottomSheet {
                 }
                 drawable = new AnimatedFileDrawable(
                         previewFile, true, 0, 0, null, null, null, 0,
-                        UserConfig.selectedAccount, true, 64, 64, null
+                        telegramAccount, true, 64, 64, null
                 );
                 return drawable.getFirstFrame(null);
             } catch (Exception exception) {
@@ -888,13 +930,10 @@ public final class WaysGramGiftCatalogSheet extends BottomSheet {
         }
 
         void clear() {
-            for (Bitmap bitmap : stickers.values()) {
-                if (bitmap != null && !bitmap.isRecycled()) {
-                    bitmap.recycle();
-                }
-            }
-            stickers.clear();
+            // Avoid recycling bitmaps while RecyclerView children may still draw them.
+            stickers.evictAll();
             requestedStickers.clear();
+            failedStickers.clear();
             items.clear();
         }
     }
@@ -979,6 +1018,11 @@ public final class WaysGramGiftCatalogSheet extends BottomSheet {
             );
             buyParams.leftMargin = AndroidUtilities.dp(6);
             row.addView(buyButton, buyParams);
+        }
+
+        void clearSticker() {
+            imageView.setImageDrawable(null);
+            emojiView.setVisibility(View.VISIBLE);
         }
 
         void bind(WaysGramGiftCatalogClient.Gift gift, @Nullable Bitmap sticker) {
