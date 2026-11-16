@@ -723,6 +723,114 @@ def patch_profile_gifts_container_source(original: str) -> str:
     return updated
 
 
+
+def patch_star_gift_sheet_source(original: str) -> str:
+    """Route WaysGram gift detail and upgrade actions to the WaysGram API."""
+    marker = "private void performWaysGramGiftUpgrade(String serial)"
+    if marker in original:
+        required = (
+            "private String waysGramGiftSerial()",
+            "confirmWaysGramGiftUpgrade(waysGramSerial);",
+            "if (isWaysGramGift()) return false;",
+            "WaysGramGiftCatalogClient",
+        )
+        if not all(value in original for value in required):
+            raise ValueError("StarGiftSheet contains an incomplete WaysGram upgrade route")
+        return original
+
+    methods = (
+        "    private String waysGramGiftSerial() {\n"
+        "        if (savedStarGift == null || savedStarGift.gift == null || TextUtils.isEmpty(savedStarGift.gift.slug)) {\n"
+        "            return null;\n"
+        "        }\n"
+        "        final String prefix = \"waysgram://\";\n"
+        "        if (!savedStarGift.gift.slug.startsWith(prefix)) {\n"
+        "            return null;\n"
+        "        }\n"
+        "        String serial = savedStarGift.gift.slug.substring(prefix.length()).trim();\n"
+        "        return serial.isEmpty() ? null : serial;\n"
+        "    }\n\n"
+        "    private boolean isWaysGramGift() {\n"
+        "        return waysGramGiftSerial() != null;\n"
+        "    }\n\n"
+        "    private void confirmWaysGramGiftUpgrade(String serial) {\n"
+        "        long price = savedStarGift != null && savedStarGift.gift != null\n"
+        "                ? Math.max(0L, savedStarGift.gift.upgrade_stars) : 0L;\n"
+        "        String message = price > 0\n"
+        "                ? \"Стоимость улучшения: \" + LocaleController.formatNumber(price, ',') + \" WaysGram Stars. Списание будет выполнено внутри WaysGram.\"\n"
+        "                : \"Для этого подарка сейчас нет доступного улучшения.\";\n"
+        "        new AlertDialog.Builder(getContext(), resourcesProvider)\n"
+        "                .setTitle(\"Улучшить подарок\")\n"
+        "                .setMessage(message)\n"
+        "                .setNegativeButton(getString(R.string.Cancel), null)\n"
+        "                .setPositiveButton(\"Улучшить\", (dialog, which) -> {\n"
+        "                    if (price > 0) performWaysGramGiftUpgrade(serial);\n"
+        "                })\n"
+        "                .show();\n"
+        "    }\n\n"
+        "    private void performWaysGramGiftUpgrade(String serial) {\n"
+        "        final org.telegram.messenger.waysgram.WaysGramGiftCatalogClient client =\n"
+        "                new org.telegram.messenger.waysgram.WaysGramGiftCatalogClient(\n"
+        "                        org.telegram.messenger.waysgram.WaysGramSessionStore.getInstance(getContext(), currentAccount));\n"
+        "        client.upgradeGift(serial, new org.telegram.messenger.waysgram.WaysGramGiftCatalogClient.ActionCallback() {\n"
+        "            @Override\n"
+        "            public void onComplete(org.json.JSONObject result) {\n"
+        "                client.close();\n"
+        "                AndroidUtilities.runOnUIThread(() -> {\n"
+        "                    if (isDismissed()) return;\n"
+        "                    if (onGiftUpdatedListener != null) onGiftUpdatedListener.run();\n"
+        "                    android.widget.Toast.makeText(getContext(), \"Подарок улучшен\", android.widget.Toast.LENGTH_LONG).show();\n"
+        "                    dismiss();\n"
+        "                });\n"
+        "            }\n\n"
+        "            @Override\n"
+        "            public void onError(String message) {\n"
+        "                client.close();\n"
+        "                AndroidUtilities.runOnUIThread(() -> {\n"
+        "                    if (!isDismissed()) {\n"
+        "                        android.widget.Toast.makeText(getContext(), \"Не удалось улучшить подарок: \" + message, android.widget.Toast.LENGTH_LONG).show();\n"
+        "                    }\n"
+        "                });\n"
+        "            }\n"
+        "        });\n"
+        "    }\n\n"
+    )
+    open_upgrade = (
+        "    private void openUpgrade() {\n"
+        "        final String waysGramSerial = waysGramGiftSerial();\n"
+        "        if (waysGramSerial != null) {\n"
+        "            confirmWaysGramGiftUpgrade(waysGramSerial);\n"
+        "            return;\n"
+        "        }\n"
+    )
+    original = replace_exactly_once(
+        original, "    private void openUpgrade() {\n",
+        methods + open_upgrade[len("    private void openUpgrade() {\n"):],
+        "native gift upgrade entry point routing"
+    )
+    original = replace_exactly_once(
+        original,
+        "    private boolean canDelete() {\n        if (walletCollectible != null || getInputStarGift() == null) return false;\n",
+        "    private boolean canDelete() {\n        if (isWaysGramGift()) return false;\n"
+        "        if (walletCollectible != null || getInputStarGift() == null) return false;\n",
+        "prevent Telegram-native deletion of WaysGram gifts"
+    )
+    original = replace_exactly_once(
+        original,
+        "    public boolean canTransfer() {\n        if (getInputStarGift() == null) return false;\n",
+        "    public boolean canTransfer() {\n        if (isWaysGramGift()) return false;\n"
+        "        if (getInputStarGift() == null) return false;\n",
+        "prevent Telegram-native transfer of WaysGram gifts"
+    )
+    original = replace_exactly_once(
+        original,
+        "    private String getLink() {\n        final TL_stars.StarGift starGift = getGift();\n",
+        "    private String getLink() {\n        if (isWaysGramGift()) return null;\n"
+        "        final TL_stars.StarGift starGift = getGift();\n",
+        "prevent invalid Telegram NFT links for WaysGram gifts"
+    )
+    return original
+
 def patch_gift_sheet_source(original: str) -> str:
     """Keep Telegram's GiftCell renderer, injecting WaysGram stickers, emoji and metadata."""
     updated = original
