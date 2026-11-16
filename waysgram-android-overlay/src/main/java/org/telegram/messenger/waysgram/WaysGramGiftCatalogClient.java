@@ -241,7 +241,7 @@ public final class WaysGramGiftCatalogClient implements AutoCloseable {
         purchaseGift(gift, (String) null, callback);
     }
 
-    public void purchaseGift(Gift gift, @Nullable String recipient, PurchaseCallback callback) {
+    public void purchaseGift(Gift gift, String recipient, PurchaseCallback callback) {
         if (gift == null || callback == null || !gift.forSale) {
             if (callback != null) {
                 callback.onError("Подарок сейчас недоступен для покупки");
