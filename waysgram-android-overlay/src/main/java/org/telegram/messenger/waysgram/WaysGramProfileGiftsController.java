@@ -205,6 +205,7 @@ public final class WaysGramProfileGiftsController {
             TLRPC.TL_peerUser senderPeer = new TLRPC.TL_peerUser();
             senderPeer.user_id = UserConfig.getInstance(currentAccount).getClientUserId();
             savedGift.from_id = senderPeer;
+            savedGift.flags |= 2; // from_id is present; Telegram uses it to identify the owner profile.
             savedGift.can_upgrade = canUpgrade;
             result.add(savedGift);
         }
