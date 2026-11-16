@@ -803,8 +803,8 @@ def patch_profile_gifts_container_source(original: str) -> str:
         "                if (!(child instanceof GiftSheet.GiftCell)) continue;\n"
         "                GiftSheet.GiftCell cell = (GiftSheet.GiftCell) child;\n"
         "                TL_stars.SavedStarGift savedGift = cell.getSavedGift();\n"
-        "                if (savedGift == null || savedGift.gift == null || savedGift.gift.slug == null || !savedGift.gift.slug.startsWith(\\"waysgram://\\")) continue;\n"
-        "                String serial = savedGift.gift.slug.substring(\\"waysgram://\\".length()).trim();\n"
+        "                if (savedGift == null || savedGift.gift == null || savedGift.gift.slug == null || !savedGift.gift.slug.startsWith(\"waysgram://\")) continue;\n"
+        "                String serial = savedGift.gift.slug.substring(\"waysgram://\".length()).trim();\n"
         "                android.graphics.Bitmap bitmap = org.telegram.messenger.waysgram.WaysGramGiftMediaStore.get(serial);\n"
         "                if (bitmap != null && !bitmap.isRecycled()) {\n"
         "                    cell.imageView.getImageReceiver().setImageBitmap(bitmap);\n"
@@ -840,8 +840,8 @@ def patch_gift_sheet_profile_art_source(original: str) -> str:
     replacement = (
         needle
         + "            " + marker + "\n"
-        + "            if (userGift.gift != null && userGift.gift.slug != null && userGift.gift.slug.startsWith(\\"waysgram://\\")) {\n"
-        + "                String waysGramSerial = userGift.gift.slug.substring(\\"waysgram://\\".length()).trim();\n"
+        + "            if (userGift.gift != null && userGift.gift.slug != null && userGift.gift.slug.startsWith(\"waysgram://\")) {\n"
+        + "                String waysGramSerial = userGift.gift.slug.substring(\"waysgram://\".length()).trim();\n"
         + "                android.graphics.Bitmap waysGramBitmap = org.telegram.messenger.waysgram.WaysGramGiftMediaStore.get(waysGramSerial);\n"
         + "                if (waysGramBitmap != null && !waysGramBitmap.isRecycled()) {\n"
         + "                    imageView.getImageReceiver().setImageBitmap(waysGramBitmap);\n"
