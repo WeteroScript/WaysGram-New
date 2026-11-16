@@ -582,10 +582,26 @@ def patch_profile_gifts_container_source(original: str) -> str:
     )
     if click_match is None:
         raise ValueError("Could not locate native gift item click handler")
-    click_insert = (
-        "\n" + click_match.group("indent") + "    if (parent.waysGramInventory || list == null) return;"
+    gift_update_callback = (
+        "                        .setOnGiftUpdatedListener(() -> {\n"
+        "                            update(false);\n"
+        "                        })\n"
     )
-    updated = updated[:click_match.end()] + click_insert + updated[click_match.end():]
+    gift_update_callback_patched = (
+        "                        .setOnGiftUpdatedListener(() -> {\n"
+        "                            update(false);\n"
+        "                            if (parent.waysGramInventory && parent.waysGramGiftUpdatedListener != null) {\n"
+        "                                parent.waysGramGiftUpdatedListener.run();\n"
+        "                            }\n"
+        "                        })\n"
+    )
+    if "parent.waysGramGiftUpdatedListener.run();" not in updated:
+        updated = replace_exactly_once(
+            updated, gift_update_callback, gift_update_callback_patched,
+            "refresh WaysGram inventory after native detail sheet update"
+        )
+
+    # Keep the original click handler: WaysGram cards open the native Telegram detail sheet.
 
     long_press_match = re.search(
         r"(?m)^(?P<indent>[ \t]*)(?:(?:public|private|protected)\s+)?boolean\s+onItemLongPress\s*\([^)]*\)\s*\{",
@@ -678,6 +694,9 @@ def patch_profile_gifts_container_source(original: str) -> str:
         updated = updated[:block_start] + wrapped + updated[block_end:]
 
     method = (
+        "    public void setWaysGramGiftUpdatedListener(Runnable listener) {\n"
+        "        this.waysGramGiftUpdatedListener = listener;\n"
+        "    }\n\n"
         "    public void setWaysGramInventory(ArrayList<TL_stars.SavedStarGift> gifts) {\n"
         "        if (!waysGramInventory) return;\n"
         "        list.gifts.clear();\n"
