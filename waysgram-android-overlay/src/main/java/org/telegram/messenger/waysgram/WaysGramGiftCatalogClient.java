@@ -168,6 +168,7 @@ public final class WaysGramGiftCatalogClient implements AutoCloseable {
     private final SessionProvider sessionProvider;
     private final ExecutorService ioExecutor;
     private final ConcurrentHashMap<String, String> purchaseIdempotencyKeys = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<String, String> upgradeIdempotencyKeys = new ConcurrentHashMap<>();
 
     public WaysGramGiftCatalogClient(SessionProvider sessionProvider) {
         if (sessionProvider == null) {
@@ -378,7 +379,37 @@ public final class WaysGramGiftCatalogClient implements AutoCloseable {
     }
 
     public void upgradeGift(String serial, ActionCallback callback) {
-        runGiftAction("/api/gifts/" + encodePathSegment(serial) + "/upgrade", "POST", "{}", callback);
+        if (callback == null) {
+            return;
+        }
+        String giftSerial = serial == null ? "" : serial.trim();
+        if (giftSerial.isEmpty()) {
+            callback.onError("Не указан серийный номер подарка");
+            return;
+        }
+        String idempotencyKey = upgradeIdempotencyKeys.computeIfAbsent(
+                giftSerial,
+                ignored -> "wg-gift-upgrade-" + UUID.randomUUID()
+        );
+        runGiftAction(
+                "/api/gifts/" + encodePathSegment(giftSerial) + "/upgrade",
+                "POST",
+                "{}",
+                idempotencyKey,
+                new ActionCallback() {
+                    @Override
+                    public void onComplete(JSONObject result) {
+                        upgradeIdempotencyKeys.remove(giftSerial, idempotencyKey);
+                        callback.onComplete(result);
+                    }
+
+                    @Override
+                    public void onError(String message) {
+                        // Retain the key so a retry after a lost response cannot charge twice.
+                        callback.onError(message);
+                    }
+                }
+        );
     }
 
     public void transferGift(String serial, String recipient, ActionCallback callback) {
@@ -396,12 +427,24 @@ public final class WaysGramGiftCatalogClient implements AutoCloseable {
     }
 
     private void runGiftAction(String path, String method, String body, ActionCallback callback) {
+        runGiftAction(path, method, body, null, callback);
+    }
+
+    private void runGiftAction(
+            String path,
+            String method,
+            String body,
+            String idempotencyKey,
+            ActionCallback callback
+    ) {
         if (callback == null) {
             return;
         }
         ioExecutor.execute(() -> {
             try {
-                JSONObject response = requestJson(getBaseUrl() + path, method, body, null);
+                JSONObject response = requestJson(
+                        getBaseUrl() + path, method, body, idempotencyKey
+                );
                 callback.onComplete(response);
             } catch (Exception exception) {
                 callback.onError(toSafeError(exception));
