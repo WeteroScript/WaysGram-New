@@ -369,6 +369,7 @@ def patch_profile_gifts_source(original: str) -> str:
         "                            resourcesProvider, true);\n"
         "                    waysGramGiftsController = new WaysGramProfileGiftsController(\n"
         "                            getContext(), profileActivity, waysGramGiftsContainer);\n"
+        "                    waysGramGiftsContainer.setWaysGramGiftUpdatedListener(waysGramGiftsController::refresh);\n"
         "                }\n"
         "                if (waysGramGiftsContainer.getParent() != mediaPages[a]) {\n"
         "                    AndroidUtilities.removeFromParent(waysGramGiftsContainer);\n"
@@ -449,6 +450,7 @@ def patch_profile_gifts_container_source(original: str) -> str:
     markers = (
         "private final boolean waysGramInventory;",
         "setWaysGramInventory(ArrayList<TL_stars.SavedStarGift> gifts)",
+        "setWaysGramGiftUpdatedListener(Runnable listener)",
     )
     if all(marker in original for marker in markers):
         return original
@@ -458,7 +460,7 @@ def patch_profile_gifts_container_source(original: str) -> str:
     updated = replace_exactly_once(
         original,
         "    private final long dialogId;\n",
-        "    private final long dialogId;\n    private final boolean waysGramInventory;\n",
+        "    private final long dialogId;\n    private final boolean waysGramInventory;\n    private Runnable waysGramGiftUpdatedListener;\n",
         "native gifts container inventory mode field",
     )
 
