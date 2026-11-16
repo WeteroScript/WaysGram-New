@@ -153,7 +153,8 @@ public final class WaysGramProfileGiftsController {
                     ? 0 : Math.max(0, telegramGift.optInt("upgrade_star_count", 0));
             int telegramUpgradeVariants = telegramGift == null
                     ? 0 : Math.max(0, telegramGift.optInt("upgrade_variants", 0));
-            boolean canUpgrade = upgradeLevel == 0 && telegramUpgradePrice > 0 && hasTelegramGiftId;
+            // Keep paid, chance-based trait upgrades out of the profile detail flow.
+            boolean canUpgrade = false;
             boolean isCollectible = upgradeLevel > 0 || (traits != null && traits.length() > 0);
             boolean isListed = optBooleanLike(item, "is_listed");
             boolean isAuctioned = optBooleanLike(item, "is_auctioned");
