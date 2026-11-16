@@ -3140,6 +3140,7 @@ public final class WaysGramChatFragment extends BaseFragment {
             nativeGift.title = giftName == null ? "Подарок" : giftName;
             nativeGift.slug = "waysgram://" + nativeGiftId;
             nativeGift.stars = Math.max(0, purchasePrice);
+            // Used only to obtain Telegram's localized system-action text. It is not serialized or sent to Telegram.
 
             TLRPC.TL_messageActionStarGift action = new TLRPC.TL_messageActionStarGift();
             action.gift = nativeGift;
@@ -3160,7 +3161,7 @@ public final class WaysGramChatFragment extends BaseFragment {
             return nativeEvent.messageText == null || nativeEvent.messageText.length() == 0
                     ? fallbackText
                     : nativeEvent.messageText;
-        } catch (Throwable ignored) {
+        } catch (Exception ignored) {
             return fallbackText;
         }
     }
