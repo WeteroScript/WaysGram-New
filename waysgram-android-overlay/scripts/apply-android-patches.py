@@ -120,7 +120,98 @@ def patch_profile_actions_visibility_source(original: str) -> str:
     return original
 
 
-def patch_profile_phone_source(original: str) -> str:
+
+def patch_profile_image_updater_source(original: str) -> str:
+    """Initialize Telegram's existing profile action controls after self detection."""
+    marker = "// WaysGram: initialize native profile actions after self detection"
+    if marker in original:
+        required = (
+            "if (myProfile && userId != 0 && imageUpdater == null)",
+            "imageUpdater = new ImageUpdater(true, ImageUpdater.FOR_TYPE_USER, true);",
+            "imageUpdater.setDelegate(this);",
+        )
+        if not all(value in original for value in required):
+            raise ValueError("ProfileActivity contains an incomplete late profile action initializer")
+        return original
+
+    before = (
+        "        if ((userId == selfId || dialogId == selfId) && !myProfile) {\n"
+        "            myProfile = true;\n"
+        "            // AndroidUtilities.printStackTrace(\"myProfile flag debug\");\n"
+        "        }\n"
+    )
+    after = before + (
+        "        // WaysGram: initialize native profile actions after self detection\n"
+        "        if (myProfile && userId != 0 && imageUpdater == null) {\n"
+        "            imageUpdater = new ImageUpdater(true, ImageUpdater.FOR_TYPE_USER, true);\n"
+        "            imageUpdater.setOpenWithFrontfaceCamera(true);\n"
+        "            imageUpdater.parentFragment = this;\n"
+        "            imageUpdater.setDelegate(this);\n"
+        "        }\n"
+    )
+    return replace_exactly_once(
+        original, before, after,
+        "late initialization of native profile action controls"
+    )
+
+
+def patch_profile_phone_null_source(original: str) -> str:
+    """Reject placeholder strings such as 'null' in every profile phone display path."""
+    marker = "// WaysGram: reject non-numeric phone placeholders"
+    if marker in original:
+        required = (
+            'user.phone.matches("[0-9]{8,15}")',
+            'user.phone == null || !user.phone.matches("[0-9]{8,15}")',
+        )
+        if not all(value in original for value in required):
+            raise ValueError("ProfileActivity contains an incomplete phone placeholder guard")
+        return original
+
+    header_before = (
+        "                } else if (a == 0 && user.id != getUserConfig().getClientUserId() && !MessagesController.isSupportUser(user) && user.phone != null && user.phone.length() != 0 && getContactsController().contactsDict.get(user.id) == null &&\n"
+    )
+    header_after = (
+        "                } else if (a == 0 && user.id != getUserConfig().getClientUserId() && !MessagesController.isSupportUser(user) && user.phone != null && user.phone.matches(\"[0-9]{8,15}\") && getContactsController().contactsDict.get(user.id) == null &&\n"
+    )
+    original = replace_exactly_once(
+        original, header_before, header_after,
+        "reject invalid phone in profile header"
+    )
+
+    number_before = (
+        "                        if (user != null && user.phone != null && user.phone.length() != 0) {\n"
+    )
+    number_after = (
+        "                        if (user != null && user.phone != null && user.phone.matches(\"[0-9]{8,15}\")) {\n"
+    )
+    original = replace_exactly_once(
+        original, number_before, number_after,
+        "reject invalid phone in own profile number row"
+    )
+
+    click_before = (
+        "            if (user == null || user.phone == null || user.phone.length() == 0 || getParentActivity() == null) {\n"
+    )
+    click_after = (
+        "            if (user == null || user.phone == null || !user.phone.matches(\"[0-9]{8,15}\") || getParentActivity() == null) {\n"
+    )
+    original = replace_exactly_once(
+        original, click_before, click_after,
+        "reject invalid phone in profile phone actions"
+    )
+
+    display_anchor = (
+        "                    nameTextView[a].setText(PhoneFormat.getInstance().format(\"+\" + user.phone));\n"
+    )
+    original = replace_exactly_once(
+        original, display_anchor,
+        display_anchor + "                    // WaysGram: reject non-numeric phone placeholders\n",
+        "phone display placeholder guard marker"
+    )
+    return original
+
+
+def patch_profile_phone_source(original: str) -> str
     """Use the persisted self phone instead of a transient cached profile value."""
     marker = "// WaysGram: use persisted self phone while profile refreshes"
     if marker in original:
