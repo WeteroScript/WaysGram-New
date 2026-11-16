@@ -7,6 +7,7 @@ import android.content.ClipboardManager;
 import android.content.Context;
 import android.content.Intent;
 import android.graphics.Bitmap;
+import android.graphics.Color;
 import android.net.Uri;
 import android.os.Handler;
 import android.os.Looper;
@@ -57,6 +58,7 @@ public final class WaysGramTimelineFragment extends BaseFragment {
     private EditText messageInput;
     private EditText managementInput;
     private TextView statusView;
+    private LinearLayout channelLabelsContainer;
     private TextView typingView;
     private TextView managementStatusView;
     private Button sendButton;
@@ -127,6 +129,14 @@ public final class WaysGramTimelineFragment extends BaseFragment {
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT
         ));
+        if (type == TYPE_CHANNEL) {
+            channelLabelsContainer = new LinearLayout(context);
+            channelLabelsContainer.setOrientation(LinearLayout.HORIZONTAL);
+            root.addView(channelLabelsContainer, new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT
+            ));
+        }
         if (type == TYPE_GROUP) {
             typingView = new TextView(context);
             typingView.setTextSize(12);
@@ -243,6 +253,7 @@ public final class WaysGramTimelineFragment extends BaseFragment {
 
         fragmentView = root;
         loadManagement();
+        loadChannelLabels();
         initializeMessageEventCursor();
         return root;
     }
@@ -934,6 +945,64 @@ public final class WaysGramTimelineFragment extends BaseFragment {
                 }
             }
         });
+    }
+
+    private void loadChannelLabels() {
+        if (type != TYPE_CHANNEL || channelLabelsContainer == null || apiClient == null) {
+            return;
+        }
+        apiClient.get("/api/channels/" + targetId, new WaysGramApiClient.Callback() {
+            @Override
+            public void onSuccess(JSONObject response) {
+                renderChannelLabels(response.optJSONArray("labels"));
+            }
+
+            @Override
+            public void onError(String message, int statusCode) {
+                // Labels are supplementary; a label lookup must not interrupt the timeline.
+            }
+        });
+    }
+
+    private void renderChannelLabels(JSONArray labels) {
+        channelLabelsContainer.removeAllViews();
+        int count = labels == null ? 0 : labels.length();
+        for (int i = 0; i < count && i < 8; i++) {
+            JSONObject label = labels.optJSONObject(i);
+            if (label == null) {
+                continue;
+            }
+            String text = label.optString("text", "").trim();
+            if (text.isEmpty()) {
+                continue;
+            }
+            int color;
+            try {
+                color = Color.parseColor(label.optString("color", "#6B7280"));
+            } catch (IllegalArgumentException exception) {
+                color = Color.GRAY;
+            }
+            double luminance = (0.299 * Color.red(color))
+                    + (0.587 * Color.green(color))
+                    + (0.114 * Color.blue(color));
+            TextView chip = new TextView(getParentActivity());
+            chip.setText("  " + text + "  ");
+            chip.setTextSize(11);
+            chip.setTextColor(luminance > 150 ? Color.BLACK : Color.WHITE);
+            chip.setPadding(AndroidUtilities.dp(3), AndroidUtilities.dp(2),
+                    AndroidUtilities.dp(3), AndroidUtilities.dp(2));
+            GradientDrawable background = new GradientDrawable();
+            background.setColor(color);
+            background.setCornerRadius(AndroidUtilities.dp(6));
+            chip.setBackground(background);
+            LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT
+            );
+            params.rightMargin = AndroidUtilities.dp(5);
+            params.bottomMargin = AndroidUtilities.dp(4);
+            channelLabelsContainer.addView(chip, params);
+        }
     }
 
     private void loadManagement() {
