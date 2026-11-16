@@ -34,6 +34,7 @@ public final class WaysGramProfileGiftsController {
     private final WaysGramSessionStore sessionStore;
     private final WaysGramApiClient imageClient;
     private boolean loading;
+    private boolean loginRedirected;
 
     public WaysGramProfileGiftsController(
             Context context,
@@ -62,6 +63,7 @@ public final class WaysGramProfileGiftsController {
             public void onLoaded(JSONArray gifts) {
                 AndroidUtilities.runOnUIThread(() -> {
                     loading = false;
+                    loginRedirected = false;
                     client.close();
                     JSONArray inventory = gifts == null ? new JSONArray() : gifts;
                     WaysGramGiftMediaStore.clear();
@@ -77,13 +79,21 @@ public final class WaysGramProfileGiftsController {
                 AndroidUtilities.runOnUIThread(() -> {
                     loading = false;
                     client.close();
+                    boolean loginRequired = message != null
+                            && (message.contains("WaysGram session is missing")
+                            || message.contains("HTTP 401"));
                     if (message != null && message.contains("HTTP 401")) {
                         sessionStore.clearSession();
                     }
-                    if (message != null && (message.contains("WaysGram session is missing")
-                            || message.contains("HTTP 401"))) {
+                    if (loginRequired) {
                         container.setWaysGramInventory(new ArrayList<>());
                         showError(message);
+                        if (fragment != null && !loginRedirected
+                                && fragment.getParentActivity() != null) {
+                            loginRedirected = true;
+                            fragment.presentFragment(
+                                    new WaysGramLoginFragment(sessionStore.getTelegramAccount()), true);
+                        }
                         return;
                     }
                     showError(message);
@@ -427,7 +437,7 @@ public final class WaysGramProfileGiftsController {
         String text;
         if (message != null && (message.contains("HTTP 401")
                 || message.contains("WaysGram session is missing"))) {
-            text = "Не удалось получить доступ к инвентарю WaysGram.";
+            text = "Для этого аккаунта требуется войти в WaysGram, чтобы открыть инвентарь подарков.";
         } else if (message != null && message.contains("HTTP 404")) {
             text = "Сервер не поддерживает загрузку инвентаря. Обновите AuthBot на сервере.";
         } else if (message != null && message.contains("HTTP 403")) {
