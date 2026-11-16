@@ -3270,13 +3270,24 @@ public final class WaysGramChatFragment extends BaseFragment {
         }
 
         String giftSerial = message.optString("gift_serial_number", "");
-        if (!giftSerial.isEmpty()) {
+        if (!giftSerial.isEmpty() || isGiftPurchaseEvent) {
             JSONObject giftAttributes = giftAttributesForMessage;
             int giftLevel = Math.max(
                     message.optInt("gift_upgrade_level", 0),
                     giftAttributes == null ? 0 : giftAttributes.optInt("upgrade_level", 0)
             );
-            String giftName = message.optString("gift_name", "Подарок WaysGram");
+            String giftName = message.optString("gift_name", "").trim();
+            if (giftName.isEmpty() || "null".equalsIgnoreCase(giftName)) {
+                String purchaseBody = message.optString("body", "");
+                int quoteStart = purchaseBody.indexOf('«');
+                int quoteEnd = purchaseBody.lastIndexOf('»');
+                if (quoteStart >= 0 && quoteEnd > quoteStart) {
+                    giftName = purchaseBody.substring(quoteStart + 1, quoteEnd).trim();
+                }
+            }
+            if (giftName.isEmpty() || "null".equalsIgnoreCase(giftName)) {
+                giftName = "Коллекционный подарок";
+            }
             String giftTelegramId = message.optString("gift_telegram_gift_id", "");
             JSONObject giftTelegramMetadata = message.optJSONObject("gift_telegram_metadata");
             String giftEmoji = message.optString("gift_emoji", "").trim();
