@@ -830,12 +830,28 @@ def patch_star_gift_sheet_source(original: str) -> str:
         "            topView.setShowOptions(false);\n"
         "            topView.buttonsLayout.setVisibility(View.GONE);\n"
         "            String waysGramSerial = waysGramGiftSerial();\n"
+        "            org.telegram.messenger.waysgram.WaysGramGiftMediaStore.GiftMetadata waysGramMetadata = org.telegram.messenger.waysgram.WaysGramGiftMediaStore.getMetadata(waysGramSerial);\n"
         "            android.graphics.Bitmap waysGramBitmap = org.telegram.messenger.waysgram.WaysGramGiftMediaStore.get(waysGramSerial);\n"
+        "            View waysGramEmojiExisting = topView.imageLayout.findViewWithTag(\"waysgramGiftDetailEmoji\");\n"
+        "            android.widget.TextView waysGramEmojiView;\n"
+        "            if (waysGramEmojiExisting instanceof android.widget.TextView) {\n"
+        "                waysGramEmojiView = (android.widget.TextView) waysGramEmojiExisting;\n"
+        "            } else {\n"
+        "                waysGramEmojiView = new android.widget.TextView(getContext());\n"
+        "                waysGramEmojiView.setTag(\"waysgramGiftDetailEmoji\");\n"
+        "                waysGramEmojiView.setTextSize(TypedValue.COMPLEX_UNIT_DIP, 52);\n"
+        "                waysGramEmojiView.setGravity(Gravity.CENTER);\n"
+        "                topView.imageLayout.addView(waysGramEmojiView, new FrameLayout.LayoutParams(dp(112), dp(112), Gravity.CENTER));\n"
+        "            }\n"
+        "            waysGramEmojiView.setText(waysGramMetadata == null || TextUtils.isEmpty(waysGramMetadata.emoji) ? \"🎁\" : waysGramMetadata.emoji);\n"
         "            if (waysGramBitmap != null && topView.imageView[0] != null) {\n"
         "                topView.imageView[0].getImageReceiver().setImageBitmap(waysGramBitmap);\n"
+        "                waysGramEmojiView.setVisibility(View.GONE);\n"
+        "            } else {\n"
+        "                waysGramEmojiView.setVisibility(View.VISIBLE);\n"
         "            }\n"
         "        }\n\n"
-    )
+        ")
     original = replace_exactly_once(
         original,
         "        if (savedStarGift.refunded) {\n",
