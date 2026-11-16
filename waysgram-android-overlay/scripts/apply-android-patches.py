@@ -807,6 +807,42 @@ def patch_profile_gifts_container_source(original: str) -> str:
 
 
 
+
+def patch_gift_sheet_profile_art_source(original: str) -> str:
+    """Bind cached WaysGram sticker bitmaps to Telegram's recycled native GiftCell."""
+    marker = "// WaysGram profile gift artwork binding"
+    if marker in original:
+        required = (
+            'gift.slug.startsWith("waysgram://")',
+            "WaysGramGiftMediaStore.get(waysGramSerial)",
+            "imageView.getImageReceiver().setImageBitmap(waysGramBitmap);",
+        )
+        if not all(value in original for value in required):
+            raise ValueError("GiftSheet contains an incomplete WaysGram artwork binding")
+        return original
+
+    needle = "            setSticker(gift.getDocument(), gift);\\n"
+    replacement = (
+        needle
+        + "            " + marker + "\\n"
+        + "            if (gift.slug != null && gift.slug.startsWith(\\"waysgram://\\")) {\\n"
+        + "                String waysGramSerial = gift.slug.substring(\\"waysgram://\\".length()).trim();\\n"
+        + "                android.graphics.Bitmap waysGramBitmap = org.telegram.messenger.waysgram.WaysGramGiftMediaStore.get(waysGramSerial);\\n"
+        + "                if (waysGramBitmap != null && !waysGramBitmap.isRecycled()) {\\n"
+        + "                    imageView.getImageReceiver().setImageBitmap(waysGramBitmap);\\n"
+        + "                    imageView.invalidate();\\n"
+        + "                }\\n"
+        + "            }\\n"
+    )
+    return replace_exactly_once(
+        original,
+        needle,
+        replacement,
+        "native GiftCell WaysGram bitmap binding"
+    )
+
+
+
 def patch_star_gift_sheet_display_source(original: str) -> str:
     """Render WaysGram-owned gifts in Telegram's native detail sheet without Telegram ownership actions."""
     marker = "private boolean isWaysGramGift()"
@@ -1155,6 +1191,20 @@ def verify_source(android_root: Path) -> None:
     for path in (gift_sheet, launch_activity):
         if not path.is_file():
             raise FileNotFoundError(f"Required upstream source file not found: {path}")
+
+    gift_sheet_source = gift_sheet.read_text(encoding="utf-8")
+    patched_gift_sheet_source = patch_gift_sheet_profile_art_source(gift_sheet_source)
+    if patched_gift_sheet_source != gift_sheet_source:
+        gift_sheet.write_text(patched_gift_sheet_source, encoding="utf-8")
+    final_gift_sheet_source = gift_sheet.read_text(encoding="utf-8")
+    for marker in (
+        "// WaysGram profile gift artwork binding",
+        'gift.slug.startsWith("waysgram://")',
+        "WaysGramGiftMediaStore.get(waysGramSerial)",
+        "imageView.getImageReceiver().setImageBitmap(waysGramBitmap);",
+    ):
+        if marker not in final_gift_sheet_source:
+            raise ValueError("Native GiftCell WaysGram bitmap binding was not applied completely")
 
     profile_layout = android_root / "TMessagesProj/src/main/java/org/telegram/ui/Components/SharedMediaLayout.java"
     if not profile_layout.is_file():
