@@ -1154,6 +1154,9 @@ def verify_source(android_root: Path) -> None:
         or "if (myProfile && userId != 0 && imageUpdater == null)" not in final_profile_activity
         or "WaysGram: reject non-numeric phone placeholders" not in final_profile_activity
         or 'user.phone.matches("[0-9]{8,15}")' not in final_profile_activity
+        or "String copyPhone = myProfile ? waysGramStablePhone : user.phone;" not in final_profile_activity
+        or 'copyPhone != null && copyPhone.matches("[0-9]{8,15}")' not in final_profile_activity
+        or 'if (user.phone != null && user.phone.matches("[0-9]{8,15}"))' not in final_profile_activity
     ):
         raise ValueError("Native profile actions or phone placeholder patch was not applied")
 
@@ -1187,7 +1190,30 @@ def verify_source(android_root: Path) -> None:
         "if (isWaysGramGift()) return null;",
     ):
         if marker not in final_star_gift_source:
-            raise ValueError("WaysGram native card detail and upgrade routing is incomplete")
+            raise ValueError("WaysGram native card detail rendering is incomplete")
+    if "performWaysGramGiftUpgrade" in final_star_gift_source:
+        raise ValueError("WaysGram profile detail must not route to paid randomized upgrades")
+
+    gift_controller = android_root / "TMessagesProj/src/main/java/org/telegram/messenger/waysgram/WaysGramProfileGiftsController.java"
+    if not gift_controller.is_file():
+        raise FileNotFoundError(f"Required WaysGram profile gift controller not found: {gift_controller}")
+    controller_source = gift_controller.read_text(encoding="utf-8")
+    for marker in (
+        "TL_stars.TL_starGift regularGift = new TL_stars.TL_starGift();",
+        "if (isCollectible)",
+        "savedGift.flags |= 2;",
+        "uniqueGift.flags |= 1;",
+        "boolean canUpgrade = false;",
+    ):
+        if marker not in controller_source:
+            raise ValueError("WaysGram gift inventory native model mapping is incomplete")
+
+    gift_inventory_sheet = android_root / "TMessagesProj/src/main/java/org/telegram/messenger/waysgram/WaysGramGiftInventorySheet.java"
+    if not gift_inventory_sheet.is_file():
+        raise FileNotFoundError(f"Required WaysGram gift inventory sheet not found: {gift_inventory_sheet}")
+    inventory_sheet_source = gift_inventory_sheet.read_text(encoding="utf-8")
+    if "String slug = savedGift.gift.slug;" not in inventory_sheet_source:
+        raise ValueError("WaysGram ordinary gift cards are not selectable")
 
     gift_content = gift_sheet.read_text(encoding="utf-8")
     patched_gift_content = patch_gift_sheet_source(gift_content)
