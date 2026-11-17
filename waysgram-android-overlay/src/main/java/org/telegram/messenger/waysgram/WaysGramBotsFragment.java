@@ -42,7 +42,7 @@ public final class WaysGramBotsFragment extends BaseFragment {
     @Override
     public View createView(Context context) {
         actionBar.setTitle("BotFather WaysGram");
-        apiClient = new WaysGramApiClient(WaysGramSessionStore.getInstance(context));
+        apiClient = new WaysGramApiClient(WaysGramSessionStore.getInstance(context, getCurrentAccount()));
 
         ScrollView scroll = new ScrollView(context);
         scroll.setFillViewport(true);
@@ -287,8 +287,8 @@ public final class WaysGramBotsFragment extends BaseFragment {
             public void onError(String message, int statusCode) {
                 statusView.setText(message);
                 if (statusCode == 401) {
-                    WaysGramSessionStore.getInstance(getParentActivity()).clearSession();
-                    presentFragment(new WaysGramLoginFragment(), true);
+                    WaysGramSessionStore.getInstance(getParentActivity(), getCurrentAccount()).clearSession();
+                    presentFragment(new WaysGramLoginFragment(getCurrentAccount()), true);
                 }
             }
         });
