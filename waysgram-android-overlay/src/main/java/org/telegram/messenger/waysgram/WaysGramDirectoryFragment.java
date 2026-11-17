@@ -748,7 +748,7 @@ public final class WaysGramDirectoryFragment extends BaseFragment {
                         ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT
                 ));
                 profileButton.setOnClickListener(view ->
-                        presentFragment(new WaysGramUserProfileFragment(id), false));
+                        presentFragment(new WaysGramUserProfileFragment(id, getCurrentAccount()), false));
             }
             Button manage = new Button(getParentActivity());
             manage.setAllCaps(false);
