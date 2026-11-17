@@ -70,7 +70,7 @@ public final class WaysGramNativeGiftReceiptAdapter {
         if (selfId <= 0) {
             return;
         }
-        StarsController.getInstance(account).getStarGift(giftId, gift -> {
+        resolveGiftOrFallback(account, giftId, gift -> {
             String displayTitle = WaysGramGiftNames.displayName(
                     waysGramTitle, gift == null ? "" : gift.title, telegramGiftId
             );
@@ -273,7 +273,7 @@ public final class WaysGramNativeGiftReceiptAdapter {
         if (idMatcher.find()) {
             try {
                 long giftId = Long.parseLong(idMatcher.group(1));
-                StarsController.getInstance(account).getStarGift(giftId, callback);
+                resolveGiftOrFallback(account, giftId, callback);
                 return;
             } catch (NumberFormatException ignored) {
             }
@@ -324,6 +324,55 @@ public final class WaysGramNativeGiftReceiptAdapter {
             );
             callback.run(null);
         }
+    }
+
+    private static TL_stars.StarGift findLoadedGift(StarsController controller, long giftId) {
+        if (controller == null || controller.gifts == null) {
+            return null;
+        }
+        for (TL_stars.StarGift gift : controller.gifts) {
+            if (gift != null && gift.id == giftId) {
+                return gift;
+            }
+        }
+        return null;
+    }
+
+    private static void resolveGiftOrFallback(
+            int account,
+            long giftId,
+            Utilities.Callback<TL_stars.StarGift> callback
+    ) {
+        StarsController controller = StarsController.getInstance(account);
+        final boolean[] completed = new boolean[] { false };
+        final NotificationCenter.NotificationCenterDelegate[] observer =
+                new NotificationCenter.NotificationCenterDelegate[1];
+        observer[0] = (id, currentAccount, args) -> {
+            if (completed[0] || id != NotificationCenter.starGiftsLoaded || currentAccount != account) {
+                return;
+            }
+            TL_stars.StarGift found = findLoadedGift(controller, giftId);
+            if (found != null || (controller.giftsLoaded && !controller.giftsLoading)) {
+                completed[0] = true;
+                NotificationCenter.getInstance(account).removeObserver(
+                        observer[0], NotificationCenter.starGiftsLoaded
+                );
+                callback.run(found);
+            }
+        };
+        NotificationCenter.getInstance(account).addObserver(
+                observer[0], NotificationCenter.starGiftsLoaded
+        );
+        TL_stars.StarGift found = findLoadedGift(controller, giftId);
+        if (found != null || (controller.giftsLoaded && !controller.giftsLoading)) {
+            completed[0] = true;
+            NotificationCenter.getInstance(account).removeObserver(
+                    observer[0], NotificationCenter.starGiftsLoaded
+            );
+            callback.run(found);
+            return;
+        }
+        controller.loadStarGifts();
     }
 
     private static long parseGiftId(String title) {
