@@ -284,13 +284,62 @@ public final class WaysGramUserProfileFragment extends BaseFragment {
             if (title.isEmpty()) {
                 title = username.isEmpty() ? "Пользователь " + id : username;
             }
+            LinearLayout contactRow = new LinearLayout(getParentActivity());
+            contactRow.setOrientation(LinearLayout.HORIZONTAL);
+            contactRow.setGravity(Gravity.CENTER_VERTICAL);
             Button item = new Button(getParentActivity());
             item.setAllCaps(false);
             item.setGravity(Gravity.START | Gravity.CENTER_VERTICAL);
             item.setText(username.isEmpty() ? title : title + "\n@" + username);
-            contactsContainer.addView(item, matchWrap());
+            contactRow.addView(item, new LinearLayout.LayoutParams(
+                    0, ViewGroup.LayoutParams.WRAP_CONTENT, 1
+            ));
+            addProfileLabels(contactRow, contact.optJSONArray("labels"));
+            contactsContainer.addView(contactRow, matchWrap());
             item.setOnClickListener(view ->
                     presentFragment(new WaysGramUserProfileFragment(id), false));
+        }
+    }
+
+    private void addProfileLabels(LinearLayout parent, JSONArray labels) {
+        if (parent == null || labels == null) {
+            return;
+        }
+        int count = Math.min(labels.length(), 4);
+        for (int i = 0; i < count; i++) {
+            JSONObject label = labels.optJSONObject(i);
+            if (label == null) {
+                continue;
+            }
+            String value = label.optString("text", "").trim();
+            if (value.isEmpty()) {
+                continue;
+            }
+            int color;
+            try {
+                color = Color.parseColor(label.optString("color", "#6B7280"));
+            } catch (IllegalArgumentException exception) {
+                color = Color.GRAY;
+            }
+            double luminance = 0.299 * Color.red(color)
+                    + 0.587 * Color.green(color)
+                    + 0.114 * Color.blue(color);
+            TextView chip = new TextView(getParentActivity());
+            chip.setText(value);
+            chip.setTextSize(10);
+            chip.setSingleLine(true);
+            chip.setTextColor(luminance > 150 ? Color.BLACK : Color.WHITE);
+            chip.setPadding(AndroidUtilities.dp(5), AndroidUtilities.dp(3),
+                    AndroidUtilities.dp(5), AndroidUtilities.dp(3));
+            GradientDrawable background = new GradientDrawable();
+            background.setColor(color);
+            background.setCornerRadius(AndroidUtilities.dp(6));
+            chip.setBackground(background);
+            LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT
+            );
+            params.leftMargin = AndroidUtilities.dp(4);
+            parent.addView(chip, params);
         }
     }
 
