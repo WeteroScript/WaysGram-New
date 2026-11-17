@@ -34,8 +34,9 @@ import java.util.regex.Pattern;
 public final class WaysGramNativeGiftReceiptAdapter {
     private static final String PREFS = "waysgram_native_gift_receipts";
     private static final Pattern LEGACY_RECEIPT = Pattern.compile(
-            "^\\s*Вы приобрели коллекционный подарок\\s*«\\s*(?:Telegram\\s+Gift\\s+)?([0-9]{5,})\\s*».*$",
-            Pattern.CASE_INSENSITIVE | Pattern.UNICODE_CASE
+            "^\\s*Вы приобрели коллекционный подарок\\s*«\\s*(.*?)\\s*».*$",
+            Pattern.CASE_INSENSITIVE | Pattern.UNICODE_CASE | Pattern.DOTALL
+            
     );
     private static final Map<MessageObject, Boolean> HYDRATING =
             Collections.synchronizedMap(new WeakHashMap<MessageObject, Boolean>());
@@ -191,17 +192,13 @@ public final class WaysGramNativeGiftReceiptAdapter {
             if (!matcher.matches()) {
                 continue;
             }
-            final long giftId;
-            try {
-                giftId = Long.parseLong(matcher.group(1));
-            } catch (NumberFormatException exception) {
-                continue;
-            }
-            if (giftId <= 0) {
+            final String receiptTitle = matcher.group(1) == null
+                    ? "" : matcher.group(1).trim();
+            if (receiptTitle.isEmpty()) {
                 continue;
             }
             HYDRATING.put(messageObject, Boolean.TRUE);
-            StarsController.getInstance(account).getStarGift(giftId, gift -> {
+            resolveLegacyGift(account, receiptTitle, gift -> {
                 if (gift == null || messageObject.messageOwner == null
                         || !messages.contains(messageObject)) {
                     HYDRATING.remove(messageObject);
@@ -227,7 +224,7 @@ public final class WaysGramNativeGiftReceiptAdapter {
                 service.send_state = original.send_state;
                 service.message = "";
                 String displayTitle = WaysGramGiftNames.displayName(
-                        gift.title, "", Long.toString(giftId)
+                        receiptTitle, gift.title, Long.toString(gift.id)
                 );
                 service.action = createStarGiftAction(
                         copyGiftForDisplay(gift, displayTitle),
@@ -236,8 +233,7 @@ public final class WaysGramNativeGiftReceiptAdapter {
                         dialogId == selfId
                 );
                 MessageObject replacement = new MessageObject(account, service, false, true);
-                int index = messages.indexOf(messageObject);
-                if (index >= 0) {
+                if (messages.contains(messageObject)) {
                     ArrayList<MessageObject> replacements = new ArrayList<>();
                     replacements.add(replacement);
                     NotificationCenter.getInstance(account).postNotificationName(
@@ -249,6 +245,65 @@ public final class WaysGramNativeGiftReceiptAdapter {
                 HYDRATING.remove(messageObject);
             });
         }
+    }
+
+    private static void resolveLegacyGift(
+            int account,
+            String receiptTitle,
+            Utilities.Callback<TL_stars.StarGift> callback
+    ) {
+        Matcher idMatcher = Pattern.compile(
+                "(?:Telegram\\\\s+)?Gift\\\\s+([0-9]{5,})",
+                Pattern.CASE_INSENSITIVE
+        ).matcher(receiptTitle);
+        if (idMatcher.find()) {
+            try {
+                long giftId = Long.parseLong(idMatcher.group(1));
+                StarsController.getInstance(account).getStarGift(giftId, callback);
+                return;
+            } catch (NumberFormatException ignored) {
+            }
+        }
+
+        final String wanted = WaysGramGiftNames.displayName(receiptTitle, receiptTitle, "");
+        StarsController controller = StarsController.getInstance(account);
+        for (TL_stars.StarGift gift : controller.gifts) {
+            String candidate = WaysGramGiftNames.displayName(
+                    gift.title, "", Long.toString(gift.id)
+            );
+            if (candidate.equalsIgnoreCase(wanted)) {
+                callback.run(gift);
+                return;
+            }
+        }
+
+        final NotificationCenter.NotificationCenterDelegate[] observer =
+                new NotificationCenter.NotificationCenterDelegate[1];
+        observer[0] = (id, currentAccount, args) -> {
+            if (id != NotificationCenter.starGiftsLoaded || currentAccount != account) {
+                return;
+            }
+            TL_stars.StarGift matched = null;
+            for (TL_stars.StarGift gift : controller.gifts) {
+                String candidate = WaysGramGiftNames.displayName(
+                        gift.title, "", Long.toString(gift.id)
+                );
+                if (candidate.equalsIgnoreCase(wanted)) {
+                    matched = gift;
+                    break;
+                }
+            }
+            if (matched != null || controller.giftsLoaded) {
+                NotificationCenter.getInstance(account).removeObserver(
+                        observer[0], NotificationCenter.starGiftsLoaded
+                );
+                callback.run(matched);
+            }
+        };
+        NotificationCenter.getInstance(account).addObserver(
+                observer[0], NotificationCenter.starGiftsLoaded
+        );
+        controller.loadStarGifts();
     }
 
     private static TL_stars.StarGift copyGiftForDisplay(
@@ -272,6 +327,7 @@ public final class WaysGramNativeGiftReceiptAdapter {
             }
             if (displayTitle != null && !displayTitle.trim().isEmpty()) {
                 copy.title = displayTitle.trim();
+                copy.flags |= 1 << 5;
             }
             // Disable Telegram's chance-based paid upgrade on this WaysGram receipt.
             copy.can_upgrade = false;
