@@ -413,27 +413,36 @@ public final class WaysGramNativeGiftReceiptAdapter {
                     buffer, constructor, false
             );
             if (copy == null) {
-                return original;
+                return applyWaysGramReceiptFields(original, displayTitle, serial);
             }
-            if (displayTitle != null && !displayTitle.trim().isEmpty()) {
-                copy.title = displayTitle.trim();
-                copy.flags |= 1 << 5;
-            }
-            copy.slug = "waysgram://" + serial.trim();
-            if (copy.sticker == null) {
-                copy.sticker = new TLRPC.TL_documentEmpty();
-                copy.sticker.id = copy.id;
-            }
-            // Disable Telegram's chance-based paid upgrade on this WaysGram receipt.
-            copy.can_upgrade = false;
-            return copy;
+            return applyWaysGramReceiptFields(copy, displayTitle, serial);
         } catch (Exception exception) {
-            return original;
+            return applyWaysGramReceiptFields(original, displayTitle, serial);
         } finally {
             if (buffer != null) {
                 buffer.reuse();
             }
         }
+    }
+
+    private static TL_stars.StarGift applyWaysGramReceiptFields(
+            TL_stars.StarGift gift, String displayTitle, String serial
+    ) {
+        if (gift == null) {
+            return createSyntheticGift(1, displayTitle, serial);
+        }
+        if (displayTitle != null && !displayTitle.trim().isEmpty()) {
+            gift.title = displayTitle.trim();
+            gift.flags |= 1 << 5;
+        }
+        gift.slug = "waysgram://" + serial.trim();
+        if (gift.sticker == null) {
+            gift.sticker = new TLRPC.TL_documentEmpty();
+            gift.sticker.id = gift.id;
+        }
+        // WaysGram upgrades are handled internally; paid Telegram upgrades remain disabled.
+        gift.can_upgrade = false;
+        return gift;
     }
 
     private static TLRPC.TL_messageActionStarGift createStarGiftAction(
