@@ -41,6 +41,8 @@ public final class WaysGramNativeGiftReceiptAdapter {
     private static final Map<MessageObject, Boolean> HYDRATING =
             Collections.synchronizedMap(new WeakHashMap<MessageObject, Boolean>());
     private static final Set<String> INSERTING = Collections.synchronizedSet(new HashSet<String>());
+    private static final Set<String> MEDIA_LOADING = Collections.synchronizedSet(new HashSet<String>());
+    private static final Map<String, Long> MEDIA_LAST_ATTEMPT = Collections.synchronizedMap(new java.util.HashMap<String, Long>());
 
     private WaysGramNativeGiftReceiptAdapter() {
     }
@@ -406,12 +408,31 @@ public final class WaysGramNativeGiftReceiptAdapter {
         return gift;
     }
 
+    public static void ensureGiftMedia(int account, String giftId, String serial) {
+        if (WaysGramGiftMediaStore.get(serial) != null
+                || WaysGramGiftMediaStore.getAnimationFile(serial) != null) {
+            return;
+        }
+        warmGiftMedia(account, giftId, serial);
+    }
+
     private static void warmGiftMedia(int account, String giftId, String serial) {
         Context context = ApplicationLoader.applicationContext;
         if (context == null || giftId == null || !giftId.matches("[A-Za-z0-9_-]{1,120}")
                 || serial == null || serial.trim().isEmpty()) {
             return;
         }
+        String requestKey = account + ":" + serial.trim();
+        long now = System.currentTimeMillis();
+        Long lastAttempt = MEDIA_LAST_ATTEMPT.get(requestKey);
+        if (MEDIA_LOADING.contains(requestKey)
+                || lastAttempt != null && now - lastAttempt < 30000L
+                || WaysGramGiftMediaStore.get(serial) != null
+                || WaysGramGiftMediaStore.getAnimationFile(serial) != null
+                || !MEDIA_LOADING.add(requestKey)) {
+            return;
+        }
+        MEDIA_LAST_ATTEMPT.put(requestKey, now);
         WaysGramApiClient client = new WaysGramApiClient(
                 WaysGramSessionStore.getInstance(context, account)
         );
@@ -421,6 +442,7 @@ public final class WaysGramNativeGiftReceiptAdapter {
                 if (bitmap != null && !bitmap.isRecycled()) {
                     WaysGramGiftMediaStore.put(serial, bitmap);
                 }
+                MEDIA_LOADING.remove(requestKey);
                 client.close();
             }
 
@@ -431,11 +453,13 @@ public final class WaysGramNativeGiftReceiptAdapter {
                             @Override
                             public void onSuccess(java.io.File file) {
                                 WaysGramGiftMediaStore.putAnimationFile(serial, file);
+                                MEDIA_LOADING.remove(requestKey);
                                 client.close();
                             }
 
                             @Override
                             public void onError(String animationMessage, int animationStatus) {
+                                MEDIA_LOADING.remove(requestKey);
                                 client.close();
                             }
                         }
