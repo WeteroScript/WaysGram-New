@@ -71,17 +71,17 @@ public final class WaysGramNativeGiftReceiptAdapter {
             return;
         }
         StarsController.getInstance(account).getStarGift(giftId, gift -> {
-            if (gift == null) {
-                return;
-            }
             String displayTitle = WaysGramGiftNames.displayName(
-                    waysGramTitle, gift.title, telegramGiftId
+                    waysGramTitle, gift == null ? "" : gift.title, telegramGiftId
             );
-            TL_stars.StarGift displayGift = copyGiftForDisplay(gift, displayTitle);
+            TL_stars.StarGift displayGift = gift == null
+                    ? createSyntheticGift(giftId, displayTitle, serial)
+                    : copyGiftForDisplay(gift, displayTitle, serial);
             addLocalReceipt(account, selfId, displayGift, serial, true);
             if (ownerTelegramId > 0 && ownerTelegramId != selfId) {
                 addLocalReceipt(account, ownerTelegramId, displayGift, serial, false);
             }
+            warmGiftMedia(account, telegramGiftId, serial);
         });
     }
 
@@ -199,11 +199,18 @@ public final class WaysGramNativeGiftReceiptAdapter {
             }
             HYDRATING.put(messageObject, Boolean.TRUE);
             resolveLegacyGift(account, receiptTitle, gift -> {
-                if (gift == null || messageObject.messageOwner == null
-                        || !messages.contains(messageObject)) {
+                if (messageObject.messageOwner == null || !messages.contains(messageObject)) {
                     HYDRATING.remove(messageObject);
                     return;
                 }
+                long fallbackGiftId = parseGiftId(receiptTitle);
+                if (gift == null && fallbackGiftId <= 0) {
+                    HYDRATING.remove(messageObject);
+                    return;
+                }
+                String legacySerial = fallbackGiftId > 0
+                        ? Long.toString(fallbackGiftId)
+                        : "legacy-" + Integer.toUnsignedString(receiptTitle.hashCode());
                 TLRPC.Message original = messageObject.messageOwner;
                 TLRPC.TL_messageService service = new TLRPC.TL_messageService();
                 service.id = original.id;
@@ -224,14 +231,18 @@ public final class WaysGramNativeGiftReceiptAdapter {
                 service.send_state = original.send_state;
                 service.message = "";
                 String displayTitle = WaysGramGiftNames.displayName(
-                        receiptTitle, gift.title, Long.toString(gift.id)
+                        receiptTitle, gift == null ? "" : gift.title,
+                        Long.toString(fallbackGiftId > 0 ? fallbackGiftId : gift.id)
                 );
+                TL_stars.StarGift displayGift = gift == null
+                        ? createSyntheticGift(fallbackGiftId, displayTitle, legacySerial)
+                        : copyGiftForDisplay(gift, displayTitle, legacySerial);
                 service.action = createStarGiftAction(
-                        copyGiftForDisplay(gift, displayTitle),
-                        selfId,
-                        dialogId,
-                        dialogId == selfId
+                        displayGift, selfId, dialogId, dialogId == selfId
                 );
+                if (fallbackGiftId > 0) {
+                    warmGiftMedia(account, Long.toString(fallbackGiftId), legacySerial);
+                }
                 MessageObject replacement = new MessageObject(account, service, false, true);
                 if (messages.contains(messageObject)) {
                     ArrayList<MessageObject> replacements = new ArrayList<>();
@@ -312,9 +323,79 @@ public final class WaysGramNativeGiftReceiptAdapter {
         }
     }
 
+    private static long parseGiftId(String title) {
+        Matcher matcher = Pattern.compile(
+                "(?:Telegram\\s+)?Gift\\s+([0-9]{5,})",
+                Pattern.CASE_INSENSITIVE
+        ).matcher(title == null ? "" : title);
+        if (!matcher.find()) {
+            return 0;
+        }
+        try {
+            return Long.parseLong(matcher.group(1));
+        } catch (NumberFormatException ignored) {
+            return 0;
+        }
+    }
+
+    private static TL_stars.StarGift createSyntheticGift(
+            long giftId, String displayTitle, String serial
+    ) {
+        TL_stars.TL_starGift gift = new TL_stars.TL_starGift();
+        gift.id = giftId > 0 ? giftId : Math.max(1L, serial.hashCode() & 0xffffffffL);
+        gift.gift_id = gift.id;
+        gift.title = displayTitle == null || displayTitle.trim().isEmpty()
+                ? "Подарок WaysGram" : displayTitle.trim();
+        gift.slug = "waysgram://" + serial.trim();
+        gift.sticker = new TLRPC.TL_documentEmpty();
+        gift.sticker.id = gift.id;
+        gift.can_upgrade = false;
+        gift.flags |= 1 << 5;
+        return gift;
+    }
+
+    private static void warmGiftMedia(int account, String giftId, String serial) {
+        Context context = ApplicationLoader.applicationContext;
+        if (context == null || giftId == null || !giftId.matches("[A-Za-z0-9_-]{1,120}")
+                || serial == null || serial.trim().isEmpty()) {
+            return;
+        }
+        WaysGramApiClient client = new WaysGramApiClient(
+                WaysGramSessionStore.getInstance(context, account)
+        );
+        client.downloadTelegramGiftSticker(giftId, new WaysGramApiClient.ImageCallback() {
+            @Override
+            public void onSuccess(android.graphics.Bitmap bitmap) {
+                if (bitmap != null && !bitmap.isRecycled()) {
+                    WaysGramGiftMediaStore.put(serial, bitmap);
+                }
+                client.close();
+            }
+
+            @Override
+            public void onError(String message, int statusCode) {
+                client.downloadTelegramGiftStickerAnimation(
+                        giftId, context.getCacheDir(), new WaysGramApiClient.FileCallback() {
+                            @Override
+                            public void onSuccess(java.io.File file) {
+                                WaysGramGiftMediaStore.putAnimationFile(serial, file);
+                                client.close();
+                            }
+
+                            @Override
+                            public void onError(String animationMessage, int animationStatus) {
+                                client.close();
+                            }
+                        }
+                );
+            }
+        });
+    }
+
     private static TL_stars.StarGift copyGiftForDisplay(
             TL_stars.StarGift original,
-            String displayTitle
+            String displayTitle,
+            String serial
     ) {
         if (original == null) {
             return null;
@@ -334,6 +415,11 @@ public final class WaysGramNativeGiftReceiptAdapter {
             if (displayTitle != null && !displayTitle.trim().isEmpty()) {
                 copy.title = displayTitle.trim();
                 copy.flags |= 1 << 5;
+            }
+            copy.slug = "waysgram://" + serial.trim();
+            if (copy.sticker == null) {
+                copy.sticker = new TLRPC.TL_documentEmpty();
+                copy.sticker.id = copy.id;
             }
             // Disable Telegram's chance-based paid upgrade on this WaysGram receipt.
             copy.can_upgrade = false;
