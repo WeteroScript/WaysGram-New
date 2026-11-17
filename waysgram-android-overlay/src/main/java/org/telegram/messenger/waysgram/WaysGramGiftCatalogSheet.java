@@ -920,6 +920,9 @@ public final class WaysGramGiftCatalogSheet extends BottomSheet {
                         previewFile, true, 0, 0, null, null, null, 0,
                         telegramAccount, true, 64, 64, null
                 );
+                if (webm) {
+                    drawable.setIsWebmSticker(true);
+                }
                 return drawable.getFirstFrame(null);
             } catch (Exception exception) {
                 return null;
