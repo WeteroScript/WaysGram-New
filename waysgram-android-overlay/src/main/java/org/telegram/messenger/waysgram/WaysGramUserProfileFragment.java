@@ -30,6 +30,8 @@ public final class WaysGramUserProfileFragment extends BaseFragment {
     private ImageView avatarView;
     private TextView statusView;
     private TextView identityView;
+    private TextView usernameView;
+    private TextView bioView;
     private LinearLayout labelsContainer;
     private LinearLayout groupsContainer;
     private LinearLayout contactsContainer;
@@ -73,9 +75,25 @@ public final class WaysGramUserProfileFragment extends BaseFragment {
         root.addView(avatarView, avatarParams);
 
         identityView = addLabel(context, root, "Загружаю профиль…", 18, true);
+        LinearLayout identityRow = new LinearLayout(context);
+        identityRow.setOrientation(LinearLayout.HORIZONTAL);
+        identityRow.setGravity(Gravity.CENTER_VERTICAL);
+        root.addView(identityRow, matchWrap());
+        usernameView = new TextView(context);
+        usernameView.setTextSize(13);
+        usernameView.setTextColor(Theme.getColor(Theme.key_windowBackgroundWhiteGrayText));
+        identityRow.addView(usernameView, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT
+        ));
         labelsContainer = new LinearLayout(context);
-        labelsContainer.setOrientation(LinearLayout.VERTICAL);
-        root.addView(labelsContainer, matchWrap());
+        labelsContainer.setOrientation(LinearLayout.HORIZONTAL);
+        labelsContainer.setGravity(Gravity.CENTER_VERTICAL);
+        LinearLayout.LayoutParams labelsParams = new LinearLayout.LayoutParams(
+                0, ViewGroup.LayoutParams.WRAP_CONTENT, 1
+        );
+        labelsParams.leftMargin = AndroidUtilities.dp(6);
+        identityRow.addView(labelsContainer, labelsParams);
+        bioView = addLabel(context, root, "", 13, false);
         statusView = addLabel(context, root, "", 12, false);
 
         Button messageButton = new Button(context);
@@ -129,14 +147,10 @@ public final class WaysGramUserProfileFragment extends BaseFragment {
                 if (name.isEmpty()) {
                     name = username.isEmpty() ? "Пользователь " + userId : username;
                 }
-                StringBuilder identity = new StringBuilder(name);
-                if (!username.isEmpty()) {
-                    identity.append("\n@").append(username);
-                }
-                if (!bio.isEmpty()) {
-                    identity.append("\n\n").append(bio);
-                }
-                identityView.setText(identity.toString());
+                identityView.setText(name);
+                usernameView.setText(username.isEmpty() ? "" : "@" + username);
+                bioView.setText(bio);
+                bioView.setVisibility(bio.isEmpty() ? View.GONE : View.VISIBLE);
                 renderLabels(response.optJSONArray("labels"));
 
                 String avatarId = response.optString("avatar_media_id", "");
@@ -214,7 +228,7 @@ public final class WaysGramUserProfileFragment extends BaseFragment {
                     ViewGroup.LayoutParams.WRAP_CONTENT,
                     ViewGroup.LayoutParams.WRAP_CONTENT
             );
-            params.bottomMargin = AndroidUtilities.dp(4);
+            params.leftMargin = AndroidUtilities.dp(4);
             labelsContainer.addView(chip, params);
         }
     }
@@ -287,8 +301,7 @@ public final class WaysGramUserProfileFragment extends BaseFragment {
             addLabel(getParentActivity(), giftsContainer, "Публичных подарков не найдено", 13, false);
             return;
         }
-        int visible = Math.min(count, 50);
-        for (int i = 0; i < visible; i++) {
+        for (int i = 0; i < count; i++) {
             JSONObject gift = gifts.optJSONObject(i);
             if (gift == null) {
                 continue;
