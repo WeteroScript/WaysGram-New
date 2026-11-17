@@ -121,14 +121,7 @@ public final class WaysGramTimelineFragment extends BaseFragment {
         root.setPadding(AndroidUtilities.dp(10), AndroidUtilities.dp(8),
                 AndroidUtilities.dp(10), AndroidUtilities.dp(8));
 
-        statusView = new TextView(context);
-        statusView.setText("Загружаю сообщения…");
-        statusView.setTextSize(12);
-        statusView.setTextColor(Theme.getColor(Theme.key_windowBackgroundWhiteGrayText));
-        root.addView(statusView, new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.WRAP_CONTENT
-        ));
+        // Channel labels sit directly under the channel title, before transient status text.
         if (type == TYPE_CHANNEL) {
             channelLabelsContainer = new LinearLayout(context);
             channelLabelsContainer.setOrientation(LinearLayout.HORIZONTAL);
@@ -137,6 +130,14 @@ public final class WaysGramTimelineFragment extends BaseFragment {
                     ViewGroup.LayoutParams.WRAP_CONTENT
             ));
         }
+        statusView = new TextView(context);
+        statusView.setText("Загружаю сообщения…");
+        statusView.setTextSize(12);
+        statusView.setTextColor(Theme.getColor(Theme.key_windowBackgroundWhiteGrayText));
+        root.addView(statusView, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+        ));
         if (type == TYPE_GROUP) {
             typingView = new TextView(context);
             typingView.setTextSize(12);
