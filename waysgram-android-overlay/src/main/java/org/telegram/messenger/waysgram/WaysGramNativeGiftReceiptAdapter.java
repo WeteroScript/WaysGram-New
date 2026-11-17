@@ -7,6 +7,7 @@ import android.text.TextUtils;
 import org.telegram.messenger.ApplicationLoader;
 import org.telegram.messenger.ConnectionsManager;
 import org.telegram.messenger.MessageObject;
+import org.telegram.tgnet.NativeByteBuffer;
 import org.telegram.messenger.MessagesController;
 import org.telegram.messenger.MessagesStorage;
 import org.telegram.messenger.NotificationCenter;
@@ -19,6 +20,7 @@ import org.telegram.tgnet.tl.TL_stars;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Map;
+import java.util.HashSet;
 import java.util.Set;
 import java.util.WeakHashMap;
 import java.util.concurrent.ConcurrentHashMap;
@@ -38,7 +40,7 @@ public final class WaysGramNativeGiftReceiptAdapter {
     );
     private static final Map<MessageObject, Boolean> HYDRATING =
             Collections.synchronizedMap(new WeakHashMap<MessageObject, Boolean>());
-    private static final Set<String> INSERTING = ConcurrentHashMap.newKeySet();
+    private static final Set<String> INSERTING = Collections.synchronizedSet(new HashSet<String>());
 
     private WaysGramNativeGiftReceiptAdapter() {
     }
@@ -52,6 +54,7 @@ public final class WaysGramNativeGiftReceiptAdapter {
             int account,
             String telegramGiftId,
             String serial,
+            String waysGramTitle,
             long ownerTelegramId
     ) {
         final long giftId;
@@ -71,9 +74,13 @@ public final class WaysGramNativeGiftReceiptAdapter {
             if (gift == null) {
                 return;
             }
-            addLocalReceipt(account, selfId, gift, serial, true);
+            String displayTitle = WaysGramGiftNames.displayName(
+                    waysGramTitle, gift.title, telegramGiftId
+            );
+            TL_stars.StarGift displayGift = copyGiftForDisplay(gift, displayTitle);
+            addLocalReceipt(account, selfId, displayGift, serial, true);
             if (ownerTelegramId > 0 && ownerTelegramId != selfId) {
-                addLocalReceipt(account, ownerTelegramId, gift, serial, false);
+                addLocalReceipt(account, ownerTelegramId, displayGift, serial, false);
             }
         });
     }
@@ -220,8 +227,11 @@ public final class WaysGramNativeGiftReceiptAdapter {
                 service.date = original.date;
                 service.send_state = original.send_state;
                 service.message = "";
+                String displayTitle = WaysGramGiftNames.displayName(
+                        gift.title, "", Long.toString(giftId)
+                );
                 service.action = createStarGiftAction(
-                        gift,
+                        copyGiftForDisplay(gift, displayTitle),
                         selfId,
                         dialogId,
                         dialogId == selfId
@@ -239,6 +249,40 @@ public final class WaysGramNativeGiftReceiptAdapter {
                 }
                 HYDRATING.remove(messageObject);
             });
+        }
+    }
+
+    private static TL_stars.StarGift copyGiftForDisplay(
+            TL_stars.StarGift original,
+            String displayTitle
+    ) {
+        if (original == null) {
+            return null;
+        }
+        NativeByteBuffer buffer = null;
+        try {
+            buffer = new NativeByteBuffer(original.getObjectSize());
+            original.serializeToStream(buffer);
+            buffer.position(0);
+            int constructor = buffer.readInt32(false);
+            TL_stars.StarGift copy = TL_stars.StarGift.TLdeserialize(
+                    buffer, constructor, false
+            );
+            if (copy == null) {
+                return original;
+            }
+            if (displayTitle != null && !displayTitle.trim().isEmpty()) {
+                copy.title = displayTitle.trim();
+            }
+            // Disable Telegram's chance-based paid upgrade on this WaysGram receipt.
+            copy.can_upgrade = false;
+            return copy;
+        } catch (Exception exception) {
+            return original;
+        } finally {
+            if (buffer != null) {
+                buffer.reuse();
+            }
         }
     }
 
