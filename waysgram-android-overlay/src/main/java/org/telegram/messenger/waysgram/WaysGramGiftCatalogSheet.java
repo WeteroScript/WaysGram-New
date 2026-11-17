@@ -29,6 +29,7 @@ import androidx.recyclerview.widget.LinearLayoutManager;
 import androidx.recyclerview.widget.RecyclerView;
 
 import org.telegram.messenger.AndroidUtilities;
+import org.telegram.messenger.UserConfig;
 import org.telegram.ui.Components.AnimatedFileDrawable;
 import org.telegram.ui.ActionBar.BottomSheet;
 import org.telegram.ui.ActionBar.Theme;
@@ -733,10 +734,24 @@ public final class WaysGramGiftCatalogSheet extends BottomSheet {
                     String serial = purchasedGift == null
                             ? ""
                             : purchasedGift.optString("serial_number", "");
+                    String purchasedGiftId = purchasedGift == null
+                            ? gift.id
+                            : purchasedGift.optString("telegram_gift_id", gift.id);
+                    long ownerId = purchasedGift == null
+                            ? UserConfig.getInstance(telegramAccount).getClientUserId()
+                            : purchasedGift.optLong(
+                                    "owner_id", UserConfig.getInstance(telegramAccount).getClientUserId()
+                            );
+                    if (!serial.isEmpty()) {
+                        WaysGramNativeGiftReceiptAdapter.addPurchaseReceipt(
+                                telegramAccount, purchasedGiftId, serial, ownerId
+                        );
+                    }
                     int balance = result.optInt("stars", -1);
                     String confirmation = recipient == null ? "Подарок куплен" : "Подарок отправлен другу";
-                    confirmation += (serial.length() > 0 ? " · " + serial : "")
-                            + (balance >= 0 ? " · баланс " + balance + " Stars" : "");
+                    if (balance >= 0) {
+                        confirmation += " · баланс " + balance + " Stars";
+                    }
                     statusView.setText(confirmation);
                     Toast.makeText(getContext(), confirmation, Toast.LENGTH_LONG).show();
                     loadCatalog();
