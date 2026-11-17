@@ -3441,8 +3441,14 @@ public final class WaysGramChatFragment extends BaseFragment {
 
             }
 
+            JSONObject giftStickerInfo = giftTelegramMetadata == null
+                    ? null : giftTelegramMetadata.optJSONObject("sticker");
+            boolean giftIsAnimated = giftStickerInfo != null
+                    && (giftStickerInfo.optBoolean("is_animated", false)
+                    || giftStickerInfo.optBoolean("is_video", false));
             WaysGramGiftCardRenderer.addPreview(
-                    getParentActivity(), giftCard, apiClient, giftTelegramId, giftEmoji
+                    getParentActivity(), giftCard, apiClient, giftTelegramId, giftEmoji,
+                    giftIsAnimated, getCurrentAccount()
             );
 
             TextView giftDetails = new TextView(getParentActivity());
