@@ -1221,14 +1221,14 @@ def patch_chat_activity_native_gift_receipts_source(original: str) -> str:
             raise ValueError("ChatActivity contains an incomplete WaysGram receipt patch")
         return original
 
-    anchor = "        checkGroupMessagesOrder();\\n"
+    anchor = "        checkGroupMessagesOrder();\n"
     replacement = (
         anchor
-        + "        // WaysGram: hydrate legacy native gift receipts\\n"
-        + "        if (chatMode == MODE_DEFAULT && chatAdapter != null) {\\n"
-        + "            org.telegram.messenger.waysgram.WaysGramNativeGiftReceiptAdapter.hydrateLegacyReceipts(\\n"
-        + "                    currentAccount, dialog_id, messages);\\n"
-        + "        }\\n"
+        + "        // WaysGram: hydrate legacy native gift receipts\n"
+        + "        if (chatMode == MODE_DEFAULT && chatAdapter != null) {\n"
+        + "            org.telegram.messenger.waysgram.WaysGramNativeGiftReceiptAdapter.hydrateLegacyReceipts(\n"
+        + "                    currentAccount, dialog_id, messages);\n"
+        + "        }\n"
     )
     return replace_exactly_once(
         original,
