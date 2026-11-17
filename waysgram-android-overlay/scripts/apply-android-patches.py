@@ -1007,8 +1007,9 @@ def patch_chat_action_cell_waysgram_receipts_source(original: str) -> str:
     if marker in original:
         required = (
             'action.gift.slug.startsWith("waysgram://")',
+            'messageObject.messageOwner.params.containsKey("waysgram_gift_serial")',
             "WaysGramGiftMediaStore.getAnimationFile(waysGramSerial)",
-            "Gift2ActionSelfInfoNoConvert",
+            'title = "Подарок приобретён в WaysGram";',
         )
         if not all(value in original for value in required):
             raise ValueError("ChatActionCell contains an incomplete WaysGram gift receipt patch")
@@ -1023,7 +1024,7 @@ def patch_chat_action_cell_waysgram_receipts_source(original: str) -> str:
     )
     title_after = (
         "                        // WaysGram: render local purchase receipt title and media\n"
-        "                        if (action.gift != null && action.gift.slug != null && action.gift.slug.startsWith(\"waysgram://\") && !TextUtils.isEmpty(action.gift.title)) {\n"
+        "                        if (action.gift != null && !TextUtils.isEmpty(action.gift.title) && ((action.gift.slug != null && action.gift.slug.startsWith(\"waysgram://\")) || (messageObject.messageOwner.params != null && messageObject.messageOwner.params.containsKey(\"waysgram_gift_serial\")))) {\n"
         "                            sb.append(action.gift.title);\n"
         "                        } else if (action.gift_num > 0 && action.gift != null && action.gift.title != null) {\n"
         "                            sb.append(action.gift.title).append(\" #\").append(formatNumber(action.gift_num, ','));\n"
@@ -1048,7 +1049,7 @@ def patch_chat_action_cell_waysgram_receipts_source(original: str) -> str:
     )
     subtitle_after = (
         "                    } else if (self) {\n"
-        "                        if (action.gift != null && action.gift.slug != null && action.gift.slug.startsWith(\"waysgram://\")) {\n"
+        "                        if ((action.gift != null && action.gift.slug != null && action.gift.slug.startsWith(\"waysgram://\")) || (messageObject.messageOwner.params != null && messageObject.messageOwner.params.containsKey(\"waysgram_gift_serial\"))) {\n"
         "                            title = \"Подарок приобретён в WaysGram\";\n"
         "                        } else if (action.converted && stars > 0) {\n"
         "                            title = formatPluralStringComma(\"Gift2ActionConvertedInfo\", (int) stars);\n"
@@ -1074,8 +1075,8 @@ def patch_chat_action_cell_waysgram_receipts_source(original: str) -> str:
     media_binding = (
         "                if (messageObject.messageOwner.action instanceof TLRPC.TL_messageActionStarGift) {\n"
         "                    TL_stars.StarGift waysGramGift = ((TLRPC.TL_messageActionStarGift) messageObject.messageOwner.action).gift;\n"
-        "                    if (waysGramGift != null && waysGramGift.slug != null && waysGramGift.slug.startsWith(\"waysgram://\")) {\n"
-        "                        String waysGramSerial = waysGramGift.slug.substring(\"waysgram://\".length()).trim();\n"
+        "                    String waysGramSerial = waysGramGift != null && waysGramGift.slug != null && waysGramGift.slug.startsWith(\"waysgram://\") ? waysGramGift.slug.substring(\"waysgram://\".length()).trim() : (messageObject.messageOwner.params == null ? \"\" : messageObject.messageOwner.params.get(\"waysgram_gift_serial\"));\n"
+        "                    if (waysGramSerial != null && !waysGramSerial.isEmpty()) {\n"
         "                        java.io.File waysGramAnimationFile = org.telegram.messenger.waysgram.WaysGramGiftMediaStore.getAnimationFile(waysGramSerial);\n"
         "                        if (waysGramAnimationFile != null && waysGramAnimationFile.isFile()) {\n"
         "                            org.telegram.ui.Components.AnimatedFileDrawable waysGramAnimation = new org.telegram.ui.Components.AnimatedFileDrawable(waysGramAnimationFile, true, 0, 0, null, null, null, 0, currentAccount, true, 160, 160, null);\n"
