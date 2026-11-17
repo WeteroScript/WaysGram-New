@@ -40,6 +40,8 @@ public final class WaysGramHomeFragment extends BaseFragment {
     private WaysGramSessionStore sessionStore;
     private WaysGramApiClient apiClient;
     private TextView profileView;
+    private TextView profileDetailsView;
+    private LinearLayout labelsContainer;
     private TextView walletView;
     private TextView statusView;
     private TextView inboxSummaryView;
@@ -106,6 +108,12 @@ public final class WaysGramHomeFragment extends BaseFragment {
         content.addView(avatarView, avatarParams);
 
         profileView = addLabel(context, content, "Загрузка профиля…", 19, true);
+        labelsContainer = new LinearLayout(context);
+        labelsContainer.setOrientation(LinearLayout.HORIZONTAL);
+        content.addView(labelsContainer, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
+        ));
+        profileDetailsView = addLabel(context, content, "", 13, false);
         walletView = addLabel(context, content, "Баланс загружается…", 14, false);
         statusView = addLabel(context, content, "", 13, false);
         inboxSummaryView = addLabel(context, content, "Непрочитанные сообщения загружаются…", 13, true);
@@ -195,6 +203,50 @@ public final class WaysGramHomeFragment extends BaseFragment {
         button.setOnClickListener(view -> callback.run());
     }
 
+    private void renderLabels(JSONArray labels) {
+        if (labelsContainer == null) {
+            return;
+        }
+        labelsContainer.removeAllViews();
+        int count = labels == null ? 0 : labels.length();
+        for (int i = 0; i < count && i < 12; i++) {
+            JSONObject label = labels.optJSONObject(i);
+            if (label == null) {
+                continue;
+            }
+            String text = label.optString("text", "").trim();
+            if (text.isEmpty()) {
+                continue;
+            }
+            int color;
+            try {
+                color = Color.parseColor(label.optString("color", "#6B7280"));
+            } catch (IllegalArgumentException exception) {
+                color = Color.GRAY;
+            }
+            double luminance = (0.299 * Color.red(color))
+                    + (0.587 * Color.green(color))
+                    + (0.114 * Color.blue(color));
+            TextView chip = new TextView(getParentActivity());
+            chip.setText("  " + text + "  ");
+            chip.setTextSize(11);
+            chip.setTextColor(luminance > 150 ? Color.BLACK : Color.WHITE);
+            chip.setPadding(AndroidUtilities.dp(3), AndroidUtilities.dp(2),
+                    AndroidUtilities.dp(3), AndroidUtilities.dp(2));
+            GradientDrawable background = new GradientDrawable();
+            background.setColor(color);
+            background.setCornerRadius(AndroidUtilities.dp(7));
+            chip.setBackground(background);
+            LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT
+            );
+            params.rightMargin = AndroidUtilities.dp(5);
+            params.bottomMargin = AndroidUtilities.dp(4);
+            labelsContainer.addView(chip, params);
+        }
+    }
+
     private void loadProfile() {
         if (apiClient == null) {
             return;
@@ -223,13 +275,19 @@ public final class WaysGramHomeFragment extends BaseFragment {
                 if (!phone.matches("\\+[1-9][0-9]{7,14}")) {
                     phone = "";
                 }
+                profileView.setText(profileText);
+                StringBuilder details = new StringBuilder();
                 if (!phone.isEmpty()) {
-                    profileText += "\n" + phone;
+                    details.append(phone);
                 }
                 if (!currentBio.isEmpty()) {
-                    profileText += "\n" + currentBio;
+                    if (details.length() > 0) {
+                        details.append('\n');
+                    }
+                    details.append(currentBio);
                 }
-                profileView.setText(profileText);
+                profileDetailsView.setText(details.toString());
+                renderLabels(response.optJSONArray("labels"));
                 if (!avatarId.equals(currentAvatarMediaId)) {
                     currentAvatarMediaId = avatarId;
                     if (avatarId.matches("[a-f0-9]{32}")) {
