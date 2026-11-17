@@ -17,6 +17,7 @@ import android.location.LocationListener;
 import android.location.LocationManager;
 import android.database.Cursor;
 import android.graphics.Bitmap;
+import android.graphics.Color;
 import android.graphics.Outline;
 import android.graphics.drawable.GradientDrawable;
 import android.net.Uri;
@@ -140,6 +141,7 @@ public final class WaysGramChatFragment extends BaseFragment {
     };
     private TextView statusView;
     private TextView typingView;
+    private LinearLayout peerLabelsContainer;
     private boolean messageSendInFlight = false;
     private long replyToMessageId = 0;
     private final Handler pollHandler = new Handler(Looper.getMainLooper());
@@ -211,6 +213,18 @@ public final class WaysGramChatFragment extends BaseFragment {
         root.setOrientation(LinearLayout.VERTICAL);
         root.setPadding(AndroidUtilities.dp(10), AndroidUtilities.dp(8),
                 AndroidUtilities.dp(10), AndroidUtilities.dp(8));
+
+        if (!savedMessages) {
+            peerLabelsContainer = new LinearLayout(context);
+            peerLabelsContainer.setOrientation(LinearLayout.HORIZONTAL);
+            peerLabelsContainer.setGravity(Gravity.CENTER_VERTICAL);
+            peerLabelsContainer.setVisibility(View.GONE);
+            root.addView(peerLabelsContainer, new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT
+            ));
+            loadPeerLabels();
+        }
 
         statusView = new TextView(context);
         statusView.setText("Загрузка истории…");
@@ -1478,6 +1492,79 @@ public final class WaysGramChatFragment extends BaseFragment {
                         }
                     }
                 }
+        );
+    }
+
+    private void loadPeerLabels() {
+        if (savedMessages || apiClient == null || peerId <= 0) {
+            return;
+        }
+        apiClient.get("/api/users/" + peerId, new WaysGramApiClient.Callback() {
+            @Override
+            public void onSuccess(JSONObject response) {
+                String displayName = response.optString("display_name", "").trim();
+                String username = response.optString("username", "").trim();
+                String title = displayName.isEmpty() ? peerTitle : displayName;
+                if (!username.isEmpty()) {
+                    title += "  @" + username;
+                }
+                if (!title.trim().isEmpty()) {
+                    actionBar.setTitle(title);
+                }
+                renderPeerLabels(response.optJSONArray("labels"));
+            }
+
+            @Override
+            public void onError(String message, int statusCode) {
+                // Label lookup is supplementary and must not interrupt chat loading.
+            }
+        });
+    }
+
+    private void renderPeerLabels(JSONArray labels) {
+        if (peerLabelsContainer == null) {
+            return;
+        }
+        peerLabelsContainer.removeAllViews();
+        int count = labels == null ? 0 : Math.min(labels.length(), 8);
+        for (int i = 0; i < count; i++) {
+            JSONObject label = labels.optJSONObject(i);
+            if (label == null) {
+                continue;
+            }
+            String value = label.optString("text", "").trim();
+            if (value.isEmpty()) {
+                continue;
+            }
+            int color;
+            try {
+                color = Color.parseColor(label.optString("color", "#6B7280"));
+            } catch (IllegalArgumentException exception) {
+                color = Color.GRAY;
+            }
+            double luminance = 0.299 * Color.red(color)
+                    + 0.587 * Color.green(color)
+                    + 0.114 * Color.blue(color);
+            TextView chip = new TextView(getParentActivity());
+            chip.setText("  " + value + "  ");
+            chip.setTextSize(11);
+            chip.setSingleLine(true);
+            chip.setTextColor(luminance > 150 ? Color.BLACK : Color.WHITE);
+            chip.setPadding(AndroidUtilities.dp(3), AndroidUtilities.dp(2),
+                    AndroidUtilities.dp(3), AndroidUtilities.dp(2));
+            GradientDrawable background = new GradientDrawable();
+            background.setColor(color);
+            background.setCornerRadius(AndroidUtilities.dp(6));
+            chip.setBackground(background);
+            LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT
+            );
+            params.rightMargin = AndroidUtilities.dp(5);
+            peerLabelsContainer.addView(chip, params);
+        }
+        peerLabelsContainer.setVisibility(
+                peerLabelsContainer.getChildCount() == 0 ? View.GONE : View.VISIBLE
         );
     }
 
