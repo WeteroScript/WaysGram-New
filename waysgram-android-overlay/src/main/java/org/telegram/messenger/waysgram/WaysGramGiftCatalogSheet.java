@@ -898,7 +898,16 @@ public final class WaysGramGiftCatalogSheet extends BottomSheet {
             File previewFile = null;
             AnimatedFileDrawable drawable = null;
             try {
-                String extension = gift.videoSticker ? ".webm" : ".tgs";
+                String stickerMime = gift.stickerMimeType == null
+                        ? "" : gift.stickerMimeType.toLowerCase(java.util.Locale.ROOT);
+                boolean webm = gift.videoSticker || stickerMime.startsWith("video/")
+                        || stickerMime.contains("webm")
+                        || (bytes.length >= 4
+                        && (bytes[0] & 0xff) == 0x1a
+                        && (bytes[1] & 0xff) == 0x45
+                        && (bytes[2] & 0xff) == 0xdf
+                        && (bytes[3] & 0xff) == 0xa3);
+                String extension = webm ? ".webm" : ".tgs";
                 previewFile = new File(
                         getContext().getCacheDir(),
                         "waysgram_gift_preview_" + gift.id + extension
