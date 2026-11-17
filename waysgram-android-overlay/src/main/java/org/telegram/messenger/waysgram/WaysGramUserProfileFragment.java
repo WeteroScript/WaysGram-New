@@ -331,8 +331,14 @@ public final class WaysGramUserProfileFragment extends BaseFragment {
             TextView titleView = addLabel(getParentActivity(), card, title, 16, true);
             titleView.setPadding(AndroidUtilities.dp(2), AndroidUtilities.dp(3),
                     AndroidUtilities.dp(2), AndroidUtilities.dp(5));
+            JSONObject stickerInfo = telegramGift == null
+                    ? null : telegramGift.optJSONObject("sticker");
+            boolean animated = stickerInfo != null
+                    && (stickerInfo.optBoolean("is_animated", false)
+                    || stickerInfo.optBoolean("is_video", false));
             WaysGramGiftCardRenderer.addPreview(
-                    getParentActivity(), card, apiClient, telegramId, emoji
+                    getParentActivity(), card, apiClient, telegramId, emoji,
+                    animated, getCurrentAccount()
             );
             if (telegramGift != null && gift.optBoolean("can_upgrade", false)) {
                 int upgradePrice = telegramGift.optInt("upgrade_star_count", 0);
