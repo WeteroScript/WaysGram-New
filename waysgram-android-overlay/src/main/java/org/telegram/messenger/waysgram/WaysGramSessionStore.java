@@ -2,6 +2,7 @@ package org.telegram.messenger.waysgram;
 
 import android.content.Context;
 import android.content.SharedPreferences;
+import java.io.File;
 import android.security.keystore.KeyGenParameterSpec;
 import android.security.keystore.KeyProperties;
 import android.util.Base64;
@@ -78,39 +79,45 @@ public final class WaysGramSessionStore implements WaysGramGiftCatalogClient.Ses
             return;
         }
 
-        boolean hasToken = hasText(preferences.getString(PREF_SESSION_TOKEN, null));
-        boolean hasBase = hasText(preferences.getString(PREF_API_BASE, null));
+        String selectedToken = preferences.getString(PREF_SESSION_TOKEN, null);
+        String selectedBase = preferences.getString(PREF_API_BASE, null);
+        boolean hasSelectedPair = hasText(selectedToken) && hasText(selectedBase);
+        long selectedTimestamp = preferenceFileModifiedAt(context, LEGACY_PREFS_NAME);
 
         // Previous releases wrote credentials to per-Telegram-account preference
-        // files. Import any existing credentials into the shared store exactly once.
-        if (!hasToken || !hasBase) {
-            for (int account = 0; account < UserConfig.MAX_ACCOUNT_COUNT; account++) {
-                SharedPreferences accountPreferences = context.getSharedPreferences(
-                        ACCOUNT_PREFS_PREFIX + account,
-                        Context.MODE_PRIVATE
-                );
-                String accountToken = accountPreferences.getString(PREF_SESSION_TOKEN, null);
-                String accountBase = accountPreferences.getString(PREF_API_BASE, null);
-                SharedPreferences.Editor editor = preferences.edit();
-                boolean changed = false;
+        // files. Prefer the most recently persisted complete pair: an older shared
+        // legacy token must not override a newer account-scoped WaysGram login.
+        for (int account = 0; account < UserConfig.MAX_ACCOUNT_COUNT; account++) {
+            String preferenceName = ACCOUNT_PREFS_PREFIX + account;
+            SharedPreferences accountPreferences = context.getSharedPreferences(
+                    preferenceName, Context.MODE_PRIVATE
+            );
+            String accountToken = accountPreferences.getString(PREF_SESSION_TOKEN, null);
+            String accountBase = accountPreferences.getString(PREF_API_BASE, null);
+            if (!hasText(accountToken) || !hasText(accountBase)) {
+                continue;
+            }
 
-                if (!hasToken && hasText(accountToken)) {
-                    editor.putString(PREF_SESSION_TOKEN, accountToken);
-                    hasToken = true;
-                    changed = true;
-                }
-                if (!hasBase && hasText(accountBase)) {
-                    editor.putString(PREF_API_BASE, accountBase);
-                    hasBase = true;
-                    changed = true;
-                }
-                if (changed && !editor.commit()) {
-                    Log.e(TAG, "Unable to migrate existing WaysGram credentials from Telegram account "
-                            + account);
+            long accountTimestamp = preferenceFileModifiedAt(context, preferenceName);
+            if (!hasSelectedPair || accountTimestamp > selectedTimestamp) {
+                selectedToken = accountToken;
+                selectedBase = accountBase;
+                selectedTimestamp = accountTimestamp;
+                hasSelectedPair = true;
+            }
+        }
+
+        if (hasSelectedPair) {
+            boolean sameToken = selectedToken.equals(preferences.getString(PREF_SESSION_TOKEN, null));
+            boolean sameBase = selectedBase.equals(preferences.getString(PREF_API_BASE, null));
+            if (!sameToken || !sameBase) {
+                boolean committed = preferences.edit()
+                        .putString(PREF_SESSION_TOKEN, selectedToken)
+                        .putString(PREF_API_BASE, selectedBase)
+                        .commit();
+                if (!committed) {
+                    Log.e(TAG, "Unable to migrate the latest existing WaysGram session");
                     return;
-                }
-                if (hasToken && hasBase) {
-                    break;
                 }
             }
         }
@@ -118,6 +125,11 @@ public final class WaysGramSessionStore implements WaysGramGiftCatalogClient.Ses
         if (!migration.edit().putBoolean(PREF_SHARED_SESSION_MIGRATED, true).commit()) {
             Log.e(TAG, "Unable to persist shared WaysGram session migration state");
         }
+    }
+
+    private static long preferenceFileModifiedAt(Context context, String preferenceName) {
+        File preferencesDirectory = new File(context.getApplicationInfo().dataDir, "shared_prefs");
+        return new File(preferencesDirectory, preferenceName + ".xml").lastModified();
     }
 
     private static boolean hasText(String value) {
