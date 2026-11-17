@@ -9,8 +9,8 @@ import java.util.Map;
 
 /** In-memory sticker and metadata cache for WaysGram gifts rendered by Telegram GiftCell. */
 public final class WaysGramGiftMediaStore {
-    private static final int MAX_ITEMS = 200;
-    private static final int MAX_METADATA_ITEMS = 200;
+    private static final int MAX_ITEMS = 1200;
+    private static final int MAX_METADATA_ITEMS = 1200;
     private static final LinkedHashMap<String, Bitmap> CACHE =
             new LinkedHashMap<String, Bitmap>(MAX_ITEMS, 0.75f, true) {
                 @Override
