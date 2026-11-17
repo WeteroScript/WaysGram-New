@@ -3012,9 +3012,9 @@ public final class WaysGramChatFragment extends BaseFragment {
                 String[] labels = new String[available.size()];
                 for (int i = 0; i < available.size(); i++) {
                     JSONObject gift = available.get(i);
-                    labels[i] = gift.optString("gift_name", "Подарок WaysGram")
-                            + " · уровень " + gift.optInt("upgrade_level", 0)
-                            + "\n" + gift.optString("serial_number", "");
+                    labels[i] = WaysGramGiftNames.displayName(
+                            gift.optString("gift_name", ""), "", gift.optString("telegram_gift_id", "")
+                    );
                 }
                 statusView.setText("Выберите подарок для отправки");
                 new AlertDialog.Builder(getParentActivity())
@@ -3357,6 +3357,11 @@ public final class WaysGramChatFragment extends BaseFragment {
             }
             String giftTelegramId = message.optString("gift_telegram_gift_id", "");
             JSONObject giftTelegramMetadata = message.optJSONObject("gift_telegram_metadata");
+            giftName = WaysGramGiftNames.displayName(
+                    giftName,
+                    giftTelegramMetadata == null ? "" : giftTelegramMetadata.optString("title", ""),
+                    giftTelegramId
+            );
             String giftEmoji = message.optString("gift_emoji", "").trim();
             if (giftEmoji.isEmpty() && giftTelegramMetadata != null) {
                 giftEmoji = giftTelegramMetadata.optString("emoji", "").trim();
@@ -3413,7 +3418,7 @@ public final class WaysGramChatFragment extends BaseFragment {
                 giftCard.addView(purchaseNotice, noticeParams);
             } else {
                 TextView giftTitle = new TextView(getParentActivity());
-                giftTitle.setText(giftEmoji + "  " + giftName);
+                giftTitle.setText(giftName);
                 giftTitle.setTextSize(16);
                 giftTitle.setTypeface(android.graphics.Typeface.DEFAULT, android.graphics.Typeface.BOLD);
                 giftTitle.setGravity(android.view.Gravity.START);
@@ -3443,9 +3448,7 @@ public final class WaysGramChatFragment extends BaseFragment {
             TextView giftDetails = new TextView(getParentActivity());
             StringBuilder giftInfo = isGiftPurchaseEvent
                     ? new StringBuilder()
-                    : new StringBuilder("Коллекция WaysGram · уровень ")
-                            .append(giftLevel)
-                            .append("\nСерийный номер: ").append(giftSerial);
+                    : new StringBuilder("Коллекция WaysGram");
             if (isGiftPurchaseEvent) {
                 long purchasedAt = message.optLong("created_at", 0);
                 if (purchasedAt > 0) {
