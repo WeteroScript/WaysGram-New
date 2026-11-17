@@ -75,8 +75,22 @@ public final class WaysGramProfileGiftsController {
                 AndroidUtilities.runOnUIThread(() -> {
                     loading = false;
                     client.close();
-                    // Keep the existing WaysGram session and inventory intact.
-                    // Gift inventory errors must never open a second sign-in screen.
+                    boolean missingSession = message != null
+                            && message.contains("WaysGram session is missing");
+                    boolean expiredSession = message != null
+                            && message.contains("HTTP 401");
+                    if ((missingSession || expiredSession) && fragment != null
+                            && fragment.getParentActivity() != null) {
+                        if (expiredSession) {
+                            sessionStore.clearSession();
+                        }
+                        int account = fragment.getCurrentAccount();
+                        fragment.presentFragment(
+                                new WaysGramLoginFragment(account, this::refresh), true
+                        );
+                        return;
+                    }
+                    // Network and server errors keep the current session untouched.
                     showError(message);
                 });
             }
