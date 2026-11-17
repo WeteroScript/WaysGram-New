@@ -3104,6 +3104,18 @@ public final class WaysGramChatFragment extends BaseFragment {
         });
     }
 
+    private static boolean isLegacyGiftPurchaseReceipt(String body) {
+        if (body == null || body.trim().isEmpty()) {
+            return false;
+        }
+        String normalized = body.toLowerCase(Locale.ROOT);
+        boolean russianPurchase = (normalized.contains("приобрели")
+                || normalized.contains("купили")) && normalized.contains("подарок");
+        boolean englishPurchase = (normalized.contains("purchased")
+                || normalized.contains("bought")) && normalized.contains("gift");
+        return russianPurchase || englishPurchase;
+    }
+
     private CharSequence createNativeGiftPurchaseNotice(
             JSONObject message,
             long senderId,
@@ -3202,9 +3214,7 @@ public final class WaysGramChatFragment extends BaseFragment {
         boolean isGiftPurchaseEvent = (giftAttributesForMessage != null
                 && ("purchase".equals(giftAttributesForMessage.optString("event_type", ""))
                 || "star_gift_purchase".equals(giftAttributesForMessage.optString("native_action", ""))))
-                || message.optString("body", "").startsWith(
-                        "Вы приобрели коллекционный подарок «"
-                );
+                || isLegacyGiftPurchaseReceipt(message.optString("body", ""));
         TextView row = new TextView(getParentActivity());
         long sender = message.optLong("sender_id", 0);
         long recipient = message.optLong("recipient_id", 0);
@@ -3348,6 +3358,14 @@ public final class WaysGramChatFragment extends BaseFragment {
                 String purchaseBody = message.optString("body", "");
                 int quoteStart = purchaseBody.indexOf('«');
                 int quoteEnd = purchaseBody.lastIndexOf('»');
+                if (quoteStart < 0 || quoteEnd <= quoteStart) {
+                    quoteStart = purchaseBody.indexOf('“');
+                    quoteEnd = purchaseBody.lastIndexOf('”');
+                }
+                if (quoteStart < 0 || quoteEnd <= quoteStart) {
+                    quoteStart = purchaseBody.indexOf('"');
+                    quoteEnd = purchaseBody.lastIndexOf('"');
+                }
                 if (quoteStart >= 0 && quoteEnd > quoteStart) {
                     giftName = purchaseBody.substring(quoteStart + 1, quoteEnd).trim();
                 }
