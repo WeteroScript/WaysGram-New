@@ -40,6 +40,9 @@ public final class WaysGramHomeFragment extends BaseFragment {
     private WaysGramSessionStore sessionStore;
     private WaysGramApiClient apiClient;
     private TextView profileView;
+    private TextView profileUsernameView;
+    private TextView profileDetailsView;
+    private LinearLayout profileLabelsContainer;
     private TextView walletView;
     private TextView statusView;
     private TextView inboxSummaryView;
@@ -106,6 +109,27 @@ public final class WaysGramHomeFragment extends BaseFragment {
         content.addView(avatarView, avatarParams);
 
         profileView = addLabel(context, content, "Загрузка профиля…", 19, true);
+        LinearLayout identityRow = new LinearLayout(context);
+        identityRow.setOrientation(LinearLayout.HORIZONTAL);
+        identityRow.setGravity(Gravity.CENTER_VERTICAL);
+        content.addView(identityRow, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
+        ));
+        profileUsernameView = new TextView(context);
+        profileUsernameView.setTextSize(13);
+        profileUsernameView.setTextColor(Theme.getColor(Theme.key_windowBackgroundWhiteGrayText));
+        identityRow.addView(profileUsernameView, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT
+        ));
+        profileLabelsContainer = new LinearLayout(context);
+        profileLabelsContainer.setOrientation(LinearLayout.HORIZONTAL);
+        profileLabelsContainer.setGravity(Gravity.CENTER_VERTICAL);
+        LinearLayout.LayoutParams profileLabelsParams = new LinearLayout.LayoutParams(
+                0, ViewGroup.LayoutParams.WRAP_CONTENT, 1
+        );
+        profileLabelsParams.leftMargin = AndroidUtilities.dp(6);
+        identityRow.addView(profileLabelsContainer, profileLabelsParams);
+        profileDetailsView = addLabel(context, content, "", 13, false);
         walletView = addLabel(context, content, "Баланс загружается…", 14, false);
         statusView = addLabel(context, content, "", 13, false);
         inboxSummaryView = addLabel(context, content, "Непрочитанные сообщения загружаются…", 13, true);
@@ -176,6 +200,52 @@ public final class WaysGramHomeFragment extends BaseFragment {
         return view;
     }
 
+    private void renderProfileLabels(JSONArray labels) {
+        if (profileLabelsContainer == null) {
+            return;
+        }
+        profileLabelsContainer.removeAllViews();
+        if (labels == null) {
+            return;
+        }
+        int count = Math.min(labels.length(), 8);
+        for (int i = 0; i < count; i++) {
+            JSONObject label = labels.optJSONObject(i);
+            if (label == null) {
+                continue;
+            }
+            String value = label.optString("text", "").trim();
+            if (value.isEmpty()) {
+                continue;
+            }
+            int color;
+            try {
+                color = Color.parseColor(label.optString("color", "#6B7280"));
+            } catch (IllegalArgumentException exception) {
+                color = Color.GRAY;
+            }
+            double luminance = 0.299 * Color.red(color)
+                    + 0.587 * Color.green(color)
+                    + 0.114 * Color.blue(color);
+            TextView chip = new TextView(getParentActivity());
+            chip.setText(value);
+            chip.setTextSize(10);
+            chip.setSingleLine(true);
+            chip.setTextColor(luminance > 150 ? Color.BLACK : Color.WHITE);
+            chip.setPadding(AndroidUtilities.dp(5), AndroidUtilities.dp(3),
+                    AndroidUtilities.dp(5), AndroidUtilities.dp(3));
+            GradientDrawable background = new GradientDrawable();
+            background.setColor(color);
+            background.setCornerRadius(AndroidUtilities.dp(6));
+            chip.setBackground(background);
+            LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT
+            );
+            params.leftMargin = AndroidUtilities.dp(4);
+            profileLabelsContainer.addView(chip, params);
+        }
+    }
+
     private void addButton(Context context, LinearLayout parent, String title, Runnable callback) {
         if (parent == null) {
             return;
@@ -214,22 +284,28 @@ public final class WaysGramHomeFragment extends BaseFragment {
                 if (name.length() == 0) {
                     name = "Пользователь WaysGram";
                 }
-                String profileText = name;
-                if (!currentUsername.isEmpty()) {
-                    profileText += "\n@" + currentUsername;
-                }
+                profileView.setText(name);
+                profileUsernameView.setText(
+                        currentUsername.isEmpty() ? "" : "@" + currentUsername
+                );
+                renderProfileLabels(response.optJSONArray("labels"));
+                StringBuilder profileDetails = new StringBuilder();
                 String phone = response.optString("phone", "").trim();
                 // Show only a valid international WaysGram number; never render null-like placeholders.
                 if (!phone.matches("\\+[1-9][0-9]{7,14}")) {
                     phone = "";
                 }
                 if (!phone.isEmpty()) {
-                    profileText += "\n" + phone;
+                    profileDetails.append(phone);
                 }
                 if (!currentBio.isEmpty()) {
-                    profileText += "\n" + currentBio;
+                    if (profileDetails.length() > 0) {
+                        profileDetails.append("\n");
+                    }
+                    profileDetails.append(currentBio);
                 }
-                profileView.setText(profileText);
+                profileDetailsView.setText(profileDetails.toString());
+                profileDetailsView.setVisibility(profileDetails.length() == 0 ? View.GONE : View.VISIBLE);
                 if (!avatarId.equals(currentAvatarMediaId)) {
                     currentAvatarMediaId = avatarId;
                     if (avatarId.matches("[a-f0-9]{32}")) {
