@@ -136,16 +136,9 @@ public final class WaysGramProfileGiftsController {
                 giftEmoji = optText(telegramGift, "emoji");
             }
             String catalogTitle = optText(telegramGift, "title");
-            String giftTitle = catalogTitle.isEmpty()
-                    ? optText(item, "gift_name")
-                    : catalogTitle;
-            if ("Подарок Telegram".equalsIgnoreCase(giftTitle)
-                    || "Telegram Gift".equalsIgnoreCase(giftTitle)) {
-                giftTitle = "";
-            }
-            if (giftTitle.isEmpty()) {
-                giftTitle = giftEmoji.isEmpty() ? "Подарок" : giftEmoji;
-            }
+            String giftTitle = WaysGramGiftNames.displayName(
+                    catalogTitle, optText(item, "gift_name"), telegramGiftIdText
+            );
             int telegramUpgradePrice = telegramGift == null
                     ? 0 : Math.max(0, telegramGift.optInt("upgrade_star_count", 0));
             int telegramUpgradeVariants = telegramGift == null
@@ -259,27 +252,29 @@ public final class WaysGramProfileGiftsController {
             boolean isListed,
             boolean isAuctioned
     ) {
-        StringBuilder firstLine = new StringBuilder(serial)
-                .append(" · Ур. ")
-                .append(upgradeLevel);
+        // Serial numbers and internal upgrade levels are kept in WaysGram data,
+        // but are not shown as part of the gift's public display name/subtitle.
+        StringBuilder firstLine = new StringBuilder();
         if (isAuctioned) {
-            firstLine.append(" · Аукцион");
+            firstLine.append("Аукцион");
         } else if (isListed) {
-            firstLine.append(" · Продажа");
+            firstLine.append("Продажа");
         }
 
         StringBuilder secondLine = new StringBuilder();
-        appendPart(secondLine, giftEmoji);
         appendPart(secondLine, rarity);
         appendPart(secondLine, model);
         appendPart(secondLine, symbol);
         if (canUpgrade) {
             appendPart(secondLine, telegramUpgradePrice > 0
-                    ? "Апгрейд Telegram · " + telegramUpgradePrice + " Stars"
+                    ? "Доступно улучшение · " + telegramUpgradePrice + " Stars"
                     : "Доступно улучшение");
         }
         if (telegramUpgradeVariants > 0) {
             appendPart(secondLine, "Вариантов: " + telegramUpgradeVariants);
+        }
+        if (firstLine.length() == 0) {
+            return secondLine.toString();
         }
         return secondLine.length() == 0
                 ? firstLine.toString()
