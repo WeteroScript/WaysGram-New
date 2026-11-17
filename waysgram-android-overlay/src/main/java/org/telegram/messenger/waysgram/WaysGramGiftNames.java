@@ -8,6 +8,8 @@ public final class WaysGramGiftNames {
     }
 
     public static String displayName(String primary, String fallback, String telegramGiftId) {
+        // Stable Telegram gift IDs and catalogue titles are resolved before
+        // any user-facing card, inventory row or receipt is rendered.
         if (PLUSH_PEPE_ID.equals(trim(telegramGiftId))) {
             return "Plush Pepe";
         }
