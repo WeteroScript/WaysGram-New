@@ -8,6 +8,7 @@ on:
   push:
     branches:
       - main
+      - fix/gift-inventory-ui-labels-animation-v158
   workflow_dispatch:
 
 permissions:
