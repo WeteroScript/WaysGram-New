@@ -88,6 +88,12 @@ public final class WaysGramProfileGiftsController {
     }
 
     public static ArrayList<TL_stars.SavedStarGift> toNativeGifts(JSONArray inventory, int currentAccount) {
+        return toNativeGifts(inventory, currentAccount, false);
+    }
+
+    public static ArrayList<TL_stars.SavedStarGift> toNativeGifts(
+            JSONArray inventory, int currentAccount, boolean showSerialAsTitle
+    ) {
         ArrayList<TL_stars.SavedStarGift> result = new ArrayList<>();
         for (int i = 0; i < inventory.length(); i++) {
             JSONObject item = inventory.optJSONObject(i);
@@ -155,12 +161,14 @@ public final class WaysGramProfileGiftsController {
 
             WaysGramGiftMediaStore.putMetadata(
                     serial,
-                    giftTitle,
-                    buildGiftSubtitle(
-                            serial, upgradeLevel, rarity, model, symbol, giftEmoji,
-                            canUpgrade, telegramUpgradePrice, telegramUpgradeVariants,
-                            isListed, isAuctioned
-                    ),
+                    showSerialAsTitle ? serial : giftTitle,
+                    showSerialAsTitle
+                            ? "Уровень " + upgradeLevel
+                            : buildGiftSubtitle(
+                                    serial, upgradeLevel, rarity, model, symbol, giftEmoji,
+                                    canUpgrade, telegramUpgradePrice, telegramUpgradeVariants,
+                                    isListed, isAuctioned
+                            ),
                     giftEmoji
             );
 
