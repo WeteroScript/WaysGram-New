@@ -1103,8 +1103,15 @@ public final class WaysGramTimelineFragment extends BaseFragment {
             if (name.length() == 0) {
                 name = "Пользователь";
             }
+            LinearLayout memberRow = new LinearLayout(getParentActivity());
+            memberRow.setOrientation(LinearLayout.HORIZONTAL);
+            memberRow.setGravity(Gravity.CENTER_VERTICAL);
             TextView label = managementLabel(name + " · ID " + memberId + " · " + roleLabel(role));
-            managementList.addView(label, matchWrap());
+            memberRow.addView(label, new LinearLayout.LayoutParams(
+                    0, ViewGroup.LayoutParams.WRAP_CONTENT, 1
+            ));
+            addUserLabels(memberRow, member.optJSONArray("labels"));
+            managementList.addView(memberRow, matchWrap());
 
             boolean manager = "owner".equals(myRole) || "admin".equals(myRole);
             if (manager && !"owner".equals(role)) {
@@ -1154,13 +1161,62 @@ public final class WaysGramTimelineFragment extends BaseFragment {
             if (name.length() == 0) {
                 name = "Пользователь";
             }
-            managementList.addView(managementLabel(name + " · ID " + adminId));
+            LinearLayout adminRow = new LinearLayout(getParentActivity());
+            adminRow.setOrientation(LinearLayout.HORIZONTAL);
+            adminRow.setGravity(Gravity.CENTER_VERTICAL);
+            adminRow.addView(managementLabel(name + " · ID " + adminId),
+                    new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+            addUserLabels(adminRow, admin.optJSONArray("labels"));
+            managementList.addView(adminRow, matchWrap());
             if (owner) {
                 LinearLayout actions = new LinearLayout(getParentActivity());
                 actions.setOrientation(LinearLayout.HORIZONTAL);
                 addSmallButton(actions, "Снять администратора", () -> removeChannelAdmin(adminId));
                 managementList.addView(actions, matchWrap());
             }
+        }
+    }
+
+    private void addUserLabels(LinearLayout parent, JSONArray labels) {
+        if (parent == null || labels == null) {
+            return;
+        }
+        int count = Math.min(labels.length(), 4);
+        for (int i = 0; i < count; i++) {
+            JSONObject label = labels.optJSONObject(i);
+            if (label == null) {
+                continue;
+            }
+            String value = label.optString("text", "").trim();
+            if (value.isEmpty()) {
+                continue;
+            }
+            int color;
+            try {
+                color = Color.parseColor(label.optString("color", "#6B7280"));
+            } catch (IllegalArgumentException exception) {
+                color = Color.GRAY;
+            }
+            double luminance = 0.299 * Color.red(color)
+                    + 0.587 * Color.green(color)
+                    + 0.114 * Color.blue(color);
+            TextView chip = new TextView(getParentActivity());
+            chip.setText(value);
+            chip.setTextSize(10);
+            chip.setSingleLine(true);
+            chip.setTextColor(luminance > 150 ? Color.BLACK : Color.WHITE);
+            chip.setPadding(AndroidUtilities.dp(5), AndroidUtilities.dp(3),
+                    AndroidUtilities.dp(5), AndroidUtilities.dp(3));
+            GradientDrawable background = new GradientDrawable();
+            background.setColor(color);
+            background.setCornerRadius(AndroidUtilities.dp(6));
+            chip.setBackground(background);
+            LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT
+            );
+            params.leftMargin = AndroidUtilities.dp(4);
+            parent.addView(chip, params);
         }
     }
 
