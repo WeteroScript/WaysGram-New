@@ -313,8 +313,7 @@ public final class WaysGramHomeFragment extends BaseFragment {
 
         addLabel(getParentActivity(), giftsContainer,
                 "В инвентаре: " + count + " подарков", 12, false);
-        int visible = Math.min(count, 50);
-        for (int i = 0; i < visible; i++) {
+        for (int i = 0; i < count; i++) {
             JSONObject gift = gifts.optJSONObject(i);
             if (gift == null) {
                 continue;
@@ -423,12 +422,6 @@ public final class WaysGramHomeFragment extends BaseFragment {
             );
             cardParams.bottomMargin = AndroidUtilities.dp(8);
             giftsContainer.addView(card, cardParams);
-        }
-        if (count > visible) {
-            addLabel(getParentActivity(), giftsContainer,
-                    "Показаны последние " + visible + " из " + count
-                            + ". Полный список доступен в инвентаре.",
-                    12, false);
         }
     }
 
