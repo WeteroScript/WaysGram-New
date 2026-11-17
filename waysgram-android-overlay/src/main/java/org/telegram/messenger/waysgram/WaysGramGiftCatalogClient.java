@@ -228,12 +228,31 @@ public final class WaysGramGiftCatalogClient implements AutoCloseable {
         }
         ioExecutor.execute(() -> {
             try {
-                JSONObject response = requestJson(getBaseUrl() + "/api/me/gifts");
-                JSONArray gifts = response.optJSONArray("gifts");
-                if (gifts == null) {
-                    throw new IOException("WaysGram inventory response does not contain a gifts array");
+                final int pageSize = 100;
+                int offset = 0;
+                JSONArray allGifts = new JSONArray();
+                while (true) {
+                    JSONObject response = requestJson(
+                            getBaseUrl() + "/api/me/gifts?limit=" + pageSize + "&offset=" + offset
+                    );
+                    JSONArray page = response.optJSONArray("gifts");
+                    if (page == null) {
+                        throw new IOException("WaysGram inventory response does not contain a gifts array");
+                    }
+                    for (int i = 0; i < page.length(); i++) {
+                        allGifts.put(page.opt(i));
+                    }
+                    // Older servers return the complete inventory without pagination metadata.
+                    if (!response.has("has_more") || !response.optBoolean("has_more", false)) {
+                        break;
+                    }
+                    int nextOffset = response.optInt("next_offset", offset + page.length());
+                    if (page.length() == 0 || nextOffset <= offset) {
+                        throw new IOException("WaysGram inventory pagination did not advance");
+                    }
+                    offset = nextOffset;
                 }
-                callback.onLoaded(gifts);
+                callback.onLoaded(allGifts);
             } catch (Exception exception) {
                 callback.onError(toSafeError(exception));
             }
