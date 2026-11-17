@@ -286,7 +286,7 @@ public final class WaysGramUserProfileFragment extends BaseFragment {
             item.setText(username.isEmpty() ? title : title + "\n@" + username);
             contactsContainer.addView(item, matchWrap());
             item.setOnClickListener(view ->
-                    presentFragment(new WaysGramUserProfileFragment(id), false));
+                    presentFragment(new WaysGramUserProfileFragment(id, getCurrentAccount()), false));
         }
     }
 
