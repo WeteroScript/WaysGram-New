@@ -253,7 +253,7 @@ public final class WaysGramNativeGiftReceiptAdapter {
             Utilities.Callback<TL_stars.StarGift> callback
     ) {
         Matcher idMatcher = Pattern.compile(
-                "(?:Telegram\\\\s+)?Gift\\\\s+([0-9]{5,})",
+                "(?:Telegram\\s+)?Gift\\s+([0-9]{5,})",
                 Pattern.CASE_INSENSITIVE
         ).matcher(receiptTitle);
         if (idMatcher.find()) {
@@ -304,6 +304,12 @@ public final class WaysGramNativeGiftReceiptAdapter {
                 observer[0], NotificationCenter.starGiftsLoaded
         );
         controller.loadStarGifts();
+        if (controller.giftsLoaded && !controller.giftsLoading) {
+            NotificationCenter.getInstance(account).removeObserver(
+                    observer[0], NotificationCenter.starGiftsLoaded
+            );
+            callback.run(null);
+        }
     }
 
     private static TL_stars.StarGift copyGiftForDisplay(
