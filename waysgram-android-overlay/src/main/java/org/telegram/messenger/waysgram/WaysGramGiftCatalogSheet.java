@@ -220,7 +220,7 @@ public final class WaysGramGiftCatalogSheet extends BottomSheet {
         ArrayList<String> actions = new ArrayList<>();
         boolean listed = gift.optInt("is_listed", gift.optBoolean("is_listed", false) ? 1 : 0) == 1;
         boolean auctioned = gift.optInt("is_auctioned", gift.optBoolean("is_auctioned", false) ? 1 : 0) == 1;
-        boolean canUpgrade = gift.optBoolean("can_upgrade", false)
+        boolean canUpgrade = gift.optBoolean("waysgram_can_upgrade", false)
                 && telegramGift != null
                 && telegramGift.optInt("upgrade_star_count", 0) > 0;
         boolean auctionEligible = gift.optInt(
