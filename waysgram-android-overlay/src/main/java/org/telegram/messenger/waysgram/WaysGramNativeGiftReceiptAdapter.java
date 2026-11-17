@@ -230,6 +230,9 @@ public final class WaysGramNativeGiftReceiptAdapter {
                 service.date = original.date;
                 service.send_state = original.send_state;
                 service.message = "";
+                service.params = new java.util.HashMap<>();
+                service.params.put("waysgram_gift_serial", legacySerial);
+                service.params.put("waysgram_gift_source", "waysgram");
                 String displayTitle = WaysGramGiftNames.displayName(
                         receiptTitle, gift == null ? "" : gift.title,
                         Long.toString(fallbackGiftId > 0 ? fallbackGiftId : gift.id)
