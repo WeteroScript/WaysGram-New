@@ -143,7 +143,6 @@ public final class WaysGramChatFragment extends BaseFragment {
     };
     private TextView statusView;
     private TextView typingView;
-    private LinearLayout peerLabelsContainer;
     private boolean messageSendInFlight = false;
     private long replyToMessageId = 0;
     private final Handler pollHandler = new Handler(Looper.getMainLooper());
