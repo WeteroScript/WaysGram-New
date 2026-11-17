@@ -2,6 +2,8 @@ package org.telegram.messenger.waysgram;
 
 import android.graphics.Bitmap;
 
+import java.io.File;
+
 import java.util.LinkedHashMap;
 import java.util.Map;
 
@@ -13,6 +15,13 @@ public final class WaysGramGiftMediaStore {
             new LinkedHashMap<String, Bitmap>(MAX_ITEMS, 0.75f, true) {
                 @Override
                 protected boolean removeEldestEntry(Map.Entry<String, Bitmap> eldest) {
+                    return size() > MAX_ITEMS;
+                }
+            };
+    private static final LinkedHashMap<String, File> ANIMATION_FILES =
+            new LinkedHashMap<String, File>(MAX_ITEMS, 0.75f, true) {
+                @Override
+                protected boolean removeEldestEntry(Map.Entry<String, File> eldest) {
                     return size() > MAX_ITEMS;
                 }
             };
@@ -51,6 +60,26 @@ public final class WaysGramGiftMediaStore {
         return bitmap == null || bitmap.isRecycled() ? null : bitmap;
     }
 
+    public static synchronized void putAnimationFile(String serial, File file) {
+        if (serial == null || serial.isEmpty() || file == null || !file.isFile() || file.length() <= 0) {
+            return;
+        }
+        ANIMATION_FILES.put(serial, file);
+        CACHE.remove(serial);
+    }
+
+    public static synchronized File getAnimationFile(String serial) {
+        if (serial == null || serial.isEmpty()) {
+            return null;
+        }
+        File file = ANIMATION_FILES.get(serial);
+        if (file == null || !file.isFile() || file.length() <= 0) {
+            ANIMATION_FILES.remove(serial);
+            return null;
+        }
+        return file;
+    }
+
     public static synchronized void putMetadata(String serial, String title, String subtitle, String emoji) {
         if (serial == null || serial.isEmpty()) {
             return;
@@ -66,6 +95,7 @@ public final class WaysGramGiftMediaStore {
 
     public static synchronized void clear() {
         CACHE.clear();
+        ANIMATION_FILES.clear();
         METADATA.clear();
     }
 }
