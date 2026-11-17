@@ -34,7 +34,7 @@ public final class WaysGramGiftInventorySheet extends BottomSheet {
         void onGiftSelected(JSONObject gift);
     }
 
-    private static final int MAX_STICKER_DOWNLOADS = 200;
+    private static final int MAX_STICKER_DOWNLOADS = 1000;
 
     private final WaysGramGiftCatalogClient catalogClient;
     private final int telegramAccount;
@@ -187,7 +187,7 @@ public final class WaysGramGiftInventorySheet extends BottomSheet {
         int scheduled = 0;
         for (int i = 0; i < inventory.length() && scheduled < MAX_STICKER_DOWNLOADS; i++) {
             JSONObject item = inventory.optJSONObject(i);
-            if (item == null || !item.optBoolean("sticker_available", false)) continue;
+            if (item == null) continue;
             String serial = item.optString("serial_number", "").trim();
             String giftId = item.optString("telegram_gift_id", "").trim();
             JSONObject telegramGift = item.optJSONObject("telegram_gift");
@@ -201,42 +201,47 @@ public final class WaysGramGiftInventorySheet extends BottomSheet {
                     && (sticker.optBoolean("is_animated", false)
                     || sticker.optBoolean("is_video", false));
             if (animated) {
-                final String cacheKey = serial;
-                final String telegramId = giftId;
-                imageClient.downloadTelegramGiftStickerAnimation(
-                        telegramId, getContext().getCacheDir(), new WaysGramApiClient.FileCallback() {
-                            @Override
-                            public void onSuccess(java.io.File file) {
-                                WaysGramGiftMediaStore.putAnimationFile(cacheKey, file);
-                                refreshGiftCells();
-                            }
-
-                            @Override
-                            public void onError(String message, int statusCode) {
-                                downloadStaticSticker(telegramId, cacheKey);
-                            }
-                        }
-                );
+                downloadAnimatedSticker(giftId, serial, true);
             } else {
-                downloadStaticSticker(giftId, serial);
+                downloadStaticSticker(giftId, serial, true);
             }
         }
     }
 
-    private void downloadStaticSticker(String giftId, String serial) {
+    private void downloadStaticSticker(String giftId, String serial, boolean tryAnimationOnFailure) {
         imageClient.downloadTelegramGiftSticker(giftId, new WaysGramApiClient.ImageCallback() {
             @Override
             public void onSuccess(Bitmap bitmap) {
-                if (bitmap == null || bitmap.isRecycled()) return;
+                if (bitmap == null || bitmap.isRecycled()) {
+                    if (tryAnimationOnFailure) downloadAnimatedSticker(giftId, serial, false);
+                    return;
+                }
                 WaysGramGiftMediaStore.put(serial, bitmap);
                 refreshGiftCells();
             }
 
             @Override
             public void onError(String message, int statusCode) {
-                // Retain the native placeholder when no preview can be loaded.
+                if (tryAnimationOnFailure) downloadAnimatedSticker(giftId, serial, false);
             }
         });
+    }
+
+    private void downloadAnimatedSticker(String giftId, String serial, boolean tryStaticOnFailure) {
+        imageClient.downloadTelegramGiftStickerAnimation(
+                giftId, getContext().getCacheDir(), new WaysGramApiClient.FileCallback() {
+                    @Override
+                    public void onSuccess(java.io.File file) {
+                        WaysGramGiftMediaStore.putAnimationFile(serial, file);
+                        refreshGiftCells();
+                    }
+
+                    @Override
+                    public void onError(String message, int statusCode) {
+                        if (tryStaticOnFailure) downloadStaticSticker(giftId, serial, false);
+                    }
+                }
+        );
     }
 
     private void refreshGiftCells() {
