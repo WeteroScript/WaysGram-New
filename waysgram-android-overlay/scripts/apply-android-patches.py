@@ -1109,6 +1109,8 @@ def patch_chat_action_cell_waysgram_receipts_source(original: str) -> str:
         "                            if (waysGramBitmap != null && !waysGramBitmap.isRecycled()) {\n"
         "                                imageReceiver.setAllowStartLottieAnimation(true);\n"
         "                                imageReceiver.setImageBitmap(waysGramBitmap);\n"
+        "                            } else if (waysGramGift != null) {\n"
+        "                                org.telegram.messenger.waysgram.WaysGramNativeGiftReceiptAdapter.ensureGiftMedia(currentAccount, Long.toString(waysGramGift.id), waysGramSerial);\n"
         "                            }\n"
         "                        }\n"
         "                    }\n"
