@@ -34,8 +34,6 @@ public final class WaysGramGiftInventorySheet extends BottomSheet {
         void onGiftSelected(JSONObject gift);
     }
 
-    private static final int MAX_STICKER_DOWNLOADS = 200;
-
     private final WaysGramGiftCatalogClient catalogClient;
     private final int telegramAccount;
     private final WaysGramApiClient imageClient;
@@ -184,8 +182,7 @@ public final class WaysGramGiftInventorySheet extends BottomSheet {
     }
 
     private void downloadGiftStickers(JSONArray inventory) {
-        int scheduled = 0;
-        for (int i = 0; i < inventory.length() && scheduled < MAX_STICKER_DOWNLOADS; i++) {
+        for (int i = 0; i < inventory.length(); i++) {
             JSONObject item = inventory.optJSONObject(i);
             if (item == null || !item.optBoolean("sticker_available", false)) continue;
             String serial = item.optString("serial_number", "").trim();
@@ -195,7 +192,6 @@ public final class WaysGramGiftInventorySheet extends BottomSheet {
                 giftId = telegramGift == null ? "" : telegramGift.optString("id", "").trim();
             }
             if (serial.isEmpty() || giftId.isEmpty() || !startedStickerDownloads.add(serial)) continue;
-            scheduled++;
             final String cacheKey = serial;
             imageClient.downloadTelegramGiftSticker(giftId, new WaysGramApiClient.ImageCallback() {
                 @Override
