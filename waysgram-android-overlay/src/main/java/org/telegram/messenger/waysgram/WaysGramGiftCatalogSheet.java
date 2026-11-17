@@ -922,6 +922,7 @@ public final class WaysGramGiftCatalogSheet extends BottomSheet {
                 );
                 if (webm) {
                     drawable.setIsWebmSticker(true);
+                    return drawable.getFrameAtTime(0L, false);
                 }
                 return drawable.getFirstFrame(null);
             } catch (Exception exception) {
