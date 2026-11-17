@@ -4,11 +4,13 @@ import android.content.ContentResolver;
 import android.database.Cursor;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
-import android.graphics.drawable.AnimatedFileDrawable;
 import android.net.Uri;
 import android.os.Handler;
 import android.os.Looper;
 import android.provider.OpenableColumns;
+
+import org.telegram.messenger.ApplicationLoader;
+import org.telegram.ui.Components.AnimatedFileDrawable;
 
 import org.json.JSONObject;
 
