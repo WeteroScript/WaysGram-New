@@ -51,7 +51,7 @@ public final class WaysGramUserProfileFragment extends BaseFragment {
 
     @Override
     public View createView(android.content.Context context) {
-        apiClient = new WaysGramApiClient(WaysGramSessionStore.getInstance(context));
+        apiClient = new WaysGramApiClient(WaysGramSessionStore.getInstance(context, getCurrentAccount()));
         actionBar.setTitle("Профиль WaysGram");
 
         ScrollView scroll = new ScrollView(context);
@@ -182,7 +182,7 @@ public final class WaysGramUserProfileFragment extends BaseFragment {
             public void onError(String message, int statusCode) {
                 statusView.setText(message);
                 if (statusCode == 401) {
-                    WaysGramSessionStore.getInstance(getParentActivity()).clearSession();
+                    WaysGramSessionStore.getInstance(getParentActivity(), getCurrentAccount()).clearSession();
                     presentFragment(new WaysGramLoginFragment(), true);
                 }
             }
