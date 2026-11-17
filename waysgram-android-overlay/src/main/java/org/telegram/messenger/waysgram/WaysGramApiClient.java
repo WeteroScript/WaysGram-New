@@ -4,6 +4,7 @@ import android.content.ContentResolver;
 import android.database.Cursor;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
+import android.graphics.drawable.AnimatedFileDrawable;
 import android.net.Uri;
 import android.os.Handler;
 import android.os.Looper;
@@ -12,6 +13,8 @@ import android.provider.OpenableColumns;
 import org.json.JSONObject;
 
 import java.io.ByteArrayOutputStream;
+import java.io.File;
+import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
@@ -32,6 +35,7 @@ public final class WaysGramApiClient implements AutoCloseable {
     private static final int READ_TIMEOUT_MS = 30000;
     private static final int MAX_RESPONSE_BYTES = 2 * 1024 * 1024;
     private static final int MAX_IMAGE_BYTES = 10 * 1024 * 1024;
+    private static final int MAX_STICKER_BYTES = 20 * 1024 * 1024;
     private static final int MAX_DOCUMENT_BYTES = 25 * 1024 * 1024;
 
     public interface Callback {
@@ -545,6 +549,49 @@ public final class WaysGramApiClient implements AutoCloseable {
         if (giftId == null || !giftId.matches("[A-Za-z0-9_-]{1,120}")) {
             throw new IOException("Некорректный Telegram Gift ID");
         }
+
+        IOException previewError = null;
+        try {
+            StickerResponse preview = requestTelegramGiftSticker(giftId, false);
+            Bitmap bitmap = decodeStaticSticker(preview.bytes);
+            if (bitmap != null) {
+                return bitmap;
+            }
+            bitmap = decodeAnimatedStickerPreview(giftId, preview.bytes, preview.mimeType);
+            if (bitmap != null) {
+                return bitmap;
+            }
+        } catch (IOException exception) {
+            previewError = exception;
+        }
+
+        // Some Telegram gifts, including video/animated collectibles, have no
+        // still thumbnail. Ask AuthBot for the original animation and extract
+        // a frame locally instead of treating the gift as image-less.
+        try {
+            StickerResponse animated = requestTelegramGiftSticker(giftId, true);
+            Bitmap bitmap = decodeStaticSticker(animated.bytes);
+            if (bitmap != null) {
+                return bitmap;
+            }
+            bitmap = decodeAnimatedStickerPreview(giftId, animated.bytes, animated.mimeType);
+            if (bitmap != null) {
+                return bitmap;
+            }
+        } catch (IOException exception) {
+            if (previewError == null) {
+                previewError = exception;
+            }
+        }
+
+        throw new IOException(
+                "Не удалось декодировать статичное изображение или кадр анимации подарка",
+                previewError
+        );
+    }
+
+    private StickerResponse requestTelegramGiftSticker(String giftId, boolean animated)
+            throws IOException {
         String baseUrl = sessionStore.getApiBaseUrl();
         String token = sessionStore.getWaysGramSessionToken();
         if (baseUrl == null || token == null || token.length() == 0) {
@@ -553,13 +600,14 @@ public final class WaysGramApiClient implements AutoCloseable {
 
         HttpURLConnection connection = null;
         try {
-            String path = "/api/telegram/gifts/" + Uri.encode(giftId) + "/sticker";
+            String path = "/api/telegram/gifts/" + Uri.encode(giftId) + "/sticker"
+                    + (animated ? "?animated=1" : "");
             connection = (HttpURLConnection) new URL(baseUrl + path).openConnection();
             connection.setRequestMethod("GET");
             connection.setInstanceFollowRedirects(false);
             connection.setConnectTimeout(CONNECT_TIMEOUT_MS);
             connection.setReadTimeout(READ_TIMEOUT_MS);
-            connection.setRequestProperty("Accept", "image/webp,image/png,image/jpeg");
+            connection.setRequestProperty("Accept", "image/*,video/webm,application/x-tgsticker,*/*");
             connection.setRequestProperty("Authorization", "Bearer " + token);
             int status = connection.getResponseCode();
             if (status < 200 || status >= 300) {
@@ -568,28 +616,88 @@ public final class WaysGramApiClient implements AutoCloseable {
                 JSONObject errorJson = parseJsonResponse(errorBytes);
                 throw new ApiException(status, safeApiMessage(errorJson, status));
             }
-            byte[] bytes = readLimited(connection.getInputStream(), MAX_IMAGE_BYTES);
-            BitmapFactory.Options options = new BitmapFactory.Options();
-            options.inJustDecodeBounds = true;
-            BitmapFactory.decodeByteArray(bytes, 0, bytes.length, options);
-            if (options.outWidth <= 0 || options.outHeight <= 0) {
-                throw new IOException("Стикер подарка не является статическим изображением");
+            String mimeType = connection.getContentType();
+            byte[] bytes = readLimited(connection.getInputStream(), MAX_STICKER_BYTES);
+            if (bytes.length == 0) {
+                throw new IOException("Сервер вернул пустой стикер подарка");
             }
-            options.inSampleSize = 1;
-            while (options.outWidth / options.inSampleSize > 256
-                    || options.outHeight / options.inSampleSize > 256) {
-                options.inSampleSize *= 2;
-            }
-            options.inJustDecodeBounds = false;
-            Bitmap bitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.length, options);
-            if (bitmap == null) {
-                throw new IOException("Не удалось декодировать стикер подарка");
-            }
-            return bitmap;
+            return new StickerResponse(bytes, mimeType == null ? "" : mimeType.toLowerCase(Locale.ROOT));
         } finally {
             if (connection != null) {
                 connection.disconnect();
             }
+        }
+    }
+
+    private static Bitmap decodeStaticSticker(byte[] bytes) {
+        if (bytes == null || bytes.length == 0) {
+            return null;
+        }
+        BitmapFactory.Options bounds = new BitmapFactory.Options();
+        bounds.inJustDecodeBounds = true;
+        BitmapFactory.decodeByteArray(bytes, 0, bytes.length, bounds);
+        if (bounds.outWidth <= 0 || bounds.outHeight <= 0) {
+            return null;
+        }
+        int sampleSize = 1;
+        while (Math.max(bounds.outWidth, bounds.outHeight) / sampleSize > 256) {
+            sampleSize *= 2;
+        }
+        BitmapFactory.Options decode = new BitmapFactory.Options();
+        decode.inSampleSize = sampleSize;
+        decode.inPreferredConfig = Bitmap.Config.ARGB_8888;
+        return BitmapFactory.decodeByteArray(bytes, 0, bytes.length, decode);
+    }
+
+    private Bitmap decodeAnimatedStickerPreview(String giftId, byte[] bytes, String mimeType) {
+        if (bytes == null || bytes.length == 0 || ApplicationLoader.applicationContext == null) {
+            return null;
+        }
+        File previewFile = null;
+        AnimatedFileDrawable drawable = null;
+        try {
+            boolean webm = (mimeType != null && (
+                    mimeType.startsWith("video/") || mimeType.contains("webm")
+            )) || (bytes.length >= 4
+                    && (bytes[0] & 0xff) == 0x1a
+                    && (bytes[1] & 0xff) == 0x45
+                    && (bytes[2] & 0xff) == 0xdf
+                    && (bytes[3] & 0xff) == 0xa3);
+            String extension = webm ? ".webm" : ".tgs";
+            previewFile = new File(
+                    ApplicationLoader.applicationContext.getCacheDir(),
+                    "waysgram_gift_preview_" + giftId + extension
+            );
+            try (FileOutputStream output = new FileOutputStream(previewFile)) {
+                output.write(bytes);
+                output.flush();
+            }
+            drawable = new AnimatedFileDrawable(
+                    previewFile, true, 0, 0, null, null, null, 0,
+                    sessionStore.getTelegramAccount(), true, 64, 64, null
+            );
+            Bitmap frame = drawable.getFirstFrame(null);
+            return frame == null || frame.isRecycled() ? null : frame;
+        } catch (Exception exception) {
+            return null;
+        } finally {
+            if (drawable != null) {
+                drawable.recycle();
+            }
+            if (previewFile != null && previewFile.exists()) {
+                // The bitmap returned by getFirstFrame is detached from this file.
+                previewFile.delete();
+            }
+        }
+    }
+
+    private static final class StickerResponse {
+        final byte[] bytes;
+        final String mimeType;
+
+        StickerResponse(byte[] bytes, String mimeType) {
+            this.bytes = bytes;
+            this.mimeType = mimeType == null ? "" : mimeType;
         }
     }
 
