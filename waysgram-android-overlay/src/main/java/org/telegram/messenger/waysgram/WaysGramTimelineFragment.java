@@ -63,8 +63,6 @@ public final class WaysGramTimelineFragment extends BaseFragment {
     private EditText messageInput;
     private EditText managementInput;
     private TextView statusView;
-    private LinearLayout channelLabelsContainer;
-    private TextView channelNameView;
     private TextView typingView;
     private TextView managementStatusView;
     private Button sendButton;
