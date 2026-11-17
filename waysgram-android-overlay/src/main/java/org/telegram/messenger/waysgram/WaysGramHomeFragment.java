@@ -401,8 +401,7 @@ public final class WaysGramHomeFragment extends BaseFragment {
 
         addLabel(getParentActivity(), giftsContainer,
                 "В инвентаре: " + count + " подарков", 12, false);
-        int visible = Math.min(count, 50);
-        for (int i = 0; i < visible; i++) {
+        for (int i = 0; i < count; i++) {
             JSONObject gift = gifts.optJSONObject(i);
             if (gift == null) {
                 continue;
@@ -412,19 +411,11 @@ public final class WaysGramHomeFragment extends BaseFragment {
                 attributes = new JSONObject();
             }
             JSONObject telegramGift = gift.optJSONObject("telegram_gift");
-            String title = telegramGift == null ? "" : telegramGift.optString("title", "").trim();
-            if (title.isEmpty()) {
-                title = gift.optString("gift_name", "Подарок WaysGram");
-            }
-            String emoji = gift.optString("gift_emoji", "").trim();
-            if (emoji.isEmpty() && telegramGift != null) {
-                emoji = telegramGift.optString("emoji", "").trim();
-            }
             String telegramId = gift.optString("telegram_gift_id", "");
-            String serial = gift.optString("serial_number", "");
-            int level = Math.max(
-                    gift.optInt("upgrade_level", 0),
-                    attributes.optInt("upgrade_level", 0)
+            String title = WaysGramGiftNames.displayName(
+                    telegramGift == null ? "" : telegramGift.optString("title", ""),
+                    gift.optString("gift_name", ""),
+                    telegramId
             );
 
             LinearLayout card = new LinearLayout(getParentActivity());
@@ -436,28 +427,16 @@ public final class WaysGramHomeFragment extends BaseFragment {
             background.setCornerRadius(AndroidUtilities.dp(12));
             card.setBackground(background);
 
-            addLabel(getParentActivity(), card,
-                    (emoji.isEmpty() ? "🎁" : emoji) + "  " + title, 16, true);
+            addLabel(getParentActivity(), card, title, 16, true);
+            JSONObject stickerInfo = telegramGift == null
+                    ? null : telegramGift.optJSONObject("sticker");
+            boolean animated = stickerInfo != null
+                    && (stickerInfo.optBoolean("is_animated", false)
+                    || stickerInfo.optBoolean("is_video", false));
             WaysGramGiftCardRenderer.addPreview(
-                    getParentActivity(), card, apiClient, telegramId, emoji
+                    getParentActivity(), card, apiClient, telegramId, "",
+                    animated, currentAccount
             );
-            addLabel(getParentActivity(), card, "Уровень WaysGram: " + level, 13, true);
-            if (telegramGift != null && gift.optBoolean("can_upgrade", false)) {
-                int upgradePrice = telegramGift.optInt("upgrade_star_count", 0);
-                int upgradeVariants = telegramGift.optInt("upgrade_variants", 0);
-                addLabel(getParentActivity(), card,
-                        "Параметры Telegram-улучшения"
-                                + (upgradePrice > 0 ? " · " + upgradePrice + " Stars" : "")
-                                + (upgradeVariants > 0 ? " · вариантов: " + upgradeVariants : ""),
-                        12, true
-                );
-            }
-            if (!serial.isEmpty()) {
-                addLabel(getParentActivity(), card, "Серийный номер: " + serial, 12, false);
-            }
-            if (!telegramId.isEmpty()) {
-                addLabel(getParentActivity(), card, "Telegram Gift ID: " + telegramId, 12, false);
-            }
             String upgradeSource = attributes.optString("upgrade_source", "");
             if ("waysgram_internal".equals(upgradeSource)) {
                 addLabel(getParentActivity(), card,
