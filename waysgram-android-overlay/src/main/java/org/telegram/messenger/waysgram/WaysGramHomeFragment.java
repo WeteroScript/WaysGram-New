@@ -179,6 +179,13 @@ public final class WaysGramHomeFragment extends BaseFragment {
         addButton(context, profileMenuContainer, "Выйти из WaysGram", this::logout);
 
         fragmentView = scroll;
+        if (!sessionStore.hasSession()) {
+            // A missing local token is reported with status 0 (not HTTP 401).
+            // Open WaysGram sign-in for this Telegram slot instead of leaving
+            // the user on a profile that cannot load inventory or gift data.
+            presentFragment(new WaysGramLoginFragment(currentAccount, this::loadProfile), true);
+            return scroll;
+        }
         loadProfile();
         return scroll;
     }
