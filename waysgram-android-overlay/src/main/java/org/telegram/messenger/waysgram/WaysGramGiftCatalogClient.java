@@ -36,6 +36,10 @@ public final class WaysGramGiftCatalogClient implements AutoCloseable {
     public interface SessionProvider {
         String getApiBaseUrl();
         String getWaysGramSessionToken();
+
+        default int getTelegramAccount() {
+            return org.telegram.messenger.UserConfig.selectedAccount;
+        }
     }
 
     public interface CatalogCallback {
