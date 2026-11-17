@@ -115,7 +115,7 @@ public final class WaysGramTimelineFragment extends BaseFragment {
     @Override
     public View createView(Context context) {
         actionBar.setTitle(targetTitle.length() > 0 ? targetTitle : (type == TYPE_GROUP ? "Группа" : "Канал"));
-        apiClient = new WaysGramApiClient(WaysGramSessionStore.getInstance(context));
+        apiClient = new WaysGramApiClient(WaysGramSessionStore.getInstance(context, getCurrentAccount()));
 
         LinearLayout root = new LinearLayout(context);
         root.setOrientation(LinearLayout.VERTICAL);
@@ -666,7 +666,7 @@ public final class WaysGramTimelineFragment extends BaseFragment {
                 setSendInFlight(false);
                 statusView.setText(message);
                 if (statusCode == 401) {
-                    WaysGramSessionStore.getInstance(getParentActivity()).clearSession();
+                    WaysGramSessionStore.getInstance(getParentActivity(), getCurrentAccount()).clearSession();
                     presentFragment(new WaysGramLoginFragment(), true);
                 }
             }
@@ -739,7 +739,7 @@ public final class WaysGramTimelineFragment extends BaseFragment {
                                 public void onError(String message, int statusCode) {
                                     statusView.setText(message);
                                     if (statusCode == 401) {
-                                        WaysGramSessionStore.getInstance(getParentActivity()).clearSession();
+                                        WaysGramSessionStore.getInstance(getParentActivity(), getCurrentAccount()).clearSession();
                                         presentFragment(new WaysGramLoginFragment(), true);
                                     }
                                 }
@@ -771,7 +771,7 @@ public final class WaysGramTimelineFragment extends BaseFragment {
                 messageEventsInitializing = false;
                 messageEventsReady = false;
                 if (statusCode == 401) {
-                    WaysGramSessionStore.getInstance(getParentActivity()).clearSession();
+                    WaysGramSessionStore.getInstance(getParentActivity(), getCurrentAccount()).clearSession();
                     presentFragment(new WaysGramLoginFragment(), true);
                     return;
                 }
@@ -834,7 +834,7 @@ public final class WaysGramTimelineFragment extends BaseFragment {
                     public void onError(String message, int statusCode) {
                         eventPollInFlight = false;
                         if (statusCode == 401) {
-                            WaysGramSessionStore.getInstance(getParentActivity()).clearSession();
+                            WaysGramSessionStore.getInstance(getParentActivity(), getCurrentAccount()).clearSession();
                             presentFragment(new WaysGramLoginFragment(), true);
                         } else {
                             scheduleNextEventPoll(4000);
@@ -871,7 +871,7 @@ public final class WaysGramTimelineFragment extends BaseFragment {
             public void onError(String message, int statusCode) {
                 statusView.setText(message);
                 if (statusCode == 401) {
-                    WaysGramSessionStore.getInstance(getParentActivity()).clearSession();
+                    WaysGramSessionStore.getInstance(getParentActivity(), getCurrentAccount()).clearSession();
                     presentFragment(new WaysGramLoginFragment(), true);
                 } else {
                     scheduleNextPoll();
@@ -901,7 +901,7 @@ public final class WaysGramTimelineFragment extends BaseFragment {
             @Override
             public void onError(String message, int statusCode) {
                 if (statusCode == 401 && getParentActivity() != null) {
-                    WaysGramSessionStore.getInstance(getParentActivity()).clearSession();
+                    WaysGramSessionStore.getInstance(getParentActivity(), getCurrentAccount()).clearSession();
                     presentFragment(new WaysGramLoginFragment(), true);
                 }
             }
@@ -951,7 +951,7 @@ public final class WaysGramTimelineFragment extends BaseFragment {
             public void onError(String message, int statusCode) {
                 pollInFlight = false;
                 if (statusCode == 401) {
-                    WaysGramSessionStore.getInstance(getParentActivity()).clearSession();
+                    WaysGramSessionStore.getInstance(getParentActivity(), getCurrentAccount()).clearSession();
                     presentFragment(new WaysGramLoginFragment(), true);
                 } else {
                     scheduleNextPoll(4000);
@@ -1041,7 +1041,7 @@ public final class WaysGramTimelineFragment extends BaseFragment {
                     managementStatusView.setText(message);
                     managementActionButton.setEnabled(false);
                     if (statusCode == 401) {
-                        WaysGramSessionStore.getInstance(getParentActivity()).clearSession();
+                        WaysGramSessionStore.getInstance(getParentActivity(), getCurrentAccount()).clearSession();
                         presentFragment(new WaysGramLoginFragment(), true);
                     }
                 }
@@ -1058,7 +1058,7 @@ public final class WaysGramTimelineFragment extends BaseFragment {
                     managementStatusView.setText(message);
                     managementActionButton.setEnabled(false);
                     if (statusCode == 401) {
-                        WaysGramSessionStore.getInstance(getParentActivity()).clearSession();
+                        WaysGramSessionStore.getInstance(getParentActivity(), getCurrentAccount()).clearSession();
                         presentFragment(new WaysGramLoginFragment(), true);
                     }
                 }
@@ -1283,7 +1283,7 @@ public final class WaysGramTimelineFragment extends BaseFragment {
                     public void onError(String message, int statusCode) {
                         managementStatusView.setText(message);
                         if (statusCode == 401) {
-                            WaysGramSessionStore.getInstance(getParentActivity()).clearSession();
+                            WaysGramSessionStore.getInstance(getParentActivity(), getCurrentAccount()).clearSession();
                             presentFragment(new WaysGramLoginFragment(), true);
                         }
                     }
@@ -2073,7 +2073,7 @@ public final class WaysGramTimelineFragment extends BaseFragment {
         if (mediaId == null || !mediaId.matches("[a-f0-9]{32}") || getParentActivity() == null) {
             return null;
         }
-        String baseUrl = WaysGramSessionStore.getInstance(getParentActivity()).getApiBaseUrl();
+        String baseUrl = WaysGramSessionStore.getInstance(getParentActivity(), getCurrentAccount()).getApiBaseUrl();
         if (baseUrl == null || baseUrl.trim().isEmpty()) {
             return null;
         }
@@ -2083,7 +2083,7 @@ public final class WaysGramTimelineFragment extends BaseFragment {
     private Map<String, String> mediaAuthorizationHeaders() {
         Map<String, String> headers = new HashMap<>();
         if (getParentActivity() != null) {
-            String token = WaysGramSessionStore.getInstance(getParentActivity()).getWaysGramSessionToken();
+            String token = WaysGramSessionStore.getInstance(getParentActivity(), getCurrentAccount()).getWaysGramSessionToken();
             if (token != null && !token.isEmpty()) {
                 headers.put("Authorization", "Bearer " + token);
             }
@@ -2188,7 +2188,7 @@ public final class WaysGramTimelineFragment extends BaseFragment {
                 setSendInFlight(false);
                 statusView.setText(message);
                 if (statusCode == 401) {
-                    WaysGramSessionStore.getInstance(getParentActivity()).clearSession();
+                    WaysGramSessionStore.getInstance(getParentActivity(), getCurrentAccount()).clearSession();
                     presentFragment(new WaysGramLoginFragment(), true);
                 }
             }
