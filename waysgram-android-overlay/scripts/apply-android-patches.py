@@ -1208,6 +1208,36 @@ def patch_translation_dependencies(android_root: Path) -> None:
     gradle_file.write_text(content.rstrip() + addition, encoding="utf-8")
 
 
+
+def patch_chat_activity_native_gift_receipts_source(original: str) -> str:
+    """Render WaysGram purchase receipts through Telegram's native StarGift action cell."""
+    marker = "// WaysGram: hydrate legacy native gift receipts"
+    if marker in original:
+        required = (
+            "WaysGramNativeGiftReceiptAdapter.hydrateLegacyReceipts",
+            "chatMode == MODE_DEFAULT",
+        )
+        if not all(value in original for value in required):
+            raise ValueError("ChatActivity contains an incomplete WaysGram receipt patch")
+        return original
+
+    anchor = "        checkGroupMessagesOrder();\\n"
+    replacement = (
+        anchor
+        + "        // WaysGram: hydrate legacy native gift receipts\\n"
+        + "        if (chatMode == MODE_DEFAULT && chatAdapter != null) {\\n"
+        + "            org.telegram.messenger.waysgram.WaysGramNativeGiftReceiptAdapter.hydrateLegacyReceipts(\\n"
+        + "                    currentAccount, dialog_id, messages);\\n"
+        + "        }\\n"
+    )
+    return replace_exactly_once(
+        original,
+        anchor,
+        replacement,
+        "native Saved Messages and DM gift receipt hydration"
+    )
+
+
 def verify_source(android_root: Path) -> None:
     gift_sheet = android_root / "TMessagesProj/src/main/java/org/telegram/ui/Gifts/GiftSheet.java"
     launch_activity = android_root / "TMessagesProj/src/main/java/org/telegram/ui/LaunchActivity.java"
@@ -1228,6 +1258,20 @@ def verify_source(android_root: Path) -> None:
     ):
         if marker not in final_gift_sheet_source:
             raise ValueError("Native GiftCell WaysGram bitmap binding was not applied completely")
+
+    chat_activity = android_root / "TMessagesProj/src/main/java/org/telegram/ui/ChatActivity.java"
+    if not chat_activity.is_file():
+        raise FileNotFoundError(f"Required native ChatActivity source not found: {chat_activity}")
+    chat_activity_source = chat_activity.read_text(encoding="utf-8")
+    patched_chat_activity = patch_chat_activity_native_gift_receipts_source(chat_activity_source)
+    if patched_chat_activity != chat_activity_source:
+        chat_activity.write_text(patched_chat_activity, encoding="utf-8")
+    final_chat_activity = chat_activity.read_text(encoding="utf-8")
+    if (
+        "// WaysGram: hydrate legacy native gift receipts" not in final_chat_activity
+        or "WaysGramNativeGiftReceiptAdapter.hydrateLegacyReceipts" not in final_chat_activity
+    ):
+        raise ValueError("Native Saved Messages gift receipt integration was not applied")
 
     profile_layout = android_root / "TMessagesProj/src/main/java/org/telegram/ui/Components/SharedMediaLayout.java"
     if not profile_layout.is_file():
