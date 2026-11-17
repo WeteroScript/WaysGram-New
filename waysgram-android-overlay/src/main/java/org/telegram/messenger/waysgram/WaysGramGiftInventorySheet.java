@@ -190,30 +190,60 @@ public final class WaysGramGiftInventorySheet extends BottomSheet {
             if (item == null || !item.optBoolean("sticker_available", false)) continue;
             String serial = item.optString("serial_number", "").trim();
             String giftId = item.optString("telegram_gift_id", "").trim();
+            JSONObject telegramGift = item.optJSONObject("telegram_gift");
             if (giftId.isEmpty()) {
-                JSONObject telegramGift = item.optJSONObject("telegram_gift");
                 giftId = telegramGift == null ? "" : telegramGift.optString("id", "").trim();
             }
             if (serial.isEmpty() || giftId.isEmpty() || !startedStickerDownloads.add(serial)) continue;
             scheduled++;
-            final String cacheKey = serial;
-            imageClient.downloadTelegramGiftSticker(giftId, new WaysGramApiClient.ImageCallback() {
-                @Override
-                public void onSuccess(Bitmap bitmap) {
-                    if (bitmap == null || bitmap.isRecycled()) return;
-                    WaysGramGiftMediaStore.put(cacheKey, bitmap);
-                    AndroidUtilities.runOnUIThread(() -> {
-                        if (!isDismissed() && listView != null && listView.adapter != null) {
-                            listView.adapter.update(false);
-                        }
-                    });
-                }
+            JSONObject sticker = telegramGift == null ? null : telegramGift.optJSONObject("sticker");
+            boolean animated = sticker != null
+                    && (sticker.optBoolean("is_animated", false)
+                    || sticker.optBoolean("is_video", false));
+            if (animated) {
+                final String cacheKey = serial;
+                final String telegramId = giftId;
+                imageClient.downloadTelegramGiftStickerAnimation(
+                        telegramId, getContext().getCacheDir(), new WaysGramApiClient.FileCallback() {
+                            @Override
+                            public void onSuccess(java.io.File file) {
+                                WaysGramGiftMediaStore.putAnimationFile(cacheKey, file);
+                                refreshGiftCells();
+                            }
 
-                @Override
-                public void onError(String message, int statusCode) {
-                    // Keep Telegram's native GiftCell background if no sticker can be loaded.
-                }
-            });
+                            @Override
+                            public void onError(String message, int statusCode) {
+                                downloadStaticSticker(telegramId, cacheKey);
+                            }
+                        }
+                );
+            } else {
+                downloadStaticSticker(giftId, serial);
+            }
         }
+    }
+
+    private void downloadStaticSticker(String giftId, String serial) {
+        imageClient.downloadTelegramGiftSticker(giftId, new WaysGramApiClient.ImageCallback() {
+            @Override
+            public void onSuccess(Bitmap bitmap) {
+                if (bitmap == null || bitmap.isRecycled()) return;
+                WaysGramGiftMediaStore.put(serial, bitmap);
+                refreshGiftCells();
+            }
+
+            @Override
+            public void onError(String message, int statusCode) {
+                // Retain the native placeholder when no preview can be loaded.
+            }
+        });
+    }
+
+    private void refreshGiftCells() {
+        AndroidUtilities.runOnUIThread(() -> {
+            if (!isDismissed() && listView != null && listView.adapter != null) {
+                listView.adapter.update(false);
+            }
+        });
     }
 }
