@@ -33,7 +33,7 @@ import java.util.regex.Pattern;
 public final class WaysGramNativeGiftReceiptAdapter {
     private static final String PREFS = "waysgram_native_gift_receipts";
     private static final Pattern LEGACY_RECEIPT = Pattern.compile(
-            "^\\s*Вы приобрели коллекционный подарок\\s*[«\\"]\\s*(?:Telegram\\s+Gift\\s+)?([0-9]{5,})\\s*[»\\"]?.*$",
+            "^\\s*Вы приобрели коллекционный подарок\\s*«\\s*(?:Telegram\\s+Gift\\s+)?([0-9]{5,})\\s*».*$",
             Pattern.CASE_INSENSITIVE | Pattern.UNICODE_CASE
     );
     private static final Map<MessageObject, Boolean> HYDRATING =
