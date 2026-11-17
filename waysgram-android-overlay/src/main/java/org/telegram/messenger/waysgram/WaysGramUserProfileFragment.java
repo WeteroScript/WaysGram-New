@@ -16,6 +16,7 @@ import android.widget.TextView;
 import org.json.JSONArray;
 import org.json.JSONObject;
 import org.telegram.messenger.AndroidUtilities;
+import org.telegram.messenger.UserConfig;
 import org.telegram.ui.ActionBar.BaseFragment;
 import org.telegram.ui.ActionBar.Theme;
 
@@ -30,15 +31,21 @@ public final class WaysGramUserProfileFragment extends BaseFragment {
     private ImageView avatarView;
     private TextView statusView;
     private TextView identityView;
+    private TextView bioView;
     private LinearLayout labelsContainer;
     private LinearLayout groupsContainer;
     private LinearLayout contactsContainer;
     private LinearLayout giftsContainer;
 
     public WaysGramUserProfileFragment(long userId) {
+        this(userId, UserConfig.selectedAccount);
+    }
+
+    public WaysGramUserProfileFragment(long userId, int telegramAccount) {
         if (userId <= 0) {
             throw new IllegalArgumentException("Invalid WaysGram user ID");
         }
+        setCurrentAccount(telegramAccount);
         this.userId = userId;
     }
 
@@ -49,7 +56,9 @@ public final class WaysGramUserProfileFragment extends BaseFragment {
 
     @Override
     public View createView(android.content.Context context) {
-        apiClient = new WaysGramApiClient(WaysGramSessionStore.getInstance(context));
+        apiClient = new WaysGramApiClient(
+                WaysGramSessionStore.getInstance(context, getCurrentAccount())
+        );
         actionBar.setTitle("Профиль WaysGram");
 
         ScrollView scroll = new ScrollView(context);
@@ -74,8 +83,9 @@ public final class WaysGramUserProfileFragment extends BaseFragment {
 
         identityView = addLabel(context, root, "Загружаю профиль…", 18, true);
         labelsContainer = new LinearLayout(context);
-        labelsContainer.setOrientation(LinearLayout.VERTICAL);
+        labelsContainer.setOrientation(LinearLayout.HORIZONTAL);
         root.addView(labelsContainer, matchWrap());
+        bioView = addLabel(context, root, "", 13, false);
         statusView = addLabel(context, root, "", 12, false);
 
         Button messageButton = new Button(context);
@@ -133,11 +143,9 @@ public final class WaysGramUserProfileFragment extends BaseFragment {
                 if (!username.isEmpty()) {
                     identity.append("\n@").append(username);
                 }
-                if (!bio.isEmpty()) {
-                    identity.append("\n\n").append(bio);
-                }
                 identityView.setText(identity.toString());
                 renderLabels(response.optJSONArray("labels"));
+                bioView.setText(bio);
 
                 String avatarId = response.optString("avatar_media_id", "");
                 if (avatarId.matches("[a-f0-9]{32}")) {
@@ -168,8 +176,10 @@ public final class WaysGramUserProfileFragment extends BaseFragment {
             public void onError(String message, int statusCode) {
                 statusView.setText(message);
                 if (statusCode == 401) {
-                    WaysGramSessionStore.getInstance(getParentActivity()).clearSession();
-                    presentFragment(new WaysGramLoginFragment(), true);
+                    WaysGramSessionStore.getInstance(
+                            getParentActivity(), getCurrentAccount()
+                    ).clearSession();
+                    presentFragment(new WaysGramLoginFragment(getCurrentAccount()), true);
                 }
             }
         });
@@ -276,7 +286,7 @@ public final class WaysGramUserProfileFragment extends BaseFragment {
             item.setText(username.isEmpty() ? title : title + "\n@" + username);
             contactsContainer.addView(item, matchWrap());
             item.setOnClickListener(view ->
-                    presentFragment(new WaysGramUserProfileFragment(id), false));
+                    presentFragment(new WaysGramUserProfileFragment(id, getCurrentAccount()), false));
         }
     }
 
@@ -287,8 +297,7 @@ public final class WaysGramUserProfileFragment extends BaseFragment {
             addLabel(getParentActivity(), giftsContainer, "Публичных подарков не найдено", 13, false);
             return;
         }
-        int visible = Math.min(count, 50);
-        for (int i = 0; i < visible; i++) {
+        for (int i = 0; i < count; i++) {
             JSONObject gift = gifts.optJSONObject(i);
             if (gift == null) {
                 continue;
@@ -298,21 +307,12 @@ public final class WaysGramUserProfileFragment extends BaseFragment {
                 attributes = new JSONObject();
             }
             JSONObject telegramGift = gift.optJSONObject("telegram_gift");
-            String title = telegramGift == null ? "" : telegramGift.optString("title", "").trim();
-            if (title.isEmpty()) {
-                title = gift.optString("gift_name", "Подарок WaysGram");
-            }
-            String emoji = gift.optString("gift_emoji", "").trim();
-            if (emoji.isEmpty() && telegramGift != null) {
-                emoji = telegramGift.optString("emoji", "").trim();
-            }
-            String serial = gift.optString("serial_number", "");
             String telegramId = gift.optString("telegram_gift_id", "");
-            int level = Math.max(
-                    gift.optInt("upgrade_level", 0),
-                    attributes.optInt("upgrade_level", 0)
+            String title = WaysGramGiftNames.displayName(
+                    telegramGift == null ? "" : telegramGift.optString("title", ""),
+                    gift.optString("gift_name", ""),
+                    telegramId
             );
-
             LinearLayout card = new LinearLayout(getParentActivity());
             card.setOrientation(LinearLayout.VERTICAL);
             card.setPadding(AndroidUtilities.dp(12), AndroidUtilities.dp(10),
@@ -322,30 +322,18 @@ public final class WaysGramUserProfileFragment extends BaseFragment {
             background.setCornerRadius(AndroidUtilities.dp(12));
             card.setBackground(background);
 
-            TextView titleView = addLabel(getParentActivity(), card,
-                    (emoji.isEmpty() ? "🎁" : emoji) + "  " + title, 16, true);
+            TextView titleView = addLabel(getParentActivity(), card, title, 16, true);
             titleView.setPadding(AndroidUtilities.dp(2), AndroidUtilities.dp(3),
                     AndroidUtilities.dp(2), AndroidUtilities.dp(5));
+            JSONObject stickerInfo = telegramGift == null
+                    ? null : telegramGift.optJSONObject("sticker");
+            boolean animated = stickerInfo != null
+                    && (stickerInfo.optBoolean("is_animated", false)
+                    || stickerInfo.optBoolean("is_video", false));
             WaysGramGiftCardRenderer.addPreview(
-                    getParentActivity(), card, apiClient, telegramId, emoji
+                    getParentActivity(), card, apiClient, telegramId, "",
+                    animated, getCurrentAccount()
             );
-            addLabel(getParentActivity(), card, "Уровень WaysGram: " + level, 13, true);
-            if (telegramGift != null && gift.optBoolean("can_upgrade", false)) {
-                int upgradePrice = telegramGift.optInt("upgrade_star_count", 0);
-                int upgradeVariants = telegramGift.optInt("upgrade_variants", 0);
-                addLabel(getParentActivity(), card,
-                        "Параметры Telegram-улучшения"
-                                + (upgradePrice > 0 ? " · " + upgradePrice + " Stars" : "")
-                                + (upgradeVariants > 0 ? " · вариантов: " + upgradeVariants : ""),
-                        12, true
-                );
-            }
-            if (!serial.isEmpty()) {
-                addLabel(getParentActivity(), card, "Серийный номер: " + serial, 12, false);
-            }
-            if (!telegramId.isEmpty()) {
-                addLabel(getParentActivity(), card, "Источник каталога · Telegram Gift ID: " + telegramId, 12, false);
-            }
             if ("waysgram_internal".equals(attributes.optString("upgrade_source", ""))) {
                 addLabel(getParentActivity(), card,
                         "Улучшение выполнено внутри коллекционной системы WaysGram",

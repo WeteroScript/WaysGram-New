@@ -34,7 +34,7 @@ public final class WaysGramGiftInventorySheet extends BottomSheet {
         void onGiftSelected(JSONObject gift);
     }
 
-    private static final int MAX_STICKER_DOWNLOADS = 200;
+    private static final int MAX_STICKER_DOWNLOADS = 1000;
 
     private final WaysGramGiftCatalogClient catalogClient;
     private final int telegramAccount;
@@ -187,33 +187,68 @@ public final class WaysGramGiftInventorySheet extends BottomSheet {
         int scheduled = 0;
         for (int i = 0; i < inventory.length() && scheduled < MAX_STICKER_DOWNLOADS; i++) {
             JSONObject item = inventory.optJSONObject(i);
-            if (item == null || !item.optBoolean("sticker_available", false)) continue;
+            if (item == null) continue;
             String serial = item.optString("serial_number", "").trim();
             String giftId = item.optString("telegram_gift_id", "").trim();
+            JSONObject telegramGift = item.optJSONObject("telegram_gift");
             if (giftId.isEmpty()) {
-                JSONObject telegramGift = item.optJSONObject("telegram_gift");
                 giftId = telegramGift == null ? "" : telegramGift.optString("id", "").trim();
             }
             if (serial.isEmpty() || giftId.isEmpty() || !startedStickerDownloads.add(serial)) continue;
             scheduled++;
-            final String cacheKey = serial;
-            imageClient.downloadTelegramGiftSticker(giftId, new WaysGramApiClient.ImageCallback() {
-                @Override
-                public void onSuccess(Bitmap bitmap) {
-                    if (bitmap == null || bitmap.isRecycled()) return;
-                    WaysGramGiftMediaStore.put(cacheKey, bitmap);
-                    AndroidUtilities.runOnUIThread(() -> {
-                        if (!isDismissed() && listView != null && listView.adapter != null) {
-                            listView.adapter.update(false);
-                        }
-                    });
-                }
-
-                @Override
-                public void onError(String message, int statusCode) {
-                    // Keep Telegram's native GiftCell background if no sticker can be loaded.
-                }
-            });
+            JSONObject sticker = telegramGift == null ? null : telegramGift.optJSONObject("sticker");
+            boolean animated = sticker != null
+                    && (sticker.optBoolean("is_animated", false)
+                    || sticker.optBoolean("is_video", false));
+            if (animated) {
+                downloadAnimatedSticker(giftId, serial, true);
+            } else {
+                downloadStaticSticker(giftId, serial, true);
+            }
         }
+    }
+
+    private void downloadStaticSticker(String giftId, String serial, boolean tryAnimationOnFailure) {
+        imageClient.downloadTelegramGiftSticker(giftId, new WaysGramApiClient.ImageCallback() {
+            @Override
+            public void onSuccess(Bitmap bitmap) {
+                if (bitmap == null || bitmap.isRecycled()) {
+                    if (tryAnimationOnFailure) downloadAnimatedSticker(giftId, serial, false);
+                    return;
+                }
+                WaysGramGiftMediaStore.put(serial, bitmap);
+                refreshGiftCells();
+            }
+
+            @Override
+            public void onError(String message, int statusCode) {
+                if (tryAnimationOnFailure) downloadAnimatedSticker(giftId, serial, false);
+            }
+        });
+    }
+
+    private void downloadAnimatedSticker(String giftId, String serial, boolean tryStaticOnFailure) {
+        imageClient.downloadTelegramGiftStickerAnimation(
+                giftId, getContext().getCacheDir(), new WaysGramApiClient.FileCallback() {
+                    @Override
+                    public void onSuccess(java.io.File file) {
+                        WaysGramGiftMediaStore.putAnimationFile(serial, file);
+                        refreshGiftCells();
+                    }
+
+                    @Override
+                    public void onError(String message, int statusCode) {
+                        if (tryStaticOnFailure) downloadStaticSticker(giftId, serial, false);
+                    }
+                }
+        );
+    }
+
+    private void refreshGiftCells() {
+        AndroidUtilities.runOnUIThread(() -> {
+            if (!isDismissed() && listView != null && listView.adapter != null) {
+                listView.adapter.update(false);
+            }
+        });
     }
 }

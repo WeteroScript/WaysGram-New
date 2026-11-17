@@ -29,6 +29,7 @@ import androidx.recyclerview.widget.LinearLayoutManager;
 import androidx.recyclerview.widget.RecyclerView;
 
 import org.telegram.messenger.AndroidUtilities;
+import org.telegram.messenger.UserConfig;
 import org.telegram.ui.Components.AnimatedFileDrawable;
 import org.telegram.ui.ActionBar.BottomSheet;
 import org.telegram.ui.ActionBar.Theme;
@@ -209,25 +210,18 @@ public final class WaysGramGiftCatalogSheet extends BottomSheet {
     private void showGiftActions(JSONObject gift) {
         String serial = gift.optString("serial_number", "");
         JSONObject telegramGift = gift.optJSONObject("telegram_gift");
-        String name = telegramGift == null ? "" : telegramGift.optString("title", "").trim();
-        if (name.isEmpty() || "null".equalsIgnoreCase(name)
-                || "Подарок Telegram".equalsIgnoreCase(name) || "Telegram Gift".equalsIgnoreCase(name)) {
-            name = gift.optString("gift_name", "").trim();
-        }
-        if (name.isEmpty() || "null".equalsIgnoreCase(name)
-                || "Подарок Telegram".equalsIgnoreCase(name) || "Telegram Gift".equalsIgnoreCase(name)) {
-            name = gift.optString("gift_emoji", "").trim();
-        }
-        if (name.isEmpty() || "null".equalsIgnoreCase(name)) {
-            name = "Подарок";
-        }
+        String name = WaysGramGiftNames.displayName(
+                telegramGift == null ? "" : telegramGift.optString("title", ""),
+                gift.optString("gift_name", ""),
+                gift.optString("telegram_gift_id", "")
+        );
         if (serial.isEmpty()) {
             return;
         }
         ArrayList<String> actions = new ArrayList<>();
         boolean listed = gift.optInt("is_listed", gift.optBoolean("is_listed", false) ? 1 : 0) == 1;
         boolean auctioned = gift.optInt("is_auctioned", gift.optBoolean("is_auctioned", false) ? 1 : 0) == 1;
-        boolean canUpgrade = gift.optString("telegram_gift_id", "").length() > 0
+        boolean canUpgrade = gift.optBoolean("waysgram_can_upgrade", false)
                 && telegramGift != null
                 && telegramGift.optInt("upgrade_star_count", 0) > 0;
         boolean auctionEligible = gift.optInt(
@@ -740,10 +734,24 @@ public final class WaysGramGiftCatalogSheet extends BottomSheet {
                     String serial = purchasedGift == null
                             ? ""
                             : purchasedGift.optString("serial_number", "");
+                    String purchasedGiftId = purchasedGift == null
+                            ? gift.id
+                            : purchasedGift.optString("telegram_gift_id", gift.id);
+                    long ownerId = purchasedGift == null
+                            ? UserConfig.getInstance(telegramAccount).getClientUserId()
+                            : purchasedGift.optLong(
+                                    "owner_id", UserConfig.getInstance(telegramAccount).getClientUserId()
+                            );
+                    if (!serial.isEmpty()) {
+                        WaysGramNativeGiftReceiptAdapter.addPurchaseReceipt(
+                                telegramAccount, purchasedGiftId, serial, gift.title, ownerId
+                        );
+                    }
                     int balance = result.optInt("stars", -1);
                     String confirmation = recipient == null ? "Подарок куплен" : "Подарок отправлен другу";
-                    confirmation += (serial.length() > 0 ? " · " + serial : "")
-                            + (balance >= 0 ? " · баланс " + balance + " Stars" : "");
+                    if (balance >= 0) {
+                        confirmation += " · баланс " + balance + " Stars";
+                    }
                     statusView.setText(confirmation);
                     Toast.makeText(getContext(), confirmation, Toast.LENGTH_LONG).show();
                     loadCatalog();
@@ -1062,8 +1070,8 @@ public final class WaysGramGiftCatalogSheet extends BottomSheet {
             } else {
                 imageView.setImageDrawable(null);
                 imageView.setVisibility(View.GONE);
-                emojiView.setText(gift.emoji.length() > 0 ? gift.emoji : "🎁");
-                emojiView.setVisibility(View.VISIBLE);
+                emojiView.setText("");
+                emojiView.setVisibility(View.GONE);
             }
         }
     }

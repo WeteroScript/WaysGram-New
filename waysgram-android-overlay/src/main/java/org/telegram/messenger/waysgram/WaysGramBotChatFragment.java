@@ -55,7 +55,7 @@ public final class WaysGramBotChatFragment extends BaseFragment {
     @Override
     public View createView(Context context) {
         actionBar.setTitle(botTitle.length() > 0 ? botTitle : "Чат с ботом");
-        apiClient = new WaysGramApiClient(WaysGramSessionStore.getInstance(context));
+        apiClient = new WaysGramApiClient(WaysGramSessionStore.getInstance(context, getCurrentAccount()));
 
         LinearLayout root = new LinearLayout(context);
         root.setOrientation(LinearLayout.VERTICAL);
@@ -217,8 +217,8 @@ public final class WaysGramBotChatFragment extends BaseFragment {
 
     private void handleAuthError(int statusCode) {
         if (statusCode == 401) {
-            WaysGramSessionStore.getInstance(getParentActivity()).clearSession();
-            presentFragment(new WaysGramLoginFragment(), true);
+            WaysGramSessionStore.getInstance(getParentActivity(), getCurrentAccount()).clearSession();
+            presentFragment(new WaysGramLoginFragment(getCurrentAccount()), true);
         }
     }
 

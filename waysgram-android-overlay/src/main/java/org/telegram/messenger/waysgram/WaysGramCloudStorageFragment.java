@@ -44,7 +44,7 @@ public final class WaysGramCloudStorageFragment extends BaseFragment {
     @Override
     public View createView(android.content.Context context) {
         actionBar.setTitle("Облачные файлы");
-        apiClient = new WaysGramApiClient(WaysGramSessionStore.getInstance(context));
+        apiClient = new WaysGramApiClient(WaysGramSessionStore.getInstance(context, getCurrentAccount()));
 
         ScrollView scroll = new ScrollView(context);
         scroll.setFillViewport(true);
@@ -132,8 +132,8 @@ public final class WaysGramCloudStorageFragment extends BaseFragment {
                         loadMoreButton.setEnabled(hasMore);
                         statusView.setText(message);
                         if (statusCode == 401 && getParentActivity() != null) {
-                            WaysGramSessionStore.getInstance(getParentActivity()).clearSession();
-                            presentFragment(new WaysGramLoginFragment(), true);
+                            WaysGramSessionStore.getInstance(getParentActivity(), getCurrentAccount()).clearSession();
+                            presentFragment(new WaysGramLoginFragment(getCurrentAccount()), true);
                         }
                     }
                 });

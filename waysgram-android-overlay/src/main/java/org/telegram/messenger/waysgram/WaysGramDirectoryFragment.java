@@ -77,7 +77,7 @@ public final class WaysGramDirectoryFragment extends BaseFragment {
     public View createView(Context context) {
         actionBar.setTitle(titleForType());
         apiClient = new WaysGramApiClient(
-                WaysGramSessionStore.getInstance(context)
+                WaysGramSessionStore.getInstance(context, getCurrentAccount())
         );
 
         LinearLayout root = new LinearLayout(context);
@@ -173,8 +173,8 @@ public final class WaysGramDirectoryFragment extends BaseFragment {
             public void onError(String message, int statusCode) {
                 directoryEventsInitializing = false;
                 if (statusCode == 401) {
-                    WaysGramSessionStore.getInstance(getParentActivity()).clearSession();
-                    presentFragment(new WaysGramLoginFragment(), true);
+                    WaysGramSessionStore.getInstance(getParentActivity(), getCurrentAccount()).clearSession();
+                    presentFragment(new WaysGramLoginFragment(getCurrentAccount()), true);
                 } else {
                     scheduleDirectoryEventRetry(4000);
                 }
@@ -236,8 +236,8 @@ public final class WaysGramDirectoryFragment extends BaseFragment {
                     public void onError(String message, int statusCode) {
                         directoryEventPollInFlight = false;
                         if (statusCode == 401) {
-                            WaysGramSessionStore.getInstance(getParentActivity()).clearSession();
-                            presentFragment(new WaysGramLoginFragment(), true);
+                            WaysGramSessionStore.getInstance(getParentActivity(), getCurrentAccount()).clearSession();
+                            presentFragment(new WaysGramLoginFragment(getCurrentAccount()), true);
                         } else {
                             scheduleDirectoryEventRetry(4000);
                         }
@@ -365,8 +365,8 @@ public final class WaysGramDirectoryFragment extends BaseFragment {
             public void onError(String message, int statusCode) {
                 statusView.setText(message);
                 if (statusCode == 401) {
-                    WaysGramSessionStore.getInstance(getParentActivity()).clearSession();
-                    presentFragment(new WaysGramLoginFragment(), true);
+                    WaysGramSessionStore.getInstance(getParentActivity(), getCurrentAccount()).clearSession();
+                    presentFragment(new WaysGramLoginFragment(getCurrentAccount()), true);
                 }
             }
         });
@@ -651,8 +651,8 @@ public final class WaysGramDirectoryFragment extends BaseFragment {
             public void onError(String message, int statusCode) {
                 statusView.setText(message);
                 if (statusCode == 401) {
-                    WaysGramSessionStore.getInstance(getParentActivity()).clearSession();
-                    presentFragment(new WaysGramLoginFragment(), true);
+                    WaysGramSessionStore.getInstance(getParentActivity(), getCurrentAccount()).clearSession();
+                    presentFragment(new WaysGramLoginFragment(getCurrentAccount()), true);
                 }
             }
         });
@@ -748,7 +748,7 @@ public final class WaysGramDirectoryFragment extends BaseFragment {
                         ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT
                 ));
                 profileButton.setOnClickListener(view ->
-                        presentFragment(new WaysGramUserProfileFragment(id), false));
+                        presentFragment(new WaysGramUserProfileFragment(id, getCurrentAccount()), false));
             }
             Button manage = new Button(getParentActivity());
             manage.setAllCaps(false);

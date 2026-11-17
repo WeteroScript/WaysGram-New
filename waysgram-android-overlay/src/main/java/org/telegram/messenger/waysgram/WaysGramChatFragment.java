@@ -205,7 +205,7 @@ public final class WaysGramChatFragment extends BaseFragment {
     @Override
     public View createView(Context context) {
         actionBar.setTitle(peerTitle.length() > 0 ? peerTitle : "Диалог");
-        apiClient = new WaysGramApiClient(WaysGramSessionStore.getInstance(context));
+        apiClient = new WaysGramApiClient(WaysGramSessionStore.getInstance(context, getCurrentAccount()));
 
         LinearLayout root = new LinearLayout(context);
         root.setOrientation(LinearLayout.VERTICAL);
@@ -547,8 +547,8 @@ public final class WaysGramChatFragment extends BaseFragment {
                     public void onError(String message, int statusCode) {
                         statusView.setText(message);
                         if (statusCode == 401 && getParentActivity() != null) {
-                            WaysGramSessionStore.getInstance(getParentActivity()).clearSession();
-                            presentFragment(new WaysGramLoginFragment(), true);
+                            WaysGramSessionStore.getInstance(getParentActivity(), getCurrentAccount()).clearSession();
+                            presentFragment(new WaysGramLoginFragment(getCurrentAccount()), true);
                         }
                     }
                 });
@@ -593,8 +593,8 @@ public final class WaysGramChatFragment extends BaseFragment {
                 setMessageSendInFlight(false);
                 statusView.setText(message);
                 if (statusCode == 401 && getParentActivity() != null) {
-                    WaysGramSessionStore.getInstance(getParentActivity()).clearSession();
-                    presentFragment(new WaysGramLoginFragment(), true);
+                    WaysGramSessionStore.getInstance(getParentActivity(), getCurrentAccount()).clearSession();
+                    presentFragment(new WaysGramLoginFragment(getCurrentAccount()), true);
                 }
             }
         });
@@ -788,8 +788,8 @@ public final class WaysGramChatFragment extends BaseFragment {
                     public void onError(String message, int statusCode) {
                         statusView.setText(message);
                         if (statusCode == 401 && getParentActivity() != null) {
-                            WaysGramSessionStore.getInstance(getParentActivity()).clearSession();
-                            presentFragment(new WaysGramLoginFragment(), true);
+                            WaysGramSessionStore.getInstance(getParentActivity(), getCurrentAccount()).clearSession();
+                            presentFragment(new WaysGramLoginFragment(getCurrentAccount()), true);
                         }
                     }
                 });
@@ -876,8 +876,8 @@ public final class WaysGramChatFragment extends BaseFragment {
                     public void onError(String message, int statusCode) {
                         statusView.setText(message);
                         if (statusCode == 401 && getParentActivity() != null) {
-                            WaysGramSessionStore.getInstance(getParentActivity()).clearSession();
-                            presentFragment(new WaysGramLoginFragment(), true);
+                            WaysGramSessionStore.getInstance(getParentActivity(), getCurrentAccount()).clearSession();
+                            presentFragment(new WaysGramLoginFragment(getCurrentAccount()), true);
                         }
                     }
                 });
@@ -1270,7 +1270,7 @@ public final class WaysGramChatFragment extends BaseFragment {
                                 long userId = user.optLong("id", 0);
                                 if (userId > 0) {
                                     presentFragment(
-                                            new WaysGramUserProfileFragment(userId), false
+                                            new WaysGramUserProfileFragment(userId, getCurrentAccount()), false
                                     );
                                     return;
                                 }
@@ -1283,8 +1283,8 @@ public final class WaysGramChatFragment extends BaseFragment {
                     public void onError(String message, int statusCode) {
                         statusView.setText(message);
                         if (statusCode == 401 && getParentActivity() != null) {
-                            WaysGramSessionStore.getInstance(getParentActivity()).clearSession();
-                            presentFragment(new WaysGramLoginFragment(), true);
+                            WaysGramSessionStore.getInstance(getParentActivity(), getCurrentAccount()).clearSession();
+                            presentFragment(new WaysGramLoginFragment(getCurrentAccount()), true);
                         }
                     }
                 });
@@ -1362,8 +1362,8 @@ public final class WaysGramChatFragment extends BaseFragment {
                     public void onError(String message, int statusCode) {
                         statusView.setText(message);
                         if (statusCode == 401) {
-                            WaysGramSessionStore.getInstance(getParentActivity()).clearSession();
-                            presentFragment(new WaysGramLoginFragment(), true);
+                            WaysGramSessionStore.getInstance(getParentActivity(), getCurrentAccount()).clearSession();
+                            presentFragment(new WaysGramLoginFragment(getCurrentAccount()), true);
                         }
                     }
                 }
@@ -1408,8 +1408,8 @@ public final class WaysGramChatFragment extends BaseFragment {
                 messageEventsInitializing = false;
                 messageEventsReady = false;
                 if (statusCode == 401) {
-                    WaysGramSessionStore.getInstance(getParentActivity()).clearSession();
-                    presentFragment(new WaysGramLoginFragment(), true);
+                    WaysGramSessionStore.getInstance(getParentActivity(), getCurrentAccount()).clearSession();
+                    presentFragment(new WaysGramLoginFragment(getCurrentAccount()), true);
                     return;
                 }
                 loadMessages();
@@ -1471,8 +1471,8 @@ public final class WaysGramChatFragment extends BaseFragment {
                     public void onError(String message, int statusCode) {
                         eventPollInFlight = false;
                         if (statusCode == 401) {
-                            WaysGramSessionStore.getInstance(getParentActivity()).clearSession();
-                            presentFragment(new WaysGramLoginFragment(), true);
+                            WaysGramSessionStore.getInstance(getParentActivity(), getCurrentAccount()).clearSession();
+                            presentFragment(new WaysGramLoginFragment(getCurrentAccount()), true);
                         } else {
                             scheduleNextEventPoll(4000);
                         }
@@ -1517,8 +1517,8 @@ public final class WaysGramChatFragment extends BaseFragment {
             public void onError(String message, int statusCode) {
                 statusView.setText(message);
                 if (statusCode == 401) {
-                    WaysGramSessionStore.getInstance(getParentActivity()).clearSession();
-                    presentFragment(new WaysGramLoginFragment(), true);
+                    WaysGramSessionStore.getInstance(getParentActivity(), getCurrentAccount()).clearSession();
+                    presentFragment(new WaysGramLoginFragment(getCurrentAccount()), true);
                 } else {
                     scheduleNextPoll();
                 }
@@ -1596,8 +1596,8 @@ public final class WaysGramChatFragment extends BaseFragment {
                         loadOlderButton.setText("Загрузить предыдущие сообщения");
                         statusView.setText(message);
                         if (statusCode == 401 && getParentActivity() != null) {
-                            WaysGramSessionStore.getInstance(getParentActivity()).clearSession();
-                            presentFragment(new WaysGramLoginFragment(), true);
+                            WaysGramSessionStore.getInstance(getParentActivity(), getCurrentAccount()).clearSession();
+                            presentFragment(new WaysGramLoginFragment(getCurrentAccount()), true);
                         }
                     }
                 });
@@ -1654,8 +1654,8 @@ public final class WaysGramChatFragment extends BaseFragment {
             @Override
             public void onError(String message, int statusCode) {
                 if (statusCode == 401 && getParentActivity() != null) {
-                    WaysGramSessionStore.getInstance(getParentActivity()).clearSession();
-                    presentFragment(new WaysGramLoginFragment(), true);
+                    WaysGramSessionStore.getInstance(getParentActivity(), getCurrentAccount()).clearSession();
+                    presentFragment(new WaysGramLoginFragment(getCurrentAccount()), true);
                 }
             }
         });
@@ -1710,8 +1710,8 @@ public final class WaysGramChatFragment extends BaseFragment {
                     public void onError(String message, int statusCode) {
                         pollInFlight = false;
                         if (statusCode == 401) {
-                            WaysGramSessionStore.getInstance(getParentActivity()).clearSession();
-                            presentFragment(new WaysGramLoginFragment(), true);
+                            WaysGramSessionStore.getInstance(getParentActivity(), getCurrentAccount()).clearSession();
+                            presentFragment(new WaysGramLoginFragment(getCurrentAccount()), true);
                         } else {
                             scheduleNextPoll(4000);
                         }
@@ -2262,8 +2262,8 @@ public final class WaysGramChatFragment extends BaseFragment {
             @Override
             public void onError(String message, int statusCode) {
                 if (statusCode == 401 && getParentActivity() != null) {
-                    WaysGramSessionStore.getInstance(getParentActivity()).clearSession();
-                    presentFragment(new WaysGramLoginFragment(), true);
+                    WaysGramSessionStore.getInstance(getParentActivity(), getCurrentAccount()).clearSession();
+                    presentFragment(new WaysGramLoginFragment(getCurrentAccount()), true);
                 }
             }
         });
@@ -3012,9 +3012,9 @@ public final class WaysGramChatFragment extends BaseFragment {
                 String[] labels = new String[available.size()];
                 for (int i = 0; i < available.size(); i++) {
                     JSONObject gift = available.get(i);
-                    labels[i] = gift.optString("gift_name", "Подарок WaysGram")
-                            + " · уровень " + gift.optInt("upgrade_level", 0)
-                            + "\n" + gift.optString("serial_number", "");
+                    labels[i] = WaysGramGiftNames.displayName(
+                            gift.optString("gift_name", ""), "", gift.optString("telegram_gift_id", "")
+                    );
                 }
                 statusView.setText("Выберите подарок для отправки");
                 new AlertDialog.Builder(getParentActivity())
@@ -3032,8 +3032,8 @@ public final class WaysGramChatFragment extends BaseFragment {
             public void onError(String message, int statusCode) {
                 statusView.setText(message);
                 if (statusCode == 401) {
-                    WaysGramSessionStore.getInstance(getParentActivity()).clearSession();
-                    presentFragment(new WaysGramLoginFragment(), true);
+                    WaysGramSessionStore.getInstance(getParentActivity(), getCurrentAccount()).clearSession();
+                    presentFragment(new WaysGramLoginFragment(getCurrentAccount()), true);
                 }
             }
         });
@@ -3097,8 +3097,8 @@ public final class WaysGramChatFragment extends BaseFragment {
                 setMessageSendInFlight(false);
                 statusView.setText(message);
                 if (statusCode == 401) {
-                    WaysGramSessionStore.getInstance(getParentActivity()).clearSession();
-                    presentFragment(new WaysGramLoginFragment(), true);
+                    WaysGramSessionStore.getInstance(getParentActivity(), getCurrentAccount()).clearSession();
+                    presentFragment(new WaysGramLoginFragment(getCurrentAccount()), true);
                 }
             }
         });
@@ -3339,10 +3339,6 @@ public final class WaysGramChatFragment extends BaseFragment {
         String giftSerial = message.optString("gift_serial_number", "");
         if (!giftSerial.isEmpty() || isGiftPurchaseEvent) {
             JSONObject giftAttributes = giftAttributesForMessage;
-            int giftLevel = Math.max(
-                    message.optInt("gift_upgrade_level", 0),
-                    giftAttributes == null ? 0 : giftAttributes.optInt("upgrade_level", 0)
-            );
             String giftName = message.optString("gift_name", "").trim();
             if (giftName.isEmpty() || "null".equalsIgnoreCase(giftName)) {
                 String purchaseBody = message.optString("body", "");
@@ -3357,12 +3353,17 @@ public final class WaysGramChatFragment extends BaseFragment {
             }
             String giftTelegramId = message.optString("gift_telegram_gift_id", "");
             JSONObject giftTelegramMetadata = message.optJSONObject("gift_telegram_metadata");
+            giftName = WaysGramGiftNames.displayName(
+                    giftName,
+                    giftTelegramMetadata == null ? "" : giftTelegramMetadata.optString("title", ""),
+                    giftTelegramId
+            );
             String giftEmoji = message.optString("gift_emoji", "").trim();
             if (giftEmoji.isEmpty() && giftTelegramMetadata != null) {
                 giftEmoji = giftTelegramMetadata.optString("emoji", "").trim();
             }
-            if (giftEmoji.isEmpty() || "null".equalsIgnoreCase(giftEmoji)) {
-                giftEmoji = "🎁";
+            if ("null".equalsIgnoreCase(giftEmoji)) {
+                giftEmoji = "";
             }
             LinearLayout giftCard = new LinearLayout(getParentActivity());
             giftCard.setOrientation(LinearLayout.VERTICAL);
@@ -3413,7 +3414,7 @@ public final class WaysGramChatFragment extends BaseFragment {
                 giftCard.addView(purchaseNotice, noticeParams);
             } else {
                 TextView giftTitle = new TextView(getParentActivity());
-                giftTitle.setText(giftEmoji + "  " + giftName);
+                giftTitle.setText(giftName);
                 giftTitle.setTextSize(16);
                 giftTitle.setTypeface(android.graphics.Typeface.DEFAULT, android.graphics.Typeface.BOLD);
                 giftTitle.setGravity(android.view.Gravity.START);
@@ -3436,16 +3437,20 @@ public final class WaysGramChatFragment extends BaseFragment {
 
             }
 
+            JSONObject giftStickerInfo = giftTelegramMetadata == null
+                    ? null : giftTelegramMetadata.optJSONObject("sticker");
+            boolean giftIsAnimated = giftStickerInfo != null
+                    && (giftStickerInfo.optBoolean("is_animated", false)
+                    || giftStickerInfo.optBoolean("is_video", false));
             WaysGramGiftCardRenderer.addPreview(
-                    getParentActivity(), giftCard, apiClient, giftTelegramId, giftEmoji
+                    getParentActivity(), giftCard, apiClient, giftTelegramId, giftEmoji,
+                    giftIsAnimated, getCurrentAccount()
             );
 
             TextView giftDetails = new TextView(getParentActivity());
             StringBuilder giftInfo = isGiftPurchaseEvent
                     ? new StringBuilder()
-                    : new StringBuilder("Коллекция WaysGram · уровень ")
-                            .append(giftLevel)
-                            .append("\nСерийный номер: ").append(giftSerial);
+                    : new StringBuilder("Коллекция WaysGram");
             if (isGiftPurchaseEvent) {
                 long purchasedAt = message.optLong("created_at", 0);
                 if (purchasedAt > 0) {
@@ -3464,21 +3469,6 @@ public final class WaysGramChatFragment extends BaseFragment {
                         giftInfo.append("\n");
                     }
                     giftInfo.append("Цена: ").append(purchasePriceGrams).append(" Gram");
-                }
-            }
-            if (!isGiftPurchaseEvent && !giftTelegramId.isEmpty()) {
-                giftInfo.append("\nTelegram Gift ID: ").append(giftTelegramId);
-            }
-            if (giftLevel == 0 && giftTelegramMetadata != null
-                    && giftTelegramMetadata.optBoolean("can_upgrade", false)) {
-                int upgradePrice = giftTelegramMetadata.optInt("upgrade_star_count", 0);
-                int upgradeVariants = giftTelegramMetadata.optInt("upgrade_variants", 0);
-                giftInfo.append("\nПараметры Telegram-улучшения");
-                if (upgradePrice > 0) {
-                    giftInfo.append(" · ").append(upgradePrice).append(" Stars");
-                }
-                if (upgradeVariants > 0) {
-                    giftInfo.append(" · вариантов: ").append(upgradeVariants);
                 }
             }
             if (giftAttributes != null
@@ -4039,8 +4029,8 @@ public final class WaysGramChatFragment extends BaseFragment {
             public void onError(String message, int statusCode) {
                 statusView.setText(message);
                 if (statusCode == 401) {
-                    WaysGramSessionStore.getInstance(getParentActivity()).clearSession();
-                    presentFragment(new WaysGramLoginFragment(), true);
+                    WaysGramSessionStore.getInstance(getParentActivity(), getCurrentAccount()).clearSession();
+                    presentFragment(new WaysGramLoginFragment(getCurrentAccount()), true);
                 }
             }
         });
@@ -4130,8 +4120,8 @@ public final class WaysGramChatFragment extends BaseFragment {
                                     public void onError(String message, int statusCode) {
                                         statusView.setText(message);
                                         if (statusCode == 401 && getParentActivity() != null) {
-                                            WaysGramSessionStore.getInstance(getParentActivity()).clearSession();
-                                            presentFragment(new WaysGramLoginFragment(), true);
+                                            WaysGramSessionStore.getInstance(getParentActivity(), getCurrentAccount()).clearSession();
+                                            presentFragment(new WaysGramLoginFragment(getCurrentAccount()), true);
                                         }
                                     }
                                 }))
@@ -4156,8 +4146,8 @@ public final class WaysGramChatFragment extends BaseFragment {
                                     public void onError(String message, int statusCode) {
                                         statusView.setText(message);
                                         if (statusCode == 401 && getParentActivity() != null) {
-                                            WaysGramSessionStore.getInstance(getParentActivity()).clearSession();
-                                            presentFragment(new WaysGramLoginFragment(), true);
+                                            WaysGramSessionStore.getInstance(getParentActivity(), getCurrentAccount()).clearSession();
+                                            presentFragment(new WaysGramLoginFragment(getCurrentAccount()), true);
                                         }
                                     }
                                 }))
@@ -4226,7 +4216,7 @@ public final class WaysGramChatFragment extends BaseFragment {
                 || getParentActivity() == null) {
             return null;
         }
-        WaysGramSessionStore store = WaysGramSessionStore.getInstance(getParentActivity());
+        WaysGramSessionStore store = WaysGramSessionStore.getInstance(getParentActivity(), getCurrentAccount());
         String baseUrl = store.getApiBaseUrl();
         if (baseUrl == null || baseUrl.trim().isEmpty()) {
             return null;
@@ -4237,7 +4227,7 @@ public final class WaysGramChatFragment extends BaseFragment {
     private Map<String, String> mediaAuthorizationHeaders() {
         HashMap<String, String> headers = new HashMap<>();
         if (getParentActivity() != null) {
-            String token = WaysGramSessionStore.getInstance(getParentActivity())
+            String token = WaysGramSessionStore.getInstance(getParentActivity(), getCurrentAccount())
                     .getWaysGramSessionToken();
             if (token != null && !token.isEmpty()) {
                 headers.put("Authorization", "Bearer " + token);

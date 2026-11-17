@@ -25,8 +25,7 @@ import java.util.Set;
  * for the native profile layout and GiftCell rendering.
  */
 public final class WaysGramProfileGiftsController {
-    private static final int MAX_VISIBLE_GIFTS = 200;
-    private static final int MAX_STICKER_DOWNLOADS = MAX_VISIBLE_GIFTS;
+    private static final int MAX_STICKER_DOWNLOADS = 1000;
 
     private final Context appContext;
     private final BaseFragment fragment;
@@ -64,7 +63,6 @@ public final class WaysGramProfileGiftsController {
                     loading = false;
                     client.close();
                     JSONArray inventory = gifts == null ? new JSONArray() : gifts;
-                    WaysGramGiftMediaStore.clear();
                     ArrayList<TL_stars.SavedStarGift> nativeGifts = toNativeGifts(inventory,
                             fragment == null ? UserConfig.selectedAccount : fragment.getCurrentAccount());
                     container.setWaysGramInventory(nativeGifts);
@@ -91,8 +89,9 @@ public final class WaysGramProfileGiftsController {
 
     public static ArrayList<TL_stars.SavedStarGift> toNativeGifts(JSONArray inventory, int currentAccount) {
         ArrayList<TL_stars.SavedStarGift> result = new ArrayList<>();
-        int limit = Math.min(inventory.length(), MAX_VISIBLE_GIFTS);
-        for (int i = 0; i < limit; i++) {
+        // The API already returns the complete owner inventory; do not truncate it
+        // to a local UI page size. All records remain scrollable in GiftCell.
+        for (int i = 0; i < inventory.length(); i++) {
             JSONObject item = inventory.optJSONObject(i);
             if (item == null) {
                 continue;
@@ -136,16 +135,9 @@ public final class WaysGramProfileGiftsController {
                 giftEmoji = optText(telegramGift, "emoji");
             }
             String catalogTitle = optText(telegramGift, "title");
-            String giftTitle = catalogTitle.isEmpty()
-                    ? optText(item, "gift_name")
-                    : catalogTitle;
-            if ("Подарок Telegram".equalsIgnoreCase(giftTitle)
-                    || "Telegram Gift".equalsIgnoreCase(giftTitle)) {
-                giftTitle = "";
-            }
-            if (giftTitle.isEmpty()) {
-                giftTitle = giftEmoji.isEmpty() ? "Подарок" : giftEmoji;
-            }
+            String giftTitle = WaysGramGiftNames.displayName(
+                    catalogTitle, optText(item, "gift_name"), telegramGiftIdText
+            );
             int telegramUpgradePrice = telegramGift == null
                     ? 0 : Math.max(0, telegramGift.optInt("upgrade_star_count", 0));
             int telegramUpgradeVariants = telegramGift == null
@@ -259,27 +251,26 @@ public final class WaysGramProfileGiftsController {
             boolean isListed,
             boolean isAuctioned
     ) {
-        StringBuilder firstLine = new StringBuilder(serial)
-                .append(" · Ур. ")
-                .append(upgradeLevel);
+        // Serial numbers and internal upgrade levels are kept in WaysGram data,
+        // but are not shown as part of the gift's public display name/subtitle.
+        StringBuilder firstLine = new StringBuilder();
         if (isAuctioned) {
-            firstLine.append(" · Аукцион");
+            firstLine.append("Аукцион");
         } else if (isListed) {
-            firstLine.append(" · Продажа");
+            firstLine.append("Продажа");
         }
 
         StringBuilder secondLine = new StringBuilder();
-        appendPart(secondLine, giftEmoji);
         appendPart(secondLine, rarity);
         appendPart(secondLine, model);
         appendPart(secondLine, symbol);
         if (canUpgrade) {
             appendPart(secondLine, telegramUpgradePrice > 0
-                    ? "Апгрейд Telegram · " + telegramUpgradePrice + " Stars"
+                    ? "Доступно улучшение · " + telegramUpgradePrice + " Stars"
                     : "Доступно улучшение");
         }
-        if (telegramUpgradeVariants > 0) {
-            appendPart(secondLine, "Вариантов: " + telegramUpgradeVariants);
+        if (firstLine.length() == 0) {
+            return secondLine.toString();
         }
         return secondLine.length() == 0
                 ? firstLine.toString()
@@ -384,43 +375,80 @@ public final class WaysGramProfileGiftsController {
         int scheduled = 0;
         for (int i = 0; i < inventory.length() && scheduled < MAX_STICKER_DOWNLOADS; i++) {
             JSONObject item = inventory.optJSONObject(i);
-            if (item == null || !item.optBoolean("sticker_available", false)) {
+            if (item == null) {
                 continue;
             }
             String serial = item.optString("serial_number", "").trim();
             String telegramGiftId = item.optString("telegram_gift_id", "").trim();
+            JSONObject telegramGift = item.optJSONObject("telegram_gift");
             if (telegramGiftId.isEmpty()) {
-                JSONObject telegramGift = item.optJSONObject("telegram_gift");
                 telegramGiftId = optText(telegramGift, "id");
             }
             if (serial.isEmpty() || telegramGiftId.isEmpty() || !started.add(serial)) {
                 continue;
             }
             scheduled++;
-            final String cacheKey = serial;
-            imageClient.downloadTelegramGiftSticker(telegramGiftId, new WaysGramApiClient.ImageCallback() {
-                @Override
-                public void onSuccess(Bitmap bitmap) {
-                    if (bitmap == null || bitmap.isRecycled()) {
-                        return;
-                    }
-                    WaysGramGiftMediaStore.put(cacheKey, bitmap);
-                    container.refreshWaysGramGiftViews();
-                }
-
-                @Override
-                public void onError(String message, int statusCode) {
-                    // Keep Telegram's native GiftCell background when no sticker is available.
-                }
-            });
+            JSONObject sticker = telegramGift == null ? null : telegramGift.optJSONObject("sticker");
+            boolean animated = sticker != null
+                    && (sticker.optBoolean("is_animated", false)
+                    || sticker.optBoolean("is_video", false));
+            if (animated) {
+                downloadAnimatedGiftSticker(telegramGiftId, serial);
+            } else {
+                // Some archived gifts have incomplete animation flags. Try the
+                // static preview first, then request the original TGS/WebM asset.
+                downloadStaticGiftSticker(telegramGiftId, serial, true);
+            }
         }
+    }
+
+    private void downloadStaticGiftSticker(String giftId, String serial, boolean tryAnimationOnFailure) {
+        imageClient.downloadTelegramGiftSticker(giftId, new WaysGramApiClient.ImageCallback() {
+            @Override
+            public void onSuccess(Bitmap bitmap) {
+                if (bitmap == null || bitmap.isRecycled()) {
+                    if (tryAnimationOnFailure) {
+                        downloadAnimatedGiftSticker(giftId, serial);
+                    }
+                    return;
+                }
+                WaysGramGiftMediaStore.put(serial, bitmap);
+                AndroidUtilities.runOnUIThread(container::refreshWaysGramGiftViews);
+            }
+
+            @Override
+            public void onError(String message, int statusCode) {
+                if (tryAnimationOnFailure) {
+                    downloadAnimatedGiftSticker(giftId, serial);
+                }
+            }
+        });
+    }
+
+    private void downloadAnimatedGiftSticker(String giftId, String serial) {
+        imageClient.downloadTelegramGiftStickerAnimation(
+                giftId, appContext.getCacheDir(), new WaysGramApiClient.FileCallback() {
+                    @Override
+                    public void onSuccess(java.io.File file) {
+                        WaysGramGiftMediaStore.putAnimationFile(serial, file);
+                        AndroidUtilities.runOnUIThread(container::refreshWaysGramGiftViews);
+                    }
+
+                    @Override
+                    public void onError(String message, int statusCode) {
+                        // No emoji fallback: keep the native neutral gift placeholder.
+                    }
+                }
+        );
     }
 
     private void showError(String message) {
         String text;
-        if (message != null && (message.contains("HTTP 401")
-                || message.contains("WaysGram session is missing"))) {
-            text = "Сессия WaysGram недоступна. Проверьте подключение и повторите загрузку подарков.";
+        if (message != null && (message.contains("WaysGram session is missing")
+                || message.contains("Нет активной сессии WaysGram"))) {
+            text = "Для этого Telegram-аккаунта ещё нет отдельного входа в WaysGram. Откройте WaysGram и войдите под этим аккаунтом.";
+        } else if (message != null && message.contains("HTTP 401")) {
+            text = "Сессия WaysGram истекла или отозвана. Повторно войдите в WaysGram для этого Telegram-аккаунта.";
         } else if (message != null && message.contains("HTTP 404")) {
             text = "Сервер не поддерживает загрузку инвентаря. Обновите AuthBot на сервере.";
         } else if (message != null && message.contains("HTTP 403")) {

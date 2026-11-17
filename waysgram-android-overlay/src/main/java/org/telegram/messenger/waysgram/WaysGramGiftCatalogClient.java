@@ -107,7 +107,7 @@ public final class WaysGramGiftCatalogClient implements AutoCloseable {
 
         private Gift(JSONObject object, String baseUrl) {
             id = object.optString("id", "");
-            title = object.optString("title", id);
+            title = WaysGramGiftNames.displayName(object.optString("title", id), "", id);
             emoji = object.optString("emoji", "");
             currency = object.optString("currency", "telegram_stars");
             starCount = Math.max(0, object.optInt("star_count", 0));

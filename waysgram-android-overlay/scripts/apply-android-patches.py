@@ -824,13 +824,14 @@ def patch_profile_gifts_container_source(original: str) -> str:
 
 
 def patch_gift_sheet_profile_art_source(original: str) -> str:
-    """Bind cached WaysGram artwork to the SavedStarGift overload used by profile cards."""
+    """Bind static and animated WaysGram artwork to the SavedStarGift profile cells."""
     marker = "// WaysGram saved profile gift artwork binding"
     if marker in original:
         required = (
             'userGift.gift.slug.startsWith("waysgram://")',
+            "WaysGramGiftMediaStore.getAnimationFile(waysGramSerial)",
+            "setImageBitmap(waysGramAnimation)",
             "WaysGramGiftMediaStore.get(waysGramSerial)",
-            "imageView.getImageReceiver().setImageBitmap(waysGramBitmap);",
         )
         if not all(value in original for value in required):
             raise ValueError("GiftSheet contains an incomplete SavedStarGift artwork binding")
@@ -842,10 +843,17 @@ def patch_gift_sheet_profile_art_source(original: str) -> str:
         + "            " + marker + "\n"
         + "            if (userGift.gift != null && userGift.gift.slug != null && userGift.gift.slug.startsWith(\"waysgram://\")) {\n"
         + "                String waysGramSerial = userGift.gift.slug.substring(\"waysgram://\".length()).trim();\n"
-        + "                android.graphics.Bitmap waysGramBitmap = org.telegram.messenger.waysgram.WaysGramGiftMediaStore.get(waysGramSerial);\n"
-        + "                if (waysGramBitmap != null && !waysGramBitmap.isRecycled()) {\n"
-        + "                    imageView.getImageReceiver().setImageBitmap(waysGramBitmap);\n"
+        + "                java.io.File waysGramAnimationFile = org.telegram.messenger.waysgram.WaysGramGiftMediaStore.getAnimationFile(waysGramSerial);\n"
+        + "                if (waysGramAnimationFile != null && waysGramAnimationFile.isFile()) {\n"
+        + "                    org.telegram.ui.Components.AnimatedFileDrawable waysGramAnimation = new org.telegram.ui.Components.AnimatedFileDrawable(waysGramAnimationFile, true, 0, 0, null, null, null, 0, org.telegram.messenger.UserConfig.selectedAccount, true, 64, 64, null);\n"
+        + "                    imageView.getImageReceiver().setImageBitmap(waysGramAnimation);\n"
         + "                    imageView.invalidate();\n"
+        + "                } else {\n"
+        + "                    android.graphics.Bitmap waysGramBitmap = org.telegram.messenger.waysgram.WaysGramGiftMediaStore.get(waysGramSerial);\n"
+        + "                    if (waysGramBitmap != null && !waysGramBitmap.isRecycled()) {\n"
+        + "                        imageView.getImageReceiver().setImageBitmap(waysGramBitmap);\n"
+        + "                        imageView.invalidate();\n"
+        + "                    }\n"
         + "                }\n"
         + "            }\n"
     )
@@ -853,7 +861,7 @@ def patch_gift_sheet_profile_art_source(original: str) -> str:
         original,
         needle,
         replacement,
-        "native SavedStarGift profile bitmap binding"
+        "native SavedStarGift profile media binding"
     )
 
 
@@ -952,36 +960,10 @@ def patch_star_gift_sheet_display_source(original: str) -> str:
     return original
 
 def patch_gift_sheet_source(original: str) -> str:
-    """Keep Telegram's GiftCell renderer, injecting WaysGram stickers, emoji and metadata."""
+    """Bind WaysGram profile gift metadata and artwork without emoji fallbacks."""
     updated = original
-
-    sticker_marker = "WaysGramGiftMediaStore.get("
-    if sticker_marker not in updated:
-        sticker_target = "            setSticker(userGift.gift.getDocument(), userGift);\n"
-        sticker_replacement = (
-            sticker_target
-            + "            if (userGift.gift.slug != null && userGift.gift.slug.startsWith(\"waysgram://\")) {\n"
-            + "                android.graphics.Bitmap waysGramBitmap = org.telegram.messenger.waysgram.WaysGramGiftMediaStore.get(userGift.gift.slug.substring(\"waysgram://\".length()));\n"
-            + "                if (waysGramBitmap != null) imageView.setImageBitmap(waysGramBitmap);\n"
-            + "            }\n"
-        )
-        updated = replace_exactly_once(updated, sticker_target, sticker_replacement, "native GiftCell WaysGram sticker binding")
-
-    emoji_reset_marker = "waysGramEmojiOverlay"
-    if emoji_reset_marker not in updated:
-        sticker_target = "            setSticker(userGift.gift.getDocument(), userGift);\n"
-        sticker_replacement = (
-            sticker_target
-            + "            View waysGramEmojiOverlay = card.findViewWithTag(\"waysgramGiftEmoji\");\n"
-            + "            if (waysGramEmojiOverlay != null) waysGramEmojiOverlay.setVisibility(View.GONE);\n"
-        )
-        updated = replace_exactly_once(
-            updated, sticker_target, sticker_replacement,
-            "reset recycled WaysGram gift emoji overlay"
-        )
-
-    metadata_marker = "WaysGramGiftMediaStore.getMetadata("
-    if metadata_marker not in updated:
+    marker = "WaysGramGiftMediaStore.getMetadata("
+    if marker not in updated:
         metadata_target = (
             "            cardBackground.setStrokeColors(null);\n"
             "            titleView.setVisibility(View.GONE);\n"
@@ -1001,33 +983,165 @@ def patch_gift_sheet_source(original: str) -> str:
             + "                    subtitleView.setTextSize(TypedValue.COMPLEX_UNIT_DIP, 9.5f);\n"
             + "                    subtitleView.setMaxLines(2);\n"
             + "                    subtitleView.setEllipsize(android.text.TextUtils.TruncateAt.END);\n"
-            + "                    subtitleView.setVisibility(View.VISIBLE);\n"
+            + "                    subtitleView.setVisibility(waysGramMetadata.subtitle == null || waysGramMetadata.subtitle.isEmpty() ? View.GONE : View.VISIBLE);\n"
             + "                    priceLayout.setVisibility(View.GONE);\n"
             + "                    View waysGramEmojiExisting = card.findViewWithTag(\"waysgramGiftEmoji\");\n"
-            + "                    android.widget.TextView waysGramEmojiView;\n"
-            + "                    if (waysGramEmojiExisting instanceof android.widget.TextView) {\n"
-            + "                        waysGramEmojiView = (android.widget.TextView) waysGramEmojiExisting;\n"
-            + "                    } else {\n"
-            + "                        waysGramEmojiView = new android.widget.TextView(getContext());\n"
-            + "                        waysGramEmojiView.setTag(\"waysgramGiftEmoji\");\n"
-            + "                        waysGramEmojiView.setTextSize(TypedValue.COMPLEX_UNIT_DIP, 30);\n"
-            + "                        waysGramEmojiView.setGravity(android.view.Gravity.CENTER);\n"
-            + "                        waysGramEmojiView.setTextColor(Theme.getColor(Theme.key_windowBackgroundWhiteBlackText, resourcesProvider));\n"
-            + "                        card.addView(waysGramEmojiView, new FrameLayout.LayoutParams(AndroidUtilities.dp(80), AndroidUtilities.dp(80), android.view.Gravity.CENTER));\n"
-            + "                    }\n"
-            + "                    waysGramEmojiView.setText(waysGramMetadata.emoji == null || waysGramMetadata.emoji.isEmpty() ? \"🎁\" : waysGramMetadata.emoji);\n"
+            + "                    if (waysGramEmojiExisting != null) waysGramEmojiExisting.setVisibility(View.GONE);\n"
             + "                    android.graphics.Bitmap waysGramGiftBitmap = org.telegram.messenger.waysgram.WaysGramGiftMediaStore.get(waysGramSerial);\n"
-            + "                    if (waysGramGiftBitmap != null) {\n"
+            + "                    if (waysGramGiftBitmap != null && !waysGramGiftBitmap.isRecycled()) {\n"
             + "                        imageView.setImageBitmap(waysGramGiftBitmap);\n"
-            + "                        waysGramEmojiView.setVisibility(View.GONE);\n"
-            + "                    } else {\n"
-            + "                        waysGramEmojiView.setVisibility(View.VISIBLE);\n"
             + "                    }\n"
             + "                }\n"
             + "            }\n"
         )
-        updated = replace_exactly_once(updated, metadata_target, metadata_replacement, "native GiftCell WaysGram metadata and emoji binding")
+        updated = replace_exactly_once(
+            updated, metadata_target, metadata_replacement,
+            "native GiftCell WaysGram metadata and non-emoji artwork binding"
+        )
+    return updated
 
+
+def patch_chat_action_cell_waysgram_receipts_source(original: str) -> str:
+    """Render WaysGram-owned service receipts with their own title and cached artwork."""
+    marker = "// WaysGram: render local purchase receipt title and media"
+    if marker in original:
+        required = (
+            'action.gift.slug.startsWith("waysgram://")',
+            'messageObject.messageOwner.params.containsKey("waysgram_gift_serial")',
+            "WaysGramGiftMediaStore.getAnimationFile(waysGramSerial)",
+            'title = "Подарок приобретён в WaysGram";',
+        )
+        if not all(value in original for value in required):
+            raise ValueError("ChatActionCell contains an incomplete WaysGram gift receipt patch")
+        return original
+
+    title_before = (
+        "                        if (action.gift_num > 0 && action.gift != null && action.gift.title != null) {\n"
+        "                            sb.append(action.gift.title).append(\" #\").append(formatNumber(action.gift_num, ','));\n"
+        "                        } else {\n"
+        "                            sb.append(getString(R.string.Gift2ActionSelfTitle));\n"
+        "                        }"
+    )
+    title_after = (
+        "                        // WaysGram: render local purchase receipt title and media\n"
+        "                        if (action.gift != null && !TextUtils.isEmpty(action.gift.title) && ((action.gift.slug != null && action.gift.slug.startsWith(\"waysgram://\")) || (messageObject.messageOwner.params != null && messageObject.messageOwner.params.containsKey(\"waysgram_gift_serial\")))) {\n"
+        "                            sb.append(action.gift.title);\n"
+        "                        } else if (action.gift_num > 0 && action.gift != null && action.gift.title != null) {\n"
+        "                            sb.append(action.gift.title).append(\" #\").append(formatNumber(action.gift_num, ','));\n"
+        "                        } else {\n"
+        "                            sb.append(getString(R.string.Gift2ActionSelfTitle));\n"
+        "                        }"
+    )
+    updated = replace_exactly_once(
+        original, title_before, title_after,
+        "native WaysGram purchase receipt header title"
+    )
+    free_upgrade_anchor = (
+        "                    final boolean freeUpgrade = action.can_upgrade && !action.converted && action.upgrade_stars > 0 && !action.upgraded;\n"
+    )
+    free_upgrade_replacement = (
+        free_upgrade_anchor
+        + "                    final boolean waysGramGiftReceipt = action.gift != null && !TextUtils.isEmpty(action.gift.title) && ((action.gift.slug != null && action.gift.slug.startsWith(\"waysgram://\")) || (messageObject.messageOwner.params != null && messageObject.messageOwner.params.containsKey(\"waysgram_gift_serial\")));\n"
+    )
+    updated = replace_exactly_once(
+        updated, free_upgrade_anchor, free_upgrade_replacement,
+        "WaysGram purchase receipt identity after database reload"
+    )
+    action_title_anchor = "                    if (toId != 0 && action.auction_acquired && recipient != null) {\n"
+    action_title_replacement = (
+        "                    if (waysGramGiftReceipt) {\n"
+        "                        sb.append(action.gift.title);\n"
+        "                    } else if (toId != 0 && action.auction_acquired && recipient != null) {\n"
+    )
+    updated = replace_exactly_once(
+        updated, action_title_anchor, action_title_replacement,
+        "WaysGram receipt title for Saved Messages and direct conversations"
+    )
+
+    subtitle_before = (
+        "                    } else if (self) {\n"
+        "                        if (action.converted && stars > 0) {\n"
+        "                            title = formatPluralStringComma(\"Gift2ActionConvertedInfo\", (int) stars);\n"
+        "                        } else if (action.can_upgrade) {\n"
+        "                            title = AndroidUtilities.replaceTags(getString(R.string.Gift2ActionSelfInfoUpgrade));\n"
+        "                        } else {\n"
+        "                            title = AndroidUtilities.replaceTags(getString(R.string.Gift2ActionSelfInfoNoConvert));\n"
+        "                        }\n"
+    )
+    subtitle_after = (
+        "                    } else if (self) {\n"
+        "                        if ((action.gift != null && action.gift.slug != null && action.gift.slug.startsWith(\"waysgram://\")) || (messageObject.messageOwner.params != null && messageObject.messageOwner.params.containsKey(\"waysgram_gift_serial\"))) {\n"
+        "                            title = \"Подарок приобретён в WaysGram\";\n"
+        "                        } else if (action.converted && stars > 0) {\n"
+        "                            title = formatPluralStringComma(\"Gift2ActionConvertedInfo\", (int) stars);\n"
+        "                        } else if (action.can_upgrade) {\n"
+        "                            title = AndroidUtilities.replaceTags(getString(R.string.Gift2ActionSelfInfoUpgrade));\n"
+        "                        } else {\n"
+        "                            title = AndroidUtilities.replaceTags(getString(R.string.Gift2ActionSelfInfoNoConvert));\n"
+        "                        }\n"
+    )
+    updated = replace_exactly_once(
+        updated, subtitle_before, subtitle_after,
+        "native WaysGram purchase receipt subtitle"
+    )
+
+    media_key_marker = "    private String waysGramGiftMediaKey;\n"
+    if media_key_marker not in updated:
+        updated = replace_exactly_once(
+            updated,
+            "    private ImageReceiver imageReceiver;\n",
+            "    private ImageReceiver imageReceiver;\n" + media_key_marker,
+            "native ChatActionCell WaysGram artwork identity field"
+        )
+    message_reset_anchor = "        if (messageObject == null) return;\n"
+    if "waysGramGiftMediaKey = null;" not in updated:
+        updated = replace_exactly_once(
+            updated,
+            message_reset_anchor,
+            message_reset_anchor + "        if (currentMessageObject != messageObject) waysGramGiftMediaKey = null;\n",
+            "reset native WaysGram artwork identity for a new chat row"
+        )
+
+    media_anchor = "                forceWasUnread = messageObject.wasUnread;\n                giftSticker = document;\n"
+    insert_position = updated.find(media_anchor)
+    if insert_position < 0:
+        raise ValueError("Could not locate the native gift sticker preparation block")
+    next_block = "                if (botInlineButtons != null) {\n"
+    block_position = updated.find(next_block, insert_position)
+    if block_position < 0:
+        raise ValueError("Could not locate the native gift message action block")
+    media_binding = (
+        "                if (messageObject.messageOwner.action instanceof TLRPC.TL_messageActionStarGift) {\n"
+        "                    TL_stars.StarGift waysGramGift = ((TLRPC.TL_messageActionStarGift) messageObject.messageOwner.action).gift;\n"
+        "                    String waysGramSerial = waysGramGift != null && waysGramGift.slug != null && waysGramGift.slug.startsWith(\"waysgram://\") ? waysGramGift.slug.substring(\"waysgram://\".length()).trim() : (messageObject.messageOwner.params == null ? \"\" : messageObject.messageOwner.params.get(\"waysgram_gift_serial\"));\n"
+        "                    if (waysGramSerial != null && !waysGramSerial.isEmpty()) {\n"
+        "                        java.io.File waysGramAnimationFile = org.telegram.messenger.waysgram.WaysGramGiftMediaStore.getAnimationFile(waysGramSerial);\n"
+        "                        if (waysGramAnimationFile != null && waysGramAnimationFile.isFile()) {\n"
+        "                            String waysGramMediaKey = waysGramSerial + \":animation\";\n"
+        "                            if (!waysGramMediaKey.equals(waysGramGiftMediaKey)) {\n"
+        "                                org.telegram.ui.Components.AnimatedFileDrawable waysGramAnimation = new org.telegram.ui.Components.AnimatedFileDrawable(waysGramAnimationFile, true, 0, 0, null, null, null, 0, currentAccount, true, 160, 160, null);\n"
+        "                                imageReceiver.setAllowStartLottieAnimation(true);\n"
+        "                                imageReceiver.setDelegate(giftStickerDelegate);\n"
+        "                                imageReceiver.setImageBitmap(waysGramAnimation);\n"
+        "                                waysGramGiftMediaKey = waysGramMediaKey;\n"
+        "                            }\n"
+        "                        } else {\n"
+        "                            android.graphics.Bitmap waysGramBitmap = org.telegram.messenger.waysgram.WaysGramGiftMediaStore.get(waysGramSerial);\n"
+        "                            if (waysGramBitmap != null && !waysGramBitmap.isRecycled()) {\n"
+        "                                String waysGramMediaKey = waysGramSerial + \":bitmap\";\n"
+        "                                if (!waysGramMediaKey.equals(waysGramGiftMediaKey)) {\n"
+        "                                    imageReceiver.setAllowStartLottieAnimation(true);\n"
+        "                                    imageReceiver.setImageBitmap(waysGramBitmap);\n"
+        "                                    waysGramGiftMediaKey = waysGramMediaKey;\n"
+        "                                }\n"
+        "                            } else if (waysGramGift != null) {\n"
+        "                                org.telegram.messenger.waysgram.WaysGramNativeGiftReceiptAdapter.ensureGiftMedia(currentAccount, Long.toString(waysGramGift.id), waysGramSerial);\n"
+        "                            }\n"
+        "                        }\n"
+        "                    }\n"
+        "                }\n"
+    )
+    updated = updated[:block_position] + media_binding + updated[block_position:]
     return updated
 
 def patch_push_service_source(original: str) -> str:
@@ -1200,6 +1314,36 @@ def patch_translation_dependencies(android_root: Path) -> None:
     gradle_file.write_text(content.rstrip() + addition, encoding="utf-8")
 
 
+
+def patch_chat_activity_native_gift_receipts_source(original: str) -> str:
+    """Render WaysGram purchase receipts through Telegram's native StarGift action cell."""
+    marker = "// WaysGram: hydrate legacy native gift receipts"
+    if marker in original:
+        required = (
+            "WaysGramNativeGiftReceiptAdapter.hydrateLegacyReceipts",
+            "chatMode == MODE_DEFAULT",
+        )
+        if not all(value in original for value in required):
+            raise ValueError("ChatActivity contains an incomplete WaysGram receipt patch")
+        return original
+
+    anchor = "        checkGroupMessagesOrder();\n"
+    replacement = (
+        anchor
+        + "        // WaysGram: hydrate legacy native gift receipts\n"
+        + "        if (chatMode == MODE_DEFAULT && chatAdapter != null) {\n"
+        + "            org.telegram.messenger.waysgram.WaysGramNativeGiftReceiptAdapter.hydrateLegacyReceipts(\n"
+        + "                    currentAccount, dialog_id, messages);\n"
+        + "        }\n"
+    )
+    return replace_exactly_once(
+        original,
+        anchor,
+        replacement,
+        "native Saved Messages and DM gift receipt hydration"
+    )
+
+
 def verify_source(android_root: Path) -> None:
     gift_sheet = android_root / "TMessagesProj/src/main/java/org/telegram/ui/Gifts/GiftSheet.java"
     launch_activity = android_root / "TMessagesProj/src/main/java/org/telegram/ui/LaunchActivity.java"
@@ -1220,6 +1364,37 @@ def verify_source(android_root: Path) -> None:
     ):
         if marker not in final_gift_sheet_source:
             raise ValueError("Native GiftCell WaysGram bitmap binding was not applied completely")
+
+    chat_activity = android_root / "TMessagesProj/src/main/java/org/telegram/ui/ChatActivity.java"
+    if not chat_activity.is_file():
+        raise FileNotFoundError(f"Required native ChatActivity source not found: {chat_activity}")
+    chat_activity_source = chat_activity.read_text(encoding="utf-8")
+    patched_chat_activity = patch_chat_activity_native_gift_receipts_source(chat_activity_source)
+    if patched_chat_activity != chat_activity_source:
+        chat_activity.write_text(patched_chat_activity, encoding="utf-8")
+    final_chat_activity = chat_activity.read_text(encoding="utf-8")
+    if (
+        "// WaysGram: hydrate legacy native gift receipts" not in final_chat_activity
+        or "WaysGramNativeGiftReceiptAdapter.hydrateLegacyReceipts" not in final_chat_activity
+    ):
+        raise ValueError("Native Saved Messages gift receipt integration was not applied")
+
+    chat_action_cell = android_root / "TMessagesProj/src/main/java/org/telegram/ui/Cells/ChatActionCell.java"
+    if not chat_action_cell.is_file():
+        raise FileNotFoundError(f"Required native ChatActionCell source not found: {chat_action_cell}")
+    chat_action_source = chat_action_cell.read_text(encoding="utf-8")
+    patched_chat_action = patch_chat_action_cell_waysgram_receipts_source(chat_action_source)
+    if patched_chat_action != chat_action_source:
+        chat_action_cell.write_text(patched_chat_action, encoding="utf-8")
+    final_chat_action = chat_action_cell.read_text(encoding="utf-8")
+    for marker in (
+        "// WaysGram: render local purchase receipt title and media",
+        'action.gift.slug.startsWith("waysgram://")',
+        "WaysGramGiftMediaStore.getAnimationFile(waysGramSerial)",
+        'title = "Подарок приобретён в WaysGram";',
+    ):
+        if marker not in final_chat_action:
+            raise ValueError("Native Saved Messages WaysGram gift card rendering is incomplete")
 
     profile_layout = android_root / "TMessagesProj/src/main/java/org/telegram/ui/Components/SharedMediaLayout.java"
     if not profile_layout.is_file():
@@ -1347,11 +1522,12 @@ def verify_source(android_root: Path) -> None:
     for marker in (
         "WaysGramGiftMediaStore.get(",
         "WaysGramGiftMediaStore.getMetadata(",
-        "waysgramGiftEmoji",
-        "waysGramEmojiView.setText",
+        "waysGramEmojiExisting.setVisibility(View.GONE)",
     ):
         if marker not in gift_content:
-            raise ValueError("WaysGram native GiftCell sticker, emoji or metadata binding is missing")
+            raise ValueError("WaysGram native GiftCell artwork and metadata binding is missing")
+    if "waysGramEmojiView.setText" in gift_content:
+        raise ValueError("Emoji placeholders must remain hidden on WaysGram gift cards")
 
     gift_hits = [marker for marker in FORBIDDEN_GIFT_MARKERS if marker in gift_content]
     launch_hits = [marker for marker in FORBIDDEN_LAUNCH_MARKERS if marker in launch_content]
