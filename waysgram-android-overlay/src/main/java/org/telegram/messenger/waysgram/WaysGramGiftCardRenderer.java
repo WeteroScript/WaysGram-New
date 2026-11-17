@@ -24,6 +24,18 @@ public final class WaysGramGiftCardRenderer {
             String telegramGiftId,
             String emoji
     ) {
+        addPreview(context, parent, apiClient, telegramGiftId, emoji, false, 0);
+    }
+
+    public static void addPreview(
+            Context context,
+            LinearLayout parent,
+            WaysGramApiClient apiClient,
+            String telegramGiftId,
+            String emoji,
+            boolean animated,
+            int telegramAccount
+    ) {
         if (context == null || parent == null) {
             return;
         }
@@ -58,6 +70,42 @@ public final class WaysGramGiftCardRenderer {
             return;
         }
 
+        if (animated) {
+            apiClient.downloadTelegramGiftStickerAnimation(
+                    giftId, context.getCacheDir(), new WaysGramApiClient.FileCallback() {
+                        @Override
+                        public void onSuccess(java.io.File file) {
+                            if (file == null || !file.isFile() || frame.getParent() == null) {
+                                return;
+                            }
+                            org.telegram.ui.Components.AnimatedFileDrawable drawable =
+                                    new org.telegram.ui.Components.AnimatedFileDrawable(
+                                            file, true, 0, 0, null, null, null, 0,
+                                            telegramAccount, true, 64, 64, null
+                                    );
+                            image.setImageDrawable(drawable);
+                            image.setVisibility(View.VISIBLE);
+                            placeholder.setVisibility(View.GONE);
+                        }
+
+                        @Override
+                        public void onError(String message, int statusCode) {
+                            downloadStaticPreview(apiClient, giftId, image, placeholder, frame);
+                        }
+                    }
+            );
+        } else {
+            downloadStaticPreview(apiClient, giftId, image, placeholder, frame);
+        }
+    }
+
+    private static void downloadStaticPreview(
+            WaysGramApiClient apiClient,
+            String giftId,
+            ImageView image,
+            TextView placeholder,
+            FrameLayout frame
+    ) {
         apiClient.downloadTelegramGiftSticker(giftId, new WaysGramApiClient.ImageCallback() {
             @Override
             public void onSuccess(Bitmap bitmap) {
@@ -71,8 +119,9 @@ public final class WaysGramGiftCardRenderer {
 
             @Override
             public void onError(String message, int statusCode) {
-                // The Telegram emoji remains visible when the sticker is animated or unavailable.
+                // The Telegram emoji remains visible when no valid preview is available.
             }
         });
     }
+
 }
