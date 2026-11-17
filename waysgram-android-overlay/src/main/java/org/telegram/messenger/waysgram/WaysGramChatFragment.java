@@ -3339,10 +3339,6 @@ public final class WaysGramChatFragment extends BaseFragment {
         String giftSerial = message.optString("gift_serial_number", "");
         if (!giftSerial.isEmpty() || isGiftPurchaseEvent) {
             JSONObject giftAttributes = giftAttributesForMessage;
-            int giftLevel = Math.max(
-                    message.optInt("gift_upgrade_level", 0),
-                    giftAttributes == null ? 0 : giftAttributes.optInt("upgrade_level", 0)
-            );
             String giftName = message.optString("gift_name", "").trim();
             if (giftName.isEmpty() || "null".equalsIgnoreCase(giftName)) {
                 String purchaseBody = message.optString("body", "");
@@ -3366,8 +3362,8 @@ public final class WaysGramChatFragment extends BaseFragment {
             if (giftEmoji.isEmpty() && giftTelegramMetadata != null) {
                 giftEmoji = giftTelegramMetadata.optString("emoji", "").trim();
             }
-            if (giftEmoji.isEmpty() || "null".equalsIgnoreCase(giftEmoji)) {
-                giftEmoji = "🎁";
+            if ("null".equalsIgnoreCase(giftEmoji)) {
+                giftEmoji = "";
             }
             LinearLayout giftCard = new LinearLayout(getParentActivity());
             giftCard.setOrientation(LinearLayout.VERTICAL);
@@ -3473,21 +3469,6 @@ public final class WaysGramChatFragment extends BaseFragment {
                         giftInfo.append("\n");
                     }
                     giftInfo.append("Цена: ").append(purchasePriceGrams).append(" Gram");
-                }
-            }
-            if (!isGiftPurchaseEvent && !giftTelegramId.isEmpty()) {
-                giftInfo.append("\nTelegram Gift ID: ").append(giftTelegramId);
-            }
-            if (giftLevel == 0 && giftTelegramMetadata != null
-                    && giftTelegramMetadata.optBoolean("can_upgrade", false)) {
-                int upgradePrice = giftTelegramMetadata.optInt("upgrade_star_count", 0);
-                int upgradeVariants = giftTelegramMetadata.optInt("upgrade_variants", 0);
-                giftInfo.append("\nПараметры Telegram-улучшения");
-                if (upgradePrice > 0) {
-                    giftInfo.append(" · ").append(upgradePrice).append(" Stars");
-                }
-                if (upgradeVariants > 0) {
-                    giftInfo.append(" · вариантов: ").append(upgradeVariants);
                 }
             }
             if (giftAttributes != null
