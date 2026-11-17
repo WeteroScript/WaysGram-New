@@ -3113,7 +3113,17 @@ public final class WaysGramChatFragment extends BaseFragment {
                 || normalized.contains("купили")) && normalized.contains("подарок");
         boolean englishPurchase = (normalized.contains("purchased")
                 || normalized.contains("bought")) && normalized.contains("gift");
-        return russianPurchase || englishPurchase;
+        boolean collectibleMarker = normalized.contains("коллекционный подарок")
+                || normalized.contains("collectible gift");
+        boolean telegramGiftId = normalized.matches(
+                "(?s).*telegram\\s+gift[\\s:#-]*[0-9]{5,}.*"
+        );
+        boolean quotedGiftName = normalized.contains("подарок")
+                && (normalized.contains("«") && normalized.contains("»")
+                || normalized.contains("“") && normalized.contains("”")
+                || normalized.indexOf('"') != normalized.lastIndexOf('"'));
+        return (russianPurchase || englishPurchase)
+                && (collectibleMarker || telegramGiftId || quotedGiftName);
     }
 
     private CharSequence createNativeGiftPurchaseNotice(
