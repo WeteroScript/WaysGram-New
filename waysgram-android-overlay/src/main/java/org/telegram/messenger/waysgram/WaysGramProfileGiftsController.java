@@ -25,9 +25,6 @@ import java.util.Set;
  * for the native profile layout and GiftCell rendering.
  */
 public final class WaysGramProfileGiftsController {
-    private static final int MAX_VISIBLE_GIFTS = 200;
-    private static final int MAX_STICKER_DOWNLOADS = MAX_VISIBLE_GIFTS;
-
     private final Context appContext;
     private final BaseFragment fragment;
     private final ProfileGiftsContainer container;
@@ -48,6 +45,7 @@ public final class WaysGramProfileGiftsController {
         this.container = container;
         sessionStore = WaysGramSessionStore.getInstance(appContext,
                 fragment == null ? UserConfig.selectedAccount : fragment.getCurrentAccount());
+        WaysGramGiftMediaStore.configure(appContext);
         imageClient = new WaysGramApiClient(sessionStore);
     }
 
@@ -91,8 +89,7 @@ public final class WaysGramProfileGiftsController {
 
     public static ArrayList<TL_stars.SavedStarGift> toNativeGifts(JSONArray inventory, int currentAccount) {
         ArrayList<TL_stars.SavedStarGift> result = new ArrayList<>();
-        int limit = Math.min(inventory.length(), MAX_VISIBLE_GIFTS);
-        for (int i = 0; i < limit; i++) {
+        for (int i = 0; i < inventory.length(); i++) {
             JSONObject item = inventory.optJSONObject(i);
             if (item == null) {
                 continue;
@@ -381,8 +378,7 @@ public final class WaysGramProfileGiftsController {
 
     private void downloadGiftStickers(JSONArray inventory) {
         Set<String> started = new HashSet<>();
-        int scheduled = 0;
-        for (int i = 0; i < inventory.length() && scheduled < MAX_STICKER_DOWNLOADS; i++) {
+        for (int i = 0; i < inventory.length(); i++) {
             JSONObject item = inventory.optJSONObject(i);
             if (item == null || !item.optBoolean("sticker_available", false)) {
                 continue;
@@ -396,7 +392,6 @@ public final class WaysGramProfileGiftsController {
             if (serial.isEmpty() || telegramGiftId.isEmpty() || !started.add(serial)) {
                 continue;
             }
-            scheduled++;
             final String cacheKey = serial;
             imageClient.downloadTelegramGiftSticker(telegramGiftId, new WaysGramApiClient.ImageCallback() {
                 @Override
