@@ -1028,6 +1028,41 @@ def patch_gift_sheet_source(original: str) -> str:
         )
         updated = replace_exactly_once(updated, metadata_target, metadata_replacement, "native GiftCell WaysGram metadata and emoji binding")
 
+    inventory_text_marker = "// WaysGram inventory serial and level display"
+    if inventory_text_marker not in updated:
+        draw_target = (
+            "            if (gift != null) {\n"
+            "                if (title == null) {\n"
+            "                    title = new Text(gift.title, 20, AndroidUtilities.bold());\n"
+            "                }\n"
+            "                if (subtitle == null) {\n"
+            "                    subtitle = new Text(LocaleController.formatPluralStringComma(\"Gift2CollectionNumber\", gift.num), 13);\n"
+            "                }\n"
+        )
+        draw_replacement = (
+            "            " + inventory_text_marker + "\n"
+            "            org.telegram.messenger.waysgram.WaysGramGiftMediaStore.GiftMetadata waysGramGiftMetadata = null;\n"
+            "            if (userGift != null && userGift.gift != null && userGift.gift.slug != null && userGift.gift.slug.startsWith(\"waysgram://\")) {\n"
+            "                String waysGramInventorySerial = userGift.gift.slug.substring(\"waysgram://\".length());\n"
+            "                waysGramGiftMetadata = org.telegram.messenger.waysgram.WaysGramGiftMediaStore.getMetadata(waysGramInventorySerial);\n"
+            "            }\n"
+            "            if (waysGramGiftMetadata != null) {\n"
+            "                title = new Text(waysGramGiftMetadata.title, 20, AndroidUtilities.bold());\n"
+            "                subtitle = new Text(waysGramGiftMetadata.subtitle, 13);\n"
+            "            }\n"
+            "            if (gift != null || waysGramGiftMetadata != null) {\n"
+            "                if (title == null) {\n"
+            "                    title = new Text(gift.title, 20, AndroidUtilities.bold());\n"
+            "                }\n"
+            "                if (subtitle == null) {\n"
+            "                    subtitle = new Text(LocaleController.formatPluralStringComma(\"Gift2CollectionNumber\", gift.num), 13);\n"
+            "                }\n"
+        )
+        updated = replace_exactly_once(
+            updated, draw_target, draw_replacement,
+            "native GiftCell WaysGram inventory serial and level labels"
+        )
+
     return updated
 
 def patch_push_service_source(original: str) -> str:
@@ -1349,6 +1384,9 @@ def verify_source(android_root: Path) -> None:
         "WaysGramGiftMediaStore.getMetadata(",
         "waysgramGiftEmoji",
         "waysGramEmojiView.setText",
+        "// WaysGram inventory serial and level display",
+        "waysGramGiftMetadata.title",
+        "waysGramGiftMetadata.subtitle",
     ):
         if marker not in gift_content:
             raise ValueError("WaysGram native GiftCell sticker, emoji or metadata binding is missing")
