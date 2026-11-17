@@ -265,14 +265,6 @@ public final class WaysGramHomeFragment extends BaseFragment {
         }), true);
     }
 
-    @Override
-    public void onResume() {
-        super.onResume();
-        if (sessionStore != null && !sessionStore.hasSession()) {
-            loginScreenOpening = false;
-        }
-    }
-
     private void loadProfile() {
         if (apiClient == null) {
             return;
@@ -401,7 +393,8 @@ public final class WaysGramHomeFragment extends BaseFragment {
 
         addLabel(getParentActivity(), giftsContainer,
                 "В инвентаре: " + count + " подарков", 12, false);
-        for (int i = 0; i < count; i++) {
+        int visible = Math.min(count, 12);
+        for (int i = 0; i < visible; i++) {
             JSONObject gift = gifts.optJSONObject(i);
             if (gift == null) {
                 continue;
@@ -708,6 +701,9 @@ public final class WaysGramHomeFragment extends BaseFragment {
     @Override
     public void onResume() {
         super.onResume();
+        if (sessionStore != null && !sessionStore.hasSession()) {
+            loginScreenOpening = false;
+        }
         restoreProfileMenuVisibility();
         WaysGramPushManager.sync(getParentActivity());
         WaysGramPushManager.requestNotificationPermission(getParentActivity());
