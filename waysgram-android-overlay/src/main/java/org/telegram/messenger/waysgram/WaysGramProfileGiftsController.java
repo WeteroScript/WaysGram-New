@@ -161,7 +161,7 @@ public final class WaysGramProfileGiftsController {
 
             WaysGramGiftMediaStore.putMetadata(
                     serial,
-                    showSerialAsTitle ? serial : giftTitle,
+                    showSerialAsTitle ? "WG-" + uniqueId : giftTitle,
                     showSerialAsTitle
                             ? "Уровень " + upgradeLevel
                             : buildGiftSubtitle(
