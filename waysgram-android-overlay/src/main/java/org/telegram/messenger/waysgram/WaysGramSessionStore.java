@@ -64,11 +64,38 @@ public final class WaysGramSessionStore implements WaysGramGiftCatalogClient.Ses
             value = new WaysGramSessionStore(context, telegramAccount);
             INSTANCES.put(telegramAccount, value);
         }
+        value.clearCopiedLegacySessionForNonOwner(context);
         return value;
     }
 
     public int getTelegramAccount() {
         return telegramAccount;
+    }
+
+    private void clearCopiedLegacySessionForNonOwner(Context context) {
+        SharedPreferences migration = context.getApplicationContext().getSharedPreferences(
+                MIGRATION_PREFS_NAME, Context.MODE_PRIVATE
+        );
+        String owner = migration.getString(PREF_LEGACY_OWNER_ACCOUNT, null);
+        if (owner == null || owner.equals(Integer.toString(telegramAccount))) {
+            return;
+        }
+        SharedPreferences legacy = context.getApplicationContext().getSharedPreferences(
+                LEGACY_PREFS_NAME, Context.MODE_PRIVATE
+        );
+        String legacyToken = legacy.getString(PREF_SESSION_TOKEN, null);
+        String storedToken = preferences.getString(PREF_SESSION_TOKEN, null);
+        // Previous app releases could have copied the same global token into every
+        // account-scoped preference file. Remove only exact copies of that legacy
+        // token from non-owner slots; independently authenticated tokens survive.
+        if (hasText(legacyToken) && legacyToken.equals(storedToken)) {
+            Log.w(TAG, "Removing duplicated legacy WaysGram session from Telegram account "
+                    + telegramAccount);
+            preferences.edit()
+                    .remove(PREF_API_BASE)
+                    .remove(PREF_SESSION_TOKEN)
+                    .apply();
+        }
     }
 
     private void migrateLegacySessionOnce(Context context) {
