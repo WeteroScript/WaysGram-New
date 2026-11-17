@@ -444,9 +444,11 @@ public final class WaysGramProfileGiftsController {
 
     private void showError(String message) {
         String text;
-        if (message != null && (message.contains("HTTP 401")
-                || message.contains("WaysGram session is missing"))) {
-            text = "Сессия WaysGram недоступна. Проверьте подключение и повторите загрузку подарков.";
+        if (message != null && (message.contains("WaysGram session is missing")
+                || message.contains("Нет активной сессии WaysGram"))) {
+            text = "Для этого Telegram-аккаунта ещё нет отдельного входа в WaysGram. Откройте WaysGram и войдите под этим аккаунтом.";
+        } else if (message != null && message.contains("HTTP 401")) {
+            text = "Сессия WaysGram истекла или отозвана. Повторно войдите в WaysGram для этого Telegram-аккаунта.";
         } else if (message != null && message.contains("HTTP 404")) {
             text = "Сервер не поддерживает загрузку инвентаря. Обновите AuthBot на сервере.";
         } else if (message != null && message.contains("HTTP 403")) {
