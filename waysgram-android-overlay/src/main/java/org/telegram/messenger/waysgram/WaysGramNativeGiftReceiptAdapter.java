@@ -5,13 +5,13 @@ import android.content.SharedPreferences;
 import android.text.TextUtils;
 
 import org.telegram.messenger.ApplicationLoader;
-import org.telegram.messenger.ConnectionsManager;
+import org.telegram.tgnet.ConnectionsManager;
 import org.telegram.messenger.MessageObject;
 import org.telegram.tgnet.NativeByteBuffer;
 import org.telegram.messenger.MessagesController;
 import org.telegram.messenger.MessagesStorage;
 import org.telegram.messenger.NotificationCenter;
-import org.telegram.messenger.StarsController;
+import org.telegram.ui.Stars.StarsController;
 import org.telegram.messenger.UserConfig;
 import org.telegram.messenger.Utilities;
 import org.telegram.tgnet.TLRPC;
@@ -110,7 +110,7 @@ public final class WaysGramNativeGiftReceiptAdapter {
             long selfId = UserConfig.getInstance(account).getClientUserId();
             TLRPC.TL_messageService message = new TLRPC.TL_messageService();
             message.local_id = message.id = UserConfig.getInstance(account).getNewMessageId();
-            message.random_id = Utilities.randomLong();
+            message.random_id = Utilities.random.nextLong();
             message.dialog_id = dialogUserId;
             message.peer_id = new TLRPC.TL_peerUser();
             message.peer_id.user_id = dialogUserId;
