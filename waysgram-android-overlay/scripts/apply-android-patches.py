@@ -1085,6 +1085,23 @@ def patch_chat_action_cell_waysgram_receipts_source(original: str) -> str:
         "native WaysGram purchase receipt subtitle"
     )
 
+    media_key_marker = "    private String waysGramGiftMediaKey;\n"
+    if media_key_marker not in updated:
+        updated = replace_exactly_once(
+            updated,
+            "    private ImageReceiver imageReceiver;\n",
+            "    private ImageReceiver imageReceiver;\n" + media_key_marker,
+            "native ChatActionCell WaysGram artwork identity field"
+        )
+    message_reset_anchor = "        if (messageObject == null) return;\n"
+    if "waysGramGiftMediaKey = null;" not in updated:
+        updated = replace_exactly_once(
+            updated,
+            message_reset_anchor,
+            message_reset_anchor + "        if (currentMessageObject != messageObject) waysGramGiftMediaKey = null;\n",
+            "reset native WaysGram artwork identity for a new chat row"
+        )
+
     media_anchor = "                forceWasUnread = messageObject.wasUnread;\n                giftSticker = document;\n"
     insert_position = updated.find(media_anchor)
     if insert_position < 0:
@@ -1100,15 +1117,23 @@ def patch_chat_action_cell_waysgram_receipts_source(original: str) -> str:
         "                    if (waysGramSerial != null && !waysGramSerial.isEmpty()) {\n"
         "                        java.io.File waysGramAnimationFile = org.telegram.messenger.waysgram.WaysGramGiftMediaStore.getAnimationFile(waysGramSerial);\n"
         "                        if (waysGramAnimationFile != null && waysGramAnimationFile.isFile()) {\n"
-        "                            org.telegram.ui.Components.AnimatedFileDrawable waysGramAnimation = new org.telegram.ui.Components.AnimatedFileDrawable(waysGramAnimationFile, true, 0, 0, null, null, null, 0, currentAccount, true, 160, 160, null);\n"
-        "                            imageReceiver.setAllowStartLottieAnimation(true);\n"
-        "                            imageReceiver.setDelegate(giftStickerDelegate);\n"
-        "                            imageReceiver.setImageBitmap(waysGramAnimation);\n"
+        "                            String waysGramMediaKey = waysGramSerial + \":animation\";\n"
+        "                            if (!waysGramMediaKey.equals(waysGramGiftMediaKey)) {\n"
+        "                                org.telegram.ui.Components.AnimatedFileDrawable waysGramAnimation = new org.telegram.ui.Components.AnimatedFileDrawable(waysGramAnimationFile, true, 0, 0, null, null, null, 0, currentAccount, true, 160, 160, null);\n"
+        "                                imageReceiver.setAllowStartLottieAnimation(true);\n"
+        "                                imageReceiver.setDelegate(giftStickerDelegate);\n"
+        "                                imageReceiver.setImageBitmap(waysGramAnimation);\n"
+        "                                waysGramGiftMediaKey = waysGramMediaKey;\n"
+        "                            }\n"
         "                        } else {\n"
         "                            android.graphics.Bitmap waysGramBitmap = org.telegram.messenger.waysgram.WaysGramGiftMediaStore.get(waysGramSerial);\n"
         "                            if (waysGramBitmap != null && !waysGramBitmap.isRecycled()) {\n"
-        "                                imageReceiver.setAllowStartLottieAnimation(true);\n"
-        "                                imageReceiver.setImageBitmap(waysGramBitmap);\n"
+        "                                String waysGramMediaKey = waysGramSerial + \":bitmap\";\n"
+        "                                if (!waysGramMediaKey.equals(waysGramGiftMediaKey)) {\n"
+        "                                    imageReceiver.setAllowStartLottieAnimation(true);\n"
+        "                                    imageReceiver.setImageBitmap(waysGramBitmap);\n"
+        "                                    waysGramGiftMediaKey = waysGramMediaKey;\n"
+        "                                }\n"
         "                            } else if (waysGramGift != null) {\n"
         "                                org.telegram.messenger.waysgram.WaysGramNativeGiftReceiptAdapter.ensureGiftMedia(currentAccount, Long.toString(waysGramGift.id), waysGramSerial);\n"
         "                            }\n"
