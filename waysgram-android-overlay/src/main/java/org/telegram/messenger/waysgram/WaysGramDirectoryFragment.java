@@ -4,6 +4,8 @@ import android.app.AlertDialog;
 import android.content.ClipData;
 import android.content.ClipboardManager;
 import android.content.Context;
+import android.graphics.Color;
+import android.graphics.drawable.GradientDrawable;
 import android.os.Handler;
 import android.os.Looper;
 import android.text.InputFilter;
@@ -740,6 +742,7 @@ public final class WaysGramDirectoryFragment extends BaseFragment {
             row.addView(open, new LinearLayout.LayoutParams(
                     0, ViewGroup.LayoutParams.WRAP_CONTENT, 1
             ));
+            addEntityLabels(row, item.optJSONArray("labels"));
             if (type == TYPE_CONTACTS) {
                 Button profileButton = new Button(getParentActivity());
                 profileButton.setAllCaps(false);
@@ -798,16 +801,23 @@ public final class WaysGramDirectoryFragment extends BaseFragment {
             return;
         }
 
+        LinearLayout labeledRow = new LinearLayout(getParentActivity());
+        labeledRow.setOrientation(LinearLayout.HORIZONTAL);
+        labeledRow.setGravity(Gravity.CENTER_VERTICAL);
         Button button = new Button(getParentActivity());
         button.setGravity(Gravity.START | Gravity.CENTER_VERTICAL);
         button.setAllCaps(false);
         button.setText(detail.length() > 0 ? title + "\n" + detail : title);
+        labeledRow.addView(button, new LinearLayout.LayoutParams(
+                0, ViewGroup.LayoutParams.WRAP_CONTENT, 1
+        ));
+        addEntityLabels(labeledRow, item.optJSONArray("labels"));
         LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT
         );
         params.topMargin = AndroidUtilities.dp(5);
-        listContainer.addView(button, params);
+        listContainer.addView(labeledRow, params);
         final String selectedTitle = title;
         button.setOnClickListener(view -> {
             if (id <= 0) {
@@ -823,6 +833,49 @@ public final class WaysGramDirectoryFragment extends BaseFragment {
                 ), false);
             }
         });
+    }
+
+    private void addEntityLabels(LinearLayout parent, JSONArray labels) {
+        if (parent == null || labels == null) {
+            return;
+        }
+        int count = Math.min(labels.length(), 4);
+        for (int i = 0; i < count; i++) {
+            JSONObject label = labels.optJSONObject(i);
+            if (label == null) {
+                continue;
+            }
+            String value = label.optString("text", "").trim();
+            if (value.isEmpty()) {
+                continue;
+            }
+            int color;
+            try {
+                color = Color.parseColor(label.optString("color", "#6B7280"));
+            } catch (IllegalArgumentException exception) {
+                color = Color.GRAY;
+            }
+            double luminance = 0.299 * Color.red(color)
+                    + 0.587 * Color.green(color)
+                    + 0.114 * Color.blue(color);
+            TextView chip = new TextView(getParentActivity());
+            chip.setText(value);
+            chip.setTextSize(10);
+            chip.setSingleLine(true);
+            chip.setTextColor(luminance > 150 ? Color.BLACK : Color.WHITE);
+            chip.setPadding(AndroidUtilities.dp(5), AndroidUtilities.dp(3),
+                    AndroidUtilities.dp(5), AndroidUtilities.dp(3));
+            GradientDrawable background = new GradientDrawable();
+            background.setColor(color);
+            background.setCornerRadius(AndroidUtilities.dp(6));
+            chip.setBackground(background);
+            LinearLayout.LayoutParams chipParams = new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT
+            );
+            chipParams.leftMargin = AndroidUtilities.dp(4);
+            parent.addView(chip, chipParams);
+        }
     }
 
     private void editContactNote(long userId, String currentNote) {
