@@ -44,6 +44,11 @@ public final class WaysGramApiClient implements AutoCloseable {
         void onError(String message, int statusCode);
     }
 
+    public interface FileCallback {
+        void onSuccess(File file);
+        void onError(String message, int statusCode);
+    }
+
     public void uploadDocument(ContentResolver resolver, Uri uri, Callback callback) {
         uploadDocument(resolver, uri, "", callback);
     }
@@ -204,6 +209,26 @@ public final class WaysGramApiClient implements AutoCloseable {
                 deliverImageError(callback, exception.getMessage(), exception.statusCode);
             } catch (Exception exception) {
                 deliverImageError(callback, "Не удалось загрузить изображение подарка", 0);
+            }
+        });
+    }
+
+    /** Downloads the original TGS/WebM file, preserving its animation frames. */
+    public void downloadTelegramGiftStickerAnimation(
+            String giftId, File cacheDirectory, FileCallback callback
+    ) {
+        ioExecutor.execute(() -> {
+            try {
+                File file = performTelegramGiftStickerAnimationDownload(giftId, cacheDirectory);
+                mainHandler.post(() -> {
+                    if (callback != null) {
+                        callback.onSuccess(file);
+                    }
+                });
+            } catch (ApiException exception) {
+                deliverFileError(callback, exception.getMessage(), exception.statusCode);
+            } catch (Exception exception) {
+                deliverFileError(callback, "Не удалось загрузить анимацию подарка", 0);
             }
         });
     }
@@ -593,6 +618,67 @@ public final class WaysGramApiClient implements AutoCloseable {
         }
     }
 
+    private File performTelegramGiftStickerAnimationDownload(
+            String giftId, File cacheDirectory
+    ) throws IOException {
+        if (giftId == null || !giftId.matches("[A-Za-z0-9_-]{1,120}")) {
+            throw new IOException("Некорректный Telegram Gift ID");
+        }
+        if (cacheDirectory == null) {
+            throw new IOException("Каталог кеша подарков недоступен");
+        }
+        String baseUrl = sessionStore.getApiBaseUrl();
+        String token = sessionStore.getWaysGramSessionToken();
+        if (baseUrl == null || token == null || token.length() == 0) {
+            throw new IOException("Нет активной сессии WaysGram");
+        }
+
+        HttpURLConnection connection = null;
+        try {
+            String path = "/api/telegram/gifts/" + Uri.encode(giftId) + "/sticker?animated=1";
+            connection = (HttpURLConnection) new URL(baseUrl + path).openConnection();
+            connection.setRequestMethod("GET");
+            connection.setInstanceFollowRedirects(false);
+            connection.setConnectTimeout(CONNECT_TIMEOUT_MS);
+            connection.setReadTimeout(READ_TIMEOUT_MS);
+            connection.setRequestProperty("Accept", "application/x-tgsticker,video/webm");
+            connection.setRequestProperty("Authorization", "Bearer " + token);
+            int status = connection.getResponseCode();
+            if (status < 200 || status >= 300) {
+                InputStream error = connection.getErrorStream();
+                byte[] errorBytes = error == null ? new byte[0] : readLimited(error, MAX_RESPONSE_BYTES);
+                JSONObject errorJson = parseJsonResponse(errorBytes);
+                throw new ApiException(status, safeApiMessage(errorJson, status));
+            }
+            byte[] bytes = readLimited(connection.getInputStream(), MAX_IMAGE_BYTES);
+            if (bytes.length == 0) {
+                throw new IOException("Сервер вернул пустую анимацию");
+            }
+            String mime = connection.getContentType();
+            boolean webm = mime != null && mime.toLowerCase(java.util.Locale.ROOT).startsWith("video/");
+            if (!webm && bytes.length >= 4) {
+                webm = (bytes[0] & 0xff) == 0x1a
+                        && (bytes[1] & 0xff) == 0x45
+                        && (bytes[2] & 0xff) == 0xdf
+                        && (bytes[3] & 0xff) == 0xa3;
+            }
+            if (!cacheDirectory.exists() && !cacheDirectory.mkdirs()) {
+                throw new IOException("Не удалось создать каталог кеша анимаций");
+            }
+            File target = new File(cacheDirectory, "waysgram_gift_" + giftId + (webm ? ".webm" : ".tgs"));
+            try (FileOutputStream output = new FileOutputStream(target)) {
+                output.write(bytes);
+                output.flush();
+                output.getFD().sync();
+            }
+            return target;
+        } finally {
+            if (connection != null) {
+                connection.disconnect();
+            }
+        }
+    }
+
     private static String detectImageMime(byte[] content) throws IOException {
         if (content.length >= 3
                 && (content[0] & 0xff) == 0xff
@@ -619,6 +705,13 @@ public final class WaysGramApiClient implements AutoCloseable {
             return "image/webp";
         }
         throw new IOException("Поддерживаются только JPEG, PNG и WebP");
+    }
+
+    private void deliverFileError(FileCallback callback, String message, int statusCode) {
+        if (callback == null) {
+            return;
+        }
+        mainHandler.post(() -> callback.onError(message, statusCode));
     }
 
     private static JSONObject parseJsonResponse(byte[] bytes) throws IOException {
