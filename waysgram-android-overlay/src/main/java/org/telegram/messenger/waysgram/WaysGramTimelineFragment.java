@@ -12,6 +12,11 @@ import android.net.Uri;
 import android.os.Handler;
 import android.os.Looper;
 import android.text.InputType;
+import android.text.Spannable;
+import android.text.SpannableStringBuilder;
+import android.text.style.BackgroundColorSpan;
+import android.text.style.ForegroundColorSpan;
+import android.text.style.RelativeSizeSpan;
 import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
@@ -122,26 +127,7 @@ public final class WaysGramTimelineFragment extends BaseFragment {
         root.setPadding(AndroidUtilities.dp(10), AndroidUtilities.dp(8),
                 AndroidUtilities.dp(10), AndroidUtilities.dp(8));
 
-        if (type == TYPE_CHANNEL) {
-            channelLabelsContainer = new LinearLayout(context);
-            channelLabelsContainer.setOrientation(LinearLayout.HORIZONTAL);
-            channelLabelsContainer.setGravity(Gravity.CENTER_VERTICAL);
-            channelNameView = new TextView(context);
-            channelNameView.setText(targetTitle);
-            channelNameView.setTextSize(15);
-            channelNameView.setTypeface(null, android.graphics.Typeface.BOLD);
-            channelNameView.setTextColor(Theme.getColor(Theme.key_windowBackgroundWhiteBlackText));
-            LinearLayout.LayoutParams nameParams = new LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.WRAP_CONTENT,
-                    ViewGroup.LayoutParams.WRAP_CONTENT
-            );
-            nameParams.rightMargin = AndroidUtilities.dp(6);
-            channelLabelsContainer.addView(channelNameView, nameParams);
-            root.addView(channelLabelsContainer, new LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT,
-                    ViewGroup.LayoutParams.WRAP_CONTENT
-            ));
-        }
+
         statusView = new TextView(context);
         statusView.setText("Загружаю сообщения…");
         statusView.setTextSize(12);
@@ -961,7 +947,7 @@ public final class WaysGramTimelineFragment extends BaseFragment {
     }
 
     private void loadChannelLabels() {
-        if (type != TYPE_CHANNEL || channelLabelsContainer == null || apiClient == null) {
+        if (type != TYPE_CHANNEL || apiClient == null) {
             return;
         }
         apiClient.get("/api/channels/" + targetId, new WaysGramApiClient.Callback() {
@@ -978,25 +964,26 @@ public final class WaysGramTimelineFragment extends BaseFragment {
     }
 
     private void renderChannelLabels(JSONObject channel) {
-        if (channelLabelsContainer == null || channelNameView == null) {
+        if (channel == null) {
             return;
         }
         String title = channel.optString("title", targetTitle).trim();
         String username = channel.optString("username", "").trim();
-        channelNameView.setText((title.isEmpty() ? targetTitle : title)
-                + (username.isEmpty() ? "" : "  @" + username));
-        while (channelLabelsContainer.getChildCount() > 1) {
-            channelLabelsContainer.removeViewAt(1);
+        String displayTitle = title.isEmpty() ? targetTitle : title;
+        if (!username.isEmpty()) {
+            displayTitle += "  @" + username;
         }
+
+        SpannableStringBuilder result = new SpannableStringBuilder(displayTitle);
         JSONArray labels = channel.optJSONArray("labels");
-        int count = labels == null ? 0 : labels.length();
-        for (int i = 0; i < count && i < 8; i++) {
+        int count = labels == null ? 0 : Math.min(labels.length(), 8);
+        for (int i = 0; i < count; i++) {
             JSONObject label = labels.optJSONObject(i);
             if (label == null) {
                 continue;
             }
-            String text = label.optString("text", "").trim();
-            if (text.isEmpty()) {
+            String value = label.optString("text", "").trim();
+            if (value.isEmpty()) {
                 continue;
             }
             int color;
@@ -1005,27 +992,18 @@ public final class WaysGramTimelineFragment extends BaseFragment {
             } catch (IllegalArgumentException exception) {
                 color = Color.GRAY;
             }
-            double luminance = (0.299 * Color.red(color))
-                    + (0.587 * Color.green(color))
-                    + (0.114 * Color.blue(color));
-            TextView chip = new TextView(getParentActivity());
-            chip.setText("  " + text + "  ");
-            chip.setTextSize(11);
-            chip.setTextColor(luminance > 150 ? Color.BLACK : Color.WHITE);
-            chip.setPadding(AndroidUtilities.dp(3), AndroidUtilities.dp(2),
-                    AndroidUtilities.dp(3), AndroidUtilities.dp(2));
-            GradientDrawable background = new GradientDrawable();
-            background.setColor(color);
-            background.setCornerRadius(AndroidUtilities.dp(6));
-            chip.setBackground(background);
-            LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.WRAP_CONTENT,
-                    ViewGroup.LayoutParams.WRAP_CONTENT
-            );
-            params.rightMargin = AndroidUtilities.dp(5);
-            params.bottomMargin = AndroidUtilities.dp(4);
-            channelLabelsContainer.addView(chip, params);
+            int start = result.length() + 2;
+            result.append("  ").append(value);
+            int end = result.length();
+            double luminance = 0.299 * Color.red(color)
+                    + 0.587 * Color.green(color)
+                    + 0.114 * Color.blue(color);
+            result.setSpan(new BackgroundColorSpan(color), start, end, Spannable.SPAN_EXCLUSIVE_EXCLUSIVE);
+            result.setSpan(new ForegroundColorSpan(luminance > 150 ? Color.BLACK : Color.WHITE),
+                    start, end, Spannable.SPAN_EXCLUSIVE_EXCLUSIVE);
+            result.setSpan(new RelativeSizeSpan(0.82f), start, end, Spannable.SPAN_EXCLUSIVE_EXCLUSIVE);
         }
+        actionBar.setTitle(result);
     }
 
     private void loadManagement() {
