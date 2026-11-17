@@ -744,7 +744,7 @@ public final class WaysGramGiftCatalogSheet extends BottomSheet {
                             );
                     if (!serial.isEmpty()) {
                         WaysGramNativeGiftReceiptAdapter.addPurchaseReceipt(
-                                telegramAccount, purchasedGiftId, serial, ownerId
+                                telegramAccount, purchasedGiftId, serial, gift.title, ownerId
                         );
                     }
                     int balance = result.optInt("stars", -1);
