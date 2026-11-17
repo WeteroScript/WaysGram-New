@@ -1070,8 +1070,8 @@ public final class WaysGramGiftCatalogSheet extends BottomSheet {
             } else {
                 imageView.setImageDrawable(null);
                 imageView.setVisibility(View.GONE);
-                emojiView.setText(gift.emoji.length() > 0 ? gift.emoji : "🎁");
-                emojiView.setVisibility(View.VISIBLE);
+                emojiView.setText("");
+                emojiView.setVisibility(View.GONE);
             }
         }
     }
