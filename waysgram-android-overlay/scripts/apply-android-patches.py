@@ -1330,6 +1330,23 @@ def verify_source(android_root: Path) -> None:
     ):
         raise ValueError("Native Saved Messages gift receipt integration was not applied")
 
+    chat_action_cell = android_root / "TMessagesProj/src/main/java/org/telegram/ui/Cells/ChatActionCell.java"
+    if not chat_action_cell.is_file():
+        raise FileNotFoundError(f"Required native ChatActionCell source not found: {chat_action_cell}")
+    chat_action_source = chat_action_cell.read_text(encoding="utf-8")
+    patched_chat_action = patch_chat_action_cell_waysgram_receipts_source(chat_action_source)
+    if patched_chat_action != chat_action_source:
+        chat_action_cell.write_text(patched_chat_action, encoding="utf-8")
+    final_chat_action = chat_action_cell.read_text(encoding="utf-8")
+    for marker in (
+        "// WaysGram: render local purchase receipt title and media",
+        'action.gift.slug.startsWith("waysgram://")',
+        "WaysGramGiftMediaStore.getAnimationFile(waysGramSerial)",
+        'title = "Подарок приобретён в WaysGram";',
+    ):
+        if marker not in final_chat_action:
+            raise ValueError("Native Saved Messages WaysGram gift card rendering is incomplete")
+
     profile_layout = android_root / "TMessagesProj/src/main/java/org/telegram/ui/Components/SharedMediaLayout.java"
     if not profile_layout.is_file():
         raise FileNotFoundError(f"Required profile layout source not found: {profile_layout}")
@@ -1456,11 +1473,12 @@ def verify_source(android_root: Path) -> None:
     for marker in (
         "WaysGramGiftMediaStore.get(",
         "WaysGramGiftMediaStore.getMetadata(",
-        "waysgramGiftEmoji",
-        "waysGramEmojiView.setText",
+        "waysGramEmojiExisting.setVisibility(View.GONE)",
     ):
         if marker not in gift_content:
-            raise ValueError("WaysGram native GiftCell sticker, emoji or metadata binding is missing")
+            raise ValueError("WaysGram native GiftCell artwork and metadata binding is missing")
+    if "waysGramEmojiView.setText" in gift_content:
+        raise ValueError("Emoji placeholders must remain hidden on WaysGram gift cards")
 
     gift_hits = [marker for marker in FORBIDDEN_GIFT_MARKERS if marker in gift_content]
     launch_hits = [marker for marker in FORBIDDEN_LAUNCH_MARKERS if marker in launch_content]
