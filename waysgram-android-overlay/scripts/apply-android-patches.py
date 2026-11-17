@@ -1037,21 +1037,21 @@ def patch_chat_action_cell_waysgram_receipts_source(original: str) -> str:
         "native WaysGram purchase receipt header title"
     )
     free_upgrade_anchor = (
-        "                    final boolean freeUpgrade = action.can_upgrade && !action.converted && action.upgrade_stars > 0 && !action.upgraded;\\n"
+        "                    final boolean freeUpgrade = action.can_upgrade && !action.converted && action.upgrade_stars > 0 && !action.upgraded;\n"
     )
     free_upgrade_replacement = (
         free_upgrade_anchor
-        + "                    final boolean waysGramGiftReceipt = action.gift != null && !TextUtils.isEmpty(action.gift.title) && ((action.gift.slug != null && action.gift.slug.startsWith(\\\"waysgram://\\\")) || (messageObject.messageOwner.params != null && messageObject.messageOwner.params.containsKey(\\\"waysgram_gift_serial\\\")));\\n"
+        + "                    final boolean waysGramGiftReceipt = action.gift != null && !TextUtils.isEmpty(action.gift.title) && ((action.gift.slug != null && action.gift.slug.startsWith(\"waysgram://\")) || (messageObject.messageOwner.params != null && messageObject.messageOwner.params.containsKey(\"waysgram_gift_serial\")));\n"
     )
     updated = replace_exactly_once(
         updated, free_upgrade_anchor, free_upgrade_replacement,
         "WaysGram purchase receipt identity after database reload"
     )
-    action_title_anchor = "                    if (toId != 0 && action.auction_acquired && recipient != null) {\\n"
+    action_title_anchor = "                    if (toId != 0 && action.auction_acquired && recipient != null) {\n"
     action_title_replacement = (
-        "                    if (waysGramGiftReceipt) {\\n"
-        "                        sb.append(action.gift.title);\\n"
-        "                    } else if (toId != 0 && action.auction_acquired && recipient != null) {\\n"
+        "                    if (waysGramGiftReceipt) {\n"
+        "                        sb.append(action.gift.title);\n"
+        "                    } else if (toId != 0 && action.auction_acquired && recipient != null) {\n"
     )
     updated = replace_exactly_once(
         updated, action_title_anchor, action_title_replacement,
