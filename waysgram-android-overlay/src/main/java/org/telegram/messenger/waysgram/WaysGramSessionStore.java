@@ -31,6 +31,8 @@ import javax.crypto.spec.GCMParameterSpec;
 public final class WaysGramSessionStore implements WaysGramGiftCatalogClient.SessionProvider {
     private static final String LEGACY_PREFS_NAME = "waysgram_private_session";
     private static final String ACCOUNT_PREFS_PREFIX = "waysgram_private_session_account_";
+    private static final String MIGRATION_PREFS_NAME = "waysgram_session_migration";
+    private static final String PREF_SHARED_SESSION_MIGRATED = "shared_session_migrated";
     private static final String KEY_ALIAS = "org.telegram.messenger.WaysGramSession.v1";
     private static final String PREF_API_BASE = "api_base_encrypted";
     private static final String PREF_SESSION_TOKEN = "session_token_encrypted";
@@ -69,43 +71,52 @@ public final class WaysGramSessionStore implements WaysGramGiftCatalogClient.Ses
     }
 
     private void migrateAccountSessions(Context context) {
-        boolean hasToken = hasText(preferences.getString(PREF_SESSION_TOKEN, null));
-        boolean hasBase = hasText(preferences.getString(PREF_API_BASE, null));
-        if (hasToken && hasBase) {
+        SharedPreferences migration = context.getSharedPreferences(
+                MIGRATION_PREFS_NAME, Context.MODE_PRIVATE
+        );
+        if (migration.getBoolean(PREF_SHARED_SESSION_MIGRATED, false)) {
             return;
         }
 
-        // Previous releases wrote credentials to per-Telegram-account preference
-        // files. Import any existing credentials into the shared store before
-        // serving requests for the currently selected Telegram account.
-        for (int account = 0; account < UserConfig.MAX_ACCOUNT_COUNT; account++) {
-            SharedPreferences accountPreferences = context.getSharedPreferences(
-                    ACCOUNT_PREFS_PREFIX + account,
-                    Context.MODE_PRIVATE
-            );
-            String accountToken = accountPreferences.getString(PREF_SESSION_TOKEN, null);
-            String accountBase = accountPreferences.getString(PREF_API_BASE, null);
-            SharedPreferences.Editor editor = preferences.edit();
-            boolean changed = false;
+        boolean hasToken = hasText(preferences.getString(PREF_SESSION_TOKEN, null));
+        boolean hasBase = hasText(preferences.getString(PREF_API_BASE, null));
 
-            if (!hasToken && hasText(accountToken)) {
-                editor.putString(PREF_SESSION_TOKEN, accountToken);
-                hasToken = true;
-                changed = true;
+        // Previous releases wrote credentials to per-Telegram-account preference
+        // files. Import any existing credentials into the shared store exactly once.
+        if (!hasToken || !hasBase) {
+            for (int account = 0; account < UserConfig.MAX_ACCOUNT_COUNT; account++) {
+                SharedPreferences accountPreferences = context.getSharedPreferences(
+                        ACCOUNT_PREFS_PREFIX + account,
+                        Context.MODE_PRIVATE
+                );
+                String accountToken = accountPreferences.getString(PREF_SESSION_TOKEN, null);
+                String accountBase = accountPreferences.getString(PREF_API_BASE, null);
+                SharedPreferences.Editor editor = preferences.edit();
+                boolean changed = false;
+
+                if (!hasToken && hasText(accountToken)) {
+                    editor.putString(PREF_SESSION_TOKEN, accountToken);
+                    hasToken = true;
+                    changed = true;
+                }
+                if (!hasBase && hasText(accountBase)) {
+                    editor.putString(PREF_API_BASE, accountBase);
+                    hasBase = true;
+                    changed = true;
+                }
+                if (changed && !editor.commit()) {
+                    Log.e(TAG, "Unable to migrate existing WaysGram credentials from Telegram account "
+                            + account);
+                    return;
+                }
+                if (hasToken && hasBase) {
+                    break;
+                }
             }
-            if (!hasBase && hasText(accountBase)) {
-                editor.putString(PREF_API_BASE, accountBase);
-                hasBase = true;
-                changed = true;
-            }
-            if (changed && !editor.commit()) {
-                Log.e(TAG, "Unable to migrate existing WaysGram credentials from Telegram account "
-                        + account);
-                return;
-            }
-            if (hasToken && hasBase) {
-                break;
-            }
+        }
+
+        if (!migration.edit().putBoolean(PREF_SHARED_SESSION_MIGRATED, true).commit()) {
+            Log.e(TAG, "Unable to persist shared WaysGram session migration state");
         }
     }
 
