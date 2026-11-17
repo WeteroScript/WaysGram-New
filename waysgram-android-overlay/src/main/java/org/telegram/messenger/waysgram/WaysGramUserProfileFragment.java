@@ -297,8 +297,7 @@ public final class WaysGramUserProfileFragment extends BaseFragment {
             addLabel(getParentActivity(), giftsContainer, "Публичных подарков не найдено", 13, false);
             return;
         }
-        int visible = Math.min(count, 50);
-        for (int i = 0; i < visible; i++) {
+        for (int i = 0; i < count; i++) {
             JSONObject gift = gifts.optJSONObject(i);
             if (gift == null) {
                 continue;
@@ -314,11 +313,6 @@ public final class WaysGramUserProfileFragment extends BaseFragment {
                     gift.optString("gift_name", ""),
                     telegramId
             );
-            String emoji = gift.optString("gift_emoji", "").trim();
-            if (emoji.isEmpty() && telegramGift != null) {
-                emoji = telegramGift.optString("emoji", "").trim();
-            }
-
             LinearLayout card = new LinearLayout(getParentActivity());
             card.setOrientation(LinearLayout.VERTICAL);
             card.setPadding(AndroidUtilities.dp(12), AndroidUtilities.dp(10),
@@ -337,19 +331,9 @@ public final class WaysGramUserProfileFragment extends BaseFragment {
                     && (stickerInfo.optBoolean("is_animated", false)
                     || stickerInfo.optBoolean("is_video", false));
             WaysGramGiftCardRenderer.addPreview(
-                    getParentActivity(), card, apiClient, telegramId, emoji,
+                    getParentActivity(), card, apiClient, telegramId, "",
                     animated, getCurrentAccount()
             );
-            if (telegramGift != null && gift.optBoolean("can_upgrade", false)) {
-                int upgradePrice = telegramGift.optInt("upgrade_star_count", 0);
-                int upgradeVariants = telegramGift.optInt("upgrade_variants", 0);
-                addLabel(getParentActivity(), card,
-                        "Параметры Telegram-улучшения"
-                                + (upgradePrice > 0 ? " · " + upgradePrice + " Stars" : "")
-                                + (upgradeVariants > 0 ? " · вариантов: " + upgradeVariants : ""),
-                        12, true
-                );
-            }
             if ("waysgram_internal".equals(attributes.optString("upgrade_source", ""))) {
                 addLabel(getParentActivity(), card,
                         "Улучшение выполнено внутри коллекционной системы WaysGram",
