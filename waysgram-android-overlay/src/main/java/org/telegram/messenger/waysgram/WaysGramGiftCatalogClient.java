@@ -13,7 +13,9 @@ import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
@@ -231,6 +233,7 @@ public final class WaysGramGiftCatalogClient implements AutoCloseable {
                 final int pageSize = 100;
                 int offset = 0;
                 JSONArray allGifts = new JSONArray();
+                Set<String> seenGifts = new HashSet<>();
                 while (true) {
                     JSONObject response = requestJson(
                             getBaseUrl() + "/api/me/gifts?limit=" + pageSize + "&offset=" + offset
@@ -239,13 +242,38 @@ public final class WaysGramGiftCatalogClient implements AutoCloseable {
                     if (page == null) {
                         throw new IOException("WaysGram inventory response does not contain a gifts array");
                     }
+                    int newItems = 0;
                     for (int i = 0; i < page.length(); i++) {
-                        allGifts.put(page.opt(i));
+                        Object item = page.opt(i);
+                        String key;
+                        if (item instanceof JSONObject) {
+                            JSONObject gift = (JSONObject) item;
+                            String serial = gift.optString("serial_number", "").trim();
+                            String id = gift.optString("id", "").trim();
+                            key = !serial.isEmpty() ? "serial:" + serial
+                                    : !id.isEmpty() ? "id:" + id : gift.toString();
+                        } else {
+                            key = String.valueOf(item);
+                        }
+                        if (seenGifts.add(key)) {
+                            allGifts.put(item);
+                            newItems++;
+                        }
                     }
-                    // Older servers return the complete inventory without pagination metadata.
-                    if (!response.has("has_more") || !response.optBoolean("has_more", false)) {
+
+                    boolean hasPaginationMetadata = response.has("has_more");
+                    if (hasPaginationMetadata) {
+                        if (!response.optBoolean("has_more", false)) {
+                            break;
+                        }
+                    } else if (page.length() < pageSize || page.length() > pageSize) {
+                        // A legacy server either returned its full inventory or the final short page.
+                        break;
+                    } else if (newItems == 0) {
+                        // The server ignored offset; stop rather than append the same page forever.
                         break;
                     }
+
                     int nextOffset = response.optInt("next_offset", offset + page.length());
                     if (page.length() == 0 || nextOffset <= offset) {
                         throw new IOException("WaysGram inventory pagination did not advance");
