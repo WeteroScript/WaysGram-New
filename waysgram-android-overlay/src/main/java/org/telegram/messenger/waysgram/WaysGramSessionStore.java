@@ -2,7 +2,6 @@ package org.telegram.messenger.waysgram;
 
 import android.content.Context;
 import android.content.SharedPreferences;
-import java.io.File;
 import android.security.keystore.KeyGenParameterSpec;
 import android.security.keystore.KeyProperties;
 import android.util.Base64;
@@ -33,7 +32,7 @@ public final class WaysGramSessionStore implements WaysGramGiftCatalogClient.Ses
     private static final String LEGACY_PREFS_NAME = "waysgram_private_session";
     private static final String ACCOUNT_PREFS_PREFIX = "waysgram_private_session_account_";
     private static final String MIGRATION_PREFS_NAME = "waysgram_session_migration";
-    private static final String PREF_SHARED_SESSION_MIGRATED = "shared_session_migrated";
+    private static final String PREF_MIGRATED = "legacy_session_migrated";
     private static final String KEY_ALIAS = "org.telegram.messenger.WaysGramSession.v1";
     private static final String PREF_API_BASE = "api_base_encrypted";
     private static final String PREF_SESSION_TOKEN = "session_token_encrypted";
@@ -48,10 +47,11 @@ public final class WaysGramSessionStore implements WaysGramGiftCatalogClient.Ses
     private WaysGramSessionStore(Context context, int telegramAccount) {
         Context appContext = context.getApplicationContext();
         this.telegramAccount = telegramAccount;
-        // WaysGram is one application identity, not a separate login per Telegram slot.
-        // All Telegram accounts therefore share this encrypted WaysGram credential pair.
-        preferences = appContext.getSharedPreferences(LEGACY_PREFS_NAME, Context.MODE_PRIVATE);
-        migrateAccountSessions(appContext);
+        // Every Telegram slot has its own WaysGram login and gift inventory.
+        preferences = appContext.getSharedPreferences(
+                ACCOUNT_PREFS_PREFIX + telegramAccount, Context.MODE_PRIVATE
+        );
+        migrateLegacySessionOnce(appContext);
     }
 
     public static WaysGramSessionStore getInstance(Context context) {
@@ -71,69 +71,28 @@ public final class WaysGramSessionStore implements WaysGramGiftCatalogClient.Ses
         return telegramAccount;
     }
 
-    private void migrateAccountSessions(Context context) {
+    private void migrateLegacySessionOnce(Context context) {
         SharedPreferences migration = context.getSharedPreferences(
                 MIGRATION_PREFS_NAME, Context.MODE_PRIVATE
         );
-        if (migration.getBoolean(PREF_SHARED_SESSION_MIGRATED, false)) {
+        if (migration.getBoolean(PREF_MIGRATED, false)) {
             return;
         }
-
-        String selectedToken = preferences.getString(PREF_SESSION_TOKEN, null);
-        String selectedBase = preferences.getString(PREF_API_BASE, null);
-        boolean hasSelectedPair = hasText(selectedToken) && hasText(selectedBase);
-        long selectedTimestamp = preferenceFileModifiedAt(context, LEGACY_PREFS_NAME);
-
-        // Previous releases wrote credentials to per-Telegram-account preference
-        // files. Prefer the most recently persisted complete pair: an older shared
-        // legacy token must not override a newer account-scoped WaysGram login.
-        for (int account = 0; account < UserConfig.MAX_ACCOUNT_COUNT; account++) {
-            String preferenceName = ACCOUNT_PREFS_PREFIX + account;
-            SharedPreferences accountPreferences = context.getSharedPreferences(
-                    preferenceName, Context.MODE_PRIVATE
-            );
-            String accountToken = accountPreferences.getString(PREF_SESSION_TOKEN, null);
-            String accountBase = accountPreferences.getString(PREF_API_BASE, null);
-            if (!hasText(accountToken) || !hasText(accountBase)) {
-                continue;
-            }
-
-            long accountTimestamp = preferenceFileModifiedAt(context, preferenceName);
-            if (!hasSelectedPair || accountTimestamp > selectedTimestamp) {
-                selectedToken = accountToken;
-                selectedBase = accountBase;
-                selectedTimestamp = accountTimestamp;
-                hasSelectedPair = true;
+        SharedPreferences legacy = context.getSharedPreferences(LEGACY_PREFS_NAME, Context.MODE_PRIVATE);
+        if (!preferences.contains(PREF_SESSION_TOKEN) && legacy.contains(PREF_SESSION_TOKEN)) {
+            boolean committed = preferences.edit()
+                    .putString(PREF_API_BASE, legacy.getString(PREF_API_BASE, null))
+                    .putString(PREF_SESSION_TOKEN, legacy.getString(PREF_SESSION_TOKEN, null))
+                    .commit();
+            if (!committed) {
+                Log.e(TAG, "Unable to migrate the legacy WaysGram session for Telegram account "
+                        + telegramAccount);
+                return;
             }
         }
-
-        if (hasSelectedPair) {
-            boolean sameToken = selectedToken.equals(preferences.getString(PREF_SESSION_TOKEN, null));
-            boolean sameBase = selectedBase.equals(preferences.getString(PREF_API_BASE, null));
-            if (!sameToken || !sameBase) {
-                boolean committed = preferences.edit()
-                        .putString(PREF_SESSION_TOKEN, selectedToken)
-                        .putString(PREF_API_BASE, selectedBase)
-                        .commit();
-                if (!committed) {
-                    Log.e(TAG, "Unable to migrate the latest existing WaysGram session");
-                    return;
-                }
-            }
+        if (!migration.edit().putBoolean(PREF_MIGRATED, true).commit()) {
+            Log.e(TAG, "Unable to persist WaysGram session migration state");
         }
-
-        if (!migration.edit().putBoolean(PREF_SHARED_SESSION_MIGRATED, true).commit()) {
-            Log.e(TAG, "Unable to persist shared WaysGram session migration state");
-        }
-    }
-
-    private static long preferenceFileModifiedAt(Context context, String preferenceName) {
-        File preferencesDirectory = new File(context.getApplicationInfo().dataDir, "shared_prefs");
-        return new File(preferencesDirectory, preferenceName + ".xml").lastModified();
-    }
-
-    private static boolean hasText(String value) {
-        return value != null && !value.trim().isEmpty();
     }
 
     /**
