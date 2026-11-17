@@ -824,13 +824,14 @@ def patch_profile_gifts_container_source(original: str) -> str:
 
 
 def patch_gift_sheet_profile_art_source(original: str) -> str:
-    """Bind cached WaysGram artwork to the SavedStarGift overload used by profile cards."""
+    """Bind static and animated WaysGram artwork to the SavedStarGift profile cells."""
     marker = "// WaysGram saved profile gift artwork binding"
     if marker in original:
         required = (
             'userGift.gift.slug.startsWith("waysgram://")',
+            "WaysGramGiftMediaStore.getAnimationFile(waysGramSerial)",
+            "setImageBitmap(waysGramAnimation)",
             "WaysGramGiftMediaStore.get(waysGramSerial)",
-            "imageView.getImageReceiver().setImageBitmap(waysGramBitmap);",
         )
         if not all(value in original for value in required):
             raise ValueError("GiftSheet contains an incomplete SavedStarGift artwork binding")
@@ -842,10 +843,17 @@ def patch_gift_sheet_profile_art_source(original: str) -> str:
         + "            " + marker + "\n"
         + "            if (userGift.gift != null && userGift.gift.slug != null && userGift.gift.slug.startsWith(\"waysgram://\")) {\n"
         + "                String waysGramSerial = userGift.gift.slug.substring(\"waysgram://\".length()).trim();\n"
-        + "                android.graphics.Bitmap waysGramBitmap = org.telegram.messenger.waysgram.WaysGramGiftMediaStore.get(waysGramSerial);\n"
-        + "                if (waysGramBitmap != null && !waysGramBitmap.isRecycled()) {\n"
-        + "                    imageView.getImageReceiver().setImageBitmap(waysGramBitmap);\n"
+        + "                java.io.File waysGramAnimationFile = org.telegram.messenger.waysgram.WaysGramGiftMediaStore.getAnimationFile(waysGramSerial);\n"
+        + "                if (waysGramAnimationFile != null && waysGramAnimationFile.isFile()) {\n"
+        + "                    org.telegram.ui.Components.AnimatedFileDrawable waysGramAnimation = new org.telegram.ui.Components.AnimatedFileDrawable(waysGramAnimationFile, true, 0, 0, null, null, null, 0, org.telegram.messenger.UserConfig.selectedAccount, true, 64, 64, null);\n"
+        + "                    imageView.getImageReceiver().setImageBitmap(waysGramAnimation);\n"
         + "                    imageView.invalidate();\n"
+        + "                } else {\n"
+        + "                    android.graphics.Bitmap waysGramBitmap = org.telegram.messenger.waysgram.WaysGramGiftMediaStore.get(waysGramSerial);\n"
+        + "                    if (waysGramBitmap != null && !waysGramBitmap.isRecycled()) {\n"
+        + "                        imageView.getImageReceiver().setImageBitmap(waysGramBitmap);\n"
+        + "                        imageView.invalidate();\n"
+        + "                    }\n"
         + "                }\n"
         + "            }\n"
     )
@@ -853,7 +861,7 @@ def patch_gift_sheet_profile_art_source(original: str) -> str:
         original,
         needle,
         replacement,
-        "native SavedStarGift profile bitmap binding"
+        "native SavedStarGift profile media binding"
     )
 
 
