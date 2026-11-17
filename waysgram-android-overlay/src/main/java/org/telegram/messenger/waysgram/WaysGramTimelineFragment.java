@@ -59,6 +59,7 @@ public final class WaysGramTimelineFragment extends BaseFragment {
     private EditText managementInput;
     private TextView statusView;
     private LinearLayout channelLabelsContainer;
+    private TextView channelNameView;
     private TextView typingView;
     private TextView managementStatusView;
     private Button sendButton;
@@ -121,6 +122,26 @@ public final class WaysGramTimelineFragment extends BaseFragment {
         root.setPadding(AndroidUtilities.dp(10), AndroidUtilities.dp(8),
                 AndroidUtilities.dp(10), AndroidUtilities.dp(8));
 
+        if (type == TYPE_CHANNEL) {
+            channelLabelsContainer = new LinearLayout(context);
+            channelLabelsContainer.setOrientation(LinearLayout.HORIZONTAL);
+            channelLabelsContainer.setGravity(Gravity.CENTER_VERTICAL);
+            channelNameView = new TextView(context);
+            channelNameView.setText(targetTitle);
+            channelNameView.setTextSize(15);
+            channelNameView.setTypeface(null, android.graphics.Typeface.BOLD);
+            channelNameView.setTextColor(Theme.getColor(Theme.key_windowBackgroundWhiteBlackText));
+            LinearLayout.LayoutParams nameParams = new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT
+            );
+            nameParams.rightMargin = AndroidUtilities.dp(6);
+            channelLabelsContainer.addView(channelNameView, nameParams);
+            root.addView(channelLabelsContainer, new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT
+            ));
+        }
         statusView = new TextView(context);
         statusView.setText("Загружаю сообщения…");
         statusView.setTextSize(12);
@@ -129,14 +150,6 @@ public final class WaysGramTimelineFragment extends BaseFragment {
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT
         ));
-        if (type == TYPE_CHANNEL) {
-            channelLabelsContainer = new LinearLayout(context);
-            channelLabelsContainer.setOrientation(LinearLayout.HORIZONTAL);
-            root.addView(channelLabelsContainer, new LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT,
-                    ViewGroup.LayoutParams.WRAP_CONTENT
-            ));
-        }
         if (type == TYPE_GROUP) {
             typingView = new TextView(context);
             typingView.setTextSize(12);
@@ -954,7 +967,7 @@ public final class WaysGramTimelineFragment extends BaseFragment {
         apiClient.get("/api/channels/" + targetId, new WaysGramApiClient.Callback() {
             @Override
             public void onSuccess(JSONObject response) {
-                renderChannelLabels(response.optJSONArray("labels"));
+                renderChannelLabels(response);
             }
 
             @Override
@@ -964,8 +977,18 @@ public final class WaysGramTimelineFragment extends BaseFragment {
         });
     }
 
-    private void renderChannelLabels(JSONArray labels) {
-        channelLabelsContainer.removeAllViews();
+    private void renderChannelLabels(JSONObject channel) {
+        if (channelLabelsContainer == null || channelNameView == null) {
+            return;
+        }
+        String title = channel.optString("title", targetTitle).trim();
+        String username = channel.optString("username", "").trim();
+        channelNameView.setText((title.isEmpty() ? targetTitle : title)
+                + (username.isEmpty() ? "" : "  @" + username));
+        while (channelLabelsContainer.getChildCount() > 1) {
+            channelLabelsContainer.removeViewAt(1);
+        }
+        JSONArray labels = channel.optJSONArray("labels");
         int count = labels == null ? 0 : labels.length();
         for (int i = 0; i < count && i < 8; i++) {
             JSONObject label = labels.optJSONObject(i);
