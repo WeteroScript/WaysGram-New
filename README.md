@@ -4,21 +4,18 @@
 
 ## Структура
 
-Монорепозиторий: Android-клиент и бэкенд AuthBot живут вместе.
-
 - `WaysGram-Android.zip.part1` — `part5`: пять частей исходного Android-архива.
 - `waysgram-android-overlay/src/main/java/`: Android-классы WaysGram.
 - `waysgram-android-overlay/scripts/`: интеграционные патчи и конфигурация сборки.
-- `authbot/`: исходники AuthBot (Python, aiogram + FastAPI), перенесённые из
-  [WaysGram-AuthBot](https://github.com/WeteroScript/WaysGram-AuthBot) через `git subtree`.
-- `bot.py`, `requirements.txt`, `Procfile`, `runtime.txt`: точка входа и метаданные хостинга
-  для запуска AuthBot из корня репозитория.
+- `bot.py`, `requirements.txt`, `Procfile`, `runtime.txt`: точка входа и метаданные хостинга.
+  `bot.py` при старте подтягивает код AuthBot из репозитория
+  [WaysGram-AuthBot](https://github.com/WeteroScript/WaysGram-AuthBot), кэширует его по коммиту
+  и запускает — хостингу достаточно указать один репозиторий (`WaysGram-New`).
+- `authbot/`: резервная копия кода бота (`git subtree`), используется, если GitHub недоступен.
 - `.github/workflows/build-apk.yml`: восстановление проекта, наложение WaysGram-кода и сборка APK.
-- `.github/workflows/authbot.yml`: тесты AuthBot и проверка корневой точки входа.
+- `.github/workflows/authbot.yml`: тесты AuthBot и проверка загрузки кода бота.
 
-Хостинг указывает на этот единственный репозиторий и запускает `bot.py` из корня; подробности —
-[`docs/authbot-hosting.md`](docs/authbot-hosting.md). Обновление кода бота из исторического
-репозитория: `git subtree pull --prefix authbot https://github.com/WeteroScript/WaysGram-AuthBot.git main --squash`.
+Подробности — [`docs/authbot-hosting.md`](docs/authbot-hosting.md).
 
 Исходный Gradle-проект не хранится распакованными файлами в корне Git. Workflow объединяет части архива в `WaysGram-Android.zip`, распаковывает каталог `WaysGram-Android/` во временную рабочую директорию, затем копирует туда локальный overlay из этого репозитория.
 

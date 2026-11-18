@@ -59,8 +59,8 @@ jobs:
       - name: Run tests
         run: python -m pytest -q
 
-  entrypoint:
-    name: Root entry point (BotHost start file)
+  bootstrap:
+    name: Pulls AuthBot from its repository
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -71,25 +71,41 @@ jobs:
           python-version: "3.12"
           cache: pip
           cache-dependency-path: authbot/requirements.txt
-      - name: Install dependencies the way the host does it
+      - name: Install dependencies declared by the repository
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-      - name: Verify the root shim wires up authbot/
+      - name: Pull and unpack the bot without starting it
+        env:
+          AUTHBOT_HOME: ${{ runner.temp }}/authbot-cache
+        run: python bot.py --check > bootstrap.json
+      - name: Verify the pulled entry point
         run: |
           python - <<'PY'
-          import importlib.util
+          import json
           import os
-          import sys
 
-          import bot
+          data = json.load(open("bootstrap.json", encoding="utf-8"))
+          print(json.dumps(data, ensure_ascii=False, indent=2))
+          assert os.path.isfile(data["entry"]), data["entry"]
+          assert os.path.isdir(data["source"]), data["source"]
+          source_dir = data['source']
+          assert os.path.isfile(os.path.join(source_dir, "messenger_api.py"))
+          print("remote pull ok")
+          PY
+      - name: Verify the committed fallback copy
+        env:
+          AUTHBOT_SOURCE: local
+        run: python bot.py --check > fallback.json
+      - name: Verify the fallback entry point
+        run: |
+          python - <<'PY'
+          import json
+          import os
 
-          assert os.path.isfile(bot.AUTHBOT_ENTRY), bot.AUTHBOT_ENTRY
-          assert bot.AUTHBOT_DIR in sys.path
-          # Flat AuthBot imports must resolve from authbot/ without executing them.
-          assert importlib.util.find_spec("messenger_api") is not None
-          assert importlib.util.find_spec("db_split") is not None
-          print("root entry point ok")
+          data = json.load(open("fallback.json", encoding="utf-8"))
+          assert os.path.isfile(data["entry"]), data["entry"]
+          print("local fallback ok")
           PY
 
   container:

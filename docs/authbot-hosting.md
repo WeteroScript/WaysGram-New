@@ -1,98 +1,114 @@
-# AuthBot на хостинге из монорепозитория WaysGram-New
+# AuthBot: один репозиторий на хостинге, код тянется из другого
 
-AuthBot (`authbot/`) теперь лежит в этом же репозитории, что и Android-клиент. В настройках
-Bothost (или любого похожего хостинга) указывается **один** репозиторий — `WaysGram-New` — и он же
-запускает бота из корня. Отдельный репозиторий `WaysGram-AuthBot` больше не нужен для деплоя.
-
-## Раскладка
+В панели Bothost указан **один** репозиторий — `WaysGram-New`. Код бота при старте
+подтягивается из репозитория `WaysGram-AuthBot` и запускается. Тянуть ничего вручную не нужно:
+изменил бота в его репозитории — перезапустил контейнер — работает новая версия.
 
 ```
-WaysGram-New/
-├── bot.py              # точка входа для хостинга: подключает authbot/ и запускает authbot/bot.py
-├── requirements.txt    # "-r authbot/requirements.txt" — хостинг ставит зависимости из корня
-├── Procfile            # web: python bot.py
-├── runtime.txt         # python-3.12.8
-├── authbot/            # код бота целиком (bot.py, messenger_api.py, db_split.py, tests/, scripts/)
-└── .github/workflows/  # build-apk.yml (Android) и authbot.yml (тесты бота)
+BotHost ──clone──► WaysGram-New
+                      │  python bot.py
+                      ▼
+              [authbot-bootstrap]
+                      │  1) GitHub: WaysGram-AuthBot@main → commit SHA
+                      │  2) скачивает tar.gz, распаковывает в кэш /data/authbot/<sha>
+                      ▼
+              runpy → <кэш>/bot.py  (uvicorn + aiogram)
 ```
 
-`bot.py` в корне — маленький шим: он добавляет `authbot/` в `sys.path`, поэтому плоские импорты
-внутри бота (`import messenger_api`, `import db_split`, `import telegram_mtproto`) продолжают
-работать, и выполняет `authbot/bot.py` как `__main__`. Ничего в самом коде бота менять не нужно.
+## Файлы, которые за это отвечают
+
+| Файл | Роль |
+| --- | --- |
+| `bot.py` | бутстрап: находит нужный коммит, скачивает, кэширует и запускает `bot.py` бота |
+| `requirements.txt` | `-r authbot/requirements.txt` — зависимости ставятся на этапе сборки |
+| `Procfile` | `web: python bot.py` |
+| `runtime.txt` | `python-3.12.8` |
+| `.gitignore` | игнорирует `.authbot-cache/`, `.env`, `data/` |
+| `authbot/` | резервная копия кода бота (fallback, см. ниже) |
+
+Порядок поиска кода при старте:
+
+1. **remote** (по умолчанию) — берётся коммит из `WaysGram-AuthBot`; если этот коммит уже лежит
+   в кэше, сеть вообще не используется;
+2. **кэш** — если GitHub недоступен, запускается последний успешно скачанный коммит;
+3. **`authbot/`** — если и кэша нет (первый запуск без сети), берётся копия из этого репозитория.
+   В логе будет явное предупреждение, что она может отставать.
 
 ## Настройки проекта в Bothost
 
 | Параметр | Значение |
 | --- | --- |
 | Репозиторий | `WeteroScript/WaysGram-New` |
-| Ветка | `main` (после мержа PR; до этого — рабочая ветка) |
-| Язык | Python |
-| Версия Python | 3.12 (см. `runtime.txt`) |
-| Главный файл / точка входа | `bot.py` |
+| Ветка | `main` (после мержа PR; можно временно указать рабочую ветку) |
+| Язык / версия | Python 3.12 |
+| Главный файл | `bot.py` |
 | Файл зависимостей | `requirements.txt` |
-| Команда запуска (если поле есть) | `python bot.py` |
-| Постоянное хранилище | каталог `/data` (SQLite и Telethon-сессии) |
-
-Если хостинг позволяет указать путь внутри репозитория, можно вместо шима поставить точку входа
-`authbot/bot.py` и файл зависимостей `authbot/requirements.txt` — результат тот же.
+| Команда запуска (если есть) | `python bot.py` |
+| Постоянный каталог | `/data` |
 
 ## Переменные окружения
 
-Значения берутся из `authbot/.env.example`; сам `.env` в Git не попадает и на хостинге не нужен —
-все значения задаются в панели:
+Бутстрап:
 
-- `BOT_TOKEN` — токен бота от @BotFather;
-- `TELEGRAM_API_ID`, `TELEGRAM_API_HASH` — доступ к MTProto;
-- `ADMIN_ID` — Telegram ID администратора;
-- `OPENAI_API_KEY` — если используются AI-функции;
-- `INTERNAL_API_TOKEN` — общий секрет между Android-клиентом и API бота;
-- `TELESRV_OTP_WEBHOOK_SECRET` — секрет вебхука OTP;
-- `OTP_FERNET_KEY` — ключ шифрования OTP;
-- `DATABASE_PATH=/data/waysgram_authbot.sqlite3` — база на постоянном томе;
-- `MESSENGER_DATABASE_PATH` — база мессенджера, если используется отдельно;
-- `INTERNAL_API_HOST=0.0.0.0`, `INTERNAL_API_PORT` и `PORT` — адрес и порт HTTP API;
-- `PUBLIC_API_BASE_URL=https://bot-1793554244-6434-weterochina.bothost.tech` — публичный HTTPS-адрес
-  API. Он должен совпадать с секретом `WAYSGRAM_API_BASE_URL` в GitHub Actions Android-сборки,
-  иначе клиент не достучится до бэкенда;
-- `LOG_LEVEL` — уровень логирования.
+- `AUTHBOT_REPO` — репозиторий бота, по умолчанию `WeteroScript/WaysGram-AuthBot`;
+- `AUTHBOT_REF` — ветка или тег, по умолчанию `main`;
+- `AUTHBOT_COMMIT` — прибить точный коммит (тогда проверка обновлений не выполняется,
+  старт мгновенный);
+- `AUTHBOT_HOME` — каталог кэша, по умолчанию `/data/authbot` (если `/data` доступен на запись)
+  иначе `./.authbot-cache`;
+- `AUTHBOT_SOURCE` — `auto` (по умолчанию), `remote` (только сеть, без fallback) или `local`
+  (только копия в `authbot/`);
+- `AUTHBOT_GITHUB_TOKEN` — если репозиторий бота станет приватным или упрётесь в лимит GitHub API;
+- `AUTHBOT_SYNC_DEPS=1` — доустанавливать `requirements.txt` из скачанного коммита при старте.
 
-## Деплой и обновления
+Сам бот (значения переносятся без изменений из `authbot/.env.example`):
 
-1. В панели BotHost сменить репозиторий проекта на `WeteroScript/WaysGram-New`, ветку — на `main`,
-   точку входа — на `bot.py`, зависимости — на `requirements.txt`.
-2. Перенести переменные окружения (значения не меняются).
-3. Убедиться, что постоянный каталог `/data` сохранён, и что после первого деплоя в нём лежит
-   прежняя `waysgram_authbot.sqlite3` — иначе пользователи и подарки «обнулятся».
-4. Нажать «Деплой» и проверить `GET https://<домен>/` и `GET https://<домен>/api/telegram/gifts`.
+- `BOT_TOKEN`, `TELEGRAM_API_ID`, `TELEGRAM_API_HASH`, `ADMIN_ID`, `OPENAI_API_KEY`;
+- `INTERNAL_API_TOKEN`, `TELESRV_OTP_WEBHOOK_SECRET`, `OTP_FERNET_KEY`;
+- `DATABASE_PATH=/data/waysgram_authbot.sqlite3`, `MESSENGER_DATABASE_PATH`;
+- `INTERNAL_API_HOST=0.0.0.0`, `INTERNAL_API_PORT`, `PORT`;
+- `PUBLIC_API_BASE_URL` — публичный HTTPS-адрес API; должен совпадать с секретом
+  `WAYSGRAM_API_BASE_URL` в Android-сборке;
+- `LOG_LEVEL`.
 
-Дальше любая правка в `authbot/` и `push` в `main` пересобирает бота автоматически. Правки в
-Android-части запускают только сборку APK: у workflow `build-apk.yml` стоит `paths-ignore` на
-`authbot/**`, а у `authbot.yml` — фильтр на `authbot/**`, поэтому чужие сборки не тратятся.
+## Зависимости и код: важная разница
 
-## Синхронизация с историческим репозиторием
+Код тянется из `WaysGram-AuthBot`, а пакеты ставятся из `requirements.txt` **этого** репозитория
+во время сборки образа. То есть:
 
-`authbot/` импортирован через `git subtree`, поэтому историю можно тянуть и пушить обратно:
+- поменялся только код бота → достаточно перезапустить деплой;
+- в боте появились новые пакеты → обновите корневой `requirements.txt`
+  (`git subtree pull` обновит и `authbot/requirements.txt`), либо включите `AUTHBOT_SYNC_DEPS=1`
+  (медленнее старт, зато код и зависимости всегда совпадают).
+
+## Диагностика
 
 ```bash
-# забрать свежие изменения из старого репозитория
-git subtree pull --prefix authbot https://github.com/WeteroScript/WaysGram-AuthBot.git main --squash
-
-# отправить изменения из монорепозитория обратно
-git subtree push --prefix authbot https://github.com/WeteroScript/WaysGram-AuthBot.git main
+python bot.py --check     # скачать и распаковать, ничего не запускать; печатает путь и коммит
+python bot.py --check --repo WeteroScript/WaysGram-AuthBot --ref main
+AUTHBOT_SOURCE=local python bot.py --check   # проверить резервную копию
 ```
 
-Если старый репозиторий больше не нужен, его можно архивировать (read-only) — деплой от него не
-зависит.
+В логах старта ищите строки с префиксом `[authbot-bootstrap]`: там видно, какой коммит взят,
+был ли скачан архив и включился ли fallback.
 
-## Почему не «репозиторий, который тянет код из другого репозитория»
+## Обновление резервной копии `authbot/`
 
-Такой вариант технически возможен: хостинг клонирует `WaysGram-New`, а код в рантайме клонирует
-`WaysGram-AuthBot`. Но это лишний сетевой запрос на каждом холодном старте, отдельные токены доступа
-для приватного репозитория и расхождение версий клиента и API. Монорепозиторий с `git subtree`
-даёт то же удобство без этих проблем.
+Копия обновляется из исходного репозитория через `git subtree`:
 
-## Известное ограничение
+```bash
+git subtree pull --prefix authbot https://github.com/WeteroScript/WaysGram-AuthBot.git main --squash
+git push origin main
+```
 
-Репозиторий весит около 100 МБ из-за пяти частей Android-архива, поэтому первый клон на хостинге
-занимает больше времени, чем у обычного бота. Если это станет мешать, части архива можно вынести
-в GitHub Releases и скачивать их в workflow — код бота от этого не зависит.
+Она не участвует в обычном запуске, но именно она спасает первый деплой в сети, где GitHub
+недоступен.
+
+## Ограничения подхода
+
+- На старте нужен исходящий доступ к `api.github.com` / `codeload.github.com`; без него работает
+  кэш, а на самом первом запуске — копия в `authbot/`.
+- Репозиторий весит ~200 МБ из-за частей Android-архива, поэтому первый клон на хостинге
+  не мгновенный. Если начнёт мешать, части архива можно вынести в GitHub Releases.
+- Пока контейнер работает, код не обновляется сам — нужен перезапуск/редеплой (это же и защита
+  от неожиданных обновлений в момент, когда бот обслуживает пользователей).
