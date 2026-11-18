@@ -207,7 +207,7 @@ public final class WaysGramProfileGiftsController {
                 // change, so the card keeps its own look on every screen. WaysGram has no separate
                 // Telegram model/pattern art, therefore the gift's own artwork document is used.
                 TLRPC.TL_document waysGramTraitDocument =
-                        traitDocument(serial, telegramGiftId, giftEmoji);
+                        traitDocument(serial, optText(item, "telegram_gift_id"), giftEmoji);
                 if (waysGramTraitDocument != null) {
                     TL_stars.StarGiftAttributeRarity nativeGiftRarity = nativeRarity(rarity);
                     TL_stars.starGiftAttributeModel nativeModel = new TL_stars.starGiftAttributeModel();
