@@ -352,23 +352,23 @@ public final class WaysGramProfileGiftsController {
     private static TL_stars.starGiftAttributeBackdrop createNativeBackdrop(
             JSONObject traits, String rarityKey
     ) {
-        JSONObject backdrop = traitEntry(traits, "backdrop");
-        if (backdrop != null) {
-            int center = backdrop.optInt("center_color", 0) & 0x00FFFFFF;
-            int edge = backdrop.optInt("edge_color", 0) & 0x00FFFFFF;
+        JSONObject backdropEntry = traitEntry(traits, "backdrop");
+        if (backdropEntry != null) {
+            int center = backdropEntry.optInt("center_color", 0) & 0x00FFFFFF;
+            int edge = backdropEntry.optInt("edge_color", 0) & 0x00FFFFFF;
             if (center != 0 || edge != 0) {
-                String backdropName = optText(backdrop, "name");
+                String backdropTitle = optText(backdropEntry, "name");
                 TL_stars.starGiftAttributeBackdrop nativeBackdrop =
                         new TL_stars.starGiftAttributeBackdrop();
-                nativeBackdrop.name = backdropName.isEmpty() ? "WaysGram" : backdropName;
+                nativeBackdrop.name = backdropTitle.isEmpty() ? "WaysGram" : backdropTitle;
                 // Telegram ships the four colours with every backdrop; WaysGram keeps
                 // exactly the ones the official catalog published for it.
-                nativeBackdrop.backdrop_id = Math.max(0, backdrop.optInt("backdrop_id", 0));
+                nativeBackdrop.backdrop_id = Math.max(0, backdropEntry.optInt("backdrop_id", 0));
                 nativeBackdrop.center_color = center;
                 nativeBackdrop.edge_color = edge != 0 ? edge : darken(center, 0.78f);
                 nativeBackdrop.pattern_color =
-                        backdrop.optInt("pattern_color", 0) & 0x00FFFFFF;
-                nativeBackdrop.text_color = backdrop.optInt("text_color", 0) & 0x00FFFFFF;
+                        backdropEntry.optInt("pattern_color", 0) & 0x00FFFFFF;
+                nativeBackdrop.text_color = backdropEntry.optInt("text_color", 0) & 0x00FFFFFF;
                 if (nativeBackdrop.pattern_color == 0) {
                     nativeBackdrop.pattern_color = contrastColor(center);
                 }
@@ -376,7 +376,7 @@ public final class WaysGramProfileGiftsController {
                     nativeBackdrop.text_color = contrastColor(center);
                 }
                 nativeBackdrop.rarity = nativeRarity(
-                        backdrop.optString("rarity", rarityKey)
+                        backdropEntry.optString("rarity", rarityKey)
                 );
                 return nativeBackdrop;
             }
