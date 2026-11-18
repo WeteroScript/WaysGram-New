@@ -243,12 +243,32 @@ jobs:
               assert path.is_file(), f"Missing generated Firebase config: {path}"
           PY
 
-      - name: Build release APK
+      - name: Compile WaysGram Java sources
         run: |
+          set -o pipefail
           chmod +x gradlew
           ./gradlew --no-daemon --stacktrace --max-workers=2 \
             -Dorg.gradle.jvmargs="-Xmx5g -XX:MaxMetaspaceSize=1g -Dfile.encoding=UTF-8" \
-            :TMessagesProj_App:assembleAfatRelease
+            :TMessagesProj:compileAfatReleaseJavaWithJavac 2>&1 | tee /tmp/javac.log
+
+      - name: Build release APK
+        run: |
+          set -o pipefail
+          chmod +x gradlew
+          ./gradlew --no-daemon --stacktrace --max-workers=2 \
+            -Dorg.gradle.jvmargs="-Xmx5g -XX:MaxMetaspaceSize=1g -Dfile.encoding=UTF-8" \
+            :TMessagesProj_App:assembleAfatRelease 2>&1 | tee /tmp/build.log
+
+      - name: Upload build logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-logs-${{ github.run_number }}
+          path: |
+            /tmp/javac.log
+            /tmp/build.log
+          if-no-files-found: ignore
+          retention-days: 7
 
       - name: Verify APK
         shell: bash
