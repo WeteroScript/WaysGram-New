@@ -1,0 +1,24 @@
+# Python / AuthBot
+.env
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# AuthBot runtime state (SQLite database, Telethon sessions, generated files)
+data/
+!data/.gitkeep
+*.session
+*.session-journal
+*.session-shm
+*.session-wal
+
+# Android build leftovers
+local.properties
+*.keystore
+*.jks
+build/
+.gradle/

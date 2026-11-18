@@ -1,0 +1,118 @@
+name: AuthBot
+
+# The AuthBot lives in ./authbot inside the WaysGram-New monorepo, so every path filter here
+# is prefixed with that folder. The Android build has its own workflow (build-apk.yml) and
+# ignores authbot/**.
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "authbot/**"
+      - "bot.py"
+      - "requirements.txt"
+      - "Procfile"
+      - "runtime.txt"
+      - ".github/workflows/authbot.yml"
+  pull_request:
+    paths:
+      - "authbot/**"
+      - "bot.py"
+      - "requirements.txt"
+      - "Procfile"
+      - "runtime.txt"
+      - ".github/workflows/authbot.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Unit tests (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12"]
+    defaults:
+      run:
+        working-directory: authbot
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: authbot/requirements.txt
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt pytest
+      - name: Check Termux launcher syntax
+        run: bash -n scripts/run-termux.sh
+      - name: Compile Python files
+        run: python -m compileall -q bot.py messenger_api.py tests
+      - name: Run tests
+        run: python -m pytest -q
+
+  entrypoint:
+    name: Root entry point (BotHost start file)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: authbot/requirements.txt
+      - name: Install dependencies the way the host does it
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+      - name: Verify the root shim wires up authbot/
+        run: |
+          python - <<'PY'
+          import importlib.util
+          import os
+          import sys
+
+          import bot
+
+          assert os.path.isfile(bot.AUTHBOT_ENTRY), bot.AUTHBOT_ENTRY
+          assert bot.AUTHBOT_DIR in sys.path
+          # Flat AuthBot imports must resolve from authbot/ without executing them.
+          assert importlib.util.find_spec("messenger_api") is not None
+          assert importlib.util.find_spec("db_split") is not None
+          print("root entry point ok")
+          PY
+
+  container:
+    name: Docker image
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Validate Compose configuration
+        working-directory: authbot
+        run: |
+          cp .env.example .env
+          docker compose config --quiet
+          rm .env
+      - name: Build AuthBot image
+        run: docker build --pull --tag waysgram-authbot:test authbot
+      - name: Compile server modules inside the image
+        run: |
+          docker run --rm --entrypoint python waysgram-authbot:test \
+            -m compileall -q bot.py messenger_api.py otp_webhook.py tests
+      - name: Verify healthcheck configuration
+        run: |
+          docker image inspect waysgram-authbot:test \
+            --format '{{json .Config.Healthcheck}}' |
+            grep -q '127.0.0.1'
