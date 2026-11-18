@@ -747,17 +747,20 @@ public final class WaysGramGiftCatalogClient implements AutoCloseable {
             if (status == 403) {
                 return "Доступ к инвентарю запрещён (HTTP 403)";
             }
-            if (status == 404) {
-                return "Маршрут инвентаря не найден на сервере (HTTP 404)";
-            }
             if (status >= 500) {
                 return "Ошибка сервера AuthBot (HTTP " + status + ")";
             }
-            if (status == 409) {
-                return "Операция отклонена: проверьте состояние подарка (HTTP 409)";
-            }
+            // Gift rules (400, 402, 404, 409) are explained by the server, for example
+            // "Недостаточно Stars" or "Подарок старше 7 дней". Show that text instead of a
+            // generic message whenever it is available.
             if (http.detail.length() > 0) {
                 return http.detail + " (HTTP " + status + ")";
+            }
+            if (status == 404) {
+                return "Маршрут инвентаря не найден на сервере (HTTP 404)";
+            }
+            if (status == 409) {
+                return "Операция отклонена: проверьте состояние подарка (HTTP 409)";
             }
             return "WaysGram API returned HTTP " + status;
         }
