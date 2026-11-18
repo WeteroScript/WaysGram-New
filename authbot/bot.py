@@ -1057,6 +1057,9 @@ async def return_to_main_menu(callback: CallbackQuery) -> None:
 # Telegram-native admin panel. All privileged actions are restricted to ADMIN_ID.
 ADMIN_INPUT: dict[int, tuple[str, Any]] = {}
 
+# A name carries at most three marks: more would read as noise next to the peer name.
+MAX_LABELS_PER_TARGET = 3
+
 async def init_admin_storage() -> None:
     async with aiosqlite.connect(DATABASE_PATH) as db:
         await db.executescript(db_split.qualify_ddl("""
@@ -1309,16 +1312,18 @@ async def admin_label_card(label_id: int) -> tuple[str, InlineKeyboardMarkup] | 
         row = await cur.fetchone()
     if row is None:
         return None
+    assigned = int(row["assigned_count"])
     body = (
         f"Метка #{int(row['id'])}\n\n"
         f"Текст: {row['label_text']}\nЦвет: {row['color']}\n"
-        f"Назначений: {int(row['assigned_count'])}"
+        f"Назначений: {assigned}"
     )
-    return body, admin_keyboard([
-        [("Выдать метку", f"wgadm:labelassign:{label_id}")],
-        [("Удалить шаблон", f"wgadm:labeldeleteask:{label_id}")],
-        [("⬅️ К меткам", "wgadm:labels")],
-    ])
+    keyboard = [[("Выдать метку", f"wgadm:labelassign:{label_id}")]]
+    if assigned:
+        keyboard.append([(f"Кому выдана ({assigned})", f"wgadm:labeltargets:{label_id}")])
+    keyboard.append([("Удалить шаблон", f"wgadm:labeldeleteask:{label_id}")])
+    keyboard.append([("⬅️ К меткам", "wgadm:labels")])
+    return body, admin_keyboard(keyboard)
 
 
 async def admin_find_label_target(target_type: str, value: str) -> tuple[int, str] | None:
@@ -1390,6 +1395,16 @@ async def admin_find_label_target(target_type: str, value: str) -> tuple[int, st
     return None
 
 
+async def admin_label_count(target_type: str, target_id: int) -> int:
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        cur = await db.execute(
+            """SELECT COUNT(*) FROM waysgram_label_assignments
+               WHERE target_type=? AND target_id=?""",
+            (target_type, target_id),
+        )
+        return int((await cur.fetchone())[0])
+
+
 async def admin_assign_label(label_id: int, target_type: str, target_id: int) -> bool:
     now = int(time.time())
     async with aiosqlite.connect(DATABASE_PATH) as db:
@@ -1412,6 +1427,61 @@ async def admin_assign_label(label_id: int, target_type: str, target_id: int) ->
             )
         await db.commit()
     return added
+
+
+async def admin_label_targets(label_id: int) -> list[tuple[str, int, str]]:
+    """Every hand-out of a mark as (target_type, target_id, title)."""
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute(
+            """SELECT target_type,target_id FROM waysgram_label_assignments
+               WHERE label_id=? ORDER BY assigned_at,id""",
+            (label_id,),
+        )
+        rows = await cur.fetchall()
+    targets: list[tuple[str, int, str]] = []
+    for row in rows:
+        target_type = str(row["target_type"])
+        target_id = int(row["target_id"])
+        found = await admin_find_label_target(target_type, str(target_id))
+        title = found[1] if found else f"{target_type} {target_id}"
+        targets.append((target_type, target_id, title))
+    return targets
+
+
+async def admin_label_targets_page(label_id: int) -> tuple[str, InlineKeyboardMarkup] | None:
+    if await admin_label_card(label_id) is None:
+        return None
+    targets = await admin_label_targets(label_id)
+    keyboard = [[
+        (
+            f"❌ Снять: {title} ({target_type} {target_id})"[:64],
+            f"wgadm:labelunassign:{label_id}:{target_type}:{target_id}",
+        )
+    ] for target_type, target_id, title in targets]
+    keyboard.append([("⬅️ К метке", f"wgadm:label:{label_id}")])
+    lines = [f"• {title} — {target_type} {target_id}" for target_type, target_id, title in targets]
+    body = f"Кому выдана метка #{label_id}\n\n" + ("\n".join(lines) if lines else "Пока никому.")
+    return body, admin_keyboard(keyboard)
+
+
+async def admin_unassign_label(label_id: int, target_type: str, target_id: int) -> bool:
+    now = int(time.time())
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        cur = await db.execute(
+            """DELETE FROM waysgram_label_assignments
+               WHERE label_id=? AND target_type=? AND target_id=?""",
+            (label_id, target_type, target_id),
+        )
+        removed = cur.rowcount > 0
+        if removed:
+            await db.execute(
+                "INSERT INTO admin_logs(admin_id,action,target,details,created_at) VALUES(?,?,?,?,?)",
+                (ADMIN_ID, "label_unassign", f"{target_type}:{target_id}",
+                 f"label_id={label_id}", now),
+            )
+        await db.commit()
+    return removed
 
 
 def admin_keyboard(rows: list[list[tuple[str, str]]]) -> InlineKeyboardMarkup:
@@ -2033,7 +2103,7 @@ async def admin_callback(callback: CallbackQuery) -> None:
             await callback.message.answer("Шаблон метки не найден.")
             return
         await callback.message.answer(
-            "Удалить шаблон и снять эту метку со всех аккаунтов и каналов?",
+            "Удалить шаблон и снять эту метку со всех аккаунтов, каналов и групп?",
             reply_markup=admin_keyboard([
                 [("Удалить", f"wgadm:labeldelete:{label_id}")],
                 [("Отмена", f"wgadm:label:{label_id}")],
@@ -2062,6 +2132,29 @@ async def admin_callback(callback: CallbackQuery) -> None:
         await callback.message.answer("Шаблон удалён, его назначения сняты.")
         body, keyboard = await admin_labels_page()
         await callback.message.answer(body, reply_markup=keyboard)
+    elif action == "labeltargets" and len(parts) == 3:
+        try:
+            label_id = int(parts[2])
+        except ValueError:
+            return
+        page = await admin_label_targets_page(label_id)
+        if page is None:
+            await callback.message.answer("Шаблон метки не найден.")
+            return
+        await callback.message.answer(page[0], reply_markup=page[1])
+    elif action == "labelunassign" and len(parts) == 5 and parts[3] in {"account", "channel", "group"}:
+        try:
+            label_id = int(parts[2])
+            target_id = int(parts[4])
+        except ValueError:
+            return
+        removed = await admin_unassign_label(label_id, parts[3], target_id)
+        await callback.message.answer(
+            "Метка снята." if removed else "У этой цели такой метки уже нет."
+        )
+        page = await admin_label_targets_page(label_id)
+        if page:
+            await callback.message.answer(page[0], reply_markup=page[1])
     if action == "home":
         await callback.message.answer("Панель администратора WaysGram", reply_markup=admin_home_keyboard())
 
@@ -2958,6 +3051,16 @@ async def admin_text_input(message: Message) -> None:
             await message.answer(f"{target_name} не найден. Проверьте ID или username и повторите.")
             return
         target_id, target_title = target
+        if await admin_label_count(str(target_type), int(target_id)) >= MAX_LABELS_PER_TARGET:
+            ADMIN_INPUT.pop(ADMIN_ID, None)
+            await message.answer(
+                f"У цели уже {MAX_LABELS_PER_TARGET} метки: рядом с именем больше не поместится. "
+                "Снимите лишнюю в «Кому выдана»."
+            )
+            card = await admin_label_card(int(label_id))
+            if card:
+                await message.answer(card[0], reply_markup=card[1])
+            return
         assigned = await admin_assign_label(int(label_id), str(target_type), int(target_id))
         ADMIN_INPUT.pop(ADMIN_ID, None)
         target_word = {

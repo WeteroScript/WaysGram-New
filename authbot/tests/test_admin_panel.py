@@ -208,6 +208,43 @@ def test_admin_creates_reusable_labels_and_assigns_accounts_and_channels(panel) 
     )
     assert assignments == [("account", 770801), ("channel", channel_id), ("group", group_id)]
     assert run(bot_module.admin_assign_label(label_id, "group", group_id)) is False
+
+    # The mark is edited only here: the card lists who got it and can take it back.
+    card = press(f"wgadm:label:{label_id}")
+    assert "Кому выдана (3)" in str(card.sent[-1][1])
+    listed = press(f"wgadm:labeltargets:{label_id}")
+    assert "Кому выдана метка" in listed.sent[0][0]
+    assert "@label_group" in listed.sent[0][0]
+    assert f"wgadm:labelunassign:{label_id}:group:{group_id}" in str(listed.sent[-1][1])
+
+    removed = press(f"wgadm:labelunassign:{label_id}:group:{group_id}")
+    assert "Метка снята" in removed.sent[0][0]
+    assert query(
+        path,
+        "SELECT COUNT(*) FROM waysgram_label_assignments WHERE target_type='group'",
+    )[0][0] == 0
+    assert run(bot_module.admin_unassign_label(label_id, "group", group_id)) is False
+    assert "label_unassign" in str(query(path, "SELECT action FROM admin_logs"))
+
+    # Four marks next to one name do not fit: the panel stops at three.
+    now = int(time.time())
+    with db_split.sqlite_connect(path) as db:
+        for text in ("Second", "Third", "Fourth"):
+            cur = db.execute(
+                "INSERT INTO waysgram_labels(label_text,color,created_by,created_at) VALUES(?,?,?,?)",
+                (text, "#334455", bot_module.ADMIN_ID, now),
+            )
+            db.execute(
+                """INSERT INTO waysgram_label_assignments
+                   (label_id,target_type,target_id,assigned_by,assigned_at)
+                   VALUES(?,?,?,?,?)""",
+                (int(cur.lastrowid), "account", 770801, bot_module.ADMIN_ID, now),
+            )
+        db.commit()
+    press(f"wgadm:labelassign:{label_id}")
+    press(f"wgadm:labeltarget:account:{label_id}")
+    full = type_text("770801")
+    assert "уже 3 метки" in full.sent[0][0]
     # Assigning the same saved template twice is idempotent.
     assert run(bot_module.admin_assign_label(label_id, "account", 770801)) is False
 
