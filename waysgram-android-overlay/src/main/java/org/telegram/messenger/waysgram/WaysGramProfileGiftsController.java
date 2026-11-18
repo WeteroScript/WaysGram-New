@@ -31,6 +31,9 @@ public final class WaysGramProfileGiftsController {
     private final WaysGramSessionStore sessionStore;
     private final WaysGramApiClient imageClient;
     private boolean loading;
+    private JSONArray lastInventory;
+    private int lastGiftAccount = UserConfig.selectedAccount;
+    private boolean traitRebindScheduled;
 
     public WaysGramProfileGiftsController(
             Context context,
@@ -62,6 +65,9 @@ public final class WaysGramProfileGiftsController {
                     loading = false;
                     client.close();
                     JSONArray inventory = gifts == null ? new JSONArray() : gifts;
+                    lastInventory = inventory;
+                    lastGiftAccount = fragment == null
+                            ? UserConfig.selectedAccount : fragment.getCurrentAccount();
                     // Animated documents survive the refresh; only the still images are rebuilt.
                     WaysGramGiftMediaStore.clearStillImages();
                     // Gift cards carry the gift's own name and traits; the internal WaysGram serial
@@ -196,6 +202,25 @@ public final class WaysGramProfileGiftsController {
                 if (nativeBackdrop != null) {
                     uniqueGift.attributes.add(nativeBackdrop);
                 }
+                // Model and symbol are rolled once by the server for this collectible and never
+                // change, so the card keeps its own look on every screen. WaysGram has no separate
+                // Telegram model/pattern art, therefore the gift's own artwork document is used.
+                TLRPC.TL_document waysGramTraitDocument =
+                        WaysGramGiftMediaStore.getAnimationDocument(serial);
+                if (waysGramTraitDocument != null) {
+                    TL_stars.StarGiftAttributeRarity nativeRarity = nativeRarity(rarity);
+                    TL_stars.starGiftAttributeModel nativeModel = new TL_stars.starGiftAttributeModel();
+                    nativeModel.name = model.isEmpty() ? "Модель" : model;
+                    nativeModel.document = waysGramTraitDocument;
+                    nativeModel.rarity = nativeRarity;
+                    uniqueGift.attributes.add(nativeModel);
+
+                    TL_stars.starGiftAttributePattern nativePattern = new TL_stars.starGiftAttributePattern();
+                    nativePattern.name = symbol.isEmpty() ? "✦" : symbol;
+                    nativePattern.document = waysGramTraitDocument;
+                    nativePattern.rarity = nativeRarity;
+                    uniqueGift.attributes.add(nativePattern);
+                }
                 nativeGift = uniqueGift;
             } else {
                 TL_stars.TL_starGift regularGift = new TL_stars.TL_starGift();
@@ -308,6 +333,24 @@ public final class WaysGramProfileGiftsController {
             target.append(" · ");
         }
         target.append(value.trim());
+    }
+
+    /** Maps the WaysGram rarity tier onto Telegram's native attribute rarity. */
+    private static TL_stars.StarGiftAttributeRarity nativeRarity(String rarity) {
+        String value = rarity == null ? "" : rarity.trim().toLowerCase(Locale.ROOT);
+        if (value.startsWith("легендар") || value.contains("legendary")) {
+            return new TL_stars.TL_starGiftAttributeRarityLegendary();
+        }
+        if (value.startsWith("эпич") || value.contains("epic")) {
+            return new TL_stars.TL_starGiftAttributeRarityEpic();
+        }
+        if (value.startsWith("редк") || value.contains("rare")) {
+            return new TL_stars.TL_starGiftAttributeRarityRare();
+        }
+        if (value.startsWith("необыч") || value.contains("uncommon")) {
+            return new TL_stars.TL_starGiftAttributeRarityUncommon();
+        }
+        return new TL_stars.TL_starGiftAttributeRarity();
     }
 
     private static TL_stars.starGiftAttributeBackdrop createNativeBackdrop(JSONObject traits, String rarityName) {
@@ -498,7 +541,28 @@ public final class WaysGramProfileGiftsController {
             return;
         }
         WaysGramGiftMediaStore.putAnimationDocument(serial, document);
-        AndroidUtilities.runOnUIThread(container::refreshWaysGramGiftViews);
+        AndroidUtilities.runOnUIThread(() -> {
+            container.refreshWaysGramGiftViews();
+            scheduleTraitRebind();
+        });
+    }
+
+    /**
+     * Collectible traits need the artwork document, which usually arrives just after the
+     * inventory. Rebinding once, after the downloads settle, shows model and symbol without
+     * forcing the user to leave and reopen the gift tab.
+     */
+    private void scheduleTraitRebind() {
+        if (traitRebindScheduled || lastInventory == null) {
+            return;
+        }
+        traitRebindScheduled = true;
+        AndroidUtilities.runOnUIThread(() -> {
+            if (lastInventory != null && container != null) {
+                container.setWaysGramInventory(
+                        toNativeGifts(lastInventory, lastGiftAccount, false));
+            }
+        }, 1200L);
     }
 
     private void showError(String message) {

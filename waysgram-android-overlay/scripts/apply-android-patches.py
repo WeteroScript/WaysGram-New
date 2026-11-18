@@ -2097,6 +2097,24 @@ def patch_waysgram_chat_fixes(android_root: Path) -> None:
 
 
 
+def patch_star_gift_sheet_unfold_source(original: str) -> str:
+    """Unfold collectible gift cards when the native sheet binds a unique gift."""
+    if "WaysGramGiftUnfold.playOnce(" in original:
+        return original
+    anchor = (
+        "            if (gift instanceof TL_stars.TL_starGiftUnique) {\n"
+        "                backdrop[page] = findAttribute(gift.attributes, TL_stars.starGiftAttributeBackdrop.class);\n"
+    )
+    replacement = (
+        anchor
+        + "                // WaysGram: unfold the collectible card once per gift.\n"
+        + "                org.telegram.messenger.waysgram.WaysGramGiftUnfold.playOnce(\n"
+        + "                        \"wg-unique:\" + gift.slug + \":\" + gift.id, this);\n"
+    )
+    return replace_exactly_once(original, anchor, replacement, "WaysGram collectible gift unfold")
+
+
+
 def verify_source(android_root: Path) -> None:
     gift_sheet = android_root / "TMessagesProj/src/main/java/org/telegram/ui/Gifts/GiftSheet.java"
     launch_activity = android_root / "TMessagesProj/src/main/java/org/telegram/ui/LaunchActivity.java"
@@ -2197,6 +2215,7 @@ def verify_source(android_root: Path) -> None:
         raise FileNotFoundError(f"Required native StarGiftSheet source not found: {star_gift_sheet}")
     star_gift_source = star_gift_sheet.read_text(encoding="utf-8")
     patched_star_gift_source = patch_star_gift_sheet_display_source(star_gift_source)
+    patched_star_gift_source = patch_star_gift_sheet_unfold_source(patched_star_gift_source)
     if patched_star_gift_source != star_gift_source:
         star_gift_sheet.write_text(patched_star_gift_source, encoding="utf-8")
     final_star_gift_source = star_gift_sheet.read_text(encoding="utf-8")
@@ -2205,6 +2224,7 @@ def verify_source(android_root: Path) -> None:
         "topView.buttonsLayout.setVisibility(View.GONE);",
         "if (isWaysGramGift()) return false;",
         "if (isWaysGramGift()) return null;",
+        "WaysGramGiftUnfold.playOnce(",
     ):
         if marker not in final_star_gift_source:
             raise ValueError("WaysGram native card detail rendering is incomplete")
