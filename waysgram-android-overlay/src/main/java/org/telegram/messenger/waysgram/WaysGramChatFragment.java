@@ -1507,7 +1507,7 @@ public final class WaysGramChatFragment extends BaseFragment {
 
     private CharSequence buildTitleWithLabels(String title, JSONArray labels) {
         SpannableStringBuilder result = new SpannableStringBuilder(title == null ? "" : title);
-        int count = labels == null ? 0 : Math.min(labels.length(), 8);
+        int count = labels == null ? 0 : Math.min(labels.length(), WaysGramPeerBadges.MAX_LABELS);
         for (int i = 0; i < count; i++) {
             JSONObject label = labels.optJSONObject(i);
             if (label == null) {
@@ -1517,22 +1517,11 @@ public final class WaysGramChatFragment extends BaseFragment {
             if (value.isEmpty()) {
                 continue;
             }
-            int color;
-            try {
-                color = Color.parseColor(label.optString("color", "#6B7280"));
-            } catch (IllegalArgumentException exception) {
-                color = Color.GRAY;
-            }
-            int start = result.length() + 2;
-            result.append("  ").append(value);
-            int end = result.length();
-            double luminance = 0.299 * Color.red(color)
-                    + 0.587 * Color.green(color)
-                    + 0.114 * Color.blue(color);
-            result.setSpan(new BackgroundColorSpan(color), start, end, Spannable.SPAN_EXCLUSIVE_EXCLUSIVE);
-            result.setSpan(new ForegroundColorSpan(luminance > 150 ? Color.BLACK : Color.WHITE),
-                    start, end, Spannable.SPAN_EXCLUSIVE_EXCLUSIVE);
-            result.setSpan(new RelativeSizeSpan(0.82f), start, end, Spannable.SPAN_EXCLUSIVE_EXCLUSIVE);
+            int color = WaysGramPeerBadges.parseColor(label.optString("color", ""));
+            int start = result.length();
+            result.append(' ').append(value);
+            result.setSpan(new WaysGramPeerBadges.LabelSpan(value, color),
+                    start, result.length(), Spannable.SPAN_EXCLUSIVE_EXCLUSIVE);
         }
         return result;
     }

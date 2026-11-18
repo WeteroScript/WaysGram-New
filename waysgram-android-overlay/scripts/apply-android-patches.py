@@ -2065,6 +2065,103 @@ def patch_locale_default_russian(original: str) -> str:
     )
     return replace_exactly_once(original, anchor, replacement, "WaysGram default Russian locale")
 
+def patch_chat_list_marks_field(original: str) -> str:
+    """Room reserved for the WaysGram marks of the chat list row."""
+    if "private int waysGramMarksWidth;" in original:
+        return original
+    anchor = "    private boolean nameIsEllipsized;\n"
+    replacement = (
+        anchor
+        + "    private int waysGramMarksWidth;\n"
+    )
+    return replace_exactly_once(original, anchor, replacement, "WaysGram chat list marks field")
+
+
+def patch_chat_list_marks_reserve(original: str) -> str:
+    """Ellipsize a long name instead of pushing the WaysGram marks out of the row."""
+    if "WaysGram: keep room for the marks" in original:
+        return original
+    anchor = (
+        "        } else if (drawScam != 0) {\n"
+        "            int w = dp(6) + (drawScam == 1 ? Theme.dialogs_scamDrawable : Theme.dialogs_fakeDrawable).getIntrinsicWidth();\n"
+        "            nameWidth -= w;\n"
+        "            nameAdditionalsForChannelSubscriber += w;\n"
+        "            if (LocaleController.isRTL) {\n"
+        "                nameLeft += w;\n"
+        "            }\n"
+        "        }\n"
+    )
+    replacement = (
+        anchor
+        + "        // WaysGram: keep room for the marks drawn right after the badge.\n"
+        + "        waysGramMarksWidth = 0;\n"
+        + "        if (!LocaleController.isRTL) {\n"
+        + "            waysGramMarksWidth = org.telegram.messenger.waysgram.WaysGramPeerBadges.reservedWidth(\n"
+        + "                    currentAccount, getDialogId(), Theme.dialogs_namePaint[paintIndex].getTextSize(),\n"
+        + "                    () -> requestLayout());\n"
+        + "            if (waysGramMarksWidth > 0) {\n"
+        + "                waysGramMarksWidth += dp(drawPremium ? 24 : 18);\n"
+        + "                if (dialogsType != 2 && (dialogMuted || drawUnmute || isHiddenInCommunity)\n"
+        + "                        && !drawVerified && drawScam == 0) {\n"
+        + "                    waysGramMarksWidth += dp(10) + Theme.dialogs_muteDrawable.getIntrinsicWidth();\n"
+        + "                }\n"
+        + "            }\n"
+        + "        }\n"
+        + "        nameWidth -= waysGramMarksWidth;\n"
+    )
+    return replace_exactly_once(original, anchor, replacement, "WaysGram chat list marks room")
+
+
+def patch_chat_list_marks(original: str) -> str:
+    """Draw the WaysGram marks of the row after its premium or verified badge."""
+    if "WaysGramPeerBadges.drawMarks(" in original:
+        return original
+    anchor = (
+        "            } else if (drawScam != 0) {\n"
+        "                int y = dp(useForceThreeLines || SharedConfig.useThreeLinesLayout ? 12 : 15);\n"
+        "                if ((!(useForceThreeLines || SharedConfig.useThreeLinesLayout) || isForumCell()) && hasTags()) {\n"
+        "                    y -= dp(9);\n"
+        "                }\n"
+        "                setDrawableBounds((drawScam == 1 ? Theme.dialogs_scamDrawable : Theme.dialogs_fakeDrawable), nameMuteLeft, y);\n"
+        "                (drawScam == 1 ? Theme.dialogs_scamDrawable : Theme.dialogs_fakeDrawable).draw(canvas);\n"
+        "            }\n"
+    )
+    replacement = (
+        anchor
+        + "            // WaysGram: the marks follow the badge, exactly as in the chat title.\n"
+        + "            if (currentDialogFolderId == 0 && nameLayout != null && !isForumCell()\n"
+        + "                    && !LocaleController.isRTL && waysGramMarksWidth > 0\n"
+        + "                    && nameMuteLeft > nameLeft) {\n"
+        + "                try {\n"
+        + "                    float waysGramMarksLeft = nameMuteLeft;\n"
+        + "                    if (drawVerified || drawPremium || drawScam != 0) {\n"
+        + "                        waysGramMarksLeft += dp(drawPremium ? 24 : 18);\n"
+        + "                    }\n"
+        + "                    if (dialogsType != 2 && (dialogMuted || drawUnmute || isHiddenInCommunity)\n"
+        + "                            && !drawVerified && drawScam == 0) {\n"
+        + "                        waysGramMarksLeft = (nameMutedIconLeft > nameMuteLeft\n"
+        + "                                ? nameMutedIconLeft : nameMuteLeft)\n"
+        + "                                + Theme.dialogs_muteDrawable.getIntrinsicWidth() + dp(4);\n"
+        + "                    }\n"
+        + "                    org.telegram.messenger.waysgram.WaysGramPeerBadges.drawMarks(\n"
+        + "                            canvas,\n"
+        + "                            Theme.dialogs_namePaint[paintIndex],\n"
+        + "                            waysGramMarksLeft,\n"
+        + "                            nameTop,\n"
+        + "                            nameLeft + nameWidth + waysGramMarksWidth,\n"
+        + "                            currentAccount,\n"
+        + "                            getDialogId(),\n"
+        + "                            () -> {\n"
+        + "                                requestLayout();\n"
+        + "                                invalidate();\n"
+        + "                            });\n"
+        + "                } catch (Exception e) {\n"
+        + "                    FileLog.e(e);\n"
+        + "                }\n"
+        + "            }\n"
+    )
+    return replace_exactly_once(original, anchor, replacement, "WaysGram chat list marks")
+
 
 def patch_waysgram_chat_fixes(android_root: Path) -> None:
     """Saved Messages, empty chats, account phone, session refresh and own-profile marks."""
@@ -2076,6 +2173,9 @@ def patch_waysgram_chat_fixes(android_root: Path) -> None:
     user_config = android_root / "TMessagesProj/src/main/java/org/telegram/messenger/UserConfig.java"
     profile = android_root / "TMessagesProj/src/main/java/org/telegram/ui/ProfileActivity.java"
     locale = android_root / "TMessagesProj/src/main/java/org/telegram/messenger/LocaleController.java"
+    dialog_cell = (
+        android_root / "TMessagesProj/src/main/java/org/telegram/ui/Cells/DialogCell.java"
+    )
 
     jobs = (
         (api, patch_waysgram_api_helpers),
@@ -2085,6 +2185,9 @@ def patch_waysgram_chat_fixes(android_root: Path) -> None:
         (user_info, patch_user_info_phone_source),
         (user_config, patch_user_config_phone_source),
         (profile, patch_profile_own_marks_source),
+        (dialog_cell, patch_chat_list_marks_field),
+        (dialog_cell, patch_chat_list_marks_reserve),
+        (dialog_cell, patch_chat_list_marks),
         (locale, patch_locale_default_russian),
     )
     for path, patcher in jobs:
@@ -2103,6 +2206,7 @@ def patch_waysgram_chat_fixes(android_root: Path) -> None:
         (user_info, "WaysGram: the edit-account number"),
         (user_config, "WaysGram: the session knows the number"),
         (profile, "WaysGram: own account marks in the profile title"),
+        (dialog_cell, "WaysGramPeerBadges.drawMarks("),
         (locale, "WaysGram ships a Russian interface"),
     ):
         if marker not in path.read_text(encoding="utf-8"):

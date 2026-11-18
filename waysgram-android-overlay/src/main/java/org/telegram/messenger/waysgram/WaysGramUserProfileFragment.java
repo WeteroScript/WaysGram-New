@@ -3,7 +3,7 @@ package org.telegram.messenger.waysgram;
 import android.graphics.Bitmap;
 import android.graphics.Color;
 import android.graphics.Typeface;
-import android.graphics.drawable.GradientDrawable;
+import android.text.TextUtils;
 import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
@@ -88,11 +88,12 @@ public final class WaysGramUserProfileFragment extends BaseFragment {
         labelsContainer = new LinearLayout(context);
         labelsContainer.setOrientation(LinearLayout.HORIZONTAL);
         labelsContainer.setGravity(Gravity.CENTER_VERTICAL);
+        // Marks get their own row: next to the username a long mark would be squeezed out.
         LinearLayout.LayoutParams labelsParams = new LinearLayout.LayoutParams(
-                0, ViewGroup.LayoutParams.WRAP_CONTENT, 1
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
         );
-        labelsParams.leftMargin = AndroidUtilities.dp(6);
-        identityRow.addView(labelsContainer, labelsParams);
+        labelsParams.topMargin = AndroidUtilities.dp(8);
+        root.addView(labelsContainer, labelsParams);
         bioView = addLabel(context, root, "", 13, false);
         statusView = addLabel(context, root, "", 12, false);
 
@@ -192,43 +193,33 @@ public final class WaysGramUserProfileFragment extends BaseFragment {
         labelsContainer.removeAllViews();
         int count = labels == null ? 0 : labels.length();
         if (count == 0) {
+            labelsContainer.setVisibility(View.GONE);
             return;
         }
-        for (int i = 0; i < count && i < 12; i++) {
+        labelsContainer.setVisibility(View.VISIBLE);
+        int shown = 0;
+        for (int i = 0; i < count && shown < WaysGramPeerBadges.MAX_LABELS; i++) {
             JSONObject label = labels.optJSONObject(i);
             if (label == null) {
                 continue;
             }
             String text = label.optString("text", "").trim();
-            String hex = label.optString("color", "#6B7280");
             if (text.isEmpty()) {
                 continue;
             }
-            int color;
-            try {
-                color = Color.parseColor(hex);
-            } catch (IllegalArgumentException exception) {
-                color = Color.GRAY;
-            }
-            double luminance = (0.299 * Color.red(color))
-                    + (0.587 * Color.green(color))
-                    + (0.114 * Color.blue(color));
-            TextView chip = new TextView(getParentActivity());
-            chip.setText("  " + text + "  ");
-            chip.setTextSize(12);
-            chip.setTextColor(luminance > 150 ? Color.BLACK : Color.WHITE);
-            chip.setPadding(AndroidUtilities.dp(3), AndroidUtilities.dp(2),
-                    AndroidUtilities.dp(3), AndroidUtilities.dp(2));
-            GradientDrawable background = new GradientDrawable();
-            background.setColor(color);
-            background.setCornerRadius(AndroidUtilities.dp(7));
-            chip.setBackground(background);
+            TextView chip = new TextView(labelsContainer.getContext());
+            chip.setText(text);
+            chip.setAllCaps(false);
+            chip.setSingleLine(true);
+            chip.setEllipsize(TextUtils.TruncateAt.END);
+            WaysGramPeerBadges.styleChip(chip, WaysGramPeerBadges.parseColor(label.optString("color", "")));
             LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(
                     ViewGroup.LayoutParams.WRAP_CONTENT,
                     ViewGroup.LayoutParams.WRAP_CONTENT
             );
-            params.leftMargin = AndroidUtilities.dp(4);
+            params.rightMargin = AndroidUtilities.dp(6);
             labelsContainer.addView(chip, params);
+            shown++;
         }
     }
 
