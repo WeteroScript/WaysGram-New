@@ -137,7 +137,9 @@ def test_buying_a_gift_charges_stars_and_reduces_stock(env) -> None:
             assert json.loads(stored_snapshot[1])["emoji"] == "🎁"
             assert mine[0]["telegram_gift"]["catalog_source"] == "telegram_gift_catalog"
             assert mine[0]["telegram_gift"]["emoji"] == "🎁"
-            assert mine[0]["telegram_gift"]["upgrade_star_count"] == 10
+            # WaysGram upgrades always cost the same fixed 25 Stars.
+            assert mine[0]["telegram_gift"]["upgrade_star_count"] == 25
+            assert mine[0]["upgrade_star_count"] == 25
             assert mine[0]["can_upgrade"] is True
 
             public_profile = await client.get("/api/users/101", headers=headers(102))
@@ -145,7 +147,8 @@ def test_buying_a_gift_charges_stars_and_reduces_stock(env) -> None:
             public_gift = public_profile.json()["gifts"][0]
             assert public_gift["telegram_gift"]["emoji"] == "🎁"
             assert public_gift["gift_emoji"] == "🎁"
-            assert public_gift["telegram_gift"]["upgrade_star_count"] == 10
+            assert public_gift["telegram_gift"]["upgrade_star_count"] == 25
+            assert public_gift["upgrade_star_count"] == 25
             assert public_gift["can_upgrade"] is True
 
             assert bought.json()["gift"]["telegram_gift_id"] == "g1"
@@ -838,8 +841,11 @@ def test_telegram_gift_upgrade_uses_internal_stars_and_records_level(env) -> Non
             )
             assert upgraded.status_code == 200
             assert upgraded.json()["upgrade_level"] == 1
-            assert upgraded.json()["price_stars"] == 10
-            assert upgraded.json()["stars_balance"] == 4970
+            # Every WaysGram upgrade costs the same fixed 25 Stars, regardless of the
+            # Telegram catalog price of the gift.
+            assert upgraded.json()["price_stars"] == 25
+            assert upgraded.json()["upgrade_star_count"] == 25
+            assert upgraded.json()["stars_balance"] == 4955
 
             # Replaying a successful upgrade request must not debit Stars twice.
             replayed = await client.post(
@@ -847,7 +853,7 @@ def test_telegram_gift_upgrade_uses_internal_stars_and_records_level(env) -> Non
             )
             assert replayed.status_code == 200
             assert replayed.json() == upgraded.json()
-            assert (await client.get("/api/me", headers=headers(101))).json()["stars"] == 4970
+            assert (await client.get("/api/me", headers=headers(101))).json()["stars"] == 4955
             traits = upgraded.json()["attributes"]["collectible_traits"]
             assert traits["version"] == 1
             assert traits["rarity"] in {"Обычная", "Необычная", "Редкая", "Эпическая", "Легендарная"}
@@ -1718,5 +1724,166 @@ def test_public_profile_returns_all_owned_gifts_without_a_50_item_cap(env) -> No
             assert profile.status_code == 200
             assert len(profile.json()["gifts"]) == 55
             assert len({gift["serial_number"] for gift in profile.json()["gifts"]}) == 55
+
+    run(scenario())
+
+
+def test_gift_sell_refunds_half_of_the_purchase_price(env) -> None:
+    path, app = env
+
+    async def scenario() -> None:
+        await bot_module.set_telegram_gift_values("g1", price=40, supply=1)
+        async with await client_for(app) as client:
+            bought = await client.post("/api/telegram/gifts/g1/purchase", headers=headers(101), json={})
+            serial = bought.json()["gift"]["serial_number"]
+            mine = (await client.get("/api/me/gifts", headers=headers(101))).json()["gifts"]
+            assert mine[0]["purchase_asset"] == "stars"
+            assert mine[0]["purchase_price"] == 40
+            assert mine[0]["sell_refund"] == 20
+            assert mine[0]["sell_refund_asset"] == "stars"
+            assert mine[0]["sellable"] is True
+            assert mine[0]["sellable_until"] - mine[0]["acquired_at"] == 7 * 86400
+
+            sell_headers = {**headers(101), "Idempotency-Key": "wg-gift-sell-test-0001"}
+            sold = await client.post(f"/api/gifts/{serial}/sell", headers=sell_headers)
+            assert sold.status_code == 200
+            body = sold.json()
+            assert body["status"] == "sold"
+            assert body["sell_refund"] == 20 and body["sell_refund_asset"] == "stars"
+            assert body["purchase_price"] == 40
+            assert body["stars_balance"] == 5000 - 40 + 20
+            assert (await client.get("/api/me", headers=headers(101))).json()["stars"] == 4980
+            assert (await client.get("/api/me/gifts", headers=headers(101))).json()["gifts"] == []
+
+            conn = db_split.sqlite_connect(path)
+            try:
+                transaction = conn.execute(
+                    "SELECT asset,amount,balance_after,reason FROM economy_transactions "
+                    "WHERE telegram_id=? AND reason=?",
+                    (101, f"gift_sell:{serial}"),
+                ).fetchone()
+                history = conn.execute(
+                    "SELECT event_type FROM gift_transactions WHERE serial_number=?", (serial,)
+                ).fetchall()
+            finally:
+                conn.close()
+            assert transaction == ("stars", 20, 4980, f"gift_sell:{serial}")
+            assert ("sale",) in history
+
+            # Replaying the same request must not refund twice.
+            replayed = await client.post(f"/api/gifts/{serial}/sell", headers=sell_headers)
+            assert replayed.status_code == 200 and replayed.json() == body
+            assert (await client.get("/api/me", headers=headers(101))).json()["stars"] == 4980
+            # The gift is gone, so a fresh attempt is a plain 404.
+            again = await client.post(f"/api/gifts/{serial}/sell", headers=headers(101))
+            assert again.status_code == 404
+
+            # The chat receipt stays in history and is marked as sold.
+            saved = await client.get("/api/messages?with=101", headers=headers(101))
+            receipt = next(
+                item for item in saved.json()["messages"]
+                if item.get("gift_serial_number") == serial
+            )
+            assert receipt["gift_attributes"]["sold_at"] == body["sold_at"]
+            assert receipt["gift_attributes"]["native_action"] == "star_gift_sale"
+            assert receipt["gift_attributes"]["sell_refund"] == 20
+
+    run(scenario())
+
+
+def test_gift_sell_is_limited_to_the_first_week(env) -> None:
+    path, app = env
+
+    async def scenario() -> None:
+        await bot_module.set_telegram_gift_values("g1", price=40, supply=1)
+        async with await client_for(app) as client:
+            bought = await client.post("/api/telegram/gifts/g1/purchase", headers=headers(101), json={})
+            serial = bought.json()["gift"]["serial_number"]
+            conn = db_split.sqlite_connect(path)
+            try:
+                conn.execute(
+                    "UPDATE user_gifts SET acquired_at=? WHERE serial_number=?",
+                    (int(time.time()) - 8 * 86400, serial),
+                )
+                conn.commit()
+            finally:
+                conn.close()
+
+            mine = (await client.get("/api/me/gifts", headers=headers(101))).json()["gifts"]
+            assert mine[0]["sellable"] is False
+            assert mine[0]["sell_refund"] == 20
+
+            expired = await client.post(f"/api/gifts/{serial}/sell", headers=headers(101))
+            assert expired.status_code == 409
+            assert (await client.get("/api/me", headers=headers(101))).json()["stars"] == 5000 - 40
+            assert len((await client.get("/api/me/gifts", headers=headers(101))).json()["gifts"]) == 1
+
+    run(scenario())
+
+
+def test_gift_that_is_up_for_sale_cannot_be_sold_back(env) -> None:
+    path, app = env
+
+    async def scenario() -> None:
+        await bot_module.set_telegram_gift_values("g1", price=40, supply=1)
+        async with await client_for(app) as client:
+            bought = await client.post("/api/telegram/gifts/g1/purchase", headers=headers(101), json={})
+            serial = bought.json()["gift"]["serial_number"]
+            conn = db_split.sqlite_connect(path)
+            try:
+                conn.execute(
+                    """INSERT INTO gift_market_listings
+                       (serial_number,seller_telegram_id,price_grams,status,created_at)
+                       VALUES(?,?,?,'active',?)""",
+                    (serial, 101, 15, int(time.time())),
+                )
+                conn.commit()
+            finally:
+                conn.close()
+
+            mine = (await client.get("/api/me/gifts", headers=headers(101))).json()["gifts"]
+            assert mine[0]["sellable"] is False
+            blocked = await client.post(f"/api/gifts/{serial}/sell", headers=headers(101))
+            assert blocked.status_code == 409
+            assert (await client.get("/api/me", headers=headers(101))).json()["stars"] == 5000 - 40
+
+    run(scenario())
+
+
+def test_upgrade_costs_fixed_25_stars_without_a_catalog_upgrade_price(env) -> None:
+    path, app = env
+
+    async def scenario() -> None:
+        # The fake catalog has no upgrade_star_count for g2; WaysGram still upgrades it.
+        await bot_module.set_telegram_gift_values("g2", price=100, supply=1)
+        async with await client_for(app) as client:
+            bought = await client.post("/api/telegram/gifts/g2/purchase", headers=headers(101), json={})
+            serial = bought.json()["gift"]["serial_number"]
+            upgraded = await client.post(f"/api/gifts/{serial}/upgrade", headers=headers(101))
+            assert upgraded.status_code == 200
+            assert upgraded.json()["price_stars"] == 25
+            assert upgraded.json()["upgrade_star_count"] == 25
+            assert upgraded.json()["upgrade_level"] == 1
+            assert upgraded.json()["stars_balance"] == 5000 - 100 - 25
+
+    run(scenario())
+
+
+def test_upgrade_without_enough_stars_returns_402(env) -> None:
+    path, app = env
+
+    async def scenario() -> None:
+        await bot_module.set_telegram_gift_values("g1", price=4990, supply=1)
+        async with await client_for(app) as client:
+            bought = await client.post("/api/telegram/gifts/g1/purchase", headers=headers(101), json={})
+            assert bought.json()["stars"] == 10
+            serial = bought.json()["gift"]["serial_number"]
+            poor = await client.post(f"/api/gifts/{serial}/upgrade", headers=headers(101))
+            assert poor.status_code == 402
+            assert poor.json()["detail"] == "Недостаточно Stars"
+            # A rejected upgrade changes nothing.
+            mine = (await client.get("/api/me/gifts", headers=headers(101))).json()["gifts"]
+            assert mine[0]["upgrade_level"] == 0
+            assert (await client.get("/api/me", headers=headers(101))).json()["stars"] == 10
 
     run(scenario())

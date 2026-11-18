@@ -1089,7 +1089,9 @@ async def init_admin_storage() -> None:
             acquired_at INTEGER NOT NULL,
             telegram_gift_id TEXT NOT NULL DEFAULT '',
             gift_emoji TEXT NOT NULL DEFAULT '',
-            telegram_gift_metadata_json TEXT NOT NULL DEFAULT '{}'
+            telegram_gift_metadata_json TEXT NOT NULL DEFAULT '{}',
+            purchase_asset TEXT NOT NULL DEFAULT 'stars',
+            purchase_price INTEGER NOT NULL DEFAULT 0
         );
         CREATE TABLE IF NOT EXISTS economy_transactions (
             id INTEGER PRIMARY KEY AUTOINCREMENT,

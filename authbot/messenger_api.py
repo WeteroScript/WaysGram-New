@@ -42,6 +42,13 @@ MAX_USER_MEDIA_BYTES = 100 * 1024 * 1024
 MAX_USER_IMAGE_UPLOADS_PER_HOUR = 30
 PHONE_RE = re.compile(r"^\+[1-9]\d{7,14}$")
 GIFT_SERIAL_RE = re.compile(r"^WG-[A-F0-9]{12}$")
+# WaysGram upgrades cost a fixed amount of internal Stars. The Telegram catalog price is
+# informational only: the client shows exactly this number and the endpoint charges it.
+UPGRADE_PRICE_STARS = 25
+# A gift can be sold back to WaysGram during the first week after it was acquired.
+SELL_WINDOW_SECONDS = 7 * 86400
+# The owner gets half of what was paid for the gift.
+SELL_REFUND_PERCENT = 50
 LOGGER = logging.getLogger(__name__)
 FCM_SCOPE = "https://www.googleapis.com/auth/firebase.messaging"
 FCM_TOKEN_URI = "https://oauth2.googleapis.com/token"
@@ -1020,10 +1027,42 @@ async def init_messenger_storage(database_path: Path) -> None:
             ("telegram_gift_id", "TEXT NOT NULL DEFAULT ''"),
             ("gift_emoji", "TEXT NOT NULL DEFAULT ''"),
             ("telegram_gift_metadata_json", "TEXT NOT NULL DEFAULT '{}'"),
+            # The sell refund is a share of the price the owner paid, so the price and the
+            # asset it was paid in travel with the gift.
+            ("purchase_asset", "TEXT NOT NULL DEFAULT 'stars'"),
+            ("purchase_price", "INTEGER NOT NULL DEFAULT 0"),
         ):
             if column not in user_gift_columns:
                 await db.execute(
                     f"ALTER TABLE {db_split.SCHEMA}.user_gifts ADD COLUMN {column} {definition}"
+                )
+        # Gifts bought before the price was stored take it from their saved receipt, so the
+        # refund can be calculated for them as well.
+        cur = await db.execute(
+            """SELECT ug.id,mg.attributes_json FROM user_gifts ug
+               JOIN message_gifts mg ON mg.serial_number=ug.serial_number
+               WHERE ug.purchase_price=0"""
+        )
+        for stored_gift_id, raw_receipt in await cur.fetchall():
+            try:
+                receipt = json.loads(str(raw_receipt or "{}"))
+            except (TypeError, ValueError):
+                continue
+            if not isinstance(receipt, dict):
+                continue
+            price_stars = _optional_int(receipt.get("price_stars"))
+            price_grams = _optional_int(receipt.get("price_grams"))
+            if price_stars:
+                await db.execute(
+                    f"UPDATE {db_split.SCHEMA}.user_gifts "
+                    "SET purchase_asset='stars',purchase_price=? WHERE id=?",
+                    (price_stars, stored_gift_id),
+                )
+            elif price_grams:
+                await db.execute(
+                    f"UPDATE {db_split.SCHEMA}.user_gifts "
+                    "SET purchase_asset='grams',purchase_price=? WHERE id=?",
+                    (price_grams, stored_gift_id),
                 )
         cur = await db.execute(f"PRAGMA {db_split.SCHEMA}.table_info(telegram_gift_catalog)")
         telegram_gift_columns = {str(row[1]) for row in await cur.fetchall()}
@@ -3243,6 +3282,7 @@ def build_messenger_router(
             total = int((await cur.fetchone())[0] or 0)
             query = """SELECT id,serial_number,gift_id,telegram_gift_id,gift_name,gift_emoji,
                           telegram_gift_metadata_json,acquired_at,upgrade_level,attributes_json,
+                          purchase_asset,purchase_price,
                           EXISTS(SELECT 1 FROM gift_market_listings l
                                  WHERE l.serial_number=user_gifts.serial_number
                                    AND l.status='active') AS is_listed,
@@ -3312,6 +3352,14 @@ def build_messenger_router(
                 item["waysgram_can_upgrade"] = bool(
                     telegram_gift and telegram_gift.get("can_upgrade")
                 )
+                # WaysGram charges a fixed price for an upgrade, so the client always shows
+                # the same amount instead of the Telegram catalog value.
+                item["upgrade_star_count"] = UPGRADE_PRICE_STARS
+                if telegram_gift:
+                    item["telegram_gift"] = {
+                        **telegram_gift,
+                        "upgrade_star_count": UPGRADE_PRICE_STARS,
+                    }
                 item["sticker_available"] = bool(
                     item.get("sticker_available")
                     or (telegram_gift and telegram_gift.get("sticker_available"))
@@ -3320,6 +3368,23 @@ def build_messenger_router(
                     telegram_gift.get("sticker", {}).get("url", "")
                     if telegram_gift and item["sticker_available"]
                     else ""
+                )
+                purchase_asset = str(item.pop("purchase_asset", "") or "stars").strip()
+                if purchase_asset not in {"stars", "grams"}:
+                    purchase_asset = "stars"
+                purchase_price = int(item.pop("purchase_price", 0) or 0)
+                sell_refund = purchase_price * SELL_REFUND_PERCENT // 100
+                sellable_until = int(item.get("acquired_at") or 0) + SELL_WINDOW_SECONDS
+                item["purchase_asset"] = purchase_asset
+                item["purchase_price"] = purchase_price
+                item["sell_refund"] = sell_refund
+                item["sell_refund_asset"] = purchase_asset
+                item["sellable_until"] = sellable_until
+                item["sellable"] = bool(
+                    sell_refund > 0
+                    and not int(item.get("is_listed") or 0)
+                    and not int(item.get("is_auctioned") or 0)
+                    and int(time.time()) < sellable_until
                 )
                 gifts.append(item)
         return {
@@ -3681,6 +3746,14 @@ def build_messenger_router(
                     and telegram_gift["can_upgrade"]
                     and max(attributes_level, stored_level) == 0
                 )
+                # WaysGram charges a fixed price for upgrades, so every screen shows the
+                # same amount instead of the Telegram catalog value.
+                gift["upgrade_star_count"] = UPGRADE_PRICE_STARS
+                if telegram_gift:
+                    gift["telegram_gift"] = {
+                        **telegram_gift,
+                        "upgrade_star_count": UPGRADE_PRICE_STARS,
+                    }
         profile["gifts"] = gifts
         profile["common_groups"] = common_groups
         profile["common_contacts"] = common_contacts
@@ -3992,9 +4065,10 @@ def build_messenger_router(
             await db.execute(
                 """INSERT INTO user_gifts
                    (serial_number,gift_id,telegram_gift_id,gift_name,gift_emoji,
-                    telegram_gift_metadata_json,owner_telegram_id,acquired_at)
-                   VALUES(?,NULL,?,?,?,?,?,?)""",
-                (serial, gift_id, title, gift_emoji, gift_metadata_json, owner, now),
+                    telegram_gift_metadata_json,owner_telegram_id,acquired_at,
+                    purchase_asset,purchase_price)
+                   VALUES(?,NULL,?,?,?,?,?,?,'stars',?)""",
+                (serial, gift_id, title, gift_emoji, gift_metadata_json, owner, now, price),
             )
             balance = int(account["stars"]) - price
             await db.execute(
@@ -4791,9 +4865,10 @@ def build_messenger_router(
             serial = "WG-" + secrets.token_hex(6).upper()
             cur = await db.execute(
                 """INSERT INTO user_gifts
-                   (serial_number,gift_id,gift_name,owner_telegram_id,acquired_at)
-                   VALUES(?,?,?,?,?)""",
-                (serial, gift_id, str(gift["name"]), uid, now),
+                   (serial_number,gift_id,gift_name,owner_telegram_id,acquired_at,
+                    purchase_asset,purchase_price)
+                   VALUES(?,?,?,?,?,'grams',?)""",
+                (serial, gift_id, str(gift["name"]), uid, now, price),
             )
             gift_instance_id = int(cur.lastrowid)
             balance = int(account["grams"]) - price
@@ -5724,24 +5799,9 @@ def build_messenger_router(
             if not str(gift["telegram_gift_id"] or ""):
                 await db.rollback()
                 raise HTTPException(status_code=409, detail="Этот подарок нельзя улучшить")
-            cur = await db.execute("SELECT source FROM telegram_gift_sync_state WHERE id=1")
-            state = await cur.fetchone()
-            source = str(state[0]) if state else "telegram_bot_api"
-            if source == "telegram_mtproto":
-                cur = await db.execute(
-                    "SELECT upgrade_stars FROM telegram_mtproto_gift_catalog WHERE gift_id=? AND is_available=1",
-                    (str(gift["telegram_gift_id"]),),
-                )
-            else:
-                cur = await db.execute(
-                    "SELECT upgrade_star_count FROM telegram_gift_catalog WHERE gift_id=? AND is_available=1",
-                    (str(gift["telegram_gift_id"]),),
-                )
-            catalog = await cur.fetchone()
-            if catalog is None or catalog[0] is None or int(catalog[0]) <= 0:
-                await db.rollback()
-                raise HTTPException(status_code=409, detail="Для этого подарка нет доступного улучшения")
-            price = int(catalog[0])
+            # The upgrade price is fixed by WaysGram and does not depend on the Telegram
+            # catalog: the same 25 Stars are charged for every gift and every level.
+            price = UPGRADE_PRICE_STARS
             cur = await db.execute(
                 "SELECT stars,is_banned FROM accounts WHERE telegram_id=?",
                 (uid,),
@@ -5752,7 +5812,7 @@ def build_messenger_router(
                 raise HTTPException(status_code=403, detail="Аккаунт недоступен")
             if int(account["stars"]) < price:
                 await db.rollback()
-                raise HTTPException(status_code=409, detail="Недостаточно Stars")
+                raise HTTPException(status_code=402, detail="Недостаточно Stars")
             new_balance = int(account["stars"]) - price
             new_level = int(gift["upgrade_level"]) + 1
             try:
@@ -5824,8 +5884,144 @@ def build_messenger_router(
                 "gift_name": str(gift["gift_name"]),
                 "upgrade_level": new_level,
                 "price_stars": price,
+                "upgrade_star_count": price,
                 "stars_balance": new_balance,
                 "attributes": attributes,
+            }
+            await idempotency_store(db, uid, scope, descriptor, result, now)
+            await db.commit()
+        return result
+
+    @router.post("/api/gifts/{serial_number}/sell")
+    async def sell_gift(
+        serial_number: str,
+        authorization: str | None = Header(default=None),
+        idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+    ) -> dict[str, Any]:
+        """Sells a gift back to WaysGram: half of the paid price during the first week."""
+        user = await current_user(authorization)
+        uid = int(user["telegram_id"])
+        serial = serial_number.strip().upper()
+        if not GIFT_SERIAL_RE.fullmatch(serial):
+            raise HTTPException(status_code=400, detail="Некорректный серийный номер подарка")
+        now = int(time.time())
+        scope = f"/api/gifts/{serial}/sell"
+        descriptor = idempotency_descriptor(scope, {}, idempotency_key)
+        async with aiosqlite.connect(db_path()) as db:
+            db.row_factory = aiosqlite.Row
+            await db.execute("BEGIN IMMEDIATE")
+            previous = await idempotency_lookup(db, uid, scope, descriptor, now)
+            if previous is not None:
+                await db.rollback()
+                return previous
+            cur = await db.execute(
+                """SELECT id,gift_name,acquired_at,purchase_asset,purchase_price
+                   FROM user_gifts WHERE serial_number=? AND owner_telegram_id=?""",
+                (serial, uid),
+            )
+            gift = await cur.fetchone()
+            if gift is None:
+                await db.rollback()
+                raise HTTPException(status_code=404, detail="Подарок не найден в вашем инвентаре")
+            acquired_at = int(gift["acquired_at"] or 0)
+            if now - acquired_at > SELL_WINDOW_SECONDS:
+                await db.rollback()
+                raise HTTPException(
+                    status_code=409,
+                    detail="Подарок старше 7 дней и не подлежит возврату",
+                )
+            cur = await db.execute(
+                "SELECT 1 FROM gift_market_listings WHERE serial_number=? AND status='active'",
+                (serial,),
+            )
+            if await cur.fetchone():
+                await db.rollback()
+                raise HTTPException(status_code=409, detail="Сначала снимите подарок с продажи")
+            cur = await db.execute(
+                "SELECT 1 FROM gift_collectible_auctions WHERE serial_number=? AND status='active'",
+                (serial,),
+            )
+            if await cur.fetchone():
+                await db.rollback()
+                raise HTTPException(status_code=409, detail="Сначала отмените аукцион подарка")
+            asset = str(gift["purchase_asset"] or "stars").strip().lower()
+            if asset not in ("stars", "grams"):
+                asset = "stars"
+            purchase_price = int(gift["purchase_price"] or 0)
+            refund = purchase_price * SELL_REFUND_PERCENT // 100
+            if refund <= 0:
+                await db.rollback()
+                raise HTTPException(
+                    status_code=409,
+                    detail="Стоимость подарка неизвестна, возврат невозможен",
+                )
+            cur = await db.execute(
+                "SELECT stars,grams,is_banned FROM accounts WHERE telegram_id=?",
+                (uid,),
+            )
+            account = await cur.fetchone()
+            if not account or account["is_banned"]:
+                await db.rollback()
+                raise HTTPException(status_code=403, detail="Аккаунт недоступен")
+            balance_column = "stars" if asset == "stars" else "grams"
+            new_balance = int(account[balance_column] or 0) + refund
+            await db.execute(
+                f"UPDATE accounts SET {balance_column}=?,updated_at=? WHERE telegram_id=?",
+                (new_balance, now, uid),
+            )
+            await db.execute(
+                """INSERT INTO economy_transactions
+                   (telegram_id,asset,amount,balance_after,reason,admin_id,created_at)
+                   VALUES(?,?,?,?,?,NULL,?)""",
+                (uid, asset, refund, new_balance, f"gift_sell:{serial}", now),
+            )
+            # 0 as the recipient means WaysGram itself: the gift is not transferred to a user.
+            await db.execute(
+                """INSERT INTO gift_transactions
+                   (event_type,serial_number,gift_name,from_telegram_id,to_telegram_id,created_at)
+                   VALUES('sale',?,?,?,0,?)""",
+                (serial, str(gift["gift_name"]), uid, now),
+            )
+            # The receipt card stays in the chat history, marked as sold: the gift itself
+            # leaves the inventory.
+            cur = await db.execute(
+                "SELECT message_id,attributes_json FROM message_gifts WHERE serial_number=?",
+                (serial,),
+            )
+            for attachment in await cur.fetchall():
+                try:
+                    message_attributes = json.loads(str(attachment["attributes_json"] or "{}"))
+                except (TypeError, ValueError):
+                    message_attributes = {}
+                if not isinstance(message_attributes, dict):
+                    message_attributes = {}
+                message_attributes.update({
+                    "sold_at": now,
+                    "sell_refund": refund,
+                    "sell_refund_asset": asset,
+                    "native_action": "star_gift_sale",
+                })
+                await db.execute(
+                    "UPDATE message_gifts SET attributes_json=? WHERE message_id=?",
+                    (
+                        json.dumps(message_attributes, ensure_ascii=False, separators=(",", ":")),
+                        int(attachment["message_id"]),
+                    ),
+                )
+            await db.execute(
+                "DELETE FROM user_gifts WHERE id=? AND owner_telegram_id=?",
+                (int(gift["id"]), uid),
+            )
+            result = {
+                "status": "sold",
+                "serial_number": serial,
+                "gift_name": str(gift["gift_name"]),
+                "sold_at": now,
+                "sell_refund": refund,
+                "sell_refund_asset": asset,
+                "purchase_price": purchase_price,
+                "asset": asset,
+                f"{asset}_balance": new_balance,
             }
             await idempotency_store(db, uid, scope, descriptor, result, now)
             await db.commit()
