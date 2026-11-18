@@ -12,6 +12,7 @@ on:
 
 permissions:
   contents: read
+  pull-requests: write
 
 jobs:
   build:
@@ -258,6 +259,31 @@ jobs:
           ./gradlew --no-daemon --stacktrace --max-workers=2 \
             -Dorg.gradle.jvmargs="-Xmx5g -XX:MaxMetaspaceSize=1g -Dfile.encoding=UTF-8" \
             :TMessagesProj_App:assembleAfatRelease 2>&1 | tee /tmp/build.log
+
+      - name: Report compile errors on the pull request
+        if: failure()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -uo pipefail
+          file=/tmp/javac.log
+          if [ ! -s "$file" ]; then
+            file=/tmp/build.log
+          fi
+          {
+            echo "### Ошибки сборки: run ${{ github.run_number }}, commit ${GITHUB_SHA:0:7}"
+            echo '```'
+            if [ -s "$file" ]; then
+              grep -E "error:|e: |FAILED|Execution failed|Caused by" "$file" | head -40
+            else
+              echo "no gradle output captured"
+            fi
+            echo '```'
+          } > /tmp/report.md
+          number="$(gh pr list --head "${GITHUB_REF_NAME}" --json number --jq '.[0].number' 2>/dev/null || true)"
+          if [ -n "${number:-}" ] && [ "$number" != "null" ]; then
+            gh pr comment "$number" --body-file /tmp/report.md || true
+          fi
 
       - name: Upload build logs
         if: always()
