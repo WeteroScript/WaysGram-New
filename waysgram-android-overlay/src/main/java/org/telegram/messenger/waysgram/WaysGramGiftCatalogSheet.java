@@ -227,9 +227,12 @@ public final class WaysGramGiftCatalogSheet extends BottomSheet {
         ArrayList<String> actions = new ArrayList<>();
         boolean listed = gift.optInt("is_listed", gift.optBoolean("is_listed", false) ? 1 : 0) == 1;
         boolean auctioned = gift.optInt("is_auctioned", gift.optBoolean("is_auctioned", false) ? 1 : 0) == 1;
+        // The price is whatever the server charges for this gift (25 Stars once the backend
+        // pins it), so the action always shows the real amount instead of a vague label.
+        int upgradeStarPrice = telegramGift == null
+                ? 0 : Math.max(0, telegramGift.optInt("upgrade_star_count", 0));
         boolean canUpgrade = gift.optString("telegram_gift_id", "").length() > 0
-                && telegramGift != null
-                && telegramGift.optInt("upgrade_star_count", 0) > 0;
+                && upgradeStarPrice > 0;
         boolean auctionEligible = gift.optInt(
                 "auction_eligible", gift.optBoolean("auction_eligible", false) ? 1 : 0
         ) == 1;
@@ -248,7 +251,7 @@ public final class WaysGramGiftCatalogSheet extends BottomSheet {
                 actions.add("Выставить на аукцион");
             }
             if (canUpgrade) {
-                actions.add("Улучшить за WaysGram Stars");
+                actions.add("Улучшить за " + upgradeStarPrice + " ⭐");
             }
             actions.add("Передать пользователю");
         }
@@ -288,10 +291,11 @@ public final class WaysGramGiftCatalogSheet extends BottomSheet {
                         catalogClient.cancelCollectibleAuction(
                                 serial, giftActionCallback("Аукцион отменён")
                         );
-                    } else if (action.equals("Улучшить за WaysGram Stars")) {
+                    } else if (action.equals("Улучшить за " + upgradeStarPrice + " ⭐")) {
                         new AlertDialog.Builder(getContext())
                                 .setTitle("Улучшить подарок")
-                                .setMessage("Стоимость улучшения будет списана с внутреннего баланса WaysGram Stars.")
+                                .setMessage("Стоимость улучшения — " + upgradeStarPrice
+                                        + " WaysGram Stars. Средства спишутся с внутреннего баланса.")
                                 .setNegativeButton("Отмена", null)
                                 .setPositiveButton("Улучшить", (d, w) ->
                                         catalogClient.upgradeGift(serial, giftActionCallback("Подарок улучшен")))
