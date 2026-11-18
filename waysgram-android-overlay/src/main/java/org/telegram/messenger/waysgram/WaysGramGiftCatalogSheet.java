@@ -206,6 +206,29 @@ public final class WaysGramGiftCatalogSheet extends BottomSheet {
         inventorySheet.show();
     }
 
+    /**
+     * Opens the WaysGram card (the gift actions dialog) of a specific inventory gift.
+     *
+     * <p>The reveal ends with «Следующий подарок»; the card is opened through the inventory
+     * sheet because it already loads the full gift payload the actions dialog needs.</p>
+     */
+    public static void openGiftCard(Context context, int account, String serial) {
+        if (context == null || serial == null || serial.trim().isEmpty()) {
+            return;
+        }
+        WaysGramGiftCatalogSheet sheet = new WaysGramGiftCatalogSheet(
+                context,
+                WaysGramSessionStore.getInstance(context.getApplicationContext(), account),
+                account,
+                null
+        );
+        sheet.show();
+        sheet.showMyGifts();
+        if (sheet.inventorySheet != null) {
+            sheet.inventorySheet.openGiftWhenLoaded(serial.trim());
+        }
+    }
+
     private void showGiftActions(JSONObject gift) {
         String serial = gift.optString("serial_number", "");
         JSONObject telegramGift = gift.optJSONObject("telegram_gift");

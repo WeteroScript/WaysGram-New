@@ -1,18 +1,24 @@
 package org.telegram.messenger.waysgram;
 
+import android.animation.Animator;
+import android.animation.AnimatorListenerAdapter;
+import android.animation.ArgbEvaluator;
+import android.animation.ValueAnimator;
 import android.app.Dialog;
 import android.content.Context;
+import android.graphics.Canvas;
 import android.graphics.Color;
+import android.graphics.Paint;
+import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
-import android.os.Handler;
-import android.os.Looper;
-import android.os.SystemClock;
 import android.text.TextUtils;
 import android.util.TypedValue;
 import android.view.Gravity;
 import android.view.View;
+import android.view.ViewGroup;
 import android.view.Window;
 import android.view.WindowManager;
+import android.view.animation.DecelerateInterpolator;
 import android.widget.FrameLayout;
 import android.widget.LinearLayout;
 import android.widget.TextView;
@@ -23,75 +29,80 @@ import org.telegram.messenger.FileLog;
 import org.telegram.ui.Components.BackupImageView;
 
 import java.util.ArrayList;
-import java.util.Random;
+import java.util.Locale;
 
 /**
- * Plays the upgrade reveal: the model, the pattern and the backdrop reels scroll through the
- * official Telegram candidates and stop one after another on the attributes the server rolled.
+ * Plays the WaysGram upgrade reveal.
  *
- * <p>Telegram's own client rolls the three attributes on the server and animates the result; the
- * reels here use exactly the same candidate names, the same published chances (the server already
- * rolled with them) and the official backdrop colours, so the animation lands on the same kind of
- * card the original sheet shows — including the collection number, "Plush Pepe #1".</p>
+ * <p>Three reels — model, pattern and backdrop — scroll continuously through the official
+ * Telegram candidates, decelerate and click into place one after another while the card
+ * gradient and the artwork tint travel with them. The card is wrapped in a frame that turns
+ * into the colour of the rolled rarity.</p>
  *
- * <p>No toast is shown on success: the reveal itself is the confirmation.</p>
+ * <p>While the reveal runs the only control is «Пропустить»; when it settles the buttons
+ * «Следующий подарок» and «Готово» fade in. No toast confirms the upgrade: the reveal does.</p>
  */
 public final class WaysGramGiftUpgradeReveal {
 
-    private static final long MODEL_SETTLES_AT = 640L;
-    private static final long PATTERN_SETTLES_AT = 960L;
-    private static final long BACKDROP_SETTLES_AT = 1280L;
-    private static final long TICK = 45L;
-    private static final long HOLD_AFTER_SETTLE = 1400L;
+    /** Called when the user leaves the reveal. */
+    public interface Listener {
+        /** The user is done — close everything and reload the inventory. */
+        void onDone();
+
+        /** The user wants the next gift that can still be upgraded. */
+        void onNextGift();
+    }
+
+    private static final long MODEL_DURATION = 1150L;
+    private static final long PATTERN_DURATION = 1350L;
+    private static final long BACKDROP_DURATION = 1650L;
+    private static final long PATTERN_DELAY = 120L;
+    private static final long BACKDROP_DELAY = 240L;
 
     private WaysGramGiftUpgradeReveal() {
     }
 
     public static void show(
-            Context context, String serial, JSONObject result, Runnable onDone
+            Context context, String serial, JSONObject result, Listener listener
     ) {
         if (context == null || result == null) {
-            if (onDone != null) {
-                onDone.run();
+            if (listener != null) {
+                listener.onDone();
             }
             return;
         }
         try {
-            new Panel(context, serial, result, onDone).start();
+            new Panel(context, serial, result, listener).show();
         } catch (Exception exception) {
             FileLog.e(exception);
-            if (onDone != null) {
-                onDone.run();
+            if (listener != null) {
+                listener.onDone();
             }
         }
     }
 
-    private static final class Panel implements Runnable {
+    private static final class Panel {
 
         private final Context context;
         private final String serial;
-        private final Runnable onDone;
-        private final Handler handler = new Handler(Looper.getMainLooper());
-        private final Random random = new Random();
+        private final Listener listener;
+        private final Dialog dialog;
 
+        private final LinearLayout card;
+        private final GradientDrawable frameBackground;
+        private final GradientDrawable cardBackground;
+        private final View tint;
         private final TextView titleView;
         private final TextView numberView;
         private final TextView rarityView;
-        private final TextView modelValue;
-        private final TextView patternValue;
-        private final TextView backdropValue;
-        private final View artworkTint;
-        private final GradientDrawable cardBackground;
+        private final TextView skipButton;
+        private final TextView nextButton;
+        private final TextView doneButton;
+        private final LinearLayout actions;
 
-        private final String finalModel;
-        private final String finalPattern;
-        private final String finalBackdrop;
-        private final int finalFocusColor;
-        private final int finalCenterColor;
-        private final int finalEdgeColor;
-        private final String giftName;
-        private final int collectionNumber;
-        private final String rarityText;
+        private final Reel modelReel;
+        private final Reel patternReel;
+        private final Reel backdropReel;
 
         private final String[] models;
         private final String[] patterns;
@@ -99,278 +110,528 @@ public final class WaysGramGiftUpgradeReveal {
         private final int[] backdropCenter;
         private final int[] backdropEdge;
 
-        private final Dialog dialog;
-        private final long startedAt = SystemClock.uptimeMillis();
-        private boolean settled;
-        private boolean done;
+        private final String finalModel;
+        private final String finalPattern;
+        private final String finalBackdrop;
+        private final String giftName;
+        private final String rarityText;
+        private final int finalCenterColor;
+        private final int finalEdgeColor;
+        private final int accentColor;
+        private final int collectionNumber;
 
-        Panel(Context context, String serial, JSONObject result, Runnable onDone) {
+        private final ArgbEvaluator argb = new ArgbEvaluator();
+        private final ArrayList<ValueAnimator> animators = new ArrayList<>();
+
+        private boolean finished;
+        private boolean closed;
+
+        Panel(Context context, String serial, JSONObject result, Listener listener) {
             this.context = context;
             this.serial = serial;
-            this.onDone = onDone;
+            this.listener = listener;
 
             JSONObject traits = result.optJSONObject("traits");
             if (traits == null) {
                 JSONObject attributes = result.optJSONObject("attributes");
-                traits = attributes == null ? null : attributes.optJSONObject("collectible_traits");
+                traits = attributes == null
+                        ? null : attributes.optJSONObject("collectible_traits");
             }
             JSONObject model = traitObject(traits, "model");
             JSONObject pattern = traitObject(traits, "pattern");
             JSONObject backdrop = traitObject(traits, "backdrop");
-            this.finalModel = traitText(model, traits, "model", "Модель");
-            this.finalPattern = traitText(pattern, traits, "pattern", "Узор");
-            this.finalBackdrop = traitText(backdrop, traits, "backdrop", "Фон");
-            this.finalCenterColor = backdrop == null
-                    ? 0x00202A38 : backdrop.optInt("center_color", 0) | 0xFF000000;
-            this.finalEdgeColor = backdrop == null
-                    ? 0x00111A24 : backdrop.optInt("edge_color", 0) | 0xFF000000;
-            this.finalFocusColor = backdrop == null
-                    ? 0x007A6BFF : backdrop.optInt("pattern_color", 0) | 0xFF000000;
-            this.giftName = result.optString("gift_name", "").trim();
-            this.collectionNumber = Math.max(0, result.optInt("unique_num", 0));
-            this.rarityText = rarityLabel(
-                    traits == null ? "" : traits.optString("rarity", "")
-            );
+            finalModel = traitText(model, traits, "model", "Модель");
+            finalPattern = traitText(pattern, traits, "pattern", "Узор");
+            finalBackdrop = traitText(backdrop, traits, "backdrop", "Фон");
+            finalCenterColor = color(backdrop, "center_color", 0x00202A38);
+            finalEdgeColor = color(backdrop, "edge_color", 0x00111A24);
+            giftName = result.optString("gift_name", "").trim();
+            collectionNumber = Math.max(0, result.optInt("unique_num", 0));
+            String rarityKey = traits == null ? "" : traits.optString("rarity", "");
+            rarityText = rarityLabel(rarityKey);
+            accentColor = accentFor(rarityKey);
 
             JSONObject pool = result.optJSONObject("roll_pool");
-            this.models = names(pool, "models", finalModel);
-            this.patterns = names(pool, "patterns", finalPattern);
-            this.backdrops = names(pool, "backdrops", finalBackdrop);
+            models = names(pool, "models", finalModel);
+            patterns = names(pool, "patterns", finalPattern);
+            backdrops = names(pool, "backdrops", finalBackdrop);
             JSONArray candidates = pool == null ? null : pool.optJSONArray("backdrops");
             int size = candidates == null ? 0 : candidates.length();
-            this.backdropCenter = new int[Math.max(1, size)];
-            this.backdropEdge = new int[Math.max(1, size)];
+            backdropCenter = new int[Math.max(1, size)];
+            backdropEdge = new int[Math.max(1, size)];
             for (int i = 0; i < size; i++) {
                 JSONArray entry = candidates.optJSONArray(i);
-                backdropCenter[i] = entry == null ? finalCenterColor : entry.optInt(2, 0) | 0xFF000000;
-                backdropEdge[i] = entry == null ? finalEdgeColor : entry.optInt(3, 0) | 0xFF000000;
+                backdropCenter[i] = entry == null
+                        ? finalCenterColor : entry.optInt(2, 0) | 0xFF000000;
+                backdropEdge[i] = entry == null
+                        ? finalEdgeColor : entry.optInt(3, 0) | 0xFF000000;
             }
 
             dialog = new Dialog(context);
             dialog.requestWindowFeature(Window.FEATURE_NO_TITLE);
             dialog.setCancelable(true);
+            dialog.setCanceledOnTouchOutside(true);
 
-            LinearLayout root = new LinearLayout(context);
-            root.setOrientation(LinearLayout.VERTICAL);
-            root.setGravity(Gravity.CENTER_HORIZONTAL);
-            int padding = dp(20);
-            root.setPadding(padding, padding, padding, padding);
-            GradientDrawable card = new GradientDrawable(
-                    GradientDrawable.Orientation.TOP_BOTTOM,
-                    new int[]{finalCenterColor, finalEdgeColor}
-            );
-            card.setCornerRadius(dp(20));
-            cardBackground = card;
-            root.setBackground(card);
+            // Outer frame: two device pixels of accent colour, the card itself sits inside.
+            frameBackground = rounded(0x00000000, 0x66FFFFFF, dp(2), dp(24));
+            FrameLayout frameView = new FrameLayout(context);
+            frameView.setBackground(frameBackground);
+            frameView.setPadding(dp(3), dp(3), dp(3), dp(3));
 
-            titleView = text(dp(17), 0xFFFFFFFF, true);
-            titleView.setText(TextUtils.isEmpty(giftName)
-                    ? "Улучшение подарка" : giftName);
+            card = new LinearLayout(context);
+            card.setOrientation(LinearLayout.VERTICAL);
+            card.setGravity(Gravity.CENTER_HORIZONTAL);
+            card.setPadding(dp(18), dp(18), dp(18), dp(16));
+            cardBackground = rounded(finalCenterColor, 0, 0, dp(21));
+            cardBackground.setOrientation(GradientDrawable.Orientation.TOP_BOTTOM);
+            card.setBackground(cardBackground);
+            frameView.addView(card, new FrameLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT
+            ));
+
+            titleView = text(17, 0xFFFFFFFF, true);
             titleView.setGravity(Gravity.CENTER);
-            root.addView(titleView, params(-1, -2));
+            titleView.setText(TextUtils.isEmpty(giftName) ? "Улучшение подарка" : giftName);
+            card.addView(titleView, matchWrap(0));
 
-            FrameLayout artwork = new FrameLayout(context);
-            artwork.setClipToOutline(false);
-            LinearLayout.LayoutParams artworkParams = new LinearLayout.LayoutParams(dp(148), dp(148));
-            artworkParams.topMargin = dp(14);
-            root.addView(artwork, artworkParams);
+            FrameLayout artworkHolder = new FrameLayout(context);
+            LinearLayout.LayoutParams artworkParams = new LinearLayout.LayoutParams(dp(150), dp(150));
+            artworkParams.topMargin = dp(12);
+            artworkParams.gravity = Gravity.CENTER_HORIZONTAL;
+            card.addView(artworkHolder, artworkParams);
 
             BackupImageView imageView = new BackupImageView(context);
-            artwork.addView(imageView, new FrameLayout.LayoutParams(-1, -1));
-            WaysGramGiftArtwork.apply(imageView, serial);
+            artworkHolder.addView(imageView, new FrameLayout.LayoutParams(-1, -1));
+            if (WaysGramGiftArtwork.hasArtwork(serial)) {
+                WaysGramGiftArtwork.apply(imageView, serial);
+            } else {
+                TextView emojiView = text(56, 0xFFFFFFFF, false);
+                emojiView.setGravity(Gravity.CENTER);
+                emojiView.setText(result.optString("gift_emoji", "🎁"));
+                artworkHolder.addView(emojiView, new FrameLayout.LayoutParams(-1, -1));
+            }
 
-            artworkTint = new View(context);
-            artworkTint.setBackgroundColor(finalFocusColor);
-            artworkTint.setAlpha(0f);
+            tint = new View(context);
+            tint.setAlpha(0.32f);
             FrameLayout.LayoutParams tintParams = new FrameLayout.LayoutParams(-1, dp(96));
             tintParams.gravity = Gravity.BOTTOM;
-            artwork.addView(artworkTint, tintParams);
+            artworkHolder.addView(tint, tintParams);
 
-            numberView = text(dp(15), 0xFFFFFFFF, true);
+            numberView = text(15, 0xFFFFFFFF, true);
             numberView.setGravity(Gravity.CENTER);
             numberView.setText("");
-            LinearLayout.LayoutParams numberParams = new LinearLayout.LayoutParams(-2, -2);
-            numberParams.topMargin = dp(6);
-            root.addView(numberView, numberParams);
+            numberView.setAlpha(0f);
+            card.addView(numberView, matchWrap(2));
 
-            modelValue = reelRow(root, "Модель", finalModel);
-            patternValue = reelRow(root, "Узор", finalPattern);
-            backdropValue = reelRow(root, "Фон", finalBackdrop);
+            LinearLayout reels = new LinearLayout(context);
+            reels.setOrientation(LinearLayout.VERTICAL);
+            LinearLayout.LayoutParams reelsParams = new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
+            );
+            reelsParams.topMargin = dp(10);
+            card.addView(reels, reelsParams);
 
-            rarityView = text(dp(13), 0xCCFFFFFF, false);
+            modelReel = addReel(reels, "Модель", models);
+            patternReel = addReel(reels, "Узор", patterns);
+            backdropReel = addReel(reels, "Фон", backdrops);
+            tint.setBackgroundColor(modelColor(models[0]));
+
+            rarityView = text(12, 0xCCFFFFFF, false);
             rarityView.setGravity(Gravity.CENTER);
-            rarityView.setText("");
-            LinearLayout.LayoutParams rarityParams = new LinearLayout.LayoutParams(-2, -2);
-            rarityParams.topMargin = dp(8);
-            root.addView(rarityView, rarityParams);
+            rarityView.setText(rarityText);
+            rarityView.setAlpha(0f);
+            card.addView(rarityView, matchWrap(8));
 
-            TextView hint = text(dp(11), 0x99FFFFFF, false);
-            hint.setText("Нажмите, чтобы пропустить");
-            hint.setGravity(Gravity.CENTER);
-            LinearLayout.LayoutParams hintParams = new LinearLayout.LayoutParams(-2, -2);
-            hintParams.topMargin = dp(10);
-            root.addView(hint, hintParams);
+            actions = new LinearLayout(context);
+            actions.setOrientation(LinearLayout.HORIZONTAL);
+            actions.setGravity(Gravity.CENTER);
+            LinearLayout.LayoutParams actionsParams = new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
+            );
+            actionsParams.topMargin = dp(14);
+            card.addView(actions, actionsParams);
 
-            root.setOnClickListener(v -> skip());
+            skipButton = button("Пропустить", 0x33FFFFFF, 0xFFFFFFFF);
+            skipButton.setOnClickListener(v -> skip());
+            actions.addView(skipButton, weightWrap());
 
-            dialog.setContentView(root);
+            nextButton = button("Следующий подарок", accentColor, 0xFF10131A);
+            nextButton.setVisibility(View.GONE);
+            nextButton.setAlpha(0f);
+            nextButton.setOnClickListener(v -> finishWithNext());
+            actions.addView(nextButton, weightWrap());
+
+            doneButton = button("Готово", 0x33FFFFFF, 0xFFFFFFFF);
+            doneButton.setVisibility(View.GONE);
+            doneButton.setAlpha(0f);
+            doneButton.setOnClickListener(v -> finishWithDone());
+            LinearLayout.LayoutParams doneParams = weightWrap();
+            doneParams.leftMargin = dp(8);
+            actions.addView(doneButton, doneParams);
+
+            dialog.setContentView(frameView);
             Window window = dialog.getWindow();
             if (window != null) {
                 window.setBackgroundDrawableResource(android.R.color.transparent);
                 window.addFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND);
                 WindowManager.LayoutParams attributes = window.getAttributes();
-                attributes.dimAmount = 0.6f;
-                attributes.width = Math.min(dp(320), context.getResources().getDisplayMetrics().widthPixels - dp(48));
+                attributes.dimAmount = 0.62f;
+                int width = Math.min(dp(330), screenWidth() - dp(40));
+                attributes.width = width;
+                attributes.height = WindowManager.LayoutParams.WRAP_CONTENT;
                 window.setAttributes(attributes);
             }
-            dialog.setOnDismissListener(d -> finishOnce());
+            dialog.setOnDismissListener(d -> close());
         }
 
-        void start() {
+        void show() {
             dialog.show();
-            handler.postDelayed(this, TICK);
+            applyBackdrop(0f);
+            startReels();
         }
 
-        @Override
-        public void run() {
-            long elapsed = SystemClock.uptimeMillis() - startedAt;
-            if (!settled) {
-                if (elapsed < MODEL_SETTLES_AT) {
-                    modelValue.setText(pick(models, finalModel));
-                } else if (modelValue.getTag() == null) {
-                    modelValue.setTag(Boolean.TRUE);
-                    modelValue.setText(finalModel);
+        private void startReels() {
+            launch(modelReel, models, finalModel, MODEL_DURATION, 0L);
+            launch(patternReel, patterns, finalPattern, PATTERN_DURATION, PATTERN_DELAY);
+            ValueAnimator backdropAnimator = launch(
+                    backdropReel, backdrops, finalBackdrop, BACKDROP_DURATION, BACKDROP_DELAY
+            );
+            ValueAnimator modelTintAnimator = trail(
+                    models.length, finalModel, MODEL_DURATION, 0L,
+                    value -> applyModelTint(value)
+            );
+            // The gradient travels with the backdrop reel, so colour and name always agree.
+            backdropAnimator.addUpdateListener(
+                    animation -> applyBackdrop((float) animation.getAnimatedValue())
+            );
+            backdropAnimator.addListener(new AnimatorListenerAdapter() {
+                @Override
+                public void onAnimationEnd(Animator animation) {
+                    if (!finished) {
+                        settle();
+                    }
                 }
-                if (elapsed < PATTERN_SETTLES_AT) {
-                    patternValue.setText(pick(patterns, finalPattern));
-                } else if (patternValue.getTag() == null) {
-                    patternValue.setTag(Boolean.TRUE);
-                    patternValue.setText(finalPattern);
-                }
-                if (elapsed < BACKDROP_SETTLES_AT) {
-                    backdropValue.setText(pick(backdrops, finalBackdrop));
-                    paintRandomBackdrop();
-                } else if (backdropValue.getTag() == null) {
-                    backdropValue.setTag(Boolean.TRUE);
-                    backdropValue.setText(finalBackdrop);
-                }
-                boolean allSettled = modelValue.getTag() != null
-                        && patternValue.getTag() != null
-                        && backdropValue.getTag() != null;
-                if (!allSettled) {
-                    handler.postDelayed(this, TICK);
-                    return;
-                }
-                applyResult(true);
+            });
+            if (modelTintAnimator != null) {
+                animators.add(modelTintAnimator);
+            }
+        }
+
+        private ValueAnimator launch(
+                Reel reel, String[] values, String target, long duration, long delay
+        ) {
+            int index = indexOf(values, target);
+            float end = index + Math.max(3, 2 + values.length / 6);
+            ValueAnimator animator = ValueAnimator.ofFloat(0f, Math.max(1f, end));
+            animator.setDuration(duration);
+            animator.setStartDelay(delay);
+            animator.setInterpolator(new DecelerateInterpolator(1.75f));
+            animator.addUpdateListener(
+                    animation -> reel.setPosition((float) animation.getAnimatedValue())
+            );
+            animator.start();
+            animators.add(animator);
+            return animator;
+        }
+
+        /** Same motion as the model reel, used for the artwork tint. */
+        private ValueAnimator trail(
+                int count, String target, long duration, long delay, FloatSink sink
+        ) {
+            if (count <= 1) {
+                return null;
+            }
+            float end = Math.max(1f, Math.max(3, 2 + count / 6));
+            ValueAnimator animator = ValueAnimator.ofFloat(0f, end);
+            animator.setDuration(duration);
+            animator.setStartDelay(delay);
+            animator.setInterpolator(new DecelerateInterpolator(1.75f));
+            animator.addUpdateListener(animation -> sink.accept((float) animation.getAnimatedValue()));
+            animator.start();
+            return animator;
+        }
+
+        private void applyModelTint(float position) {
+            int count = models.length;
+            if (count == 0) {
                 return;
             }
+            int index = (int) Math.floor(position);
+            float fraction = position - index;
+            int from = modelColor(models[circular(index, count)]);
+            int to = modelColor(models[circular(index + 1, count)]);
+            tint.setBackgroundColor(blend(from, to, fraction));
+            tint.setAlpha(0.32f);
         }
 
-        private void applyResult(boolean animate) {
-            settled = true;
-            cardBackground.setColors(new int[]{finalCenterColor, finalEdgeColor});
-            modelValue.setText(finalModel);
-            patternValue.setText(finalPattern);
-            backdropValue.setText(finalBackdrop);
-            artworkTint.setBackgroundColor(modelColor(finalModel));
-            artworkTint.animate().alpha(0.22f).setDuration(220L).start();
-            rarityView.setText(rarityText);
-            String number = collectionNumber > 0 ? " #" + collectionNumber : "";
-            titleView.setText((TextUtils.isEmpty(giftName) ? "Подарок" : giftName) + number);
-            numberView.setText(collectionNumber > 0
-                    ? "Новый номер коллекции: #" + collectionNumber : "");
-            if (animate) {
-                numberView.setScaleX(0.6f);
-                numberView.setScaleY(0.6f);
-                numberView.setAlpha(0f);
-                numberView.animate().scaleX(1f).scaleY(1f).alpha(1f)
-                        .setDuration(260L).start();
-            } else {
-                numberView.setAlpha(1f);
+        private void applyBackdrop(float position) {
+            if (backdropCenter.length == 0) {
+                cardBackground.setColors(new int[]{finalCenterColor, finalEdgeColor});
+                return;
             }
-            handler.postDelayed(this::dismiss, HOLD_AFTER_SETTLE);
+            int count = backdropCenter.length;
+            int index = (int) Math.floor(position);
+            float fraction = position - index;
+            int centerFrom = backdropCenter[circular(index, count)];
+            int centerTo = backdropCenter[circular(index + 1, count)];
+            int edgeFrom = backdropEdge[circular(index, count)];
+            int edgeTo = backdropEdge[circular(index + 1, count)];
+            cardBackground.setColors(new int[]{
+                    blend(centerFrom, centerTo, fraction),
+                    blend(edgeFrom, edgeTo, fraction)
+            });
+        }
+
+        private void settle() {
+            if (finished) {
+                return;
+            }
+            finished = true;
+            modelReel.setPosition(indexOf(models, finalModel));
+            patternReel.setPosition(indexOf(patterns, finalPattern));
+            backdropReel.setPosition(indexOf(backdrops, finalBackdrop));
+            cardBackground.setColors(new int[]{finalCenterColor, finalEdgeColor});
+            tint.setBackgroundColor(modelColor(finalModel));
+            tint.setAlpha(0.24f);
+
+            String number = collectionNumber > 0
+                    ? (TextUtils.isEmpty(giftName) ? "Подарок" : giftName) + " #" + collectionNumber
+                    : (TextUtils.isEmpty(giftName) ? "Подарок" : giftName);
+            titleView.setText(number);
+            numberView.setText(collectionNumber > 0
+                    ? "Номер в коллекции: #" + collectionNumber : "");
+
+            animateColor(frameBackground, 0x66FFFFFF, accentColor, 380L);
+            fadeIn(rarityView, 260L, 120L);
+            numberView.setScaleX(0.72f);
+            numberView.setScaleY(0.72f);
+            numberView.animate()
+                    .alpha(1f).scaleX(1f).scaleY(1f)
+                    .setStartDelay(90L)
+                    .setDuration(300L)
+                    .setInterpolator(new DecelerateInterpolator(2f))
+                    .start();
+
+            skipButton.animate().alpha(0f).setDuration(160L)
+                    .withEndAction(() -> skipButton.setVisibility(View.GONE))
+                    .start();
+            revealActions();
+        }
+
+        private void revealActions() {
+            nextButton.setVisibility(View.VISIBLE);
+            doneButton.setVisibility(View.VISIBLE);
+            fadeIn(nextButton, 240L, 200L);
+            fadeIn(doneButton, 240L, 300L);
         }
 
         private void skip() {
-            if (settled) {
+            if (finished) {
                 return;
             }
-            handler.removeCallbacks(this);
-            applyResult(false);
+            for (int i = 0; i < animators.size(); i++) {
+                animators.get(i).cancel();
+            }
+            settle();
         }
 
-        private void dismiss() {
+        private void finishWithDone() {
+            dialog.dismiss();
+        }
+
+        private void finishWithNext() {
+            if (listener != null && !closed) {
+                closed = true;
+                listener.onNextGift();
+            }
             if (dialog.isShowing()) {
                 dialog.dismiss();
-            } else {
-                finishOnce();
             }
         }
 
-        private void finishOnce() {
-            if (done) {
+        private void close() {
+            if (closed) {
                 return;
             }
-            done = true;
-            handler.removeCallbacksAndMessages(null);
-            if (onDone != null) {
-                onDone.run();
+            closed = true;
+            for (int i = 0; i < animators.size(); i++) {
+                animators.get(i).cancel();
+            }
+            animators.clear();
+            if (listener != null) {
+                listener.onDone();
             }
         }
 
-        private void paintRandomBackdrop() {
-            if (backdropCenter.length == 0) {
-                return;
-            }
-            int index = random.nextInt(backdropCenter.length);
-            cardBackground.setColors(new int[]{backdropCenter[index], backdropEdge[index]});
-            artworkTint.setBackgroundColor(modelColor(pick(models, finalModel)));
-        }
-
-        private TextView reelRow(LinearLayout parent, String label, String value) {
+        private Reel addReel(LinearLayout parent, String caption, String[] values) {
             LinearLayout row = new LinearLayout(context);
             row.setOrientation(LinearLayout.HORIZONTAL);
             row.setGravity(Gravity.CENTER_VERTICAL);
-            LinearLayout.LayoutParams rowParams = new LinearLayout.LayoutParams(-1, -2);
-            rowParams.topMargin = dp(8);
+            LinearLayout.LayoutParams rowParams = new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
+            );
+            rowParams.topMargin = dp(7);
             parent.addView(row, rowParams);
 
-            TextView caption = text(dp(12), 0xAAFFFFFF, false);
-            caption.setText(label);
-            row.addView(caption, new LinearLayout.LayoutParams(dp(64), -2));
+            TextView label = text(12, 0xAAFFFFFF, false);
+            label.setText(caption);
+            row.addView(label, new LinearLayout.LayoutParams(dp(64), ViewGroup.LayoutParams.WRAP_CONTENT));
 
-            TextView field = text(dp(13), 0xFFFFFFFF, true);
-            field.setText(value);
-            field.setSingleLine(true);
-            field.setEllipsize(TextUtils.TruncateAt.END);
-            row.addView(field, new LinearLayout.LayoutParams(0, -2, 1f));
-            return field;
+            Reel reel = new Reel(context);
+            reel.setValues(values);
+            reel.setTextSizePx(sp(13.5f));
+            reel.setTextColor(0xFFFFFFFF);
+            row.addView(reel, new LinearLayout.LayoutParams(
+                    0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f
+            ));
+            return reel;
         }
 
-        private TextView text(int size, int color, boolean bold) {
+        private TextView button(String label, int background, int foreground) {
             TextView view = new TextView(context);
-            view.setTextSize(TypedValue.COMPLEX_UNIT_PX, size);
+            view.setText(label);
+            view.setGravity(Gravity.CENTER);
+            view.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f);
+            view.setTextColor(foreground);
+            view.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+            view.setPadding(dp(12), dp(10), dp(12), dp(10));
+            view.setBackground(rounded(background, 0, 0, dp(14)));
+            return view;
+        }
+
+        private void fadeIn(View view, long duration, long delay) {
+            view.setAlpha(0f);
+            view.animate().alpha(1f).setStartDelay(delay).setDuration(duration).start();
+        }
+
+        private void animateColor(
+                final GradientDrawable drawable, int from, int to, long duration
+        ) {
+            ValueAnimator animator = ValueAnimator.ofFloat(0f, 1f);
+            animator.setDuration(duration);
+            animator.addUpdateListener(animation -> {
+                float fraction = (float) animation.getAnimatedValue();
+                int color = (Integer) argb.evaluate(fraction, from, to);
+                drawable.setStroke(dp(2), color);
+            });
+            animator.start();
+        }
+
+        private TextView text(float sizeSp, int color, boolean bold) {
+            TextView view = new TextView(context);
+            view.setTextSize(TypedValue.COMPLEX_UNIT_SP, sizeSp);
             view.setTextColor(color);
             if (bold) {
-                view.setTypeface(view.getTypeface(), android.graphics.Typeface.BOLD);
+                view.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
             }
             return view;
         }
 
-        private LinearLayout.LayoutParams params(int width, int height) {
-            return new LinearLayout.LayoutParams(width, height);
+        private LinearLayout.LayoutParams matchWrap(int topMarginDp) {
+            LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
+            );
+            if (topMarginDp != 0) {
+                params.topMargin = dp(topMarginDp);
+            }
+            return params;
+        }
+
+        private LinearLayout.LayoutParams weightWrap() {
+            return new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
         }
 
         private int dp(int value) {
             return Math.round(value * context.getResources().getDisplayMetrics().density);
         }
 
-        private String pick(String[] pool, String fallback) {
-            if (pool == null || pool.length == 0) {
-                return fallback;
-            }
-            return pool[random.nextInt(pool.length)];
+        private float sp(float value) {
+            return value * context.getResources().getDisplayMetrics().scaledDensity;
         }
+
+        private int screenWidth() {
+            return context.getResources().getDisplayMetrics().widthPixels;
+        }
+
+        private int circular(int index, int count) {
+            return Math.floorMod(index, Math.max(1, count));
+        }
+
+        private int blend(int from, int to, float fraction) {
+            return (Integer) argb.evaluate(Math.max(0f, Math.min(1f, fraction)), from, to);
+        }
+    }
+
+    /** One continuously scrolling reel; it draws the current and the incoming value. */
+    private static final class Reel extends View {
+
+        private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private String[] values = new String[]{"—"};
+        private float position;
+
+        Reel(Context context) {
+            super(context);
+            paint.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+            paint.setColor(0xFFFFFFFF);
+        }
+
+        void setValues(String[] values) {
+            this.values = values == null || values.length == 0
+                    ? new String[]{"—"} : values;
+            invalidate();
+        }
+
+        void setTextSizePx(float size) {
+            paint.setTextSize(size);
+            requestLayout();
+        }
+
+        void setTextColor(int color) {
+            paint.setColor(color);
+            invalidate();
+        }
+
+        void setPosition(float position) {
+            this.position = position;
+            invalidate();
+        }
+
+        @Override
+        protected void onMeasure(int widthMeasureSpec, int heightMeasureSpec) {
+            int width = MeasureSpec.getSize(widthMeasureSpec);
+            int height = Math.round(paint.getTextSize() * 1.85f);
+            setMeasuredDimension(width, Math.max(height, 1));
+        }
+
+        @Override
+        protected void onDraw(Canvas canvas) {
+            int count = values.length;
+            if (count == 0) {
+                return;
+            }
+            int index = (int) Math.floor(position);
+            float fraction = position - index;
+            String current = values[Math.floorMod(index, count)];
+            String incoming = values[Math.floorMod(index + 1, count)];
+            float lineHeight = paint.getTextSize() * 1.85f;
+            Paint.FontMetrics metrics = paint.getFontMetrics();
+            float baseline = getHeight() / 2f - (metrics.ascent + metrics.descent) / 2f;
+            float shift = fraction * lineHeight;
+            int baseColor = paint.getColor();
+
+            paint.setAlpha(Math.round(255f * Math.max(0f, 1f - fraction * 0.55f)));
+            canvas.drawText(current, 0f, baseline - shift, paint);
+
+            paint.setAlpha(Math.round(255f * Math.min(1f, 0.35f + fraction * 0.65f)));
+            canvas.drawText(incoming, 0f, baseline + lineHeight - shift, paint);
+
+            paint.setAlpha(Color.alpha(baseColor));
+        }
+    }
+
+    private interface FloatSink {
+        void accept(float value);
     }
 
     private static JSONObject traitObject(JSONObject traits, String key) {
@@ -388,11 +649,19 @@ public final class WaysGramGiftUpgradeReveal {
         }
         if (traits != null) {
             String legacy = traits.optString(key, "").trim();
-            if (!legacy.isEmpty()) {
+            if (!legacy.isEmpty() && !"null".equalsIgnoreCase(legacy)) {
                 return legacy;
             }
         }
         return fallback;
+    }
+
+    private static int color(JSONObject entry, String key, int fallback) {
+        if (entry == null) {
+            return fallback;
+        }
+        int value = entry.optInt(key, 0);
+        return value == 0 ? fallback : value | 0xFF000000;
     }
 
     private static String[] names(JSONObject pool, String key, String fallback) {
@@ -413,26 +682,67 @@ public final class WaysGramGiftUpgradeReveal {
         return names.toArray(new String[0]);
     }
 
-    /** Telegram paints every model with its own colourway; the reveal uses it as a tint. */
+    private static int indexOf(String[] values, String target) {
+        if (values == null || values.length == 0) {
+            return 0;
+        }
+        for (int i = 0; i < values.length; i++) {
+            if (target != null && target.equals(values[i])) {
+                return i;
+            }
+        }
+        return 0;
+    }
+
+    /** Telegram paints every model with its own colourway; the reel uses it as a tint. */
     private static int modelColor(String model) {
         float hue = Math.floorMod(model == null ? 0 : model.hashCode(), 360);
-        return Color.HSVToColor(new float[]{hue, 0.45f, 1f});
+        return Color.HSVToColor(new float[]{hue, 0.42f, 1f});
+    }
+
+    private static int accentFor(String rarityKey) {
+        String rarity = rarityKey == null ? "" : rarityKey.trim().toLowerCase(Locale.ROOT);
+        switch (rarity) {
+            case "uncommon":
+                return 0xFF4ADE80;
+            case "rare":
+                return 0xFF60A5FA;
+            case "epic":
+                return 0xFFC084FC;
+            case "legendary":
+                return 0xFFFBBF24;
+            default:
+                return 0xFF8AB4F8;
+        }
     }
 
     private static String rarityLabel(String rarityKey) {
-        String rarity = rarityKey == null ? "" : rarityKey.trim().toLowerCase(java.util.Locale.ROOT);
-        if (rarity.equals("uncommon")) {
-            return "Необычная редкость";
+        String rarity = rarityKey == null ? "" : rarityKey.trim().toLowerCase(Locale.ROOT);
+        switch (rarity) {
+            case "uncommon":
+                return "Необычная редкость";
+            case "rare":
+                return "Редкая редкость";
+            case "epic":
+                return "Эпическая редкость";
+            case "legendary":
+                return "Легендарная редкость";
+            default:
+                return "Обычная редкость";
         }
-        if (rarity.equals("rare")) {
-            return "Редкая редкость";
+    }
+
+    /** Rounded drawable; radii and stroke widths are already in pixels. */
+    private static GradientDrawable rounded(
+            int fill, int stroke, int strokeWidthPx, int radiusPx
+    ) {
+        GradientDrawable drawable = new GradientDrawable();
+        drawable.setShape(GradientDrawable.RECTANGLE);
+        drawable.setColor(fill);
+        drawable.setCornerRadius(radiusPx);
+        if (strokeWidthPx > 0 && stroke != 0) {
+            drawable.setStroke(strokeWidthPx, stroke);
         }
-        if (rarity.equals("epic")) {
-            return "Эпическая редкость";
-        }
-        if (rarity.equals("legendary")) {
-            return "Легендарная редкость";
-        }
-        return "Обычная редкость";
+        return drawable;
     }
 }

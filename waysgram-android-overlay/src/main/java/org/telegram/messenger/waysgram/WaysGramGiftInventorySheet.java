@@ -43,6 +43,7 @@ public final class WaysGramGiftInventorySheet extends BottomSheet {
     private final Map<String, JSONObject> giftsBySerial = new HashMap<>();
     private final Set<String> startedStickerDownloads = new HashSet<>();
 
+    private String pendingOpenSerial;
     private UniversalRecyclerView listView;
     private TextView emptyView;
     private TextView statusView;
@@ -140,6 +141,7 @@ public final class WaysGramGiftInventorySheet extends BottomSheet {
                     }
                     listView.adapter.update(false);
                     downloadGiftStickers(gifts);
+                    openPendingGift();
                 });
             }
 
@@ -175,6 +177,38 @@ public final class WaysGramGiftInventorySheet extends BottomSheet {
             listener.onGiftSelected(source);
             dismiss();
         }
+    }
+
+    /**
+     * Opens the card of one gift as soon as the inventory is available.
+     *
+     * <p>Used by «Следующий подарок» in the upgrade reveal: the sheet loads, jumps straight to
+     * the requested gift and closes itself once the card is open.</p>
+     */
+    public void openGiftWhenLoaded(String serial) {
+        pendingOpenSerial = serial == null ? null : serial.trim();
+        openPendingGift();
+    }
+
+    private void openPendingGift() {
+        if (pendingOpenSerial == null || pendingOpenSerial.isEmpty() || listener == null) {
+            return;
+        }
+        JSONObject gift = giftsBySerial.get(pendingOpenSerial);
+        if (gift == null) {
+            for (Map.Entry<String, JSONObject> entry : giftsBySerial.entrySet()) {
+                if (entry.getKey().equalsIgnoreCase(pendingOpenSerial)) {
+                    gift = entry.getValue();
+                    break;
+                }
+            }
+        }
+        if (gift == null) {
+            return;
+        }
+        pendingOpenSerial = null;
+        listener.onGiftSelected(gift);
+        dismiss();
     }
 
     private boolean onItemLongPress(UItem item, View view, int position, float x, float y) {
