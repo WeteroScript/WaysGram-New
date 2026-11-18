@@ -12,6 +12,7 @@ import org.json.JSONArray;
 import org.json.JSONObject;
 import org.telegram.messenger.AndroidUtilities;
 import org.telegram.messenger.FileLog;
+import org.telegram.messenger.UserConfig;
 import org.telegram.tgnet.WaysGramApi;
 
 import java.util.ArrayList;
@@ -99,7 +100,7 @@ public final class WaysGramPeerBadges {
         }
         EXECUTOR.execute(() -> {
             Entry entry = new Entry(new ArrayList<>(), System.currentTimeMillis(), false);
-            for (String path : badgePaths(peerId)) {
+            for (String path : badgePaths(account, peerId)) {
                 try {
                     List<Label> labels = labels(WaysGramApi.get(account, path));
                     entry = new Entry(labels, System.currentTimeMillis(), true);
@@ -162,12 +163,17 @@ public final class WaysGramPeerBadges {
 
     /**
      * WaysGram keeps marks only for accounts and channels; a chat dialog id is
-     * negative, so channels are looked up by their positive id.
+     * negative, so channels are looked up by their positive id. The signed-in
+     * account carries its own marks on {@code /api/me}, which is what the profile
+     * of the owner shows.
      */
-    private static String[] badgePaths(long peerId) {
+    private static String[] badgePaths(int account, long peerId) {
         if (peerId < 0) {
             long id = -peerId;
             return new String[]{"/api/channels/" + id, "/api/groups/" + id};
+        }
+        if (peerId == UserConfig.getInstance(account).getClientUserId()) {
+            return new String[]{"/api/me", "/api/users/" + peerId};
         }
         return new String[]{"/api/users/" + peerId};
     }

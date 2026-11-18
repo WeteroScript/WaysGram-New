@@ -132,7 +132,7 @@ public final class WaysGramGiftInventorySheet extends BottomSheet {
                         if (!serial.isEmpty()) giftsBySerial.put(serial, item);
                     }
                     nativeGifts.clear();
-                    nativeGifts.addAll(WaysGramProfileGiftsController.toNativeGifts(gifts, telegramAccount, true));
+                    nativeGifts.addAll(WaysGramProfileGiftsController.toNativeGifts(gifts, telegramAccount, false));
                     statusView.setVisibility(View.GONE);
                     int spanCount = Math.max(1, Math.min(3, nativeGifts.size()));
                     if (listView.getSpanCount() != spanCount) {

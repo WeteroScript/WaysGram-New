@@ -1501,6 +1501,7 @@ def patch_waysgram_gift_integration(android_root: Path) -> None:
         raise FileNotFoundError(f"Required chat avatar source not found: {avatar_container}")
     avatar_source = avatar_container.read_text(encoding="utf-8")
     patched_avatar = patch_chat_avatar_title_badges(avatar_source)
+    patched_avatar = patch_chat_avatar_self_skip(patched_avatar)
     if patched_avatar != avatar_source:
         avatar_container.write_text(patched_avatar, encoding="utf-8")
     if "WaysGramPeerBadges.decorate(" not in avatar_container.read_text(encoding="utf-8"):
@@ -1643,6 +1644,457 @@ def patch_waysgram_gift_unlimited_stock(original: str) -> str:
         "        gift.limited = !waysGramUnlimitedSupply;\n"
     )
     return replace_exactly_once(original, anchor, replacement, "WaysGram unlimited gift supply")
+
+
+def patch_waysgram_api_helpers(original: str) -> str:
+    """Extend the REST client with session refresh and a remembered account phone."""
+    if "refreshTokenIfNeeded" in original:
+        for value in ("SESSION_REFRESH_GRACE_SECONDS", "getRememberedPhone", "rememberPhone"):
+            if value not in original:
+                raise ValueError("WaysGramApi contains an incomplete session refresh patch")
+        return original
+
+    expires_anchor = (
+        "    public static long getTokenExpiresAt(int account) {\n"
+        "        return prefs().getLong(\"expires_\" + account, 0);\n"
+        "    }\n"
+    )
+    helpers = expires_anchor + (
+        "\n"
+        "    /** The server extends a session while it is still valid; the token itself never changes. */\n"
+        "    private static final long SESSION_REFRESH_GRACE_SECONDS = 7 * 24 * 60 * 60;\n"
+        "    private static final java.util.concurrent.atomic.AtomicLong LAST_REFRESH =\n"
+        "            new java.util.concurrent.atomic.AtomicLong(0);\n"
+        "\n"
+        "    public static void refreshTokenIfNeeded(int account) {\n"
+        "        String token = getToken(account);\n"
+        "        if (TextUtils.isEmpty(token)) {\n"
+        "            return;\n"
+        "        }\n"
+        "        long now = System.currentTimeMillis() / 1000;\n"
+        "        long expires = getTokenExpiresAt(account);\n"
+        "        if (expires > 0 && expires - now > SESSION_REFRESH_GRACE_SECONDS) {\n"
+        "            return;\n"
+        "        }\n"
+        "        long last = LAST_REFRESH.get();\n"
+        "        if (now - last < 120 || !LAST_REFRESH.compareAndSet(last, now)) {\n"
+        "            return;\n"
+        "        }\n"
+        "        try {\n"
+        "            JSONObject response = request(\"POST\", \"/api/auth/refresh\", new JSONObject(), token, 20000);\n"
+        "            long renewed = response.optLong(\"expires_at\", 0);\n"
+        "            if (renewed > 0) {\n"
+        "                saveToken(account, token, renewed);\n"
+        "            }\n"
+        "        } catch (ApiException e) {\n"
+        "            // An unusable session is reported by the next normal request as 401.\n"
+        "            FileLog.d(\"waysgram: session refresh failed (\" + e.status + \")\");\n"
+        "        }\n"
+        "    }\n"
+        "\n"
+        "    /** The phone the server confirmed, so the UI shows the number before the profile object loads. */\n"
+        "    public static void rememberPhone(int account, String phone) {\n"
+        "        String digits = phone == null ? \"\" : phone.replaceAll(\"[^0-9]\", \"\");\n"
+        "        if (digits.length() < 8 || digits.length() > 15) {\n"
+        "            return;\n"
+        "        }\n"
+        "        prefs().edit().putString(\"phone_\" + account, digits).apply();\n"
+        "    }\n"
+        "\n"
+        "    public static String getRememberedPhone(int account) {\n"
+        "        return prefs().getString(\"phone_\" + account, \"\");\n"
+        "    }\n"
+    )
+    original = replace_exactly_once(original, expires_anchor, helpers, "WaysGram session refresh helpers")
+
+    me_anchor = (
+        "    public static JSONObject me(int account) throws ApiException {\n"
+        "        JSONObject json = get(account, \"/api/me\");\n"
+        "        if (json.has(\"is_admin\")) {\n"
+        "            setAdmin(account, json.optBoolean(\"is_admin\"));\n"
+        "        }\n"
+        "        return json;\n"
+        "    }\n"
+    )
+    me_replacement = (
+        "    public static JSONObject me(int account) throws ApiException {\n"
+        "        JSONObject json = get(account, \"/api/me\");\n"
+        "        if (json.has(\"is_admin\")) {\n"
+        "            setAdmin(account, json.optBoolean(\"is_admin\"));\n"
+        "        }\n"
+        "        rememberPhone(account, json.optString(\"phone\", \"\"));\n"
+        "        return json;\n"
+        "    }\n"
+    )
+    return replace_exactly_once(original, me_anchor, me_replacement, "WaysGram account phone caching")
+
+
+def patch_waysgram_mapper_phone(original: str) -> str:
+    """Keep the account phone on the mapped user so the UI can render a real number."""
+    if "waysGramPhoneDigits" in original:
+        return original
+
+    to_user_anchor = "    public static TLRPC.TL_user toUser(JSONObject json) {\n"
+    helper = (
+        "    /** Digits of the account phone; the API sends it as \"+<number>\" or not at all. */\n"
+        "    private static String waysGramPhoneDigits(JSONObject json) {\n"
+        "        if (json == null) {\n"
+        "            return \"\";\n"
+        "        }\n"
+        "        for (String key : new String[]{\"phone\", \"phone_number\", \"virtual_number\", \"number\"}) {\n"
+        "            String digits = json.optString(key, \"\").replaceAll(\"[^0-9]\", \"\");\n"
+        "            if (digits.matches(\"[0-9]{8,15}\")) {\n"
+        "                return digits;\n"
+        "            }\n"
+        "        }\n"
+        "        return \"\";\n"
+        "    }\n"
+        "\n"
+        + to_user_anchor
+    )
+    original = replace_exactly_once(original, to_user_anchor, helper, "WaysGram phone helper")
+
+    self_anchor = (
+        "        String digits = phoneWithPlus == null ? \"\" : phoneWithPlus.replaceAll(\"[^0-9]\", \"\");\n"
+        "        if (json != null && json.has(\"phone\") && !json.isNull(\"phone\")) {\n"
+        "            digits = json.optString(\"phone\", \"\").replaceAll(\"[^0-9]\", \"\");\n"
+        "        }\n"
+        "        if (!TextUtils.isEmpty(digits)) {\n"
+        "            user.phone = digits;\n"
+        "            user.flags |= TLObject.FLAG_4;\n"
+        "        }\n"
+    )
+    self_replacement = (
+        "        String digits = waysGramPhoneDigits(json);\n"
+        "        if (digits.isEmpty() && phoneWithPlus != null) {\n"
+        "            digits = phoneWithPlus.replaceAll(\"[^0-9]\", \"\");\n"
+        "        }\n"
+        "        if (digits.matches(\"[0-9]{8,15}\")) {\n"
+        "            user.phone = digits;\n"
+        "            user.flags |= TLObject.FLAG_4;\n"
+        "        }\n"
+    )
+    original = replace_exactly_once(original, self_anchor, self_replacement, "WaysGram self phone digits")
+
+    premium_anchor = (
+        "        user.premium = true; // every WaysGram account has Premium, permanently\n"
+    )
+    premium_replacement = premium_anchor + (
+        "        String waysGramPhone = waysGramPhoneDigits(json);\n"
+        "        if (!waysGramPhone.isEmpty()) {\n"
+        "            user.phone = waysGramPhone;\n"
+        "            user.flags |= TLObject.FLAG_4;\n"
+        "        }\n"
+    )
+    return replace_exactly_once(original, premium_anchor, premium_replacement, "WaysGram peer phone field")
+
+
+def patch_waysgram_self_chat(original: str) -> str:
+    """Let Saved Messages work: the account may read from and write to itself."""
+    if "WaysGram saved messages" in original:
+        for value in ("TL_inputPeerSelf ? selfId", "recipient_id\", targetId"):
+            if value not in original:
+                raise ValueError("WaysGram transport contains an incomplete Saved Messages patch")
+        return original
+
+    session_anchor = (
+        "        // Everything below requires a session.\n"
+        "        if (TextUtils.isEmpty(WaysGramApi.getToken(account))) {\n"
+        "            throw new WaysGramApi.ApiException(401, \"AUTH_KEY_UNREGISTERED\");\n"
+        "        }\n"
+    )
+    session_replacement = session_anchor + (
+        "        WaysGramApi.refreshTokenIfNeeded(account);\n"
+    )
+    original = replace_exactly_once(original, session_anchor, session_replacement, "WaysGram session refresh call")
+
+    history_anchor = (
+        "        if (!(req.peer instanceof TLRPC.TL_inputPeerUser)) {\n"
+        "            return out;\n"
+        "        }\n"
+        "        long peerId = req.peer.user_id;\n"
+    )
+    history_replacement = (
+        "        // WaysGram saved messages: the chat with yourself is a normal user peer.\n"
+        "        if (!(req.peer instanceof TLRPC.TL_inputPeerUser) && !(req.peer instanceof TLRPC.TL_inputPeerSelf)) {\n"
+        "            return out;\n"
+        "        }\n"
+        "        long peerId = req.peer instanceof TLRPC.TL_inputPeerSelf ? selfId : req.peer.user_id;\n"
+    )
+    original = replace_exactly_once(original, history_anchor, history_replacement, "WaysGram saved messages history")
+
+    send_anchor = (
+        "        if (!(peer instanceof TLRPC.TL_inputPeerUser)) {\n"
+        "            throw new WaysGramApi.ApiException(400, \"METHOD_NOT_SUPPORTED\");\n"
+        "        }\n"
+        "        if (WaysGramBotFather.is(peer.user_id)) {\n"
+        "            return WaysGramBotFather.send(account, text, selfId, nextPts(account));\n"
+        "        }\n"
+    )
+    send_replacement = (
+        "        // WaysGram saved messages: the recipient is the account itself.\n"
+        "        if (!(peer instanceof TLRPC.TL_inputPeerUser) && !(peer instanceof TLRPC.TL_inputPeerSelf)) {\n"
+        "            throw new WaysGramApi.ApiException(400, \"METHOD_NOT_SUPPORTED\");\n"
+        "        }\n"
+        "        final long targetId = peer instanceof TLRPC.TL_inputPeerSelf ? selfId : peer.user_id;\n"
+        "        if (peer instanceof TLRPC.TL_inputPeerUser && WaysGramBotFather.is(peer.user_id)) {\n"
+        "            return WaysGramBotFather.send(account, text, selfId, nextPts(account));\n"
+        "        }\n"
+    )
+    original = replace_exactly_once(original, send_anchor, send_replacement, "WaysGram saved messages recipient")
+    original = replace_exactly_once(
+        original,
+        "            body.put(\"recipient_id\", peer.user_id);\n",
+        "            body.put(\"recipient_id\", targetId);\n",
+        "WaysGram saved messages body",
+    )
+    original = replace_exactly_once(
+        original,
+        "        WaysGramPoller.markDelivered(account, peer.user_id, result.optInt(\"id\"));\n",
+        "        WaysGramPoller.markDelivered(account, targetId, result.optInt(\"id\"));\n",
+        "WaysGram saved messages delivery marker",
+    )
+
+    wanted_anchor = (
+        "                if (inputPeer instanceof TLRPC.TL_inputPeerUser) {\n"
+        "                    wanted.add(inputPeer.user_id);\n"
+    )
+    wanted_replacement = (
+        "                if (inputPeer instanceof TLRPC.TL_inputPeerSelf) {\n"
+        "                    wanted.add(selfId);\n"
+        "                } else if (inputPeer instanceof TLRPC.TL_inputPeerUser) {\n"
+        "                    wanted.add(inputPeer.user_id);\n"
+    )
+    original = replace_exactly_once(original, wanted_anchor, wanted_replacement, "WaysGram saved messages peer dialog")
+
+    dialogs_anchor = (
+        "        for (int i = 0; i < c.dialogs.size(); i++) {\n"
+        "            TLRPC.Dialog d = c.dialogs.get(i);\n"
+        "            if (wanted.contains(d.peer.user_id)) {\n"
+        "                out.dialogs.add(d);\n"
+        "                out.messages.add(c.messages.get(i));\n"
+        "                out.users.add(c.users.get(i));\n"
+        "            }\n"
+        "        }\n"
+        "        out.users.add(selfUser(account));\n"
+        "        out.state = state(account);\n"
+    )
+    dialogs_replacement = (
+        "        for (int i = 0; i < c.dialogs.size(); i++) {\n"
+        "            TLRPC.Dialog d = c.dialogs.get(i);\n"
+        "            if (wanted.contains(d.peer.user_id)) {\n"
+        "                out.dialogs.add(d);\n"
+        "                out.messages.add(c.messages.get(i));\n"
+        "                out.users.add(c.users.get(i));\n"
+        "            }\n"
+        "        }\n"
+        "        // A chat without messages has no server-side conversation yet; the app still needs a\n"
+        "        // dialog for it, otherwise a freshly opened chat stays in its loading state.\n"
+        "        for (long wantedPeer : wanted) {\n"
+        "            boolean present = false;\n"
+        "            for (int i = 0; i < out.dialogs.size(); i++) {\n"
+        "                TLRPC.Dialog existing = out.dialogs.get(i);\n"
+        "                if (existing.peer instanceof TLRPC.TL_peerUser && existing.peer.user_id == wantedPeer) {\n"
+        "                    present = true;\n"
+        "                    break;\n"
+        "                }\n"
+        "            }\n"
+        "            if (present) {\n"
+        "                continue;\n"
+        "            }\n"
+        "            TLRPC.User wantedUser = wantedPeer == selfId ? selfUser(account) : null;\n"
+        "            if (wantedUser == null) {\n"
+        "                try {\n"
+        "                    wantedUser = WaysGramMapper.toUser(WaysGramApi.get(account, \"/api/users/\" + wantedPeer));\n"
+        "                } catch (WaysGramApi.ApiException e) {\n"
+        "                    FileLog.e(e);\n"
+        "                    continue;\n"
+        "                }\n"
+        "            }\n"
+        "            out.dialogs.add(WaysGramMapper.toDialog(wantedPeer, 0));\n"
+        "            out.users.add(wantedUser);\n"
+        "        }\n"
+        "        out.users.add(selfUser(account));\n"
+        "        out.state = state(account);\n"
+    )
+    return replace_exactly_once(original, dialogs_anchor, dialogs_replacement, "WaysGram empty chat dialog")
+
+
+def patch_settings_phone_source(original: str) -> str:
+    """Show the account number in Settings and never render a \"+null\" placeholder."""
+    if "WaysGram: render only a real number" in original:
+        return original
+    anchor = (
+        "        final StringBuilder sb = new StringBuilder();\n"
+        "        if (user != null) {\n"
+        "            sb.append(PhoneFormat.getInstance().format(\"+\" + user.phone));\n"
+        "        }\n"
+    )
+    replacement = (
+        "        final StringBuilder sb = new StringBuilder();\n"
+        "        // WaysGram: render only a real number, never a \"+null\" placeholder.\n"
+        "        String waysGramSettingsPhone = user == null || user.phone == null\n"
+        "                ? \"\" : user.phone.replaceAll(\"[^0-9]\", \"\");\n"
+        "        if (waysGramSettingsPhone.isEmpty()) {\n"
+        "            waysGramSettingsPhone = org.telegram.tgnet.WaysGramApi.getRememberedPhone(currentAccount);\n"
+        "        }\n"
+        "        if (waysGramSettingsPhone.matches(\"[0-9]{8,15}\")) {\n"
+        "            sb.append(PhoneFormat.getInstance().format(\"+\" + waysGramSettingsPhone));\n"
+        "        }\n"
+    )
+    return replace_exactly_once(original, anchor, replacement, "WaysGram settings phone")
+
+
+def patch_user_info_phone_source(original: str) -> str:
+    """Show the account number in the edit-account screen without placeholders."""
+    if "WaysGram: the edit-account number" in original:
+        return original
+    anchor = (
+        "            items.add(SettingsActivity.SettingCell.Factory.of(INFO_PHONE, IconBackgroundColors.GREEN.top, IconBackgroundColors.GREEN.bottom, R.drawable.settings_calls, PhoneFormat.getInstance().format(\"+\" + user.phone), getString(R.string.TapToChangePhone)));\n"
+    )
+    replacement = (
+        "            // WaysGram: the edit-account number, never a \"+null\" placeholder.\n"
+        "            String waysGramUserInfoPhone = user.phone == null ? \"\" : user.phone.replaceAll(\"[^0-9]\", \"\");\n"
+        "            if (waysGramUserInfoPhone.isEmpty()) {\n"
+        "                waysGramUserInfoPhone = org.telegram.tgnet.WaysGramApi.getRememberedPhone(currentAccount);\n"
+        "            }\n"
+        "            String waysGramUserInfoPhoneText = waysGramUserInfoPhone.matches(\"[0-9]{8,15}\")\n"
+        "                    ? PhoneFormat.getInstance().format(\"+\" + waysGramUserInfoPhone) : \"\";\n"
+        "            items.add(SettingsActivity.SettingCell.Factory.of(INFO_PHONE, IconBackgroundColors.GREEN.top, IconBackgroundColors.GREEN.bottom, R.drawable.settings_calls, waysGramUserInfoPhoneText, getString(R.string.TapToChangePhone)));\n"
+    )
+    return replace_exactly_once(original, anchor, replacement, "WaysGram edit-account phone")
+
+
+def patch_user_config_phone_source(original: str) -> str:
+    """Fall back to the session phone while the profile object has none."""
+    if "WaysGram: the session knows the number" in original:
+        return original
+    anchor = (
+        "    public String getClientPhone() {\n"
+        "        synchronized (sync) {\n"
+        "            return currentUser != null && currentUser.phone != null ? currentUser.phone : \"\";\n"
+        "        }\n"
+        "    }\n"
+    )
+    replacement = (
+        "    public String getClientPhone() {\n"
+        "        synchronized (sync) {\n"
+        "            String phone = currentUser != null && currentUser.phone != null ? currentUser.phone : \"\";\n"
+        "            if (phone.isEmpty()) {\n"
+        "                // WaysGram: the session knows the number even before the profile object catches up.\n"
+        "                phone = org.telegram.tgnet.WaysGramApi.getRememberedPhone(currentAccount);\n"
+        "            }\n"
+        "            return phone;\n"
+        "        }\n"
+        "    }\n"
+    )
+    return replace_exactly_once(original, anchor, replacement, "WaysGram client phone fallback")
+
+
+def patch_profile_own_marks_source(original: str) -> str:
+    """Draw the account's own marks in its profile, exactly as in the chat title."""
+    if "WaysGram: own account marks in the profile title" in original:
+        return original
+    anchor = "                    nameTextView[a].setText(newString);\n"
+    replacement = (
+        "                    // WaysGram: own account marks in the profile title.\n"
+        "                    nameTextView[a].setText(a == 0 && dialogId == getUserConfig().getClientUserId()\n"
+        "                            ? org.telegram.messenger.waysgram.WaysGramPeerBadges.decorate(\n"
+        "                                    currentAccount, dialogId, newString,\n"
+        "                                    () -> {\n"
+        "                                        if (!isPaused) {\n"
+        "                                            updateProfileData(false);\n"
+        "                                        }\n"
+        "                                    })\n"
+        "                            : newString);\n"
+    )
+    return replace_exactly_once(original, anchor, replacement, "WaysGram own profile marks")
+
+
+def patch_chat_avatar_self_skip(original: str) -> str:
+    """Saved Messages is a chat with yourself and never carries peer marks."""
+    if "waysGramBadgeDialog" in original:
+        return original
+    anchor = (
+        "        value = org.telegram.messenger.waysgram.WaysGramPeerBadges.decorate(\n"
+        "                currentAccount,\n"
+        "                parentFragment == null ? 0 : parentFragment.getDialogId(),\n"
+    )
+    replacement = (
+        "        long waysGramBadgeDialog = parentFragment == null ? 0 : parentFragment.getDialogId();\n"
+        "        if (waysGramBadgeDialog == org.telegram.messenger.UserConfig.getInstance(currentAccount).getClientUserId()) {\n"
+        "            // Saved Messages is a chat with yourself: it shows no peer marks.\n"
+        "            waysGramBadgeDialog = 0;\n"
+        "        }\n"
+        "        value = org.telegram.messenger.waysgram.WaysGramPeerBadges.decorate(\n"
+        "                currentAccount,\n"
+        "                waysGramBadgeDialog,\n"
+    )
+    return replace_exactly_once(original, anchor, replacement, "WaysGram saved messages mark exclusion")
+
+
+def patch_locale_default_russian(original: str) -> str:
+    """Start the interface in Russian; the user can still switch languages in Settings."""
+    if "WaysGram ships a Russian interface" in original:
+        return original
+    anchor = (
+        "            String lang = preferences.getString(\"language\", null);\n"
+        "            if (lang != null) {\n"
+    )
+    replacement = (
+        "            String lang = preferences.getString(\"language\", null);\n"
+        "            if (lang == null) {\n"
+        "                // WaysGram ships a Russian interface and starts in it until another one is chosen.\n"
+        "                lang = \"ru\";\n"
+        "                preferences.edit().putString(\"language\", lang).apply();\n"
+        "            }\n"
+        "            if (lang != null) {\n"
+    )
+    return replace_exactly_once(original, anchor, replacement, "WaysGram default Russian locale")
+
+
+def patch_waysgram_chat_fixes(android_root: Path) -> None:
+    """Saved Messages, empty chats, account phone, session refresh and own-profile marks."""
+    api = android_root / "TMessagesProj/src/main/java/org/telegram/tgnet/WaysGramApi.java"
+    mapper = android_root / "TMessagesProj/src/main/java/org/telegram/tgnet/WaysGramMapper.java"
+    transport = android_root / "TMessagesProj/src/main/java/org/telegram/tgnet/WaysGramTransport.java"
+    settings = android_root / "TMessagesProj/src/main/java/org/telegram/ui/SettingsActivity.java"
+    user_info = android_root / "TMessagesProj/src/main/java/org/telegram/ui/UserInfoActivity.java"
+    user_config = android_root / "TMessagesProj/src/main/java/org/telegram/messenger/UserConfig.java"
+    profile = android_root / "TMessagesProj/src/main/java/org/telegram/ui/ProfileActivity.java"
+    locale = android_root / "TMessagesProj/src/main/java/org/telegram/messenger/LocaleController.java"
+
+    jobs = (
+        (api, patch_waysgram_api_helpers),
+        (mapper, patch_waysgram_mapper_phone),
+        (transport, patch_waysgram_self_chat),
+        (settings, patch_settings_phone_source),
+        (user_info, patch_user_info_phone_source),
+        (user_config, patch_user_config_phone_source),
+        (profile, patch_profile_own_marks_source),
+        (locale, patch_locale_default_russian),
+    )
+    for path, patcher in jobs:
+        if not path.is_file():
+            raise FileNotFoundError(f"Required WaysGram source not found: {path}")
+        source = path.read_text(encoding="utf-8")
+        patched = patcher(source)
+        if patched != source:
+            path.write_text(patched, encoding="utf-8")
+
+    for path, marker in (
+        (api, "refreshTokenIfNeeded"),
+        (mapper, "waysGramPhoneDigits"),
+        (transport, "WaysGram saved messages"),
+        (settings, "WaysGram: render only a real number"),
+        (user_info, "WaysGram: the edit-account number"),
+        (user_config, "WaysGram: the session knows the number"),
+        (profile, "WaysGram: own account marks in the profile title"),
+        (locale, "WaysGram ships a Russian interface"),
+    ):
+        if marker not in path.read_text(encoding="utf-8"):
+            raise ValueError(f"WaysGram chat fix is missing in {path.name}")
+
 
 
 def verify_source(android_root: Path) -> None:
@@ -1837,6 +2289,7 @@ def verify_source(android_root: Path) -> None:
     patch_location_permissions(android_root)
     patch_live_location_service(android_root)
     patch_translation_dependencies(android_root)
+    patch_waysgram_chat_fixes(android_root)
     patch_waysgram_gift_integration(android_root)
 
     translation_gradle = (android_root / "TMessagesProj/build.gradle").read_text(encoding="utf-8")

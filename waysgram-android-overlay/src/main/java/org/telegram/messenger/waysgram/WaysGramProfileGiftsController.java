@@ -63,11 +63,11 @@ public final class WaysGramProfileGiftsController {
                     client.close();
                     JSONArray inventory = gifts == null ? new JSONArray() : gifts;
                     WaysGramGiftMediaStore.clear();
-                    // showSerialAsTitle=true: show "WG-<id>" and the gift's level, matching
-                    // the dedicated "Мои подарки" inventory sheet.
+                    // Gift cards carry the gift's own name and traits; the internal WaysGram serial
+                    // and the gift level are never shown to the user.
                     ArrayList<TL_stars.SavedStarGift> nativeGifts = toNativeGifts(inventory,
                             fragment == null ? UserConfig.selectedAccount : fragment.getCurrentAccount(),
-                            true);
+                            false);
                     container.setWaysGramInventory(nativeGifts);
                     downloadGiftStickers(inventory);
                     downloadGiftAnimations(inventory);
@@ -271,13 +271,11 @@ public final class WaysGramProfileGiftsController {
             boolean isListed,
             boolean isAuctioned
     ) {
-        StringBuilder firstLine = new StringBuilder(serial)
-                .append(" · Ур. ")
-                .append(upgradeLevel);
+        StringBuilder firstLine = new StringBuilder();
         if (isAuctioned) {
-            firstLine.append(" · Аукцион");
+            firstLine.append("Аукцион");
         } else if (isListed) {
-            firstLine.append(" · Продажа");
+            firstLine.append("Продажа");
         }
 
         StringBuilder secondLine = new StringBuilder();
@@ -292,6 +290,9 @@ public final class WaysGramProfileGiftsController {
         }
         if (telegramUpgradeVariants > 0) {
             appendPart(secondLine, "Вариантов: " + telegramUpgradeVariants);
+        }
+        if (firstLine.length() == 0) {
+            return secondLine.toString();
         }
         return secondLine.length() == 0
                 ? firstLine.toString()

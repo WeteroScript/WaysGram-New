@@ -3063,9 +3063,7 @@ public final class WaysGramChatFragment extends BaseFragment {
                 String[] labels = new String[available.size()];
                 for (int i = 0; i < available.size(); i++) {
                     JSONObject gift = available.get(i);
-                    labels[i] = gift.optString("gift_name", "Подарок WaysGram")
-                            + " · уровень " + gift.optInt("upgrade_level", 0)
-                            + "\n" + gift.optString("serial_number", "");
+                    labels[i] = gift.optString("gift_name", "Подарок WaysGram");
                 }
                 statusView.setText("Выберите подарок для отправки");
                 new AlertDialog.Builder(getParentActivity())
@@ -3539,11 +3537,8 @@ public final class WaysGramChatFragment extends BaseFragment {
             );
 
             TextView giftDetails = new TextView(getParentActivity());
-            StringBuilder giftInfo = isGiftPurchaseEvent
-                    ? new StringBuilder()
-                    : new StringBuilder("Коллекция WaysGram · уровень ")
-                            .append(giftLevel)
-                            .append("\nСерийный номер: ").append(giftSerial);
+            // The internal collection name, the gift level and the WaysGram serial stay hidden.
+            StringBuilder giftInfo = new StringBuilder();
             if (isGiftPurchaseEvent) {
                 long purchasedAt = message.optLong("created_at", 0);
                 if (purchasedAt > 0) {
