@@ -2151,6 +2151,62 @@ def build_messenger_router(
             ("waysgram-session-id:" + token_hash).encode("utf-8")
         ).hexdigest()[:32]
 
+    @router.get("/api/labels")
+    async def resolve_labels(
+        targets: str = "",
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        """Marks of many peers at once: ``targets=account:42,channel:3,group:17``.
+
+        Every row of the chat list carries the marks of its peer, and a request per row would
+        be a storm of tiny queries. The client sends the visible rows in one query instead.
+        A channel is addressed by its own id and a group by its own id: the app keeps them in
+        different ranges, so the marks of a group can never be answered for a channel. Ids may
+        arrive negative (a dialog id), they are normalised here.
+        """
+        await current_user(authorization)
+        wanted: list[tuple[str, int]] = []
+        seen: set[tuple[str, int]] = set()
+        for raw in str(targets or "").split(","):
+            kind, _, value = raw.strip().partition(":")
+            kind = kind.strip().lower()
+            if kind not in ("account", "channel", "group"):
+                continue
+            try:
+                target_id = abs(int(value.strip()))
+            except (TypeError, ValueError):
+                continue
+            if target_id == 0 or (kind, target_id) in seen:
+                continue
+            seen.add((kind, target_id))
+            wanted.append((kind, target_id))
+            if len(wanted) >= 100:
+                break
+        labels: dict[str, list[dict[str, str]]] = {}
+        if not wanted:
+            return {"labels": labels}
+        placeholders = ",".join("(?,?)" for _ in wanted)
+        async with aiosqlite.connect(db_path()) as db:
+            db.row_factory = aiosqlite.Row
+            cur = await db.execute(
+                f"""SELECT a.target_type AS target_type,a.target_id AS target_id,
+                           l.label_text AS text,l.color AS color
+                    FROM waysgram_label_assignments a
+                    JOIN waysgram_labels l ON l.id=a.label_id
+                    WHERE (a.target_type,a.target_id) IN ({placeholders})
+                    ORDER BY a.assigned_at,a.id""",
+                [value for pair in wanted for value in pair],
+            )
+            rows = await cur.fetchall()
+        for kind, target_id in wanted:
+            labels.setdefault(f"{kind}:{target_id}", [])
+        for row in rows:
+            key = f"{row['target_type']}:{int(row['target_id'])}"
+            labels.setdefault(key, []).append(
+                {"text": str(row["text"]), "color": str(row["color"])}
+            )
+        return {"labels": labels}
+
     @router.post("/api/push/register")
     async def register_push_device(
         payload: dict[str, Any],

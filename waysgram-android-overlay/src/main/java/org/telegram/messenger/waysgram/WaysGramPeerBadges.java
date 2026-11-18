@@ -17,14 +17,20 @@ import org.telegram.messenger.AndroidUtilities;
 import org.telegram.messenger.FileLog;
 import org.telegram.messenger.UserConfig;
 import org.telegram.tgnet.WaysGramApi;
+import org.telegram.tgnet.WaysGramChats;
 
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * Shows WaysGram marks next to a name — in chat titles, in the chat list and on profiles.
@@ -49,10 +55,15 @@ public final class WaysGramPeerBadges {
     private static final float TEXT_SCALE = 0.72f;
     private static final float DIVIDER = 1.15f;
 
+    private static final long FLUSH_DELAY_MS = 120;
+
     private static final ConcurrentHashMap<Long, Entry> CACHE = new ConcurrentHashMap<>();
+    private static final ConcurrentHashMap<Long, long[]> PENDING = new ConcurrentHashMap<>();
+    private static final ConcurrentHashMap<Long, Runnable> CALLBACKS = new ConcurrentHashMap<>();
     private static final Set<Long> REQUESTED =
             Collections.newSetFromMap(new ConcurrentHashMap<Long, Boolean>());
-    private static final ExecutorService EXECUTOR = Executors.newFixedThreadPool(2);
+    private static final AtomicBoolean FLUSH_SCHEDULED = new AtomicBoolean();
+    private static final ScheduledExecutorService SCHEDULER = Executors.newSingleThreadScheduledExecutor();
 
     private static final Paint FILL_PAINT = new Paint(Paint.ANTI_ALIAS_FLAG);
     private static final Paint BORDER_PAINT = new Paint(Paint.ANTI_ALIAS_FLAG);
@@ -204,6 +215,8 @@ public final class WaysGramPeerBadges {
     /** Drops cached marks, e.g. after the session of an account changed. */
     public static void clear() {
         CACHE.clear();
+        PENDING.clear();
+        CALLBACKS.clear();
         REQUESTED.clear();
     }
 
@@ -311,45 +324,126 @@ public final class WaysGramPeerBadges {
     }
 
     private static void request(
-            final int account, final long peerId, final long key, final Runnable invalidate
+            int account, long peerId, long key, Runnable invalidate
     ) {
+        if (invalidate != null) {
+            CALLBACKS.put(key, invalidate);
+        }
         if (!REQUESTED.add(key)) {
             return;
         }
-        EXECUTOR.execute(() -> {
-            Entry entry = new Entry(new ArrayList<>(), System.currentTimeMillis(), false);
-            for (String path : badgePaths(account, peerId)) {
+        PENDING.put(key, new long[]{account, peerId});
+        scheduleFlush();
+    }
+
+    /**
+     * Marks are resolved in batches: opening the chat list asks for every visible row with a
+     * single request instead of one request per row.
+     */
+    private static void scheduleFlush() {
+        if (!FLUSH_SCHEDULED.compareAndSet(false, true)) {
+            return;
+        }
+        SCHEDULER.schedule(() -> {
+            FLUSH_SCHEDULED.set(false);
+            try {
+                flush();
+            } catch (Exception exception) {
+                FileLog.e(exception);
+            }
+        }, FLUSH_DELAY_MS, TimeUnit.MILLISECONDS);
+    }
+
+    private static void flush() {
+        if (PENDING.isEmpty()) {
+            return;
+        }
+        Map<Long, long[]> batch = new HashMap<>(PENDING);
+        PENDING.clear();
+        Map<Integer, List<Long>> byAccount = new LinkedHashMap<>();
+        for (Map.Entry<Long, long[]> entry : batch.entrySet()) {
+            List<Long> keys = byAccount.get((int) entry.getValue()[0]);
+            if (keys == null) {
+                keys = new ArrayList<>();
+                byAccount.put((int) entry.getValue()[0], keys);
+            }
+            keys.add(entry.getKey());
+        }
+        for (Map.Entry<Integer, List<Long>> group : byAccount.entrySet()) {
+            int account = group.getKey();
+            List<Long> keys = group.getValue();
+            StringBuilder targets = new StringBuilder();
+            for (Long key : keys) {
+                long[] peer = batch.get(key);
+                if (peer == null) {
+                    continue;
+                }
+                if (targets.length() > 0) {
+                    targets.append(',');
+                }
+                targets.append(target(peer[1]));
+            }
+            JSONObject response = null;
+            if (targets.length() > 0) {
                 try {
-                    List<Label> labels = labels(WaysGramApi.get(account, path));
-                    entry = new Entry(labels, System.currentTimeMillis(), true);
-                    break;
+                    response = WaysGramApi.get(account, "/api/labels?targets=" + targets);
                 } catch (Exception exception) {
                     FileLog.e(exception);
                 }
             }
-            CACHE.put(key, entry);
-            REQUESTED.remove(key);
-            if (!entry.labels.isEmpty() && invalidate != null) {
-                AndroidUtilities.runOnUIThread(invalidate);
+            JSONObject answered = response == null ? null : response.optJSONObject("labels");
+            for (Long key : keys) {
+                long[] peer = batch.get(key);
+                if (peer == null) {
+                    continue;
+                }
+                List<Label> labels = null;
+                if (answered != null) {
+                    labels = labels(answered.optJSONArray(target(peer[1])));
+                }
+                if (labels == null) {
+                    // An older WaysGram build has no batch endpoint: fall back to the peer routes.
+                    labels = loadOne(account, peer[1]);
+                }
+                finish(key, new Entry(labels, System.currentTimeMillis(), labels != null));
             }
-        });
+        }
+    }
+
+    /** Marks of one peer from its own route; {@code null} when even that route failed. */
+    private static List<Label> loadOne(int account, long peerId) {
+        for (String path : badgePaths(account, peerId)) {
+            try {
+                return labels(WaysGramApi.get(account, path));
+            } catch (Exception exception) {
+                FileLog.e(exception);
+            }
+        }
+        return null;
+    }
+
+    private static void finish(long key, Entry entry) {
+        if (entry.labels == null) {
+            entry = new Entry(new ArrayList<>(), System.currentTimeMillis(), false);
+        }
+        CACHE.put(key, entry);
+        REQUESTED.remove(key);
+        Runnable invalidate = CALLBACKS.remove(key);
+        if (invalidate != null && !entry.labels.isEmpty()) {
+            AndroidUtilities.runOnUIThread(invalidate);
+        }
     }
 
     private static List<Label> labels(JSONObject response) {
-        JSONArray array = response == null ? null : response.optJSONArray("labels");
-        if (array == null && response != null) {
-            JSONObject peer = response.optJSONObject("user");
-            if (peer == null) {
-                peer = response.optJSONObject("peer");
-            }
-            if (peer != null) {
-                array = peer.optJSONArray("labels");
-            }
-        }
-        List<Label> result = new ArrayList<>();
+        return labels(response == null ? null : response.optJSONArray("labels"));
+    }
+
+    private static List<Label> labels(JSONArray array) {
         if (array == null) {
-            return result;
+            return Collections.emptyList();
         }
+
+        List<Label> result = new ArrayList<>();
         for (int i = 0; i < array.length() && result.size() < MAX_LABELS; i++) {
             JSONObject item = array.optJSONObject(i);
             if (item == null) {
@@ -365,17 +459,32 @@ public final class WaysGramPeerBadges {
     }
 
     /**
-     * WaysGram keeps marks for accounts, channels and groups; a chat dialog id is negative, so
-     * channels and groups are looked up by their positive id. The signed-in account carries its
-     * own marks on {@code /api/me}, which is what its owner sees in their profile.
+     * The target of a peer in the WaysGram label API. A dialog id is negative; groups keep the
+     * chat id and channels carry {@link WaysGramChats#CHANNEL_OFFSET}, so a group and a channel
+     * are never confused even when the server gave them the same number.
      */
+    private static String target(long peerId) {
+        if (peerId < 0) {
+            long chatId = -peerId;
+            if (chatId >= WaysGramChats.CHANNEL_OFFSET) {
+                return "channel:" + WaysGramChats.channelServer(chatId);
+            }
+            return "group:" + chatId;
+        }
+        return "account:" + peerId;
+    }
+
+    /** Routes used when the batch endpoint is not available yet. */
     private static String[] badgePaths(int account, long peerId) {
         if (peerId == UserConfig.getInstance(account).getClientUserId()) {
-            return new String[]{"/api/me", "/api/users/" + peerId};
+            return new String[]{"/api/me"};
         }
         if (peerId < 0) {
-            long id = -peerId;
-            return new String[]{"/api/channels/" + id, "/api/groups/" + id};
+            long chatId = -peerId;
+            if (chatId >= WaysGramChats.CHANNEL_OFFSET) {
+                return new String[]{"/api/channels/" + WaysGramChats.channelServer(chatId)};
+            }
+            return new String[]{"/api/groups/" + chatId};
         }
         return new String[]{"/api/users/" + peerId};
     }

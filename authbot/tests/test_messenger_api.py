@@ -2821,6 +2821,73 @@ def test_assigned_labels_are_exposed_on_account_and_channel(api_env) -> None:
     run(scenario())
 
 
+def test_labels_endpoint_resolves_many_targets_in_one_query(api_env) -> None:
+    path, _auth_store, _fake_bot, app = api_env
+    add_account(api_env, 87801, "batch_viewer")
+    add_account(api_env, 87802, "batch_peer")
+    add_session(path, 87801, "batch-viewer-session")
+
+    now = 1_800_000_100
+    with db_split.sqlite_connect(path) as db:
+        cur = db.execute(
+            "INSERT INTO channels(username,title,owner_telegram_id,created_at) VALUES(?,?,?,?)",
+            ("batch_channel", "Batch Channel", 87801, now),
+        )
+        channel_id = int(cur.lastrowid)
+        cur = db.execute(
+            "INSERT INTO waysgram_labels(label_text,color,created_by,created_at) VALUES(?,?,?,?)",
+            ("Official", "#1769AA", 87801, now),
+        )
+        official = int(cur.lastrowid)
+        cur = db.execute(
+            "INSERT INTO waysgram_labels(label_text,color,created_by,created_at) VALUES(?,?,?,?)",
+            ("Partner", "#22C55E", 87801, now),
+        )
+        partner = int(cur.lastrowid)
+        for label_id, target_type, target_id in (
+            (official, "account", 87802),
+            (official, "channel", channel_id),
+            # A group may carry the very same numeric id as a channel; its marks stay its own.
+            (partner, "group", channel_id),
+        ):
+            db.execute(
+                """INSERT INTO waysgram_label_assignments
+                   (label_id,target_type,target_id,assigned_by,assigned_at)
+                   VALUES(?,?,?,?,?)""",
+                (label_id, target_type, target_id, 87801, now),
+            )
+        db.commit()
+
+    async def scenario() -> None:
+        async with await client_for(app) as client:
+            auth = {"Authorization": "Bearer batch-viewer-session"}
+            response = await client.get(
+                "/api/labels?targets="
+                f"account:87802,account:-87802,channel:{channel_id},group:{channel_id},"
+                "group:999,bogus:5,,",
+                headers=auth,
+            )
+            assert response.status_code == 200
+            labels = response.json()["labels"]
+            assert labels["account:87802"] == [{"text": "Official", "color": "#1769AA"}]
+            assert labels[f"channel:{channel_id}"] == [{"text": "Official", "color": "#1769AA"}]
+            assert labels[f"group:{channel_id}"] == [{"text": "Partner", "color": "#22C55E"}]
+            assert labels["group:999"] == []
+            assert "bogus:5" not in labels
+
+            capped = await client.get(
+                "/api/labels?targets=" + ",".join(f"account:{90000 + i}" for i in range(150)),
+                headers=auth,
+            )
+            assert capped.status_code == 200
+            assert len(capped.json()["labels"]) == 100
+
+            unauthorized = await client.get("/api/labels?targets=account:87802")
+            assert unauthorized.status_code == 401
+
+    run(scenario())
+
+
 def test_telegram_gift_catalog_sync_and_sticker_proxy(api_env, monkeypatch) -> None:
     path, _auth_store, fake_bot, app = api_env
     # Even when the signed-in Telegram account is the administrator's account,
