@@ -100,6 +100,9 @@ jobs:
         env:
           WAYSGRAM_REF: ${{ github.head_ref || github.ref_name }}
           WAYSGRAM_HOME: ${{ runner.temp }}/waysgram-cache
+          # Unauthenticated GitHub API calls are rate limited per runner IP, which made the
+          # "second start comes from the cache" check fail whenever the limit was hit.
+          AUTHBOT_GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: python deploy/authbot-bridge/bot.py --check > launcher.json
       - name: Verify what the launcher unpacked
         run: |
@@ -119,6 +122,7 @@ jobs:
         env:
           WAYSGRAM_REF: ${{ github.head_ref || github.ref_name }}
           WAYSGRAM_HOME: ${{ runner.temp }}/waysgram-cache
+          AUTHBOT_GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           python deploy/authbot-bridge/bot.py --check 2>&1 | tee second.json
           grep -q "using cached commit" second.json
