@@ -1489,6 +1489,7 @@ def patch_waysgram_gift_integration(android_root: Path) -> None:
     gifts_source = gifts.read_text(encoding="utf-8")
     patched_gifts = patch_waysgram_gifts_source(gifts_source)
     patched_gifts = patch_waysgram_gift_account_isolation(patched_gifts)
+    patched_gifts = patch_waysgram_gift_unlimited_stock(patched_gifts)
     if patched_gifts != gifts_source:
         gifts.write_text(patched_gifts, encoding="utf-8")
 
@@ -1516,6 +1517,7 @@ def patch_waysgram_gift_integration(android_root: Path) -> None:
         "WaysGramGiftDocuments.buildDocument(",
         "CatalogSnapshot",
         "install(snapshot);",
+        "waysGramUnlimitedSupply",
     ):
         if marker not in final_gifts:
             raise ValueError("WaysGram shop gift artwork patch is incomplete")
@@ -1625,6 +1627,22 @@ def patch_chat_avatar_title_badges(original: str) -> str:
         + "                });\n"
     )
     return replace_exactly_once(original, anchor, replacement, "native chat title WaysGram marks")
+
+
+def patch_waysgram_gift_unlimited_stock(original: str) -> str:
+    """Do not draw an unlimited WaysGram stock as a limited-edition counter."""
+    if "unlimited_supply" in original:
+        return original
+    anchor = (
+        "        // The stock is always limited: the administrator sets how many can be sold.\n"
+        "        gift.limited = true;\n"
+    )
+    replacement = (
+        "        // Unlimited WaysGram supply must not render as a limited-edition counter.\n"
+        "        boolean waysGramUnlimitedSupply = g.optBoolean(\"unlimited_supply\", false);\n"
+        "        gift.limited = !waysGramUnlimitedSupply;\n"
+    )
+    return replace_exactly_once(original, anchor, replacement, "WaysGram unlimited gift supply")
 
 
 def verify_source(android_root: Path) -> None:

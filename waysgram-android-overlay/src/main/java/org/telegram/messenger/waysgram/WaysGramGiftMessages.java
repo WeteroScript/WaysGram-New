@@ -82,6 +82,11 @@ public final class WaysGramGiftMessages {
             giftName = "Подарок WaysGram";
         }
         long stars = attributes == null ? 0L : Math.max(0L, attributes.optLong("price_stars", 0L));
+        if (stars == 0L && telegramMetadata != null) {
+            // Chat gifts carry no receipt price; the catalogue value is a better
+            // default than a card that claims the gift cost nothing.
+            stars = Math.max(0L, telegramMetadata.optLong("star_count", 0L));
+        }
 
         long documentId = WaysGramGiftDocuments.documentId(telegramGiftId);
         TLRPC.TL_document sticker = null;

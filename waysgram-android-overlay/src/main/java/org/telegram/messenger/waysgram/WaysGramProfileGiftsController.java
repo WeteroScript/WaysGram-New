@@ -527,7 +527,15 @@ public final class WaysGramProfileGiftsController {
      */
     private static String waysGramTitle(String serial, long fallbackId) {
         String value = serial == null ? "" : serial.trim();
-        String digits = value.replaceAll("(?i)^WG[-_ ]?", "").replaceAll("[^0-9]", "");
+        if (value.length() > 3 && (value.startsWith("WG-") || value.startsWith("wg-"))) {
+            String rest = value.substring(3).trim();
+            if (!rest.isEmpty()) {
+                // Serials are WG-<hex>, so the letters are part of the number:
+                // dropping them would make different gifts look identical.
+                return "WG-" + rest.replace(' ', '-').toUpperCase(Locale.ROOT);
+            }
+        }
+        String digits = value.replaceAll("[^0-9]", "");
         if (!digits.isEmpty()) {
             return "WG-" + digits;
         }

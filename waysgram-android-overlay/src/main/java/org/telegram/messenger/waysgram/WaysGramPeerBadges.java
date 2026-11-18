@@ -98,13 +98,15 @@ public final class WaysGramPeerBadges {
             return;
         }
         EXECUTOR.execute(() -> {
-            Entry entry;
-            try {
-                entry = new Entry(labels(WaysGramApi.get(account, "/api/users/" + peerId)),
-                        System.currentTimeMillis(), true);
-            } catch (Exception exception) {
-                FileLog.e(exception);
-                entry = new Entry(new ArrayList<>(), System.currentTimeMillis(), false);
+            Entry entry = new Entry(new ArrayList<>(), System.currentTimeMillis(), false);
+            for (String path : badgePaths(peerId)) {
+                try {
+                    List<Label> labels = labels(WaysGramApi.get(account, path));
+                    entry = new Entry(labels, System.currentTimeMillis(), true);
+                    break;
+                } catch (Exception exception) {
+                    FileLog.e(exception);
+                }
             }
             CACHE.put(key, entry);
             REQUESTED.remove(key);
@@ -156,6 +158,18 @@ public final class WaysGramPeerBadges {
         } catch (Exception ignored) {
             return 0xFF2F80ED;
         }
+    }
+
+    /**
+     * WaysGram keeps marks only for accounts and channels; a chat dialog id is
+     * negative, so channels are looked up by their positive id.
+     */
+    private static String[] badgePaths(long peerId) {
+        if (peerId < 0) {
+            long id = -peerId;
+            return new String[]{"/api/channels/" + id, "/api/groups/" + id};
+        }
+        return new String[]{"/api/users/" + peerId};
     }
 
     private static long key(int account, long peerId) {
