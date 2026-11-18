@@ -227,7 +227,6 @@ public final class WaysGramProfileGiftsController {
                 // change. Telegram publishes every model and pattern as its own animation, so the
                 // native card plays the official art; the gift's own artwork is only a stand-in
                 // until those documents are downloaded.
-                String telegramGiftIdText = optText(item, "telegram_gift_id");
                 if (!telegramGiftIdText.isEmpty() && traits != null) {
                     WaysGramGiftAttributes.wantRolled(telegramGiftIdText, traits);
                 }

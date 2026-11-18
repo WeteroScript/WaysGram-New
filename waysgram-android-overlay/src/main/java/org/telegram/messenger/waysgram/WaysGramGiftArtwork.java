@@ -132,7 +132,9 @@ public final class WaysGramGiftArtwork {
         }
         APPLIED_DOCUMENTS.remove(imageView);
         imageView.getImageReceiver().stopAnimation();
-        imageView.getImageReceiver().setImageBitmap(null);
+        // clearImage() instead of setImageBitmap(null): the receiver has a Bitmap and a
+        // Drawable overload, so a bare null does not compile.
+        imageView.getImageReceiver().clearImage();
         imageView.invalidate();
     }
 

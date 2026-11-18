@@ -52,7 +52,7 @@ public final class WaysGramGiftAttributes {
     private static final Set<String> FAILED = new HashSet<>();
     private static final Map<String, Set<String>> WANTED = new HashMap<>();
     private static final ArrayDeque<Request> QUEUE = new ArrayDeque<>();
-    private static final Set<Runnable> LISTENERS = new CopyOnWriteArraySet<>();
+    private static final Set<Listener> LISTENERS = new CopyOnWriteArraySet<>();
 
     private static ExecutorService executor;
     private static boolean workerRunning;

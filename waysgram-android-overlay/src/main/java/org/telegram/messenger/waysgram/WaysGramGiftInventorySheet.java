@@ -160,6 +160,57 @@ public final class WaysGramGiftInventorySheet extends BottomSheet {
         contentView.requestLayout();
     }
 
+    /**
+     * Loads «Мои подарки»: the WaysGram inventory is mapped to Telegram's own saved gifts, so the
+     * grid is the native one and keeps its animations.
+     */
+    private void loadInventory() {
+        catalogClient.loadMyGifts(new WaysGramGiftCatalogClient.InventoryCallback() {
+            @Override
+            public void onLoaded(JSONArray gifts) {
+                AndroidUtilities.runOnUIThread(() -> {
+                    if (isDismissed()) {
+                        return;
+                    }
+                    giftsBySerial.clear();
+                    startedStickerDownloads.clear();
+                    for (int i = 0; i < gifts.length(); i++) {
+                        JSONObject item = gifts.optJSONObject(i);
+                        if (item == null) {
+                            continue;
+                        }
+                        String serial = item.optString("serial_number", "").trim();
+                        if (!serial.isEmpty()) {
+                            giftsBySerial.put(serial, item);
+                        }
+                    }
+                    nativeGifts.clear();
+                    nativeGifts.addAll(WaysGramProfileGiftsController.toNativeGifts(
+                            gifts, telegramAccount, false));
+                    statusView.setVisibility(View.GONE);
+                    int spanCount = Math.max(1, Math.min(3, nativeGifts.size()));
+                    if (listView.getSpanCount() != spanCount) {
+                        listView.setSpanCount(spanCount);
+                    }
+                    listView.adapter.update(false);
+                    downloadGiftStickers(gifts);
+                    openPendingGift();
+                });
+            }
+
+            @Override
+            public void onError(String message) {
+                AndroidUtilities.runOnUIThread(() -> {
+                    if (isDismissed()) {
+                        return;
+                    }
+                    statusView.setText("Не удалось загрузить подарки: " + message);
+                    statusView.setVisibility(View.VISIBLE);
+                });
+            }
+        });
+    }
+
     private void fillItems(ArrayList<UItem> items, UniversalAdapter adapter) {
         if (nativeGifts.isEmpty()) return;
         // Telegram profile inventory uses the same 12dp top inset and native GiftCell factory.

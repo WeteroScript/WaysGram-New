@@ -555,9 +555,9 @@ public final class WaysGramGiftUpgradeReveal {
             if (models.length == 0) {
                 return;
             }
-            int index = (int) Math.floor(position);
-            float fraction = position - index;
-            int slot = fraction < 0.5f ? index : index + 1;
+            int position0 = (int) Math.floor(position);
+            float fraction = position - position0;
+            int slot = fraction < 0.5f ? position0 : position0 + 1;
             if (slot == lastModelSlot) {
                 return;
             }
