@@ -46,6 +46,11 @@ public final class WaysGramGiftArtwork {
             ImageLocation location = ImageLocation.getForDocument(document);
             if (location != null) {
                 imageView.getImageReceiver().setImage(location, null, thumb, null, null, 0);
+                // Gift artwork loops for as long as its card is on screen: playback is allowed
+                // explicitly so a finished sticker starts over instead of freezing on the last
+                // frame while the sheet stays open.
+                imageView.getImageReceiver().setAllowStartAnimation(true);
+                imageView.getImageReceiver().startAnimation(true);
                 APPLIED_DOCUMENTS.put(imageView, document.id);
                 imageView.invalidate();
                 return;
@@ -56,6 +61,42 @@ public final class WaysGramGiftArtwork {
             imageView.getImageReceiver().setImageBitmap(bitmap);
             imageView.invalidate();
         }
+    }
+
+    /**
+     * Shows only the cached still frame.
+     *
+     * <p>The upgrade reveal uses it while its reels spin: decoding an animated sticker on the UI
+     * thread at the same time as the reveal animation is what made the animation stutter.</p>
+     */
+    public static void applyStill(BackupImageView imageView, String serial) {
+        if (imageView == null || serial == null || serial.isEmpty()) {
+            return;
+        }
+        APPLIED_DOCUMENTS.remove(imageView);
+        Bitmap bitmap = WaysGramGiftMediaStore.get(serial);
+        if (bitmap != null && !bitmap.isRecycled()) {
+            imageView.getImageReceiver().setImageBitmap(bitmap);
+            imageView.invalidate();
+        }
+    }
+
+    /** Starts (or restarts) the artwork animation and keeps it looping. */
+    public static void play(BackupImageView imageView) {
+        if (imageView == null) {
+            return;
+        }
+        imageView.getImageReceiver().setAllowStartAnimation(true);
+        imageView.getImageReceiver().startAnimation(true);
+    }
+
+    /** Stops the animation and drops the cached binding of this cell. */
+    public static void stop(BackupImageView imageView) {
+        if (imageView == null) {
+            return;
+        }
+        imageView.getImageReceiver().stopAnimation();
+        APPLIED_DOCUMENTS.remove(imageView);
     }
 
     /** True when the gift has playable artwork available. */

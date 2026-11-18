@@ -10,6 +10,7 @@ import android.graphics.Canvas;
 import android.graphics.Color;
 import android.graphics.Paint;
 import android.graphics.Typeface;
+import android.graphics.drawable.ColorDrawable;
 import android.graphics.drawable.GradientDrawable;
 import android.text.TextUtils;
 import android.util.TypedValue;
@@ -53,11 +54,11 @@ public final class WaysGramGiftUpgradeReveal {
         void onNextGift();
     }
 
-    private static final long MODEL_DURATION = 1150L;
-    private static final long PATTERN_DURATION = 1350L;
-    private static final long BACKDROP_DURATION = 1650L;
-    private static final long PATTERN_DELAY = 120L;
-    private static final long BACKDROP_DELAY = 240L;
+    private static final long MODEL_DURATION = 1300L;
+    private static final long PATTERN_DURATION = 1550L;
+    private static final long BACKDROP_DURATION = 1800L;
+    private static final long PATTERN_DELAY = 110L;
+    private static final long BACKDROP_DELAY = 220L;
 
     private WaysGramGiftUpgradeReveal() {
     }
@@ -91,6 +92,9 @@ public final class WaysGramGiftUpgradeReveal {
         private final LinearLayout card;
         private final GradientDrawable frameBackground;
         private final GradientDrawable cardBackground;
+        private final BackupImageView artworkView;
+        private final ColorDrawable tintDrawable;
+        private final int[] gradientColors = new int[2];
         private final View tint;
         private final TextView titleView;
         private final TextView numberView;
@@ -122,6 +126,8 @@ public final class WaysGramGiftUpgradeReveal {
 
         private final ArgbEvaluator argb = new ArgbEvaluator();
         private final ArrayList<ValueAnimator> animators = new ArrayList<>();
+        private float lastGradientPosition = -1f;
+        private float lastTintPosition = -1f;
 
         private boolean finished;
         private boolean closed;
@@ -173,7 +179,7 @@ public final class WaysGramGiftUpgradeReveal {
             dialog.setCanceledOnTouchOutside(true);
 
             // Outer frame: two device pixels of accent colour, the card itself sits inside.
-            frameBackground = rounded(0x00000000, 0x66FFFFFF, dp(2), dp(24));
+            frameBackground = rounded(0x00000000, 0xC7FFFFFF, dp(2), dp(24));
             FrameLayout frameView = new FrameLayout(context);
             frameView.setBackground(frameBackground);
             frameView.setPadding(dp(3), dp(3), dp(3), dp(3));
@@ -201,10 +207,12 @@ public final class WaysGramGiftUpgradeReveal {
             artworkParams.gravity = Gravity.CENTER_HORIZONTAL;
             card.addView(artworkHolder, artworkParams);
 
-            BackupImageView imageView = new BackupImageView(context);
-            artworkHolder.addView(imageView, new FrameLayout.LayoutParams(-1, -1));
+            artworkView = new BackupImageView(context);
+            artworkHolder.addView(artworkView, new FrameLayout.LayoutParams(-1, -1));
+            // Only the still frame is drawn while the reels spin: decoding an animated sticker on
+            // the UI thread at the same time is what made the reveal stutter on real devices.
             if (WaysGramGiftArtwork.hasArtwork(serial)) {
-                WaysGramGiftArtwork.apply(imageView, serial);
+                WaysGramGiftArtwork.applyStill(artworkView, serial);
             } else {
                 TextView emojiView = text(56, 0xFFFFFFFF, false);
                 emojiView.setGravity(Gravity.CENTER);
@@ -212,7 +220,9 @@ public final class WaysGramGiftUpgradeReveal {
                 artworkHolder.addView(emojiView, new FrameLayout.LayoutParams(-1, -1));
             }
 
+            tintDrawable = new ColorDrawable(modelColor(models[0]));
             tint = new View(context);
+            tint.setBackground(tintDrawable);
             tint.setAlpha(0.32f);
             FrameLayout.LayoutParams tintParams = new FrameLayout.LayoutParams(-1, dp(96));
             tintParams.gravity = Gravity.BOTTOM;
@@ -235,7 +245,6 @@ public final class WaysGramGiftUpgradeReveal {
             modelReel = addReel(reels, "Модель", models);
             patternReel = addReel(reels, "Узор", patterns);
             backdropReel = addReel(reels, "Фон", backdrops);
-            tint.setBackgroundColor(modelColor(models[0]));
 
             rarityView = text(12, 0xCCFFFFFF, false);
             rarityView.setGravity(Gravity.CENTER);
@@ -288,6 +297,16 @@ public final class WaysGramGiftUpgradeReveal {
         void show() {
             dialog.show();
             applyBackdrop(0f);
+            // Animated text and background on a hardware layer keep the frames off the software
+            // rasterizer; the layer is released as soon as the reels settle.
+            card.setLayerType(View.LAYER_TYPE_HARDWARE, null);
+            card.setAlpha(0f);
+            card.setScaleX(0.94f);
+            card.setScaleY(0.94f);
+            card.animate().alpha(1f).scaleX(1f).scaleY(1f)
+                    .setDuration(220L)
+                    .setInterpolator(new DecelerateInterpolator(1.6f))
+                    .start();
             startReels();
         }
 
@@ -354,22 +373,26 @@ public final class WaysGramGiftUpgradeReveal {
 
         private void applyModelTint(float position) {
             int count = models.length;
-            if (count == 0) {
+            if (count == 0 || Math.abs(position - lastTintPosition) < 0.002f) {
                 return;
             }
+            lastTintPosition = position;
             int index = (int) Math.floor(position);
             float fraction = position - index;
             int from = modelColor(models[circular(index, count)]);
             int to = modelColor(models[circular(index + 1, count)]);
-            tint.setBackgroundColor(blend(from, to, fraction));
-            tint.setAlpha(0.32f);
+            tintDrawable.setColor(blend(from, to, fraction));
         }
 
         private void applyBackdrop(float position) {
             if (backdropCenter.length == 0) {
-                cardBackground.setColors(new int[]{finalCenterColor, finalEdgeColor});
+                setGradient(finalCenterColor, finalEdgeColor);
                 return;
             }
+            if (Math.abs(position - lastGradientPosition) < 0.002f) {
+                return;
+            }
+            lastGradientPosition = position;
             int count = backdropCenter.length;
             int index = (int) Math.floor(position);
             float fraction = position - index;
@@ -377,10 +400,20 @@ public final class WaysGramGiftUpgradeReveal {
             int centerTo = backdropCenter[circular(index + 1, count)];
             int edgeFrom = backdropEdge[circular(index, count)];
             int edgeTo = backdropEdge[circular(index + 1, count)];
-            cardBackground.setColors(new int[]{
+            setGradient(
                     blend(centerFrom, centerTo, fraction),
                     blend(edgeFrom, edgeTo, fraction)
-            });
+            );
+        }
+
+        /** Reuses one colour array so the animation allocates nothing per frame. */
+        private void setGradient(int center, int edge) {
+            if (gradientColors[0] == center && gradientColors[1] == edge) {
+                return;
+            }
+            gradientColors[0] = center;
+            gradientColors[1] = edge;
+            cardBackground.setColors(gradientColors);
         }
 
         private void settle() {
@@ -391,9 +424,15 @@ public final class WaysGramGiftUpgradeReveal {
             modelReel.setPosition(indexOf(models, finalModel));
             patternReel.setPosition(indexOf(patterns, finalPattern));
             backdropReel.setPosition(indexOf(backdrops, finalBackdrop));
-            cardBackground.setColors(new int[]{finalCenterColor, finalEdgeColor});
-            tint.setBackgroundColor(modelColor(finalModel));
+            setGradient(finalCenterColor, finalEdgeColor);
+            tintDrawable.setColor(modelColor(finalModel));
             tint.setAlpha(0.24f);
+            card.setLayerType(View.LAYER_TYPE_NONE, null);
+            // From here the gift's own animation loops for as long as the panel is open.
+            if (WaysGramGiftArtwork.hasArtwork(serial)) {
+                WaysGramGiftArtwork.apply(artworkView, serial);
+                WaysGramGiftArtwork.play(artworkView);
+            }
 
             String number = collectionNumber > 0
                     ? (TextUtils.isEmpty(giftName) ? "Подарок" : giftName) + " #" + collectionNumber
@@ -402,7 +441,7 @@ public final class WaysGramGiftUpgradeReveal {
             numberView.setText(collectionNumber > 0
                     ? "Номер в коллекции: #" + collectionNumber : "");
 
-            animateColor(frameBackground, 0x66FFFFFF, accentColor, 380L);
+            animateColor(frameBackground, 0xC7FFFFFF, accentColor, 420L);
             fadeIn(rarityView, 260L, 120L);
             numberView.setScaleX(0.72f);
             numberView.setScaleY(0.72f);
@@ -455,6 +494,7 @@ public final class WaysGramGiftUpgradeReveal {
                 return;
             }
             closed = true;
+            WaysGramGiftArtwork.stop(artworkView);
             for (int i = 0; i < animators.size(); i++) {
                 animators.get(i).cancel();
             }
