@@ -1130,7 +1130,7 @@ async def init_admin_storage() -> None:
         CREATE TABLE IF NOT EXISTS waysgram_label_assignments (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             label_id INTEGER NOT NULL REFERENCES waysgram_labels(id) ON DELETE CASCADE,
-            target_type TEXT NOT NULL CHECK(target_type IN ('account','channel')),
+            target_type TEXT NOT NULL CHECK(target_type IN ('account','channel','group')),
             target_id INTEGER NOT NULL,
             assigned_by INTEGER NOT NULL,
             assigned_at INTEGER NOT NULL,
@@ -1364,6 +1364,27 @@ async def admin_find_label_target(target_type: str, value: str) -> tuple[int, st
             username = str(row["username"] or "").strip()
             title = f"@{username}" if username else (
                 str(row["title"] or f"Канал #{int(row['id'])}")
+            )
+            return int(row["id"]), title
+
+        if target_type == "group":
+            if value.isdigit():
+                cur = await db.execute(
+                    "SELECT id,title,username FROM chat_groups WHERE id=?",
+                    (int(value),),
+                )
+            else:
+                cur = await db.execute(
+                    """SELECT id,title,username FROM chat_groups
+                       WHERE lower(username)=? COLLATE NOCASE LIMIT 1""",
+                    (value.lstrip("@").lower(),),
+                )
+            row = await cur.fetchone()
+            if row is None:
+                return None
+            username = str(row["username"] or "").strip()
+            title = f"@{username}" if username else (
+                str(row["title"] or f"Группа #{int(row['id'])}")
             )
             return int(row["id"]), title
     return None
@@ -1987,16 +2008,21 @@ async def admin_callback(callback: CallbackQuery) -> None:
             reply_markup=admin_keyboard([
                 [("👤 Аккаунту", f"wgadm:labeltarget:account:{label_id}")],
                 [("📢 Каналу", f"wgadm:labeltarget:channel:{label_id}")],
+                [("👥 Группе", f"wgadm:labeltarget:group:{label_id}")],
                 [("⬅️ К метке", f"wgadm:label:{label_id}")],
             ]),
         )
-    elif action == "labeltarget" and len(parts) == 4 and parts[2] in {"account", "channel"}:
+    elif action == "labeltarget" and len(parts) == 4 and parts[2] in {"account", "channel", "group"}:
         try:
             label_id = int(parts[3])
         except ValueError:
             return
         ADMIN_INPUT[ADMIN_ID] = ("label_target", (label_id, parts[2]))
-        target_hint = "Telegram ID или @username аккаунта" if parts[2] == "account" else "ID или @username канала"
+        target_hint = {
+            "account": "Telegram ID или @username аккаунта",
+            "channel": "ID или @username канала",
+            "group": "ID или @username группы",
+        }[parts[2]]
         await callback.message.answer(f"Введите {target_hint}.")
     elif action == "labeldeleteask" and len(parts) == 3:
         try:
@@ -2924,13 +2950,21 @@ async def admin_text_input(message: Message) -> None:
         label_id, target_type = payload
         target = await admin_find_label_target(str(target_type), value)
         if target is None:
-            target_name = "Аккаунт" if target_type == "account" else "Канал"
+            target_name = {
+                "account": "Аккаунт",
+                "channel": "Канал",
+                "group": "Группа",
+            }[str(target_type)]
             await message.answer(f"{target_name} не найден. Проверьте ID или username и повторите.")
             return
         target_id, target_title = target
         assigned = await admin_assign_label(int(label_id), str(target_type), int(target_id))
         ADMIN_INPUT.pop(ADMIN_ID, None)
-        target_word = "аккаунту" if target_type == "account" else "каналу"
+        target_word = {
+            "account": "аккаунту",
+            "channel": "каналу",
+            "group": "группе",
+        }[str(target_type)]
         result = "Метка выдана" if assigned else "Эта метка уже назначена"
         await message.answer(f"{result} {target_word} {target_title}.")
         card = await admin_label_card(int(label_id))

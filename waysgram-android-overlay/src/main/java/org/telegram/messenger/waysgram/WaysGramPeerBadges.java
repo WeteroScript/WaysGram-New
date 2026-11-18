@@ -47,6 +47,8 @@ import java.util.concurrent.atomic.AtomicBoolean;
 public final class WaysGramPeerBadges {
 
     private static final long RETRY_DELAY_MS = 5 * 60 * 1000L;
+    /** A mark handed out by the administrator appears without restarting the app. */
+    private static final long LABEL_TTL_MS = 30 * 60 * 1000L;
     /** A name never carries more marks than that: more would read as noise. */
     public static final int MAX_LABELS = 3;
     private static final int DEFAULT_COLOR = 0xFF2F80ED;
@@ -317,7 +319,9 @@ public final class WaysGramPeerBadges {
             return Collections.emptyList();
         }
         long now = System.currentTimeMillis();
-        if (!entry.loaded && now - entry.at > RETRY_DELAY_MS) {
+        long ttl = entry.loaded ? LABEL_TTL_MS : RETRY_DELAY_MS;
+        if (now - entry.at > ttl) {
+            // Refresh in the background: the known marks stay on screen until the answer is in.
             request(account, peerId, key, invalidate);
         }
         return entry.labels;

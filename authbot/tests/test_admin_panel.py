@@ -166,6 +166,12 @@ def test_admin_creates_reusable_labels_and_assigns_accounts_and_channels(panel) 
             ("label_channel", "Label Channel", 770801, now),
         )
         channel_id = int(cur.lastrowid)
+        cur = db.execute(
+            """INSERT INTO chat_groups(username,title,owner_telegram_id,created_at)
+               VALUES(?,?,?,?)""",
+            ("label_group", "Label Group", 770801, now),
+        )
+        group_id = int(cur.lastrowid)
         db.commit()
 
     menu = press("wgadm:labels")
@@ -187,12 +193,21 @@ def test_admin_creates_reusable_labels_and_assigns_accounts_and_channels(panel) 
     assigned_channel = type_text("@label_channel")
     assert "метка выдана каналу" in assigned_channel.sent[0][0].lower()
 
+    # Groups carry marks too: the client shows them next to the group name.
+    who = press(f"wgadm:labelassign:{label_id}")
+    assert "Группе" in str(who.sent[-1][1])
+    press(f"wgadm:labeltarget:group:{label_id}")
+    assigned_group = type_text("@label_group")
+    assert "метка выдана группе" in assigned_group.sent[0][0].lower()
+    assert "Группа не найден" not in assigned_group.sent[0][0]
+
     assignments = query(
         path,
         "SELECT target_type,target_id FROM waysgram_label_assignments WHERE label_id=? ORDER BY target_type",
         (label_id,),
     )
-    assert assignments == [("account", 770801), ("channel", channel_id)]
+    assert assignments == [("account", 770801), ("channel", channel_id), ("group", group_id)]
+    assert run(bot_module.admin_assign_label(label_id, "group", group_id)) is False
     # Assigning the same saved template twice is idempotent.
     assert run(bot_module.admin_assign_label(label_id, "account", 770801)) is False
 
