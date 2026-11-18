@@ -112,6 +112,8 @@ public final class WaysGramGiftUpgradeReveal {
 
         private final String[] models;
         private final String[] patterns;
+        private final long[] modelDocuments;
+        private final long[] patternDocuments;
         private final String[] backdrops;
         private final int[] backdropCenter;
         private final int[] backdropEdge;
@@ -169,8 +171,12 @@ public final class WaysGramGiftUpgradeReveal {
             accentColor = accentFor(rarityKey);
 
             JSONObject pool = result.optJSONObject("roll_pool");
-            models = names(pool, "models", finalModel);
-            patterns = names(pool, "patterns", finalPattern);
+            ReelData modelReelData = reelData(pool, "models", finalModel);
+            models = modelReelData.names;
+            modelDocuments = modelReelData.documents;
+            ReelData patternReelData = reelData(pool, "patterns", finalPattern);
+            patterns = patternReelData.names;
+            patternDocuments = patternReelData.documents;
             backdrops = names(pool, "backdrops", finalBackdrop);
             JSONArray candidates = pool == null ? null : pool.optJSONArray("backdrops");
             int size = candidates == null ? 0 : candidates.length();
@@ -323,7 +329,9 @@ public final class WaysGramGiftUpgradeReveal {
                     return;
                 }
                 if (finished) {
-                    applyModelArtwork(finalModel);
+                    applyModelArtwork(
+                            finalModel, documentAt(modelDocuments, indexOf(models, finalModel))
+                    );
                     applyPatternArtwork(finalPattern);
                 }
             };
@@ -476,7 +484,7 @@ public final class WaysGramGiftUpgradeReveal {
             if (!giftId.isEmpty()) {
                 WaysGramGiftAttributes.wantRolled(giftId, traitsSnapshot);
             }
-            applyModelArtwork(finalModel);
+            applyModelArtwork(finalModel, documentAt(modelDocuments, indexOf(models, finalModel)));
             applyPatternArtwork(finalPattern);
             // From here the gift's own animation loops for as long as the panel is open.
             if (WaysGramGiftArtwork.hasArtwork(serial)) {
@@ -554,16 +562,19 @@ public final class WaysGramGiftUpgradeReveal {
                 return;
             }
             lastModelSlot = slot;
-            applyModelArtwork(models[circular(slot, models.length)]);
+            int index = circular(slot, models.length);
+            applyModelArtwork(models[index], documentAt(modelDocuments, index));
         }
 
-        private void applyModelArtwork(String model) {
+        private void applyModelArtwork(String model, long documentId) {
             if (giftId.isEmpty() || model == null || model.isEmpty()) {
                 return;
             }
-            org.telegram.tgnet.TLRPC.TL_document document = WaysGramGiftAttributes.document(
-                    giftId, WaysGramGiftAttributes.MODEL, model
-            );
+            // The backend matched every reel slot to its Telegram document, so the animation is
+            // fetched by id: attribute names are localised and cannot be relied on.
+            org.telegram.tgnet.TLRPC.TL_document document = documentId != 0L
+                    ? WaysGramGiftAttributes.documentById(giftId, documentId)
+                    : WaysGramGiftAttributes.document(giftId, WaysGramGiftAttributes.MODEL, model);
             if (document == null || appliedModelDocument == document.id) {
                 return;
             }
@@ -576,13 +587,25 @@ public final class WaysGramGiftUpgradeReveal {
             tint.animate().alpha(0.12f).setDuration(180L).start();
         }
 
+        private long documentAt(long[] documents, int index) {
+            if (documents == null || index < 0 || index >= documents.length) {
+                return 0L;
+            }
+            return documents[index];
+        }
+
         private void applyPatternArtwork(String pattern) {
             if (giftId.isEmpty() || pattern == null || pattern.isEmpty()) {
                 return;
             }
-            org.telegram.tgnet.TLRPC.TL_document document = WaysGramGiftAttributes.document(
-                    giftId, WaysGramGiftAttributes.PATTERN, pattern
+            org.telegram.tgnet.TLRPC.TL_document document = WaysGramGiftAttributes.traitDocument(
+                    giftId, WaysGramGiftAttributes.PATTERN, traitsSnapshot, "pattern"
             );
+            if (document == null) {
+                document = WaysGramGiftAttributes.document(
+                        giftId, WaysGramGiftAttributes.PATTERN, pattern
+                );
+            }
             if (document == null || appliedPatternDocument == document.id) {
                 return;
             }
@@ -808,6 +831,45 @@ public final class WaysGramGiftUpgradeReveal {
         }
         int value = entry.optInt(key, 0);
         return value == 0 ? fallback : value | 0xFF000000;
+    }
+
+    /** Reel slots of the model or pattern reel with the document of each slot. */
+    private static final class ReelData {
+        final String[] names;
+        final long[] documents;
+
+        ReelData(String[] names, long[] documents) {
+            this.names = names;
+            this.documents = documents;
+        }
+    }
+
+    private static ReelData reelData(JSONObject pool, String key, String fallback) {
+        JSONArray array = pool == null ? null : pool.optJSONArray(key);
+        ArrayList<String> names = new ArrayList<>();
+        ArrayList<Long> documents = new ArrayList<>();
+        if (array != null) {
+            for (int i = 0; i < array.length(); i++) {
+                JSONArray entry = array.optJSONArray(i);
+                String name = entry == null ? "" : entry.optString(0, "").trim();
+                if (name.isEmpty()) {
+                    continue;
+                }
+                names.add(name);
+                // Slot shape is [name, permille, rarity, document_id]; older servers only
+                // send the first two fields, which simply leaves the document unknown.
+                documents.add(entry == null ? 0L : entry.optLong(3, 0L));
+            }
+        }
+        if (names.isEmpty()) {
+            names.add(fallback);
+            documents.add(0L);
+        }
+        long[] documentArray = new long[documents.size()];
+        for (int i = 0; i < documentArray.length; i++) {
+            documentArray[i] = documents.get(i);
+        }
+        return new ReelData(names.toArray(new String[0]), documentArray);
     }
 
     private static String[] names(JSONObject pool, String key, String fallback) {

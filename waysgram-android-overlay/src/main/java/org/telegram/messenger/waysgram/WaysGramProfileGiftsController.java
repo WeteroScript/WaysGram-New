@@ -231,11 +231,13 @@ public final class WaysGramProfileGiftsController {
                 if (!telegramGiftIdText.isEmpty() && traits != null) {
                     WaysGramGiftAttributes.wantRolled(telegramGiftIdText, traits);
                 }
-                TLRPC.TL_document modelDocument = WaysGramGiftAttributes.document(
-                        telegramGiftIdText, WaysGramGiftAttributes.MODEL, model
+                // The rolled traits carry the Telegram document id, so the official model and
+                // pattern animations are used even if Telegram localises their names.
+                TLRPC.TL_document modelDocument = WaysGramGiftAttributes.traitDocument(
+                        telegramGiftIdText, WaysGramGiftAttributes.MODEL, traits, "model"
                 );
-                TLRPC.TL_document patternDocument = WaysGramGiftAttributes.document(
-                        telegramGiftIdText, WaysGramGiftAttributes.PATTERN, pattern
+                TLRPC.TL_document patternDocument = WaysGramGiftAttributes.traitDocument(
+                        telegramGiftIdText, WaysGramGiftAttributes.PATTERN, traits, "pattern"
                 );
                 if (modelDocument == null || patternDocument == null) {
                     TLRPC.TL_document fallbackDocument =

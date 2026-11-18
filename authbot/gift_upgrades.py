@@ -191,7 +191,32 @@ def _reel(entries: list[list[Any]], winner: str, limit: int = 40) -> list[list[A
     return [list(entry) for entry in picked]
 
 
-def reveal_pool(pool: dict[str, Any] | None, traits: dict[str, Any]) -> dict[str, Any]:
+def _with_documents(
+        entries: list[list[Any]], documents: dict[int, int] | None
+) -> list[list[Any]]:
+    """Normalises a reel to ``[name, permille, rarity, document_id]``.
+
+    The document id is the Telegram sticker document of that attribute, so the client can
+    play the official model and pattern animation. It is 0 when Telegram did not provide it.
+    """
+    mapping = documents or {}
+    result: list[list[Any]] = []
+    for position, entry in enumerate(entries):
+        rarity = str(entry[2]) if len(entry) > 2 and isinstance(entry[2], str) else ""
+        result.append([
+            str(entry[0]),
+            int(entry[1]) if len(entry) > 1 else 0,
+            rarity,
+            int(mapping.get(position, 0)),
+        ])
+    return result
+
+
+def reveal_pool(
+        pool: dict[str, Any] | None,
+        traits: dict[str, Any],
+        documents: dict[str, dict[int, int]] | None = None,
+) -> dict[str, Any]:
     """Candidate attributes the client scrolls through before it lands on the result."""
     source = pool or FALLBACK_POOL
     models = [entry for entry in source.get("models") or [] if isinstance(entry, list) and entry]
@@ -200,9 +225,12 @@ def reveal_pool(pool: dict[str, Any] | None, traits: dict[str, Any]) -> dict[str
     model_name = str((traits.get("model") or {}).get("name") or "")
     pattern_name = str((traits.get("pattern") or {}).get("name") or "")
     backdrop_name = str((traits.get("backdrop") or {}).get("name") or "")
+    mapping = documents or {}
+    models = _with_documents(models or FALLBACK_POOL["models"], mapping.get("model"))
+    patterns = _with_documents(patterns or FALLBACK_POOL["patterns"], mapping.get("pattern"))
     return {
-        "models": _reel(models or FALLBACK_POOL["models"], model_name),
-        "patterns": _reel(patterns or FALLBACK_POOL["patterns"], pattern_name),
+        "models": _reel(models, model_name),
+        "patterns": _reel(patterns, pattern_name),
         "backdrops": _reel(backdrops or FALLBACK_POOL["backdrops"], backdrop_name),
     }
 

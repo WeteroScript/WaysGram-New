@@ -331,6 +331,135 @@ def _has_collectible_traits(attributes: Any) -> bool:
     return True
 
 
+def _normalise_attribute_name(value: Any) -> str:
+    """Attribute names are compared ignoring case and repeated spaces."""
+    return " ".join(str(value or "").split()).casefold()
+
+
+async def _gift_attribute_documents(db: Any, gift_id: str) -> dict[str, list[dict[str, Any]]]:
+    """Telegram's model and pattern documents of one gift, in Telegram's own order."""
+    gift_id = str(gift_id or "").strip()
+    if not gift_id:
+        return {}
+    try:
+        cur = await db.execute(
+            """SELECT kind,name,permille,position,document_id
+               FROM telegram_mtproto_gift_attributes
+               WHERE gift_id=? AND is_available=1 AND kind IN ('model','pattern')
+               ORDER BY kind,position""",
+            (gift_id,),
+        )
+        rows = await cur.fetchall()
+    except Exception:  # noqa: BLE001 - trimmed-down schemas have no attribute table
+        return {}
+    grouped: dict[str, list[dict[str, Any]]] = {"model": [], "pattern": []}
+    for row in rows:
+        document_id = int(row[4] or 0)
+        if not document_id:
+            continue
+        grouped.setdefault(str(row[0]), []).append({
+            "name": str(row[1] or ""),
+            "permille": int(row[2] or 0),
+            "position": int(row[3] or 0),
+            "document_id": document_id,
+        })
+    return grouped
+
+
+def _match_attribute_document(
+    rows: list[dict[str, Any]],
+    name: Any,
+    permille: Any,
+    position: int | None,
+    allow_position: bool,
+) -> int:
+    """Finds the Telegram document of one attribute.
+
+    Names are what Telegram prints, so they are tried first. Telegram localises attribute
+    names, so the published chance is the next key, and the position inside the gift's set is
+    the last resort — it is only trusted when both lists have the same length, which means they
+    describe exactly the same set of attributes.
+    """
+    if not rows:
+        return 0
+    wanted = _normalise_attribute_name(name)
+    if wanted:
+        for row in rows:
+            if _normalise_attribute_name(row["name"]) == wanted:
+                return int(row["document_id"])
+    try:
+        chance = int(permille or 0)
+    except (TypeError, ValueError):
+        chance = 0
+    if chance > 0:
+        same_chance = [row for row in rows if int(row["permille"]) == chance]
+        if len(same_chance) == 1:
+            return int(same_chance[0]["document_id"])
+    if allow_position and position is not None:
+        for row in rows:
+            if int(row["position"]) == int(position):
+                return int(row["document_id"])
+    return 0
+
+
+def _enrich_traits_documents(
+    traits: dict[str, Any], pool: dict[str, Any], documents: dict[str, list[dict[str, Any]]]
+) -> bool:
+    """Stores the Telegram document id inside the rolled traits of a collectible."""
+    changed = False
+    for kind, key in (("model", "models"), ("pattern", "patterns")):
+        entry = traits.get(kind)
+        if not isinstance(entry, dict):
+            continue
+        if int(entry.get("document_id") or 0):
+            continue
+        rows = documents.get(kind) or []
+        if not rows:
+            continue
+        entries = [item for item in (pool.get(key) or []) if isinstance(item, list) and item]
+        position = None
+        wanted = _normalise_attribute_name(entry.get("name"))
+        for index, item in enumerate(entries):
+            if _normalise_attribute_name(item[0]) == wanted:
+                position = index
+                break
+        document_id = _match_attribute_document(
+            rows,
+            entry.get("name"),
+            entry.get("permille"),
+            position,
+            allow_position=bool(entries) and len(entries) == len(rows),
+        )
+        if document_id:
+            entry["document_id"] = document_id
+            changed = True
+    return changed
+
+
+def _reveal_pool_documents(
+    pool: dict[str, Any], documents: dict[str, list[dict[str, Any]]]
+) -> dict[str, dict[int, int]]:
+    """Document id per candidate slot, so the reveal can play the official animations."""
+    result: dict[str, dict[int, int]] = {"model": {}, "pattern": {}}
+    for kind, key in (("model", "models"), ("pattern", "patterns")):
+        rows = documents.get(kind) or []
+        if not rows:
+            continue
+        entries = [item for item in (pool.get(key) or []) if isinstance(item, list) and item]
+        same_size = len(entries) == len(rows)
+        for index, item in enumerate(entries):
+            document_id = _match_attribute_document(
+                rows,
+                item[0],
+                item[1] if len(item) > 1 else 0,
+                index,
+                allow_position=same_size,
+            )
+            if document_id:
+                result[kind][index] = document_id
+    return result
+
+
 async def _assign_unique_number(
     db: aiosqlite.Connection, serial: str, gift_key: str, now: int
 ) -> int:
@@ -6066,6 +6195,13 @@ def build_messenger_router(
                     gift_pool, now
                 )
             traits = gift_upgrades.traits_of(attributes) or {}
+            # Telegram publishes every model and pattern as a sticker document. Its id is
+            # stored with the traits (name, then chance, then position in the set), so the
+            # client can play the official animation instead of matching by name at runtime.
+            attribute_documents = await _gift_attribute_documents(
+                db, str(gift["telegram_gift_id"] or "")
+            )
+            _enrich_traits_documents(traits, gift_pool, attribute_documents)
             unique_num = await _assign_unique_number(
                 db,
                 serial,
@@ -6135,7 +6271,11 @@ def build_messenger_router(
                 "traits": traits,
                 # Candidate names and colours the client scrolls through while the
                 # upgrade animation runs; its last frame is the rolled result.
-                "roll_pool": gift_upgrades.reveal_pool(gift_pool, traits),
+                "roll_pool": gift_upgrades.reveal_pool(
+                    gift_pool,
+                    traits,
+                    _reveal_pool_documents(gift_pool, attribute_documents),
+                ),
             }
             await idempotency_store(db, uid, scope, descriptor, result, now)
             await db.commit()

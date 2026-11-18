@@ -214,13 +214,96 @@ public final class WaysGramGiftAttributes {
         queueWanted(giftId);
     }
 
-    /** Asks for the model and the pattern that the server actually rolled for this gift. */
+    /**
+     * Asks for the model and the pattern that the server actually rolled for this gift.
+     *
+     * <p>The server stores the Telegram document id inside the rolled traits, so the exact
+     * animation is downloaded even when Telegram localises the attribute names. Only gifts
+     * upgraded by an older backend fall back to the name lookup.</p>
+     */
     public static void wantRolled(String giftId, JSONObject traits) {
         if (TextUtils.isEmpty(giftId) || traits == null) {
             return;
         }
-        want(giftId, MODEL, WaysGramGiftTraits.name(traits, "model"));
-        want(giftId, PATTERN, WaysGramGiftTraits.name(traits, "pattern"));
+        wantTrait(giftId, MODEL, traits, "model");
+        wantTrait(giftId, PATTERN, traits, "pattern");
+    }
+
+    private static void wantTrait(
+            String giftId, String kind, JSONObject traits, String key
+    ) {
+        JSONObject entry = WaysGramGiftTraits.entry(traits, key);
+        long documentId = entry == null ? 0L : entry.optLong("document_id", 0L);
+        if (documentId != 0L) {
+            wantDocument(giftId, documentId);
+            return;
+        }
+        want(giftId, kind, WaysGramGiftTraits.name(traits, key));
+    }
+
+    /**
+     * The animated document of one rolled trait: the explicit Telegram document id first,
+     * the name lookup as a fallback for gifts upgraded before document ids were stored.
+     */
+    public static TLRPC.TL_document traitDocument(
+            String giftId, String kind, JSONObject traits, String key
+    ) {
+        if (traits == null) {
+            return null;
+        }
+        JSONObject entry = WaysGramGiftTraits.entry(traits, key);
+        long documentId = entry == null ? 0L : entry.optLong("document_id", 0L);
+        if (documentId != 0L) {
+            return documentById(giftId, documentId);
+        }
+        return document(giftId, kind, WaysGramGiftTraits.name(traits, key));
+    }
+
+    /**
+     * Downloads one attribute document by its Telegram id. No attribute list is needed: the
+     * id is served by the same backend route, so the reveal can play exactly the candidate the
+     * server rolled regardless of the attribute names.
+     */
+    public static void wantDocument(String giftId, long documentId) {
+        documentById(giftId, documentId);
+    }
+
+    /** The animation of one attribute known by its Telegram document id. */
+    public static TLRPC.TL_document documentById(String giftId, long documentId) {
+        if (TextUtils.isEmpty(giftId) || documentId == 0L) {
+            return null;
+        }
+        Entry direct = new Entry(
+                "document",
+                Long.toString(documentId),
+                documentId,
+                "",
+                "/api/telegram/gifts/" + Uri.encode(giftId) + "/attributes/" + documentId
+        );
+        String cacheKey = giftId + "|" + direct.key();
+        boolean queued = false;
+        synchronized (LOCK) {
+            TLRPC.TL_document cached = DOCUMENTS.get(cacheKey);
+            if (cached != null) {
+                return cached;
+            }
+            File file = WaysGramGiftDocuments.stickerFile(documentId);
+            if (file != null && file.isFile() && file.length() > 0) {
+                TLRPC.TL_document built = WaysGramGiftDocuments.buildDocument(
+                        documentId, file, ""
+                );
+                if (built != null) {
+                    DOCUMENTS.put(cacheKey, built);
+                    return built;
+                }
+            }
+            queued = !DOWNLOADING.contains(cacheKey) && !FAILED.contains(cacheKey);
+            enqueueLocked(giftId, direct);
+        }
+        if (queued) {
+            pumpDownloads();
+        }
+        return null;
     }
 
     /**

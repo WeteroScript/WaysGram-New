@@ -1989,3 +1989,71 @@ def test_upgrade_uses_the_official_telegram_pools(env) -> None:
             assert traits["backdrop"]["name"] in {entry[0] for entry in reveal["backdrops"]}
 
     run(scenario())
+
+
+def test_upgrade_matches_telegram_models_by_position_when_names_are_localised(env) -> None:
+    """Telegram prints attribute names in its own language, the position is unambiguous."""
+    path, app = env
+    plush_pepe = "5936013938331222567"
+
+    async def scenario() -> None:
+        import gift_upgrades
+
+        _, pool = gift_upgrades.pool_for_gift(plush_pepe, None)
+        models = pool["models"]
+        patterns = pool["patterns"]
+        with db_split.sqlite_connect(path) as db:
+            for kind, entries, first_document in (
+                ("model", models, 7000),
+                ("pattern", patterns, 8000),
+            ):
+                for index, entry in enumerate(entries):
+                    db.execute(
+                        """INSERT INTO telegram_mtproto_gift_attributes
+                           (gift_id,kind,position,name,rarity,permille,document_id,dc_id,
+                            mime_type,size,payload_json,is_available,fetched_at)
+                           VALUES(?,?,?,?,'',0,?,2,'application/x-tgsticker',1024,'{}',1,0)""",
+                        (plush_pepe, kind, index, f"Локализованное имя {index}",
+                         first_document + index),
+                    )
+
+        await bot_module.set_telegram_gift_values(plush_pepe, price=25, supply=1)
+        async with await client_for(app) as client:
+            bought = await client.post(
+                f"/api/telegram/gifts/{plush_pepe}/purchase", headers=headers(101), json={}
+            )
+            serial = bought.json()["gift"]["serial_number"]
+            upgraded = await client.post(
+                f"/api/gifts/{serial}/upgrade",
+                headers={**headers(101), "Idempotency-Key": "wg-position-match-0001"},
+            )
+            assert upgraded.status_code == 200
+            payload = upgraded.json()
+            traits = payload["traits"]
+            model_names = [entry[0] for entry in models]
+            pattern_names = [entry[0] for entry in patterns]
+            # The name is unknown to Telegram, so the document comes from the slot in the set.
+            assert traits["model"]["document_id"] == 7000 + model_names.index(traits["model"]["name"])
+            assert traits["pattern"]["document_id"] == 8000 + pattern_names.index(
+                traits["pattern"]["name"]
+            )
+
+            reveal = payload["roll_pool"]
+            reveal_models = {entry[0]: entry for entry in reveal["models"]}
+            rolled_model = reveal_models[traits["model"]["name"]]
+            assert rolled_model[3] == traits["model"]["document_id"]
+            # Every reel slot is shaped [name, chance, rarity, document id].
+            assert all(len(entry) == 4 for entry in reveal["models"])
+            assert all(len(entry) == 4 for entry in reveal["patterns"])
+            assert any(entry[3] for entry in reveal["models"])
+            assert any(entry[3] for entry in reveal["patterns"])
+
+            # The document survives in the stored traits, so the profile card can use it too.
+            inventory = (await client.get("/api/me/gifts", headers=headers(101))).json()["gifts"]
+            stored = next(item for item in inventory if item["serial_number"] == serial)
+            assert (
+                stored["attributes"]["collectible_traits"]["model"]["document_id"]
+                == traits["model"]["document_id"]
+            )
+
+    run(scenario())
