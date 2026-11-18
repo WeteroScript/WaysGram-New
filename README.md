@@ -7,11 +7,13 @@
 - `WaysGram-Android.zip.part1` — `part5`: пять частей исходного Android-архива.
 - `waysgram-android-overlay/src/main/java/`: Android-классы WaysGram.
 - `waysgram-android-overlay/scripts/`: интеграционные патчи и конфигурация сборки.
-- `bot.py`, `requirements.txt`, `Procfile`, `runtime.txt`: точка входа и метаданные хостинга.
-  `bot.py` при старте подтягивает код AuthBot из репозитория
-  [WaysGram-AuthBot](https://github.com/WeteroScript/WaysGram-AuthBot), кэширует его по коммиту
-  и запускает — хостингу достаточно указать один репозиторий (`WaysGram-New`).
-- `authbot/`: резервная копия кода бота (`git subtree`), используется, если GitHub недоступен.
+- `authbot/`: весь код AuthBot (Python, aiogram + FastAPI) — единственный источник правды.
+- `bot.py`, `requirements.txt`, `Procfile`, `runtime.txt`: точка входа и метаданные хостинга, если
+  панель смотрит прямо на этот репозиторий.
+- `deploy/authbot-bridge/bot.py`: лаунчер для репозитория
+  [WaysGram-AuthBot](https://github.com/WeteroScript/WaysGram-AuthBot) — он подтягивает только
+  `authbot/**` из этого репозитория и запускает бота, поэтому в панели BotHost репозиторий остаётся
+  маленьким, а код правится здесь.
 - `.github/workflows/build-apk.yml`: восстановление проекта, наложение WaysGram-кода и сборка APK.
 - `.github/workflows/authbot.yml`: тесты AuthBot и проверка загрузки кода бота.
 

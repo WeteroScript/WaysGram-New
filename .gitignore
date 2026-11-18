@@ -10,6 +10,7 @@ __pycache__/
 
 # AuthBot bootstrap cache (pulled revisions)
 .authbot-cache/
+.waysgram-src/
 
 # AuthBot runtime state (SQLite database, Telethon sessions, generated files)
 data/

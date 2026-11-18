@@ -1,65 +1,68 @@
-# AuthBot: один репозиторий на хостинге, код тянется из другого
+# AuthBot: BotHost → WaysGram-AuthBot → код из WaysGram-New
 
-В панели Bothost указан **один** репозиторий — `WaysGram-New`. Код бота при старте
-подтягивается из репозитория `WaysGram-AuthBot` и запускается. Тянуть ничего вручную не нужно:
-изменил бота в его репозитории — перезапустил контейнер — работает новая версия.
+В панели BotHost указывается репозиторий **WaysGram-AuthBot**. В нём лежит маленький лаунчер
+(`bot.py`), который при каждом старте подтягивает папку `authbot/` из **WaysGram-New** и запускает
+её. Весь код бота живёт в `WaysGram-New`, а хостинг смотрит на стабильный маленький репозиторий.
 
 ```
-BotHost ──clone──► WaysGram-New
-                      │  python bot.py
+BotHost ──clone──► WaysGram-AuthBot            (репозиторий в панели)
+                      │  python bot.py         ← deploy/authbot-bridge/bot.py
                       ▼
-              [authbot-bootstrap]
-                      │  1) GitHub: WaysGram-AuthBot@main → commit SHA
-                      │  2) скачивает tar.gz, распаковывает в кэш /data/authbot/<sha>
+              [launcher] GitHub API → WaysGram-New@main
+                      │  скачивает только authbot/** (~25 файлов, ~1.2 МБ)
                       ▼
-              runpy → <кэш>/bot.py  (uvicorn + aiogram)
+              /data/waysgram-new/<commit>/authbot/bot.py
+                      │  runpy
+                      ▼
+              uvicorn + aiogram (код из WaysGram-New)
 ```
 
-## Файлы, которые за это отвечают
+## Что где лежит
 
-| Файл | Роль |
-| --- | --- |
-| `bot.py` | бутстрап: находит нужный коммит, скачивает, кэширует и запускает `bot.py` бота |
-| `requirements.txt` | `-r authbot/requirements.txt` — зависимости ставятся на этапе сборки |
-| `Procfile` | `web: python bot.py` |
-| `runtime.txt` | `python-3.12.8` |
-| `.gitignore` | игнорирует `.authbot-cache/`, `.env`, `data/` |
-| `authbot/` | резервная копия кода бота (fallback, см. ниже) |
+| Репозиторий | Файл | Роль |
+| --- | --- | --- |
+| `WaysGram-AuthBot` | `bot.py` | лаунчер, копия [`deploy/authbot-bridge/bot.py`](../deploy/authbot-bridge/bot.py) |
+| `WaysGram-AuthBot` | `bot_standalone.py` | старая точка входа, резерв на случай первого старта без сети |
+| `WaysGram-AuthBot` | `requirements.txt` | зависимости (ставятся при сборке образа) |
+| `WaysGram-New` | `authbot/` | **весь код бота** — единственный источник правды |
+| `WaysGram-New` | `deploy/authbot-bridge/bot.py` | исходник лаунчера |
+| `WaysGram-New` | `bot.py`, `requirements.txt`, `Procfile`, `runtime.txt` | альтернативный деплой: панель смотрит прямо на этот репозиторий |
+| `WaysGram-New` | `.github/workflows/authbot.yml` | тесты бота + проверка лаунчера и точки входа |
 
-Порядок поиска кода при старте:
+Пошаговая инструкция для `WaysGram-AuthBot` — в
+[`deploy/authbot-bridge/README.md`](../deploy/authbot-bridge/README.md).
 
-1. **remote** (по умолчанию) — берётся коммит из `WaysGram-AuthBot`; если этот коммит уже лежит
-   в кэше, сеть вообще не используется;
-2. **кэш** — если GitHub недоступен, запускается последний успешно скачанный коммит;
-3. **`authbot/`** — если и кэша нет (первый запуск без сети), берётся копия из этого репозитория.
-   В логе будет явное предупреждение, что она может отставать.
+## Установка (один раз)
 
-## Настройки проекта в Bothost
+В репозитории `WaysGram-AuthBot`:
 
-| Параметр | Значение |
-| --- | --- |
-| Репозиторий | `WeteroScript/WaysGram-New` |
-| Ветка | `main` (после мержа PR; можно временно указать рабочую ветку) |
-| Язык / версия | Python 3.12 |
-| Главный файл | `bot.py` |
-| Файл зависимостей | `requirements.txt` |
-| Команда запуска (если есть) | `python bot.py` |
-| Постоянный каталог | `/data` |
+```bash
+git mv bot.py bot_standalone.py          # сохранить старый запуск как страховку
+curl -fsSL -o bot.py \
+  https://raw.githubusercontent.com/WeteroScript/WaysGram-New/main/deploy/authbot-bridge/bot.py
+git add bot.py bot_standalone.py && git commit -m "Run the bot from WaysGram-New/authbot"
+git push origin main
+```
+
+В BotHost ничего не меняется: репозиторий `WeteroScript/WaysGram-AuthBot`, Python 3.12,
+главный файл `bot.py`, зависимости `requirements.txt`, команда `python bot.py`, постоянный
+каталог `/data`.
 
 ## Переменные окружения
 
-Бутстрап:
+Лаунчер (все необязательные):
 
-- `AUTHBOT_REPO` — репозиторий бота, по умолчанию `WeteroScript/WaysGram-AuthBot`;
-- `AUTHBOT_REF` — ветка или тег, по умолчанию `main`;
-- `AUTHBOT_COMMIT` — прибить точный коммит (тогда проверка обновлений не выполняется,
-  старт мгновенный);
-- `AUTHBOT_HOME` — каталог кэша, по умолчанию `/data/authbot` (если `/data` доступен на запись)
-  иначе `./.authbot-cache`;
-- `AUTHBOT_SOURCE` — `auto` (по умолчанию), `remote` (только сеть, без fallback) или `local`
-  (только копия в `authbot/`);
-- `AUTHBOT_GITHUB_TOKEN` — если репозиторий бота станет приватным или упрётесь в лимит GitHub API;
-- `AUTHBOT_SYNC_DEPS=1` — доустанавливать `requirements.txt` из скачанного коммита при старте.
+| Переменная | По умолчанию | Зачем |
+| --- | --- | --- |
+| `WAYSGRAM_REPO` | `WeteroScript/WaysGram-New` | откуда брать код бота |
+| `WAYSGRAM_REF` | `main` | ветка или тег |
+| `WAYSGRAM_COMMIT` | — | прибить коммит (мгновенный старт, без проверки обновлений) |
+| `WAYSGRAM_SUBDIR` | `authbot` | папка с кодом |
+| `WAYSGRAM_HOME` | `/data/waysgram-new` | кэш скачанных коммитов |
+| `WAYSGRAM_MODE` | `auto` | `auto` / `api` / `archive` / `local` |
+| `WAYSGRAM_LOCAL_ENTRY` | `bot_standalone.py` | резервная копия бота в репозитории лаунчера |
+| `AUTHBOT_GITHUB_TOKEN` | — | приватный репозиторий или повышенный лимит GitHub API |
+| `AUTHBOT_SYNC_DEPS` | `0` | `1` — доустанавливать `requirements.txt` из скачанного коммита |
 
 Сам бот (значения переносятся без изменений из `authbot/.env.example`):
 
@@ -71,44 +74,45 @@ BotHost ──clone──► WaysGram-New
   `WAYSGRAM_API_BASE_URL` в Android-сборке;
 - `LOG_LEVEL`.
 
+## Порядок загрузки кода
+
+1. **api** (по умолчанию) — резолв коммита `WaysGram-New@main`, дерево файлов, затем ~25 блобов
+   только из `authbot/**` (~1.2 МБ). Остальные ~200 МБ Android-репозитория не скачиваются.
+2. **archive** — если API упёрся в лимит: скачивается архив репозитория и из него распаковывается
+   только `authbot/`.
+3. **кэш** — GitHub недоступен: запускается последний удачно скачанный коммит
+   (`/data/waysgram-new/<commit>/authbot`). Повторный старт с тем же коммитом сети не требует.
+4. **`bot_standalone.py`** — самая последняя страховка: старый код, лежащий в репозитории лаунчера.
+
 ## Зависимости и код: важная разница
 
-Код тянется из `WaysGram-AuthBot`, а пакеты ставятся из `requirements.txt` **этого** репозитория
-во время сборки образа. То есть:
+Код тянется из `WaysGram-New/authbot`, а пакеты ставятся из `requirements.txt` репозитория
+`WaysGram-AuthBot` во время сборки образа:
 
-- поменялся только код бота → достаточно перезапустить деплой;
-- в боте появились новые пакеты → обновите корневой `requirements.txt`
-  (`git subtree pull` обновит и `authbot/requirements.txt`), либо включите `AUTHBOT_SYNC_DEPS=1`
-  (медленнее старт, зато код и зависимости всегда совпадают).
+- поменялся только код бота → достаточно рестарта/редеплоя;
+- в `authbot/requirements.txt` появились новые пакеты → перенеси их в `requirements.txt`
+  лаунчера (или включи `AUTHBOT_SYNC_DEPS=1`, тогда бот доставит их сам при старте).
 
 ## Диагностика
 
 ```bash
-python bot.py --check     # скачать и распаковать, ничего не запускать; печатает путь и коммит
-python bot.py --check --repo WeteroScript/WaysGram-AuthBot --ref main
-AUTHBOT_SOURCE=local python bot.py --check   # проверить резервную копию
+python bot.py --check                       # коммит и путь, ничего не запуская
+WAYSGRAM_REF=arena/00b4c974-waysgram-new python bot.py --check
+WAYSGRAM_MODE=archive python bot.py --check # проверить резервный путь через архив
 ```
 
-В логах старта ищите строки с префиксом `[authbot-bootstrap]`: там видно, какой коммит взят,
-был ли скачан архив и включился ли fallback.
+В логах ищите строки с префиксом `[waysgram-launcher]`.
 
-## Обновление резервной копии `authbot/`
+## Альтернатива: панель смотрит прямо на WaysGram-New
 
-Копия обновляется из исходного репозитория через `git subtree`:
+Если удобнее указывать в BotHost именно `WaysGram-New`, там уже есть корневой `bot.py`: он без
+сети запускает `authbot/` из этого же репозитория. Тогда панель: репозиторий `WaysGram-New`,
+ветка `main`, главный файл `bot.py`, зависимости `requirements.txt`.
 
-```bash
-git subtree pull --prefix authbot https://github.com/WeteroScript/WaysGram-AuthBot.git main --squash
-git push origin main
-```
+## Ограничения
 
-Она не участвует в обычном запуске, но именно она спасает первый деплой в сети, где GitHub
-недоступен.
-
-## Ограничения подхода
-
-- На старте нужен исходящий доступ к `api.github.com` / `codeload.github.com`; без него работает
-  кэш, а на самом первом запуске — копия в `authbot/`.
-- Репозиторий весит ~200 МБ из-за частей Android-архива, поэтому первый клон на хостинге
-  не мгновенный. Если начнёт мешать, части архива можно вынести в GitHub Releases.
-- Пока контейнер работает, код не обновляется сам — нужен перезапуск/редеплой (это же и защита
-  от неожиданных обновлений в момент, когда бот обслуживает пользователей).
+- На старте нужен исходящий доступ к `api.github.com` / `codeload.github.com`; без него работают
+  кэш и `bot_standalone.py`.
+- Пока контейнер работает, код не обновляется сам — нужен рестарт/редеплой.
+- Первый клон репозитория в панели не мгновенный (~200 МБ из-за частей Android-архива). Если это
+  станет мешать, части архива можно вынести в GitHub Releases.
