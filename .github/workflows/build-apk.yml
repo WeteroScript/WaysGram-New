@@ -250,7 +250,7 @@ jobs:
           chmod +x gradlew
           ./gradlew --no-daemon --stacktrace --max-workers=2 \
             -Dorg.gradle.jvmargs="-Xmx5g -XX:MaxMetaspaceSize=1g -Dfile.encoding=UTF-8" \
-            :TMessagesProj:compileAfatReleaseJavaWithJavac 2>&1 | tee /tmp/javac.log
+            :TMessagesProj_App:compileAfatReleaseJavaWithJavac 2>&1 | tee /tmp/javac.log
 
       - name: Build release APK
         run: |
@@ -274,7 +274,9 @@ jobs:
             echo "### Ошибки сборки: run ${{ github.run_number }}, commit ${GITHUB_SHA:0:7}"
             echo '```'
             if [ -s "$file" ]; then
-              grep -E "error:|e: |FAILED|Execution failed|Caused by" "$file" | head -40
+              grep -E "^e: |error: |FAILED|Execution failed|What went wrong|Caused by" "$file" | head -40
+              echo '...'
+              tail -n 60 "$file"
             else
               echo "no gradle output captured"
             fi
