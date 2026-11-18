@@ -2005,13 +2005,18 @@ def patch_user_config_phone_source(original: str) -> str:
 
 
 def patch_profile_own_marks_source(original: str) -> str:
-    """Draw the account's own marks in its profile, exactly as in the chat title."""
-    if "WaysGram: own account marks in the profile title" in original:
+    """Draw the WaysGram marks of the account in its profile, exactly as in the chat title.
+
+    The marks belong to the account, not to the viewer, so a profile shows them to everybody:
+    the owner sees their own marks and so does everyone who opens the profile.
+    """
+    marker = "WaysGram: account marks in the profile title"
+    if marker in original:
         return original
     anchor = "                    nameTextView[a].setText(newString);\n"
     replacement = (
-        "                    // WaysGram: own account marks in the profile title.\n"
-        "                    nameTextView[a].setText(a == 0 && dialogId == getUserConfig().getClientUserId()\n"
+        "                    // " + marker + ".\n"
+        "                    nameTextView[a].setText(a == 0\n"
         "                            ? org.telegram.messenger.waysgram.WaysGramPeerBadges.decorate(\n"
         "                                    currentAccount, dialogId, newString,\n"
         "                                    () -> {\n"
@@ -2021,7 +2026,7 @@ def patch_profile_own_marks_source(original: str) -> str:
         "                                    })\n"
         "                            : newString);\n"
     )
-    return replace_exactly_once(original, anchor, replacement, "WaysGram own profile marks")
+    return replace_exactly_once(original, anchor, replacement, "WaysGram profile marks")
 
 
 def patch_chat_avatar_self_skip(original: str) -> str:
@@ -2093,19 +2098,23 @@ def patch_chat_list_marks_reserve(original: str) -> str:
     )
     replacement = (
         anchor
-        + "        // WaysGram: keep room for the marks drawn right after the badge.\n"
-        + "        waysGramMarksWidth = 0;\n"
-        + "        if (!LocaleController.isRTL) {\n"
-        + "            waysGramMarksWidth = org.telegram.messenger.waysgram.WaysGramPeerBadges.reservedWidth(\n"
-        + "                    currentAccount, getDialogId(), Theme.dialogs_namePaint[paintIndex].getTextSize(),\n"
-        + "                    () -> requestLayout());\n"
-        + "            if (waysGramMarksWidth > 0) {\n"
-        + "                waysGramMarksWidth += dp(drawPremium ? 24 : 18);\n"
-        + "                if (dialogsType != 2 && (dialogMuted || drawUnmute || isHiddenInCommunity)\n"
-        + "                        && !drawVerified && drawScam == 0) {\n"
-        + "                    waysGramMarksWidth += dp(10) + Theme.dialogs_muteDrawable.getIntrinsicWidth();\n"
-        + "                }\n"
+        + "        // WaysGram: keep room for the marks drawn next to the badge.\n"
+        + "        waysGramMarksWidth = org.telegram.messenger.waysgram.WaysGramPeerBadges.reservedWidth(\n"
+        + "                currentAccount, getDialogId(), Theme.dialogs_namePaint[paintIndex].getTextSize(),\n"
+        + "                () -> requestLayout());\n"
+        + "        if (waysGramMarksWidth > 0) {\n"
+        + "            waysGramMarksWidth += dp(drawPremium ? 24 : 18);\n"
+        + "            if (dialogsType != 2 && (dialogMuted || drawUnmute || isHiddenInCommunity)\n"
+        + "                    && !drawVerified && drawScam == 0) {\n"
+        + "                waysGramMarksWidth += dp(10) + Theme.dialogs_muteDrawable.getIntrinsicWidth();\n"
         + "            }\n"
+        + "            if (waysGramMarksWidth > nameWidth / 2) {\n"
+        + "                // The marks never take more than half of the row: the name wins.\n"
+        + "                waysGramMarksWidth = 0;\n"
+        + "            }\n"
+        + "        }\n"
+        + "        if (LocaleController.isRTL) {\n"
+        + "            nameLeft += waysGramMarksWidth;\n"
         + "        }\n"
         + "        nameWidth -= waysGramMarksWidth;\n"
     )
@@ -2113,7 +2122,7 @@ def patch_chat_list_marks_reserve(original: str) -> str:
 
 
 def patch_chat_list_marks(original: str) -> str:
-    """Draw the WaysGram marks of the row after its premium or verified badge."""
+    """Draw the WaysGram marks of the row next to its premium or verified badge."""
     if "WaysGramPeerBadges.drawMarks(" in original:
         return original
     anchor = (
@@ -2129,28 +2138,42 @@ def patch_chat_list_marks(original: str) -> str:
     replacement = (
         anchor
         + "            // WaysGram: the marks follow the badge, exactly as in the chat title.\n"
-        + "            if (currentDialogFolderId == 0 && nameLayout != null && !isForumCell()\n"
-        + "                    && !LocaleController.isRTL && waysGramMarksWidth > 0\n"
-        + "                    && nameMuteLeft > nameLeft) {\n"
+        + "            if (currentDialogFolderId == 0 && nameLayout != null && waysGramMarksWidth > 0\n"
+        + "                    && nameMuteLeft != 0) {\n"
         + "                try {\n"
-        + "                    float waysGramMarksLeft = nameMuteLeft;\n"
-        + "                    if (drawVerified || drawPremium || drawScam != 0) {\n"
-        + "                        waysGramMarksLeft += dp(drawPremium ? 24 : 18);\n"
-        + "                    }\n"
-        + "                    if (dialogsType != 2 && (dialogMuted || drawUnmute || isHiddenInCommunity)\n"
-        + "                            && !drawVerified && drawScam == 0) {\n"
-        + "                        waysGramMarksLeft = (nameMutedIconLeft > nameMuteLeft\n"
-        + "                                ? nameMutedIconLeft : nameMuteLeft)\n"
-        + "                                + Theme.dialogs_muteDrawable.getIntrinsicWidth() + dp(4);\n"
+        + "                    boolean waysGramMirrored = LocaleController.isRTL;\n"
+        + "                    boolean waysGramMutedIcon = dialogsType != 2\n"
+        + "                            && (dialogMuted || drawUnmute || isHiddenInCommunity)\n"
+        + "                            && !drawVerified && drawScam == 0;\n"
+        + "                    float waysGramMarksAnchor = nameMuteLeft;\n"
+        + "                    float waysGramMarksLimit;\n"
+        + "                    if (waysGramMirrored) {\n"
+        + "                        waysGramMarksAnchor -= dp(drawVerified || drawPremium || drawScam != 0\n"
+        + "                                ? (drawPremium ? 24 : 18) : 4);\n"
+        + "                        if (waysGramMutedIcon && nameMutedIconLeft < nameMuteLeft) {\n"
+        + "                            waysGramMarksAnchor = nameMutedIconLeft - dp(4);\n"
+        + "                        }\n"
+        + "                        waysGramMarksLimit = nameLeft - waysGramMarksWidth;\n"
+        + "                    } else {\n"
+        + "                        if (drawVerified || drawPremium || drawScam != 0) {\n"
+        + "                            waysGramMarksAnchor += dp(drawPremium ? 24 : 18);\n"
+        + "                        }\n"
+        + "                        if (waysGramMutedIcon) {\n"
+        + "                            waysGramMarksAnchor = (nameMutedIconLeft > nameMuteLeft\n"
+        + "                                    ? nameMutedIconLeft : nameMuteLeft)\n"
+        + "                                    + Theme.dialogs_muteDrawable.getIntrinsicWidth() + dp(4);\n"
+        + "                        }\n"
+        + "                        waysGramMarksLimit = nameLeft + nameWidth + waysGramMarksWidth;\n"
         + "                    }\n"
         + "                    org.telegram.messenger.waysgram.WaysGramPeerBadges.drawMarks(\n"
         + "                            canvas,\n"
         + "                            Theme.dialogs_namePaint[paintIndex],\n"
-        + "                            waysGramMarksLeft,\n"
+        + "                            waysGramMarksAnchor,\n"
         + "                            nameTop,\n"
-        + "                            nameLeft + nameWidth + waysGramMarksWidth,\n"
+        + "                            waysGramMarksLimit,\n"
         + "                            currentAccount,\n"
         + "                            getDialogId(),\n"
+        + "                            waysGramMirrored,\n"
         + "                            () -> {\n"
         + "                                requestLayout();\n"
         + "                                invalidate();\n"
@@ -2205,7 +2228,7 @@ def patch_waysgram_chat_fixes(android_root: Path) -> None:
         (settings, "WaysGram: render only a real number"),
         (user_info, "WaysGram: the edit-account number"),
         (user_config, "WaysGram: the session knows the number"),
-        (profile, "WaysGram: own account marks in the profile title"),
+        (profile, "WaysGram: account marks in the profile title"),
         (dialog_cell, "WaysGramPeerBadges.drawMarks("),
         (locale, "WaysGram ships a Russian interface"),
     ):

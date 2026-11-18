@@ -92,40 +92,51 @@ public final class WaysGramPeerBadges {
     }
 
     /**
-     * Draws the marks of a peer to the right of its badge, e.g. after the premium star of the
-     * chat list. Nothing is drawn while the marks are loading; the request invalidates the
-     * caller once they arrive.
+     * Draws the marks of a peer next to its badge, e.g. after the premium star of the chat list.
+     * Nothing is drawn while the marks are loading; the request invalidates the caller once
+     * they arrive.
      *
-     * @param top top of the text layout the marks belong to
-     * @return the x coordinate after the last drawn pill, or {@code left} when none is drawn
+     * @param anchor left edge of the first pill, or its right edge when {@code mirror} is set
+     * @param top    top of the text layout the marks belong to
+     * @param limit  rightmost allowed x, or the leftmost one when {@code mirror} is set
+     * @return the x coordinate after the last drawn pill, or {@code anchor} when none is drawn
      */
     public static float drawMarks(
             Canvas canvas,
             Paint paint,
-            float left,
+            float anchor,
             float top,
-            float maxRight,
+            float limit,
             int account,
             long peerId,
+            boolean mirror,
             Runnable invalidate
     ) {
         if (canvas == null || paint == null || peerId == 0) {
-            return left;
+            return anchor;
         }
         List<Label> labels = labels(account, peerId, invalidate);
         if (labels.isEmpty()) {
-            return left;
+            return anchor;
         }
         Paint.FontMetricsInt metrics = paint.getFontMetricsInt();
         float centerY = top + (metrics.descent - metrics.ascent) * 0.5f;
-        float x = left;
+        float x = anchor;
         for (Label label : labels) {
             float width = pillWidth(paint, label.text);
-            if (x + width > maxRight) {
-                break;
+            if (mirror) {
+                if (x - width < limit) {
+                    break;
+                }
+                drawPill(canvas, paint, label.text, label.color, x - width, centerY);
+                x -= width + AndroidUtilities.dp(3);
+            } else {
+                if (x + width > limit) {
+                    break;
+                }
+                drawPill(canvas, paint, label.text, label.color, x, centerY);
+                x += width + AndroidUtilities.dp(3);
             }
-            drawPill(canvas, paint, label.text, label.color, x, centerY);
-            x += width + AndroidUtilities.dp(3);
         }
         return x;
     }
