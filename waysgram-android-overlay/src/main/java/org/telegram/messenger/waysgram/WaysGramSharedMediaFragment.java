@@ -182,7 +182,6 @@ public final class WaysGramSharedMediaFragment extends BaseFragment {
                 loadMoreButton.setEnabled(hasMore);
                 if (statusCode == 401) {
                     WaysGramSessionStore.getInstance(getParentActivity()).clearSession();
-                    presentFragment(new WaysGramLoginFragment(), true);
                 }
             }
         });

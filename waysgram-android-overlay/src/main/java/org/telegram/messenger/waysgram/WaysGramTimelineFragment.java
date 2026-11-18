@@ -651,7 +651,6 @@ public final class WaysGramTimelineFragment extends BaseFragment {
                 statusView.setText(message);
                 if (statusCode == 401) {
                     WaysGramSessionStore.getInstance(getParentActivity(), getCurrentAccount()).clearSession();
-                    presentFragment(new WaysGramLoginFragment(), true);
                 }
             }
         });
@@ -724,7 +723,6 @@ public final class WaysGramTimelineFragment extends BaseFragment {
                                     statusView.setText(message);
                                     if (statusCode == 401) {
                                         WaysGramSessionStore.getInstance(getParentActivity(), getCurrentAccount()).clearSession();
-                                        presentFragment(new WaysGramLoginFragment(), true);
                                     }
                                 }
                             });
@@ -756,7 +754,6 @@ public final class WaysGramTimelineFragment extends BaseFragment {
                 messageEventsReady = false;
                 if (statusCode == 401) {
                     WaysGramSessionStore.getInstance(getParentActivity(), getCurrentAccount()).clearSession();
-                    presentFragment(new WaysGramLoginFragment(), true);
                     return;
                 }
                 loadMessages();
@@ -819,7 +816,6 @@ public final class WaysGramTimelineFragment extends BaseFragment {
                         eventPollInFlight = false;
                         if (statusCode == 401) {
                             WaysGramSessionStore.getInstance(getParentActivity(), getCurrentAccount()).clearSession();
-                            presentFragment(new WaysGramLoginFragment(), true);
                         } else {
                             scheduleNextEventPoll(4000);
                         }
@@ -856,7 +852,6 @@ public final class WaysGramTimelineFragment extends BaseFragment {
                 statusView.setText(message);
                 if (statusCode == 401) {
                     WaysGramSessionStore.getInstance(getParentActivity(), getCurrentAccount()).clearSession();
-                    presentFragment(new WaysGramLoginFragment(), true);
                 } else {
                     scheduleNextPoll();
                 }
@@ -886,7 +881,6 @@ public final class WaysGramTimelineFragment extends BaseFragment {
             public void onError(String message, int statusCode) {
                 if (statusCode == 401 && getParentActivity() != null) {
                     WaysGramSessionStore.getInstance(getParentActivity(), getCurrentAccount()).clearSession();
-                    presentFragment(new WaysGramLoginFragment(), true);
                 }
             }
         });
@@ -936,7 +930,6 @@ public final class WaysGramTimelineFragment extends BaseFragment {
                 pollInFlight = false;
                 if (statusCode == 401) {
                     WaysGramSessionStore.getInstance(getParentActivity(), getCurrentAccount()).clearSession();
-                    presentFragment(new WaysGramLoginFragment(), true);
                 } else {
                     scheduleNextPoll(4000);
                 }
@@ -1018,7 +1011,6 @@ public final class WaysGramTimelineFragment extends BaseFragment {
                     managementActionButton.setEnabled(false);
                     if (statusCode == 401) {
                         WaysGramSessionStore.getInstance(getParentActivity(), getCurrentAccount()).clearSession();
-                        presentFragment(new WaysGramLoginFragment(), true);
                     }
                 }
             });
@@ -1035,7 +1027,6 @@ public final class WaysGramTimelineFragment extends BaseFragment {
                     managementActionButton.setEnabled(false);
                     if (statusCode == 401) {
                         WaysGramSessionStore.getInstance(getParentActivity(), getCurrentAccount()).clearSession();
-                        presentFragment(new WaysGramLoginFragment(), true);
                     }
                 }
             });
@@ -1260,7 +1251,6 @@ public final class WaysGramTimelineFragment extends BaseFragment {
                         managementStatusView.setText(message);
                         if (statusCode == 401) {
                             WaysGramSessionStore.getInstance(getParentActivity(), getCurrentAccount()).clearSession();
-                            presentFragment(new WaysGramLoginFragment(), true);
                         }
                     }
                 });
@@ -2165,7 +2155,6 @@ public final class WaysGramTimelineFragment extends BaseFragment {
                 statusView.setText(message);
                 if (statusCode == 401) {
                     WaysGramSessionStore.getInstance(getParentActivity(), getCurrentAccount()).clearSession();
-                    presentFragment(new WaysGramLoginFragment(), true);
                 }
             }
         });

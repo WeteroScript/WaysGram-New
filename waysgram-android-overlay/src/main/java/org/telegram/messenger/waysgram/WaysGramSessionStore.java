@@ -7,6 +7,7 @@ import android.security.keystore.KeyProperties;
 import android.util.Base64;
 import android.util.Log;
 
+import org.telegram.messenger.BuildVars;
 import org.telegram.messenger.UserConfig;
 
 import java.util.HashMap;
@@ -23,16 +24,28 @@ import javax.crypto.SecretKey;
 import javax.crypto.spec.GCMParameterSpec;
 
 /**
- * Encrypted storage for WaysGram's own API session.
+ * WaysGram API session for one Telegram account slot.
  *
- * This store is deliberately independent from Telegram's MTProto account
- * session. It never reads or writes Telegram user authorization data.
+ * <p>The WaysGram session is created by the application sign-in flow itself
+ * ({@code WaysGramTransport} stores {@code token_<account>} in the
+ * {@code waysgram_session} preferences while the account is being
+ * authorized). Gift screens must use exactly that session: it belongs to the
+ * Telegram account that is currently open, so every account sees its own
+ * inventory and no separate "sign in to WaysGram again" prompt is needed.</p>
+ *
+ * <p>Older builds kept a second, global WaysGram token and copied it into
+ * every account slot, which made all Telegram accounts display the same gift
+ * inventory. Those shared leftovers are removed once by
+ * {@link #dropSharedSessionsOnce(Context)}.</p>
  */
 public final class WaysGramSessionStore implements WaysGramGiftCatalogClient.SessionProvider {
-    private static final String LEGACY_PREFS_NAME = "waysgram_private_session";
     private static final String ACCOUNT_PREFS_PREFIX = "waysgram_private_session_account_";
+    private static final String LEGACY_PREFS_NAME = "waysgram_private_session";
     private static final String MIGRATION_PREFS_NAME = "waysgram_session_migration";
-    private static final String PREF_MIGRATED = "legacy_session_migrated";
+    private static final String NATIVE_PREFS_NAME = "waysgram_session";
+    private static final String NATIVE_TOKEN_PREFIX = "token_";
+    private static final String NATIVE_EXPIRES_PREFIX = "expires_";
+    private static final String PREF_SHARED_SESSIONS_DROPPED = "shared_sessions_dropped_v2";
     private static final String KEY_ALIAS = "org.telegram.messenger.WaysGramSession.v1";
     private static final String PREF_API_BASE = "api_base_encrypted";
     private static final String PREF_SESSION_TOKEN = "session_token_encrypted";
@@ -41,17 +54,18 @@ public final class WaysGramSessionStore implements WaysGramGiftCatalogClient.Ses
 
     private static final Map<Integer, WaysGramSessionStore> INSTANCES = new HashMap<>();
 
+    private final Context appContext;
     private final SharedPreferences preferences;
     private final int telegramAccount;
 
     private WaysGramSessionStore(Context context, int telegramAccount) {
-        Context appContext = context.getApplicationContext();
+        this.appContext = context.getApplicationContext();
         this.telegramAccount = telegramAccount;
-        // Every Telegram slot has its own WaysGram login and gift inventory.
+        // Every Telegram slot resolves its own WaysGram session; nothing is shared between slots.
         preferences = appContext.getSharedPreferences(
                 ACCOUNT_PREFS_PREFIX + telegramAccount, Context.MODE_PRIVATE
         );
-        migrateLegacySessionOnce(appContext);
+        dropSharedSessionsOnce(appContext);
     }
 
     public static WaysGramSessionStore getInstance(Context context) {
@@ -71,33 +85,40 @@ public final class WaysGramSessionStore implements WaysGramGiftCatalogClient.Ses
         return telegramAccount;
     }
 
-    private void migrateLegacySessionOnce(Context context) {
+    /**
+     * Deletes every session that older builds shared between account slots.
+     *
+     * <p>Runs once per installation. After this call the only WaysGram session
+     * used by gift screens is the per-account token written during sign-in.</p>
+     */
+    private static synchronized void dropSharedSessionsOnce(Context context) {
         SharedPreferences migration = context.getSharedPreferences(
                 MIGRATION_PREFS_NAME, Context.MODE_PRIVATE
         );
-        if (migration.getBoolean(PREF_MIGRATED, false)) {
+        if (migration.getBoolean(PREF_SHARED_SESSIONS_DROPPED, false)) {
             return;
         }
-        SharedPreferences legacy = context.getSharedPreferences(LEGACY_PREFS_NAME, Context.MODE_PRIVATE);
-        if (!preferences.contains(PREF_SESSION_TOKEN) && legacy.contains(PREF_SESSION_TOKEN)) {
-            boolean committed = preferences.edit()
-                    .putString(PREF_API_BASE, legacy.getString(PREF_API_BASE, null))
-                    .putString(PREF_SESSION_TOKEN, legacy.getString(PREF_SESSION_TOKEN, null))
-                    .commit();
-            if (!committed) {
-                Log.e(TAG, "Unable to migrate the legacy WaysGram session for Telegram account "
-                        + telegramAccount);
-                return;
+        try {
+            context.getSharedPreferences(LEGACY_PREFS_NAME, Context.MODE_PRIVATE)
+                    .edit().clear().commit();
+            for (int account = 0; account < UserConfig.MAX_ACCOUNT_COUNT; account++) {
+                context.getSharedPreferences(
+                        ACCOUNT_PREFS_PREFIX + account, Context.MODE_PRIVATE
+                ).edit().clear().commit();
             }
-        }
-        if (!migration.edit().putBoolean(PREF_MIGRATED, true).commit()) {
-            Log.e(TAG, "Unable to persist WaysGram session migration state");
+            migration.edit().clear()
+                    .putBoolean(PREF_SHARED_SESSIONS_DROPPED, true)
+                    .commit();
+            Log.i(TAG, "Removed WaysGram sessions that older builds shared between accounts");
+        } catch (RuntimeException exception) {
+            Log.e(TAG, "Unable to clear shared WaysGram sessions", exception);
         }
     }
 
     /**
      * Stores only the WaysGram API base URL and WaysGram session token.
-     * Call this after a successful WaysGram auth-code verification.
+     * Kept for compatibility with the optional WaysGram sign-in client; the
+     * per-account sign-in token is preferred whenever it is available.
      */
     public synchronized void saveSession(String apiBaseUrl, String sessionToken)
             throws GeneralSecurityException {
@@ -134,47 +155,88 @@ public final class WaysGramSessionStore implements WaysGramGiftCatalogClient.Ses
     }
 
     public synchronized boolean hasSession() {
-        return getWaysGramSessionToken() != null && getApiBaseUrl() != null;
+        String token = getWaysGramSessionToken();
+        return token != null && token.trim().length() > 0;
     }
 
     @Override
     public synchronized String getApiBaseUrl() {
         String savedBase = decryptPreference(PREF_API_BASE);
         if (savedBase != null && !savedBase.trim().isEmpty()) {
-            return savedBase;
+            return savedBase.trim();
         }
-        String configuredDefault = WaysGramLoginSheet.getDefaultApiBaseUrl();
-        if (configuredDefault != null && !configuredDefault.trim().isEmpty()) {
-            Log.w(TAG, "Stored API base URL is missing; using the build-configured public API origin");
-            return configuredDefault.trim();
+        String configured = BuildVars.WAYSGRAM_API_BASE_URL;
+        if (configured != null && !configured.trim().isEmpty()) {
+            return configured.trim();
         }
         return null;
     }
 
     @Override
     public synchronized String getWaysGramSessionToken() {
-        return decryptPreference(PREF_SESSION_TOKEN);
+        String nativeToken = readNativeToken();
+        if (nativeToken != null && !nativeToken.trim().isEmpty()) {
+            return nativeToken.trim();
+        }
+        String storedToken = decryptPreference(PREF_SESSION_TOKEN);
+        return storedToken == null || storedToken.trim().isEmpty() ? null : storedToken.trim();
+    }
+
+    /** WaysGram token written by the application sign-in flow for this account slot. */
+    private String readNativeToken() {
+        if (appContext == null) {
+            return null;
+        }
+        try {
+            SharedPreferences nativePreferences = appContext.getSharedPreferences(
+                    NATIVE_PREFS_NAME, Context.MODE_PRIVATE
+            );
+            String token = nativePreferences.getString(
+                    NATIVE_TOKEN_PREFIX + telegramAccount, null
+            );
+            long expiresAt = nativePreferences.getLong(
+                    NATIVE_EXPIRES_PREFIX + telegramAccount, 0L
+            );
+            if (token == null || token.trim().isEmpty()) {
+                return null;
+            }
+            if (expiresAt > 0 && expiresAt < System.currentTimeMillis() / 1000L) {
+                // An expired sign-in token is useless; let the caller report the
+                // inventory error instead of opening a second login screen.
+                return null;
+            }
+            return token;
+        } catch (RuntimeException exception) {
+            Log.e(TAG, "Unable to read the WaysGram sign-in token", exception);
+            return null;
+        }
     }
 
     private String decryptPreference(String key) {
-        String value = preferences.getString(key, null);
+        String value;
+        try {
+            value = preferences.getString(key, null);
+        } catch (RuntimeException exception) {
+            Log.e(TAG, "Unable to read session preference " + key, exception);
+            return null;
+        }
         if (value == null || value.length() == 0) {
-            Log.w(TAG, "Encrypted session preference is missing: " + key);
             return null;
         }
         try {
             String decrypted = decrypt(value);
             if (decrypted == null || decrypted.length() == 0) {
-                Log.e(TAG, "Decrypted session preference is empty: " + key);
                 return null;
             }
             Log.d(TAG, "Successfully decrypted session preference: " + key);
             return decrypted;
         } catch (GeneralSecurityException | RuntimeException exception) {
-            Log.e(TAG, "Unable to decrypt session preference " + key + " (" +
-                    exception.getClass().getSimpleName() + "); clearing the WaysGram session",
+            Log.e(TAG, "Unable to decrypt session preference " + key + " ("
+                    + exception.getClass().getSimpleName() + "); dropping the stored value",
                     exception);
-            clearSession();
+            // Only the optional private copy is dropped here. The account's
+            // sign-in session is never touched from this path.
+            preferences.edit().remove(key).apply();
             return null;
         }
     }

@@ -659,6 +659,22 @@ def patch_profile_gifts_container_source(original: str) -> str:
         "disable Telegram scroll pagination for WaysGram gifts",
     )
 
+    if "waysGramInventoryBottomSpace" not in updated:
+        fill_anchor = (
+            "            if (parent.list == list) {\n"
+            "                items.add(UItem.asSpace(dp(20)));\n"
+        )
+        fill_replacement = (
+            "            if (parent.waysGramInventory) {\n"
+            "                items.add(UItem.asSpace(dp(120))); // waysGramInventoryBottomSpace\n"
+            "            }\n"
+            + fill_anchor
+        )
+        updated = replace_exactly_once(
+            updated, fill_anchor, fill_replacement,
+            "WaysGram inventory bottom scroll space"
+        )
+
     click_match = re.search(
         r"(?m)^(?P<indent>[ \t]*)(?:(?:public|private|protected)\s+)?void\s+onItemClick\s*\([^)]*\)\s*\{",
         updated,
@@ -805,11 +821,7 @@ def patch_profile_gifts_container_source(original: str) -> str:
         "                TL_stars.SavedStarGift savedGift = cell.getSavedGift();\n"
         "                if (savedGift == null || savedGift.gift == null || savedGift.gift.slug == null || !savedGift.gift.slug.startsWith(\"waysgram://\")) continue;\n"
         "                String serial = savedGift.gift.slug.substring(\"waysgram://\".length()).trim();\n"
-        "                android.graphics.Bitmap bitmap = org.telegram.messenger.waysgram.WaysGramGiftMediaStore.get(serial);\n"
-        "                if (bitmap != null && !bitmap.isRecycled()) {\n"
-        "                    cell.imageView.getImageReceiver().setImageBitmap(bitmap);\n"
-        "                    cell.imageView.invalidate();\n"
-        "                }\n"
+        "                org.telegram.messenger.waysgram.WaysGramGiftArtwork.apply(cell.imageView, serial);\n"
         "            }\n"
         "        }\n"
         "    }\n\n"
@@ -829,8 +841,7 @@ def patch_gift_sheet_profile_art_source(original: str) -> str:
     if marker in original:
         required = (
             'userGift.gift.slug.startsWith("waysgram://")',
-            "WaysGramGiftMediaStore.get(waysGramSerial)",
-            "imageView.getImageReceiver().setImageBitmap(waysGramBitmap);",
+            "WaysGramGiftArtwork.apply(imageView, waysGramSerial);",
         )
         if not all(value in original for value in required):
             raise ValueError("GiftSheet contains an incomplete SavedStarGift artwork binding")
@@ -842,11 +853,7 @@ def patch_gift_sheet_profile_art_source(original: str) -> str:
         + "            " + marker + "\n"
         + "            if (userGift.gift != null && userGift.gift.slug != null && userGift.gift.slug.startsWith(\"waysgram://\")) {\n"
         + "                String waysGramSerial = userGift.gift.slug.substring(\"waysgram://\".length()).trim();\n"
-        + "                android.graphics.Bitmap waysGramBitmap = org.telegram.messenger.waysgram.WaysGramGiftMediaStore.get(waysGramSerial);\n"
-        + "                if (waysGramBitmap != null && !waysGramBitmap.isRecycled()) {\n"
-        + "                    imageView.getImageReceiver().setImageBitmap(waysGramBitmap);\n"
-        + "                    imageView.invalidate();\n"
-        + "                }\n"
+        + "                org.telegram.messenger.waysgram.WaysGramGiftArtwork.apply(imageView, waysGramSerial);\n"
         + "            }\n"
     )
     return replace_exactly_once(
@@ -955,7 +962,7 @@ def patch_gift_sheet_source(original: str) -> str:
     """Keep Telegram's GiftCell renderer, injecting WaysGram stickers, emoji and metadata."""
     updated = original
 
-    sticker_marker = "WaysGramGiftMediaStore.get("
+    sticker_marker = "WaysGramGiftArtwork.apply("
     if sticker_marker not in updated:
         sticker_target = "            setSticker(userGift.gift.getDocument(), userGift);\n"
         sticker_replacement = (
@@ -1016,9 +1023,8 @@ def patch_gift_sheet_source(original: str) -> str:
             + "                        card.addView(waysGramEmojiView, new FrameLayout.LayoutParams(AndroidUtilities.dp(80), AndroidUtilities.dp(80), android.view.Gravity.CENTER));\n"
             + "                    }\n"
             + "                    waysGramEmojiView.setText(waysGramMetadata.emoji == null || waysGramMetadata.emoji.isEmpty() ? \"🎁\" : waysGramMetadata.emoji);\n"
-            + "                    android.graphics.Bitmap waysGramGiftBitmap = org.telegram.messenger.waysgram.WaysGramGiftMediaStore.get(waysGramSerial);\n"
-            + "                    if (waysGramGiftBitmap != null) {\n"
-            + "                        imageView.setImageBitmap(waysGramGiftBitmap);\n"
+            + "                    org.telegram.messenger.waysgram.WaysGramGiftArtwork.apply(imageView, waysGramSerial);\n"
+            + "                    if (org.telegram.messenger.waysgram.WaysGramGiftArtwork.hasArtwork(waysGramSerial)) {\n"
             + "                        waysGramEmojiView.setVisibility(View.GONE);\n"
             + "                    } else {\n"
             + "                        waysGramEmojiView.setVisibility(View.VISIBLE);\n"
@@ -1064,6 +1070,225 @@ def patch_gift_sheet_source(original: str) -> str:
         )
 
     return updated
+
+def patch_waysgram_mapper_source(original: str) -> str:
+    """Render WaysGram gift messages as Telegram's native gift cards."""
+    marker = "WaysGramGiftMessages.toServiceMessage"
+    if marker in original:
+        required = (
+            "public static TLRPC.Message toMessage(JSONObject m, long selfId, int account)",
+            marker,
+        )
+        if not all(value in original for value in required):
+            raise ValueError("WaysGramMapper contains an incomplete WaysGram card patch")
+        return original
+
+    anchor = (
+        "    public static TLRPC.TL_message toMessage(JSONObject m, long selfId) {\n"
+        "        return toMessage(\n"
+        "                m.optLong(\"id\"),\n"
+        "                m.optLong(\"sender_id\"),\n"
+        "                m.optLong(\"recipient_id\"),\n"
+        "                m.optString(\"body\", \"\"),\n"
+        "                m.optInt(\"created_at\"),\n"
+        "                selfId);\n"
+        "    }\n"
+    )
+    replacement = (
+        "    public static TLRPC.Message toMessage(JSONObject m, long selfId) {\n"
+        "        return toMessage(m, selfId, org.telegram.messenger.UserConfig.selectedAccount);\n"
+        "    }\n"
+        "\n"
+        "    /**\n"
+        "     * Gift purchases, transfers and received gifts are drawn with Telegram's\n"
+        "     * native gift card instead of a plain text bubble.\n"
+        "     */\n"
+        "    public static TLRPC.Message toMessage(JSONObject m, long selfId, int account) {\n"
+        "        final TLRPC.Message waysGramGiftMessage =\n"
+        "                org.telegram.messenger.waysgram.WaysGramGiftMessages.toServiceMessage(account, m, selfId);\n"
+        "        if (waysGramGiftMessage != null) {\n"
+        "            return waysGramGiftMessage;\n"
+        "        }\n"
+        "        return toMessage(\n"
+        "                m.optLong(\"id\"),\n"
+        "                m.optLong(\"sender_id\"),\n"
+        "                m.optLong(\"recipient_id\"),\n"
+        "                m.optString(\"body\", \"\"),\n"
+        "                m.optInt(\"created_at\"),\n"
+        "                selfId);\n"
+        "    }\n"
+    )
+    return replace_exactly_once(original, anchor, replacement, "WaysGram gift card message mapping")
+
+
+def patch_waysgram_gift_message_callers(original: str) -> str:
+    """Pass the account slot into the gift-aware message mapper."""
+    updated = original
+    plain = "WaysGramMapper.toMessage(m, selfId)"
+    with_account = "WaysGramMapper.toMessage(m, selfId, account)"
+    if plain in updated:
+        updated = updated.replace(plain, with_account)
+    if with_account not in updated:
+        raise ValueError("WaysGram message mapper call site is missing")
+    return updated
+
+
+def patch_waysgram_gifts_source(original: str) -> str:
+    """Serve gift artwork reliably: valid mime, retries and safe placeholders."""
+    ensure_marker = "isValidSticker(file)"
+    placeholder_marker = "stickerDocumentId(file)"
+    if ensure_marker in original and placeholder_marker in original:
+        required = (
+            "downloadStickerBytes(account, giftId, true)",
+            "?animated=1",
+        )
+        if not all(value in original for value in required):
+            raise ValueError("WaysGramGifts contains an incomplete artwork download patch")
+        return original
+
+    start = original.index("    private static File ensureSticker(int account, String giftId) {")
+    end = original.index("    private static String mimeFor(JSONObject sticker) {")
+    replacement = (
+        "    private static File ensureSticker(int account, String giftId) {\n"
+        "        long stickerId = parseId(giftId);\n"
+        "        File file = new File(stickerDir(), stickerId + \".bin\");\n"
+        "        if (isValidSticker(file)) {\n"
+        "            return file;\n"
+        "        }\n"
+        "        if (file.exists() && !file.delete()) {\n"
+        "            // A stale or truncated file must never hide the real artwork.\n"
+        "            return placeholderSticker(stickerId);\n"
+        "        }\n"
+        "        Long failedAt = failedStickers.get(stickerId);\n"
+        "        if (failedAt != null && System.currentTimeMillis() - failedAt < RETRY_DELAY_MS) {\n"
+        "            return placeholderSticker(stickerId);\n"
+        "        }\n"
+        "        byte[] bytes = downloadStickerBytes(account, giftId, true);\n"
+        "        if (bytes == null) {\n"
+        "            bytes = downloadStickerBytes(account, giftId, false);\n"
+        "        }\n"
+        "        if (bytes != null && writeStickerFile(file, bytes)) {\n"
+        "            failedStickers.remove(stickerId);\n"
+        "            return file;\n"
+        "        }\n"
+        "        failedStickers.put(stickerId, System.currentTimeMillis());\n"
+        "        return placeholderSticker(stickerId);\n"
+        "    }\n"
+        "\n"
+        "    private static byte[] downloadStickerBytes(int account, String giftId, boolean animated) {\n"
+        "        try {\n"
+        "            String path = \"/api/telegram/gifts/\" + android.net.Uri.encode(giftId) + \"/sticker\"\n"
+        "                    + (animated ? \"?animated=1\" : \"\");\n"
+        "            byte[] bytes = WaysGramApi.download(account, path);\n"
+        "            return bytes == null || bytes.length == 0 ? null : bytes;\n"
+        "        } catch (Exception e) {\n"
+        "            FileLog.e(e);\n"
+        "            return null;\n"
+        "        }\n"
+        "    }\n"
+        "\n"
+        "    private static boolean isValidSticker(File file) {\n"
+        "        if (file == null || !file.isFile() || file.length() < 16) {\n"
+        "            return false;\n"
+        "        }\n"
+        "        try (java.io.FileInputStream in = new java.io.FileInputStream(file)) {\n"
+        "            byte[] head = new byte[16];\n"
+        "            int read = in.read(head);\n"
+        "            return read >= 4\n"
+        "                    && org.telegram.messenger.waysgram.WaysGramGiftDocuments.sniffMime(head) != null;\n"
+        "        } catch (Exception e) {\n"
+        "            return false;\n"
+        "        }\n"
+        "    }\n"
+        "\n"
+        "    private static boolean writeStickerFile(File file, byte[] bytes) {\n"
+        "        try {\n"
+        "            File tmp = new File(file.getPath() + \".tmp\");\n"
+        "            try (FileOutputStream out = new FileOutputStream(tmp)) {\n"
+        "                out.write(bytes);\n"
+        "            }\n"
+        "            if (file.exists() && !file.delete()) {\n"
+        "                tmp.delete();\n"
+        "                return false;\n"
+        "            }\n"
+        "            return tmp.renameTo(file);\n"
+        "        } catch (Exception e) {\n"
+        "            FileLog.e(e);\n"
+        "            return false;\n"
+        "        }\n"
+        "    }\n"
+        "\n"
+        "    /** Document id of the file that is actually served for this gift artwork. */\n"
+        "    static long stickerDocumentId(File file) {\n"
+        "        if (file == null) {\n"
+        "            return 0;\n"
+        "        }\n"
+        "        String name = file.getName();\n"
+        "        int dot = name.indexOf('.');\n"
+        "        if (dot > 0) {\n"
+        "            name = name.substring(0, dot);\n"
+        "        }\n"
+        "        try {\n"
+        "            return Long.parseLong(name);\n"
+        "        } catch (Exception e) {\n"
+        "            return parseId(name);\n"
+        "        }\n"
+        "    }\n"
+        "\n"
+    )
+    updated = original[:start] + replacement + original[end:]
+
+    # A placeholder must never occupy the real artwork file name.
+    placeholder_anchor = (
+        "        try {\n"
+        "            File file = new File(stickerDir(), id + \".bin\");\n"
+        "            if (file.exists() && file.length() > 0) {\n"
+        "                return file;\n"
+        "            }\n"
+    )
+    placeholder_replacement = (
+        "        try {\n"
+        "            // Keep the placeholder on its own document id: a failed download\n"
+        "            // must not block the real artwork forever.\n"
+        "            long placeholderId = (id * 1000003L + 7L) & 0x7FFFFFFFFFFFFFFFL;\n"
+        "            if (placeholderId == 0) {\n"
+        "                placeholderId = id + 1;\n"
+        "            }\n"
+        "            File file = new File(stickerDir(), placeholderId + \".bin\");\n"
+        "            if (file.exists() && file.length() > 0) {\n"
+        "                return file;\n"
+        "            }\n"
+    )
+    updated = replace_exactly_once(
+        updated, placeholder_anchor, placeholder_replacement,
+        "WaysGram placeholder sticker separation"
+    )
+
+    # Serve the artwork with its real mime type and animation attributes.
+    doc_anchor = "        doc.attributes.add(st);\n"
+    doc_replacement = (
+        "        doc.attributes.add(st);\n"
+        "        TLRPC.TL_document sniffedDocument =\n"
+        "                org.telegram.messenger.waysgram.WaysGramGiftDocuments.buildDocument(\n"
+        "                        stickerDocumentId(file), file, g.optString(\"emoji\", \"\"));\n"
+        "        if (sniffedDocument != null) {\n"
+        "            doc = sniffedDocument;\n"
+        "        }\n"
+    )
+    updated = replace_exactly_once(updated, doc_anchor, doc_replacement, "WaysGram gift artwork mime type")
+
+    cache_fields_anchor = "    private static long cacheAt;\n"
+    cache_fields_replacement = (
+        cache_fields_anchor
+        + "    private static final HashMap<Long, Long> failedStickers = new HashMap<>();\n"
+        + "    private static final long RETRY_DELAY_MS = 5 * 60 * 1000L;\n"
+    )
+    updated = replace_exactly_once(
+        updated, cache_fields_anchor, cache_fields_replacement,
+        "WaysGram gift artwork retry cache"
+    )
+    return updated
+
 
 def patch_push_service_source(original: str) -> str:
     """Route WaysGram FCM messages separately and refresh its secondary token."""
@@ -1235,6 +1460,173 @@ def patch_translation_dependencies(android_root: Path) -> None:
     gradle_file.write_text(content.rstrip() + addition, encoding="utf-8")
 
 
+def patch_waysgram_gift_integration(android_root: Path) -> None:
+    """Apply gift card mapping and reliable shop artwork to the WaysGram transport."""
+    mapper = android_root / "TMessagesProj/src/main/java/org/telegram/tgnet/WaysGramMapper.java"
+    if not mapper.is_file():
+        raise FileNotFoundError(f"Required WaysGram message mapper not found: {mapper}")
+    mapper_source = mapper.read_text(encoding="utf-8")
+    patched_mapper = patch_waysgram_mapper_source(mapper_source)
+    if patched_mapper != mapper_source:
+        mapper.write_text(patched_mapper, encoding="utf-8")
+
+    for relative in (
+        "TMessagesProj/src/main/java/org/telegram/tgnet/WaysGramPoller.java",
+        "TMessagesProj/src/main/java/org/telegram/tgnet/WaysGramMessages.java",
+        "TMessagesProj/src/main/java/org/telegram/tgnet/WaysGramTransport.java",
+    ):
+        path = android_root / relative
+        if not path.is_file():
+            raise FileNotFoundError(f"Required WaysGram message source not found: {path}")
+        source = path.read_text(encoding="utf-8")
+        patched = patch_waysgram_gift_message_callers(source)
+        if patched != source:
+            path.write_text(patched, encoding="utf-8")
+
+    gifts = android_root / "TMessagesProj/src/main/java/org/telegram/tgnet/WaysGramGifts.java"
+    if not gifts.is_file():
+        raise FileNotFoundError(f"Required WaysGram gift source not found: {gifts}")
+    gifts_source = gifts.read_text(encoding="utf-8")
+    patched_gifts = patch_waysgram_gifts_source(gifts_source)
+    patched_gifts = patch_waysgram_gift_account_isolation(patched_gifts)
+    if patched_gifts != gifts_source:
+        gifts.write_text(patched_gifts, encoding="utf-8")
+
+    avatar_container = (
+        android_root
+        / "TMessagesProj/src/main/java/org/telegram/ui/Components/ChatAvatarContainer.java"
+    )
+    if not avatar_container.is_file():
+        raise FileNotFoundError(f"Required chat avatar source not found: {avatar_container}")
+    avatar_source = avatar_container.read_text(encoding="utf-8")
+    patched_avatar = patch_chat_avatar_title_badges(avatar_source)
+    if patched_avatar != avatar_source:
+        avatar_container.write_text(patched_avatar, encoding="utf-8")
+    if "WaysGramPeerBadges.decorate(" not in avatar_container.read_text(encoding="utf-8"):
+        raise ValueError("WaysGram marks next to the chat name were not applied")
+
+    final_mapper = mapper.read_text(encoding="utf-8")
+    if "WaysGramGiftMessages.toServiceMessage" not in final_mapper:
+        raise ValueError("WaysGram gift cards are not mapped into native Telegram gift messages")
+    final_gifts = gifts.read_text(encoding="utf-8")
+    for marker in (
+        "isValidSticker(file)",
+        "?animated=1",
+        "stickerDocumentId(file)",
+        "WaysGramGiftDocuments.buildDocument(",
+        "CatalogSnapshot",
+        "install(snapshot);",
+    ):
+        if marker not in final_gifts:
+            raise ValueError("WaysGram shop gift artwork patch is incomplete")
+
+
+def patch_waysgram_gift_account_isolation(original: str) -> str:
+    """Keep the WaysGram gift catalog per Telegram account instead of process-wide."""
+    if "CatalogSnapshot" in original:
+        for required in ("snapshots.clear();", "install(snapshot);"):
+            if required not in original:
+                raise ValueError("WaysGramGifts contains an incomplete per-account catalog patch")
+        return original
+
+    fields = (
+        "    private static JSONArray catalogCache;\n"
+        "    private static long cacheAt;\n"
+    )
+    fields_replacement = (
+        fields
+        + "\n"
+        + "    /** Catalog snapshots per Telegram account: gifts must never leak between accounts. */\n"
+        + "    private static final HashMap<Integer, CatalogSnapshot> snapshots = new HashMap<>();\n"
+        + "\n"
+        + "    private static final class CatalogSnapshot {\n"
+        + "        JSONArray gifts;\n"
+        + "        long at;\n"
+        + "        final HashMap<Long, String> originalIds = new HashMap<>();\n"
+        + "    }\n"
+        + "\n"
+        + "    private static void install(CatalogSnapshot snapshot) {\n"
+        + "        catalogCache = snapshot.gifts;\n"
+        + "        cacheAt = snapshot.at;\n"
+        + "        originalIds.clear();\n"
+        + "        originalIds.putAll(snapshot.originalIds);\n"
+        + "    }\n"
+    )
+    updated = replace_exactly_once(original, fields, fields_replacement, "WaysGram per-account catalog fields")
+
+    invalidate_anchor = (
+        "    public static synchronized void invalidate() {\n"
+        "        cacheAt = 0;\n"
+        "    }\n"
+    )
+    invalidate_replacement = (
+        "    public static synchronized void invalidate() {\n"
+        "        snapshots.clear();\n"
+        "        catalogCache = null;\n"
+        "        cacheAt = 0;\n"
+        "        originalIds.clear();\n"
+        "        failedStickers.clear();\n"
+        "    }\n"
+    )
+    updated = replace_exactly_once(updated, invalidate_anchor, invalidate_replacement, "WaysGram per-account catalog invalidation")
+
+    start = updated.index("    private static synchronized void loadCatalog(int account) throws WaysGramApi.ApiException {")
+    end = updated.index("    private static String normalize(String s) {")
+    replacement = (
+        "    private static synchronized void loadCatalog(int account) throws WaysGramApi.ApiException {\n"
+        "        long now = System.currentTimeMillis();\n"
+        "        CatalogSnapshot snapshot = snapshots.get(account);\n"
+        "        if (snapshot != null && now - snapshot.at < CATALOG_TTL_MS) {\n"
+        "            install(snapshot);\n"
+        "            return;\n"
+        "        }\n"
+        "        JSONObject tg = WaysGramApi.get(account, \"/api/telegram/gifts?all=1\");\n"
+        "        JSONArray gifts = tg.optJSONArray(\"gifts\");\n"
+        "        CatalogSnapshot fresh = new CatalogSnapshot();\n"
+        "        fresh.gifts = gifts == null ? new JSONArray() : gifts;\n"
+        "        fresh.at = now;\n"
+        "        for (int i = 0; i < fresh.gifts.length(); i++) {\n"
+        "            JSONObject gift = fresh.gifts.optJSONObject(i);\n"
+        "            if (gift != null) {\n"
+        "                String original = gift.optString(\"id\");\n"
+        "                fresh.originalIds.put(parseId(original), original);\n"
+        "            }\n"
+        "        }\n"
+        "        snapshots.put(account, fresh);\n"
+        "        install(fresh);\n"
+        "    }\n"
+        "\n"
+    )
+    return updated[:start] + replacement + updated[end:]
+
+
+def patch_chat_avatar_title_badges(original: str) -> str:
+    """Draw WaysGram marks next to the chat title in the native action bar."""
+    marker = "WaysGramPeerBadges.decorate("
+    if marker in original:
+        return original
+
+    anchor = (
+        "        if (value != null) {\n"
+        "            value = Emoji.replaceEmoji(value, titleTextView.getPaint().getFontMetricsInt(), false);\n"
+        "        }\n"
+    )
+    replacement = (
+        anchor
+        + "        // WaysGram: draw WaysGram marks right next to the peer name.\n"
+        + "        value = org.telegram.messenger.waysgram.WaysGramPeerBadges.decorate(\n"
+        + "                currentAccount,\n"
+        + "                parentFragment == null ? 0 : parentFragment.getDialogId(),\n"
+        + "                value,\n"
+        + "                () -> {\n"
+        + "                    if (parentFragment != null) {\n"
+        + "                        parentFragment.updateTitle(true);\n"
+        + "                    }\n"
+        + "                });\n"
+    )
+    return replace_exactly_once(original, anchor, replacement, "native chat title WaysGram marks")
+
+
 def verify_source(android_root: Path) -> None:
     gift_sheet = android_root / "TMessagesProj/src/main/java/org/telegram/ui/Gifts/GiftSheet.java"
     launch_activity = android_root / "TMessagesProj/src/main/java/org/telegram/ui/LaunchActivity.java"
@@ -1250,11 +1642,10 @@ def verify_source(android_root: Path) -> None:
     for marker in (
         "// WaysGram saved profile gift artwork binding",
         'userGift.gift.slug.startsWith("waysgram://")',
-        "WaysGramGiftMediaStore.get(waysGramSerial)",
-        "imageView.getImageReceiver().setImageBitmap(waysGramBitmap);",
+        "WaysGramGiftArtwork.apply(imageView, waysGramSerial);",
     ):
         if marker not in final_gift_sheet_source:
-            raise ValueError("Native GiftCell WaysGram bitmap binding was not applied completely")
+            raise ValueError("Native GiftCell WaysGram artwork binding was not applied completely")
 
     profile_layout = android_root / "TMessagesProj/src/main/java/org/telegram/ui/Components/SharedMediaLayout.java"
     if not profile_layout.is_file():
@@ -1326,7 +1717,8 @@ def verify_source(android_root: Path) -> None:
         or "parent.waysGramGiftUpdatedListener.run();" not in final_gifts_container
         or "if (parent.waysGramInventory || list == null) return;" in final_gifts_container
         or "page.listView.getChildCount()" not in final_gifts_container
-        or "cell.imageView.getImageReceiver().setImageBitmap(bitmap);" not in final_gifts_container
+        or "WaysGramGiftArtwork.apply(cell.imageView, serial);" not in final_gifts_container
+        or "waysGramInventoryBottomSpace" not in final_gifts_container
     ):
         raise ValueError("WaysGram profile gift cards must open native details and refresh inventory")
 
@@ -1380,7 +1772,8 @@ def verify_source(android_root: Path) -> None:
     launch_content = launch_activity.read_text(encoding="utf-8")
 
     for marker in (
-        "WaysGramGiftMediaStore.get(",
+        "WaysGramGiftArtwork.apply(imageView, waysGramSerial);",
+        "WaysGramGiftArtwork.hasArtwork(waysGramSerial)",
         "WaysGramGiftMediaStore.getMetadata(",
         "waysgramGiftEmoji",
         "waysGramEmojiView.setText",
@@ -1389,7 +1782,7 @@ def verify_source(android_root: Path) -> None:
         "waysGramGiftMetadata.subtitle",
     ):
         if marker not in gift_content:
-            raise ValueError("WaysGram native GiftCell sticker, emoji or metadata binding is missing")
+            raise ValueError("WaysGram native GiftCell artwork, emoji or metadata binding is missing")
 
     gift_hits = [marker for marker in FORBIDDEN_GIFT_MARKERS if marker in gift_content]
     launch_hits = [marker for marker in FORBIDDEN_LAUNCH_MARKERS if marker in launch_content]
@@ -1426,6 +1819,7 @@ def verify_source(android_root: Path) -> None:
     patch_location_permissions(android_root)
     patch_live_location_service(android_root)
     patch_translation_dependencies(android_root)
+    patch_waysgram_gift_integration(android_root)
 
     translation_gradle = (android_root / "TMessagesProj/build.gradle").read_text(encoding="utf-8")
     if (

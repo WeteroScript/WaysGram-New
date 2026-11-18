@@ -4,6 +4,8 @@ import android.content.Context;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
 
+import org.telegram.tgnet.TLRPC;
+
 import java.io.File;
 import java.io.FileOutputStream;
 import java.util.LinkedHashMap;
@@ -17,6 +19,13 @@ public final class WaysGramGiftMediaStore {
             new LinkedHashMap<String, Bitmap>(MAX_ITEMS, 0.75f, true) {
                 @Override
                 protected boolean removeEldestEntry(Map.Entry<String, Bitmap> eldest) {
+                    return size() > MAX_ITEMS;
+                }
+            };
+    private static final LinkedHashMap<String, TLRPC.TL_document> ANIMATED_DOCUMENTS =
+            new LinkedHashMap<String, TLRPC.TL_document>(MAX_ITEMS, 0.75f, true) {
+                @Override
+                protected boolean removeEldestEntry(Map.Entry<String, TLRPC.TL_document> eldest) {
                     return size() > MAX_ITEMS;
                 }
             };
@@ -102,6 +111,21 @@ public final class WaysGramGiftMediaStore {
         return restored;
     }
 
+    /**
+     * Remembers the Telegram sticker document of an animated gift so the native
+     * gift cells can play TGS/WebM artwork instead of a single still frame.
+     */
+    public static synchronized void putAnimationDocument(String serial, TLRPC.TL_document document) {
+        if (serial == null || serial.isEmpty() || document == null) {
+            return;
+        }
+        ANIMATED_DOCUMENTS.put(serial, document);
+    }
+
+    public static synchronized TLRPC.TL_document getAnimationDocument(String serial) {
+        return serial == null ? null : ANIMATED_DOCUMENTS.get(serial);
+    }
+
     public static synchronized void putMetadata(String serial, String title, String subtitle, String emoji) {
         if (serial == null || serial.isEmpty()) {
             return;
@@ -119,6 +143,7 @@ public final class WaysGramGiftMediaStore {
     public static synchronized void clear() {
         CACHE.clear();
         METADATA.clear();
+        ANIMATED_DOCUMENTS.clear();
     }
 
     private static File fileFor(String serial) {

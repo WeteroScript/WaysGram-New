@@ -133,7 +133,6 @@ public final class WaysGramCloudStorageFragment extends BaseFragment {
                         statusView.setText(message);
                         if (statusCode == 401 && getParentActivity() != null) {
                             WaysGramSessionStore.getInstance(getParentActivity()).clearSession();
-                            presentFragment(new WaysGramLoginFragment(), true);
                         }
                     }
                 });

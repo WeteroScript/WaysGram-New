@@ -183,7 +183,6 @@ public final class WaysGramUserProfileFragment extends BaseFragment {
                 statusView.setText(message);
                 if (statusCode == 401) {
                     WaysGramSessionStore.getInstance(getParentActivity(), getCurrentAccount()).clearSession();
-                    presentFragment(new WaysGramLoginFragment(), true);
                 }
             }
         });

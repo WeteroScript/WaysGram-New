@@ -288,7 +288,6 @@ public final class WaysGramBotsFragment extends BaseFragment {
                 statusView.setText(message);
                 if (statusCode == 401) {
                     WaysGramSessionStore.getInstance(getParentActivity()).clearSession();
-                    presentFragment(new WaysGramLoginFragment(), true);
                 }
             }
         });

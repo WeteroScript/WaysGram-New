@@ -70,6 +70,7 @@ public final class WaysGramProfileGiftsController {
                             true);
                     container.setWaysGramInventory(nativeGifts);
                     downloadGiftStickers(inventory);
+                    downloadGiftAnimations(inventory);
                 });
             }
 
@@ -167,7 +168,7 @@ public final class WaysGramProfileGiftsController {
 
             WaysGramGiftMediaStore.putMetadata(
                     serial,
-                    showSerialAsTitle ? "WG-" + uniqueId : giftTitle,
+                    showSerialAsTitle ? waysGramTitle(serial, uniqueId) : giftTitle,
                     showSerialAsTitle
                             ? "Уровень " + upgradeLevel
                             : buildGiftSubtitle(
@@ -425,23 +426,112 @@ public final class WaysGramProfileGiftsController {
         }
     }
 
+    /**
+     * Makes animated (TGS/WebM) gift artwork playable in the native gift grid.
+     *
+     * <p>The original animation is stored in the shared WaysGram sticker folder
+     * and exposed to Telegram as a sticker document; the still frame from
+     * {@link #downloadGiftStickers(JSONArray)} stays as a placeholder while the
+     * animation is being prepared.</p>
+     */
+    private void downloadGiftAnimations(JSONArray inventory) {
+        Set<String> started = new HashSet<>();
+        for (int i = 0; i < inventory.length(); i++) {
+            JSONObject item = inventory.optJSONObject(i);
+            if (item == null) {
+                continue;
+            }
+            String serial = item.optString("serial_number", "").trim();
+            String telegramGiftId = item.optString("telegram_gift_id", "").trim();
+            JSONObject telegramGift = item.optJSONObject("telegram_gift");
+            if (telegramGiftId.isEmpty()) {
+                telegramGiftId = optText(telegramGift, "id");
+            }
+            if (serial.isEmpty() || telegramGiftId.isEmpty() || !started.add(serial)) {
+                continue;
+            }
+            String emoji = optText(item, "gift_emoji");
+            if (emoji.isEmpty()) {
+                emoji = optText(telegramGift, "emoji");
+            }
+            final String cacheKey = serial;
+            final String giftEmoji = emoji;
+            final long documentId = WaysGramGiftDocuments.documentId(telegramGiftId);
+            if (documentId == 0L) {
+                continue;
+            }
+            java.io.File cached = WaysGramGiftDocuments.stickerFile(documentId);
+            if (cached != null && cached.isFile() && cached.length() > 0) {
+                applyAnimationDocument(cacheKey, documentId, cached, giftEmoji);
+                continue;
+            }
+            imageClient.downloadTelegramGiftStickerBytes(
+                    telegramGiftId,
+                    true,
+                    new WaysGramApiClient.StickerBytesCallback() {
+                        @Override
+                        public void onSuccess(byte[] bytes, String mimeType) {
+                            java.io.File stored = WaysGramGiftDocuments.storeSticker(documentId, bytes);
+                            if (stored == null) {
+                                return;
+                            }
+                            applyAnimationDocument(cacheKey, documentId, stored, giftEmoji);
+                        }
+
+                        @Override
+                        public void onError(String message, int statusCode) {
+                            // The still frame from the preview download stays visible.
+                        }
+                    }
+            );
+        }
+    }
+
+    private void applyAnimationDocument(
+            String serial, long documentId, java.io.File file, String emoji
+    ) {
+        org.telegram.tgnet.TLRPC.TL_document document =
+                WaysGramGiftDocuments.buildDocument(documentId, file, emoji);
+        if (document == null || !WaysGramGiftDocuments.isAnimatedMime(document.mime_type)) {
+            return;
+        }
+        WaysGramGiftMediaStore.putAnimationDocument(serial, document);
+        AndroidUtilities.runOnUIThread(container::refreshWaysGramGiftViews);
+    }
+
     private void showError(String message) {
+        // Gift screens report problems inline and never open a second sign-in
+        // screen: the WaysGram session is the one this Telegram account is
+        // already authorized with.
         String text;
-        if (message != null && message.contains("WaysGram session is missing")) {
-            text = "Для этого Telegram-аккаунта нет активной сессии WaysGram. Войдите в WaysGram именно в текущем аккаунте.";
-        } else if (message != null && message.contains("HTTP 401")) {
-            text = "Сессия WaysGram истекла или недействительна. Повторно войдите в WaysGram для текущего Telegram-аккаунта.";
-        } else if (message != null && message.contains("HTTP 404")) {
-            text = "Сервер не поддерживает загрузку инвентаря. Обновите AuthBot на сервере.";
-        } else if (message != null && message.contains("HTTP 403")) {
-            text = "Сервер запретил доступ к инвентарю WaysGram.";
+        if (message == null || message.trim().isEmpty()) {
+            text = "Подарки временно недоступны: сервер WaysGram не ответил";
+        } else if (message.contains("WaysGram session is missing")
+                || message.contains("HTTP 401")) {
+            text = "Подарки недоступны: сервер WaysGram отклонил текущий сеанс";
+        } else if (message.contains("HTTP 404")) {
+            text = "Сервер WaysGram не поддерживает загрузку подарков";
+        } else if (message.contains("HTTP 403")) {
+            text = "Сервер WaysGram запретил доступ к подаркам";
         } else {
-            text = "Не удалось загрузить инвентарь WaysGram: "
-                    + (message == null || message.trim().isEmpty() ? "ошибка запроса" : message);
+            text = "Не удалось загрузить подарки: " + message;
         }
         if (fragment != null) {
             BulletinFactory.of(fragment).createSimpleBulletin(R.raw.error, text).show();
         }
+    }
+
+    /**
+     * Inventory cards are labelled with the internal WaysGram number and the
+     * gift level, e.g. {@code WG-5170145012310081615} / {@code Уровень 3}.
+     */
+    private static String waysGramTitle(String serial, long fallbackId) {
+        String value = serial == null ? "" : serial.trim();
+        String digits = value.replaceAll("(?i)^WG[-_ ]?", "").replaceAll("[^0-9]", "");
+        if (!digits.isEmpty()) {
+            return "WG-" + digits;
+        }
+        return "WG-" + Math.max(1L, fallbackId);
     }
 
     private static long positiveLong(JSONObject object, String key, long fallback) {
@@ -474,4 +564,4 @@ public final class WaysGramProfileGiftsController {
             return (int) (stableId(serial) & 0x7fffffff);
         }
     }
-                         }
+}

@@ -261,6 +261,10 @@ public final class WaysGramGiftCatalogClient implements AutoCloseable {
                         }
                     }
 
+                    int total = response.optInt("total", -1);
+                    if (total > 0 && allGifts.length() >= total) {
+                        break;
+                    }
                     boolean hasPaginationMetadata = response.has("has_more");
                     if (hasPaginationMetadata) {
                         if (!response.optBoolean("has_more", false)) {
@@ -275,8 +279,10 @@ public final class WaysGramGiftCatalogClient implements AutoCloseable {
                     }
 
                     int nextOffset = response.optInt("next_offset", offset + page.length());
-                    if (page.length() == 0 || nextOffset <= offset) {
-                        throw new IOException("WaysGram inventory pagination did not advance");
+                    if (page.length() == 0 || nextOffset <= offset || newItems == 0) {
+                        // Keep whatever was loaded: a server that stops advancing
+                        // its cursor must not hide the gifts the user already owns.
+                        break;
                     }
                     offset = nextOffset;
                 }

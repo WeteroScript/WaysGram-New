@@ -50,6 +50,11 @@ public final class WaysGramApiClient implements AutoCloseable {
         void onError(String message, int statusCode);
     }
 
+    public interface StickerBytesCallback {
+        void onSuccess(byte[] bytes, String mimeType);
+        void onError(String message, int statusCode);
+    }
+
     public void uploadDocument(ContentResolver resolver, Uri uri, Callback callback) {
         uploadDocument(resolver, uri, "", callback);
     }
@@ -211,6 +216,57 @@ public final class WaysGramApiClient implements AutoCloseable {
             } catch (Exception exception) {
                 deliverImageError(callback, "Не удалось загрузить изображение подарка", 0);
             }
+        });
+    }
+
+    /**
+     * Downloads the original gift artwork so animated (TGS/WebM) gifts can be
+     * rendered without a separate still preview request.
+     */
+    public void downloadTelegramGiftStickerBytes(
+            String giftId,
+            boolean preferAnimation,
+            StickerBytesCallback callback
+    ) {
+        ioExecutor.execute(() -> {
+            StickerResponse response = null;
+            String errorMessage = "Не удалось загрузить изображение подарка";
+            int errorStatus = 0;
+            if (giftId != null && giftId.matches("[A-Za-z0-9_-]{1,120}")) {
+                try {
+                    response = requestTelegramGiftSticker(giftId, preferAnimation);
+                } catch (Exception exception) {
+                    errorMessage = exception.getMessage() == null
+                            ? errorMessage : exception.getMessage();
+                    if (exception instanceof ApiException) {
+                        errorStatus = ((ApiException) exception).statusCode;
+                    }
+                }
+                if (response == null) {
+                    try {
+                        response = requestTelegramGiftSticker(giftId, !preferAnimation);
+                    } catch (Exception exception) {
+                        errorMessage = exception.getMessage() == null
+                                ? errorMessage : exception.getMessage();
+                        if (exception instanceof ApiException) {
+                            errorStatus = ((ApiException) exception).statusCode;
+                        }
+                    }
+                }
+            }
+            final StickerResponse result = response;
+            final String message = errorMessage;
+            final int status = errorStatus;
+            mainHandler.post(() -> {
+                if (callback == null) {
+                    return;
+                }
+                if (result == null) {
+                    callback.onError(message, status);
+                } else {
+                    callback.onSuccess(result.bytes, result.mimeType);
+                }
+            });
         });
     }
 

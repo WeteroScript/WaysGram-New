@@ -74,21 +74,23 @@ def configure_default_api_base_url(android_root: Path) -> None:
     ):
         raise ValueError("WAYSGRAM_API_BASE_URL must be an absolute HTTP(S) origin")
 
-    login_sheet = (
+    build_vars = (
         android_root
-        / "TMessagesProj/src/main/java/org/telegram/messenger/waysgram/WaysGramLoginSheet.java"
+        / "TMessagesProj/src/main/java/org/telegram/messenger/BuildVars.java"
     )
-    if not login_sheet.is_file():
-        raise FileNotFoundError(f"WaysGram login sheet not found: {login_sheet}")
+    if not build_vars.is_file():
+        raise FileNotFoundError(f"Telegram BuildVars not found: {build_vars}")
 
-    content = login_sheet.read_text(encoding="utf-8")
+    content = build_vars.read_text(encoding="utf-8")
     content = replace_one(
-        r'^    private static final String DEFAULT_API_BASE_URL = .*;$',
-        f'    private static final String DEFAULT_API_BASE_URL = "{value}";',
+        r'^([ \t]*)public static final String WAYSGRAM_API_BASE_URL = .*;$',
+        lambda match: (
+            f'{match.group(1)}public static final String WAYSGRAM_API_BASE_URL = "{value}";'
+        ),
         content,
-        "WaysGram default API base URL",
+        "WaysGram API base URL",
     )
-    login_sheet.write_text(content, encoding="utf-8")
+    build_vars.write_text(content, encoding="utf-8")
 
 
 def configure_waysgram_firebase(android_root: Path) -> bool:

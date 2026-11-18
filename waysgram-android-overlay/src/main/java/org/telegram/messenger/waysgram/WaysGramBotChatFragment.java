@@ -218,7 +218,6 @@ public final class WaysGramBotChatFragment extends BaseFragment {
     private void handleAuthError(int statusCode) {
         if (statusCode == 401) {
             WaysGramSessionStore.getInstance(getParentActivity()).clearSession();
-            presentFragment(new WaysGramLoginFragment(), true);
         }
     }
 

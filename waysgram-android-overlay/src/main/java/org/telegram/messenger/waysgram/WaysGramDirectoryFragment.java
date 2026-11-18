@@ -176,7 +176,6 @@ public final class WaysGramDirectoryFragment extends BaseFragment {
                 directoryEventsInitializing = false;
                 if (statusCode == 401) {
                     WaysGramSessionStore.getInstance(getParentActivity(), getCurrentAccount()).clearSession();
-                    presentFragment(new WaysGramLoginFragment(), true);
                 } else {
                     scheduleDirectoryEventRetry(4000);
                 }
@@ -239,7 +238,6 @@ public final class WaysGramDirectoryFragment extends BaseFragment {
                         directoryEventPollInFlight = false;
                         if (statusCode == 401) {
                             WaysGramSessionStore.getInstance(getParentActivity(), getCurrentAccount()).clearSession();
-                            presentFragment(new WaysGramLoginFragment(), true);
                         } else {
                             scheduleDirectoryEventRetry(4000);
                         }
@@ -368,7 +366,6 @@ public final class WaysGramDirectoryFragment extends BaseFragment {
                 statusView.setText(message);
                 if (statusCode == 401) {
                     WaysGramSessionStore.getInstance(getParentActivity(), getCurrentAccount()).clearSession();
-                    presentFragment(new WaysGramLoginFragment(), true);
                 }
             }
         });
@@ -654,7 +651,6 @@ public final class WaysGramDirectoryFragment extends BaseFragment {
                 statusView.setText(message);
                 if (statusCode == 401) {
                     WaysGramSessionStore.getInstance(getParentActivity(), getCurrentAccount()).clearSession();
-                    presentFragment(new WaysGramLoginFragment(), true);
                 }
             }
         });
