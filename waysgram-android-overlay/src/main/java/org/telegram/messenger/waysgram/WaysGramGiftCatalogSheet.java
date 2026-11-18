@@ -228,11 +228,11 @@ public final class WaysGramGiftCatalogSheet extends BottomSheet {
         boolean listed = gift.optInt("is_listed", gift.optBoolean("is_listed", false) ? 1 : 0) == 1;
         boolean auctioned = gift.optInt("is_auctioned", gift.optBoolean("is_auctioned", false) ? 1 : 0) == 1;
         // WaysGram upgrades cost a fixed amount; the server may still report its own price.
-        int upgradeStarPrice = telegramGift == null
+        // The price is read once and never reassigned, so the action lambda below can capture it.
+        int reportedUpgradePrice = telegramGift == null
                 ? 0 : Math.max(0, telegramGift.optInt("upgrade_star_count", 0));
-        if (upgradeStarPrice <= 0) {
-            upgradeStarPrice = WaysGramGiftUpgrade.DEFAULT_PRICE_STARS;
-        }
+        final int upgradeStarPrice = reportedUpgradePrice > 0
+                ? reportedUpgradePrice : WaysGramGiftUpgrade.DEFAULT_PRICE_STARS;
         boolean canUpgrade = gift.optString("telegram_gift_id", "").length() > 0;
         // WaysGram buys a gift back for half of its price during the first week.
         boolean sellable = gift.optInt("sellable", gift.optBoolean("sellable", false) ? 1 : 0) == 1;
