@@ -139,16 +139,28 @@ public final class WaysGramProfileGiftsController {
                 }
             }
             int serialNumber = serialNumber(item, serial);
+            // Telegram numbers every collection separately; the server hands out
+            // "1" for the first upgraded Plush Pepe, "1" again for the first Sakura
+            // Flower and increments per upgrade of the same gift type.
+            int collectionNumber = Math.max(0, item.optInt("unique_num", 0));
             long acquiredAt = Math.max(0L, item.optLong("acquired_at", 0L));
             JSONObject attributes = item.optJSONObject("attributes");
             JSONObject traits = attributes == null ? null : attributes.optJSONObject("collectible_traits");
             int upgradeLevel = item.has("upgrade_level")
                     ? Math.max(0, item.optInt("upgrade_level", 0))
                     : Math.max(0, attributes == null ? 0 : attributes.optInt("upgrade_level", 0));
-            String rarity = optText(traits, "rarity");
-            String model = optText(traits, "model");
-            String symbol = optText(traits, "symbol");
-            String backdropName = backdropName(optText(traits, "backdrop"));
+            // v3 traits keep the official Telegram pools: model, pattern and backdrop
+            // are objects with their name, published chance and rarity class.
+            String rarityKey = optText(traits, "rarity");
+            String model = traitName(traits, "model");
+            String pattern = traitName(traits, "pattern");
+            if (pattern.isEmpty()) {
+                pattern = traitName(traits, "symbol");
+            }
+            String modelRarity = traitRarity(traits, "model", rarityKey);
+            String patternRarity = traitRarity(traits, "pattern", rarityKey);
+            String rarity = rarityLabel(rarityKey);
+            String backdropName = backdropLabel(traits, rarityKey);
             String giftEmoji = optText(item, "gift_emoji");
             if (giftEmoji.isEmpty()) {
                 giftEmoji = optText(telegramGift, "emoji");
@@ -180,7 +192,7 @@ public final class WaysGramProfileGiftsController {
                     showSerialAsTitle
                             ? "Уровень " + upgradeLevel
                             : buildGiftSubtitle(
-                                    serial, upgradeLevel, rarity, model, symbol, giftEmoji,
+                                    serial, upgradeLevel, rarity, model, pattern, giftEmoji,
                                     canUpgrade, telegramUpgradePrice, telegramUpgradeVariants,
                                     isListed, isAuctioned
                             ),
@@ -194,12 +206,13 @@ public final class WaysGramProfileGiftsController {
                 uniqueGift.gift_id = telegramGiftId;
                 uniqueGift.title = giftTitle;
                 uniqueGift.slug = "waysgram://" + serial;
-                uniqueGift.num = serialNumber;
+                uniqueGift.num = collectionNumber > 0 ? collectionNumber : serialNumber;
                 TLRPC.TL_peerUser ownerPeer = new TLRPC.TL_peerUser();
                 ownerPeer.user_id = UserConfig.getInstance(currentAccount).getClientUserId();
                 uniqueGift.owner_id = ownerPeer;
                 uniqueGift.flags |= 1; // owner_id is present in the native unique-gift model.
-                TL_stars.starGiftAttributeBackdrop nativeBackdrop = createNativeBackdrop(traits, rarity);
+                TL_stars.starGiftAttributeBackdrop nativeBackdrop =
+                        createNativeBackdrop(traits, rarityKey);
                 if (nativeBackdrop != null) {
                     uniqueGift.attributes.add(nativeBackdrop);
                 }
@@ -209,17 +222,16 @@ public final class WaysGramProfileGiftsController {
                 TLRPC.TL_document waysGramTraitDocument =
                         traitDocument(serial, optText(item, "telegram_gift_id"), giftEmoji);
                 if (waysGramTraitDocument != null) {
-                    TL_stars.StarGiftAttributeRarity nativeGiftRarity = nativeRarity(rarity);
                     TL_stars.starGiftAttributeModel nativeModel = new TL_stars.starGiftAttributeModel();
                     nativeModel.name = model.isEmpty() ? "Модель" : model;
                     nativeModel.document = waysGramTraitDocument;
-                    nativeModel.rarity = nativeGiftRarity;
+                    nativeModel.rarity = nativeRarity(modelRarity);
                     uniqueGift.attributes.add(nativeModel);
 
                     TL_stars.starGiftAttributePattern nativePattern = new TL_stars.starGiftAttributePattern();
-                    nativePattern.name = symbol.isEmpty() ? "✦" : symbol;
+                    nativePattern.name = pattern.isEmpty() ? "Узор" : pattern;
                     nativePattern.document = waysGramTraitDocument;
-                    nativePattern.rarity = nativeGiftRarity;
+                    nativePattern.rarity = nativeRarity(patternRarity);
                     uniqueGift.attributes.add(nativePattern);
                 }
                 nativeGift = uniqueGift;
@@ -239,7 +251,8 @@ public final class WaysGramProfileGiftsController {
             savedGift.date = (int) Math.min(Integer.MAX_VALUE, acquiredAt);
             savedGift.gift = nativeGift;
             savedGift.saved_id = uniqueId;
-            savedGift.gift_num = isCollectible ? serialNumber : 0;
+            savedGift.gift_num = isCollectible
+                    ? (collectionNumber > 0 ? collectionNumber : serialNumber) : 0;
             TLRPC.TL_peerUser senderPeer = new TLRPC.TL_peerUser();
             senderPeer.user_id = UserConfig.getInstance(currentAccount).getClientUserId();
             savedGift.from_id = senderPeer;
@@ -336,7 +349,39 @@ public final class WaysGramProfileGiftsController {
         target.append(value.trim());
     }
 
-    private static TL_stars.starGiftAttributeBackdrop createNativeBackdrop(JSONObject traits, String rarityName) {
+    private static TL_stars.starGiftAttributeBackdrop createNativeBackdrop(
+            JSONObject traits, String rarityKey
+    ) {
+        JSONObject backdrop = traitEntry(traits, "backdrop");
+        if (backdrop != null) {
+            int center = backdrop.optInt("center_color", 0) & 0x00FFFFFF;
+            int edge = backdrop.optInt("edge_color", 0) & 0x00FFFFFF;
+            if (center != 0 || edge != 0) {
+                String backdropName = optText(backdrop, "name");
+                TL_stars.starGiftAttributeBackdrop nativeBackdrop =
+                        new TL_stars.starGiftAttributeBackdrop();
+                nativeBackdrop.name = backdropName.isEmpty() ? "WaysGram" : backdropName;
+                // Telegram ships the four colours with every backdrop; WaysGram keeps
+                // exactly the ones the official catalog published for it.
+                nativeBackdrop.backdrop_id = Math.max(0, backdrop.optInt("backdrop_id", 0));
+                nativeBackdrop.center_color = center;
+                nativeBackdrop.edge_color = edge != 0 ? edge : darken(center, 0.78f);
+                nativeBackdrop.pattern_color =
+                        backdrop.optInt("pattern_color", 0) & 0x00FFFFFF;
+                nativeBackdrop.text_color = backdrop.optInt("text_color", 0) & 0x00FFFFFF;
+                if (nativeBackdrop.pattern_color == 0) {
+                    nativeBackdrop.pattern_color = contrastColor(center);
+                }
+                if (nativeBackdrop.text_color == 0) {
+                    nativeBackdrop.text_color = contrastColor(center);
+                }
+                nativeBackdrop.rarity = nativeRarity(
+                        backdrop.optString("rarity", rarityKey)
+                );
+                return nativeBackdrop;
+            }
+        }
+        // Legacy (v1) traits stored the colour inside the name, "Аметистовый · #7C4DFF".
         String value = optText(traits, "backdrop");
         int hashIndex = value.lastIndexOf('#');
         if (hashIndex < 0) {
@@ -375,8 +420,61 @@ public final class WaysGramProfileGiftsController {
         backdrop.edge_color = darken(center, 0.78f);
         backdrop.pattern_color = contrast;
         backdrop.text_color = contrast;
-        backdrop.rarity = nativeRarity(rarityName);
+        backdrop.rarity = nativeRarity(rarityKey);
         return backdrop;
+    }
+
+    /** Trait entry as an object; v1 kept plain strings, so they are skipped here. */
+    private static JSONObject traitEntry(JSONObject traits, String key) {
+        if (traits == null) {
+            return null;
+        }
+        JSONObject entry = traits.optJSONObject(key);
+        return entry;
+    }
+
+    /** Name of a trait, either from the v3 object or from the legacy string. */
+    private static String traitName(JSONObject traits, String key) {
+        JSONObject entry = traitEntry(traits, key);
+        if (entry != null) {
+            return optText(entry, "name");
+        }
+        return optText(traits, key);
+    }
+
+    /** Rarity class of one attribute, falling back to the rarity of the whole card. */
+    private static String traitRarity(JSONObject traits, String key, String fallback) {
+        JSONObject entry = traitEntry(traits, key);
+        String rarity = entry == null ? "" : optText(entry, "rarity");
+        if (!rarity.isEmpty()) {
+            return rarity;
+        }
+        return fallback == null ? "" : fallback;
+    }
+
+    /** Russian label of a rarity class, shown in the inventory subtitle. */
+    private static String rarityLabel(String rarityKey) {
+        String rarity = rarityKey == null ? "" : rarityKey.trim().toLowerCase(Locale.ROOT);
+        if (rarity.equals("uncommon") || rarity.equals("необычная")) {
+            return "Необычная";
+        }
+        if (rarity.equals("rare") || rarity.equals("редкая")) {
+            return "Редкая";
+        }
+        if (rarity.equals("epic") || rarity.equals("эпическая")) {
+            return "Эпическая";
+        }
+        return rarity.equals("legendary") || rarity.equals("легендарная")
+                ? "Легендарная" : "Обычная";
+    }
+
+    /** Backdrop name shown in the inventory subtitle. */
+    private static String backdropLabel(JSONObject traits, String rarityKey) {
+        JSONObject backdrop = traitEntry(traits, "backdrop");
+        if (backdrop != null) {
+            return optText(backdrop, "name");
+        }
+        return backdropName(optText(traits, "backdrop"));
     }
 
     private static boolean isHex(char value) {

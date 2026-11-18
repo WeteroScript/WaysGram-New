@@ -21,6 +21,7 @@ from typing import Any, Callable
 
 import aiosqlite
 import db_split  # noqa: F401  # two-file database layout
+import gift_upgrades  # noqa: F401  # official Telegram upgrade pools
 import httpx
 from fastapi import APIRouter, Header, HTTPException, Query, Request, Response
 from PIL import Image, ImageOps, UnidentifiedImageError
@@ -312,72 +313,57 @@ def _normalize_uploaded_document(raw: bytes, filename: str) -> tuple[bytes, str,
     )
 
 
-COLLECTIBLE_TRAITS_VERSION = 1
-COLLECTIBLE_TRAIT_TIERS = (
-    (6000, "Обычная", {
-        "models": ("Искра", "Полярный свет", "Призма", "Лунный отблеск", "Северное сияние"),
-        "symbols": ("✦", "✧", "❖", "☾", "✺"),
-        "backdrops": (
-            "Аметистовый · #7C4DFF", "Лазурный · #168AAD", "Изумрудный · #2A9D8F",
-            "Рубиновый · #D62828", "Сапфировый · #4361EE",
-        ),
-    }),
-    (2500, "Необычная", {
-        "models": ("Комета", "Кристальный сад", "Солнечный ореол", "Звёздный след"),
-        "symbols": ("✵", "❈", "♢", "☼"),
-        "backdrops": (
-            "Бирюзовый · #20B2AA", "Янтарный · #FFB703",
-            "Лавандовый · #B8A1E3", "Малахитовый · #00A676",
-        ),
-    }),
-    (1000, "Редкая", {
-        "models": ("Небесный феникс", "Драконий камень", "Галактическая корона"),
-        "symbols": ("♛", "☄", "❂"),
-        "backdrops": ("Опаловый · #A8DADC", "Кобальтовый · #0047AB", "Гранатовый · #800020"),
-    }),
-    (400, "Эпическая", {
-        "models": ("Королевская реликвия", "Сердце кометы"),
-        "symbols": ("♜", "✹"),
-        "backdrops": ("Платиновый · #E5E4E2", "Затмение · #191970"),
-    }),
-    (100, "Легендарная", {
-        "models": ("Вечное пламя",),
-        "symbols": ("✷",),
-        "backdrops": ("Золотой · #D4AF37",),
-    }),
-)
+COLLECTIBLE_TRAITS_VERSION = gift_upgrades.TRAITS_VERSION
 
 
-def _generate_collectible_traits() -> dict[str, Any]:
-    """Create one immutable, server-generated trait set for a WaysGram collectible."""
-    roll = secrets.randbelow(10_000)
-    boundary = 0
-    selected_tier = COLLECTIBLE_TRAIT_TIERS[-1]
-    for tier in COLLECTIBLE_TRAIT_TIERS:
-        boundary += tier[0]
-        if roll < boundary:
-            selected_tier = tier
-            break
-    rarity, traits = selected_tier[1], selected_tier[2]
-    return {
-        "version": COLLECTIBLE_TRAITS_VERSION,
-        "rarity": rarity,
-        "model": secrets.choice(traits["models"]),
-        "symbol": secrets.choice(traits["symbols"]),
-        "backdrop": secrets.choice(traits["backdrops"]),
-    }
+def _collectible_trait_pool(
+    gift_id: Any = None, title: Any = None
+) -> tuple[str | None, dict[str, Any]]:
+    """Returns the collection key of a gift and its official pool (or a fallback)."""
+    key, pool = gift_upgrades.pool_for_gift(gift_id, title)
+    return key, (pool or gift_upgrades.FALLBACK_POOL)
 
 
 def _has_collectible_traits(attributes: Any) -> bool:
-    if not isinstance(attributes, dict):
+    traits = gift_upgrades.traits_of(attributes)
+    if not isinstance(traits, dict) or not traits:
         return False
-    traits = attributes.get("collectible_traits")
-    if not isinstance(traits, dict) or traits.get("version") != COLLECTIBLE_TRAITS_VERSION:
-        return False
-    return all(
-        isinstance(traits.get(key), str) and bool(traits[key].strip())
-        for key in ("rarity", "model", "symbol", "backdrop")
+    return True
+
+
+async def _assign_unique_number(
+    db: aiosqlite.Connection, serial: str, gift_key: str, now: int
+) -> int:
+    """Reserves the next per-gift number for a collectible, like Telegram does.
+
+    Telegram numbers each unique gift inside its own collection: the first
+    upgraded Plush Pepe becomes ``Plush Pepe #1`` while the first upgraded
+    Sakura Flower also becomes ``#1``. The number is stored once per gift and
+    never changes afterwards, transfers included.
+    """
+    cur = await db.execute(
+        "SELECT unique_num FROM gift_unique_numbers WHERE serial_number=?", (serial,)
     )
+    existing = await cur.fetchone()
+    if existing is not None:
+        return int(existing[0])
+    await db.execute(
+        """INSERT INTO gift_unique_counters(gift_key,last_num) VALUES(?,1)
+           ON CONFLICT(gift_key) DO UPDATE SET last_num=last_num+1""",
+        (gift_key,),
+    )
+    cur = await db.execute(
+        "SELECT last_num FROM gift_unique_counters WHERE gift_key=?", (gift_key,)
+    )
+    row = await cur.fetchone()
+    number = int(row[0]) if row else 1
+    await db.execute(
+        """INSERT INTO gift_unique_numbers(serial_number,gift_key,unique_num,assigned_at)
+           VALUES(?,?,?,?)""",
+        (serial, gift_key, number, int(now)),
+    )
+    return number
+
 
 
 async def init_messenger_storage(database_path: Path) -> None:
@@ -1210,26 +1196,65 @@ async def init_messenger_storage(database_path: Path) -> None:
                 (new_serial, old_serial),
             )
 
-        # Previously upgraded gifts did not have collectible traits. Backfill
-        # them once so existing owners keep their upgrades and receive the new
-        # collectible metadata without paying for another upgrade.
-        cur = await db.execute(
-            "SELECT id,attributes_json FROM user_gifts WHERE upgrade_level>0"
+        # Collectibles are numbered inside their own collection ("Plush Pepe #1"),
+        # exactly like Telegram numbers unique gifts.
+        await db.executescript(
+            db_split.qualify_ddl(
+                """
+            CREATE TABLE IF NOT EXISTS gift_unique_counters (
+                gift_key TEXT PRIMARY KEY,
+                last_num INTEGER NOT NULL DEFAULT 0
+            );
+            CREATE TABLE IF NOT EXISTS gift_unique_numbers (
+                serial_number TEXT PRIMARY KEY,
+                gift_key TEXT NOT NULL,
+                unique_num INTEGER NOT NULL,
+                assigned_at INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_gift_unique_numbers_key
+                ON gift_unique_numbers(gift_key,unique_num);
+            """
+            )
         )
-        upgraded_gifts = await cur.fetchall()
-        for gift_id, raw_attributes in upgraded_gifts:
+
+        # Previously upgraded gifts either had no traits at all or carried the
+        # hand-made WaysGram pools. Re-roll them from the official Telegram pools
+        # once (the very first collectible keep can be re-rolled, later upgrades
+        # never change) and give every one of them its collection number.
+        now = int(time.time())
+        try:
+            cur = await db.execute(
+                """SELECT id,serial_number,telegram_gift_id,gift_name,acquired_at,upgrade_level,
+                          attributes_json
+                   FROM user_gifts WHERE upgrade_level>0 ORDER BY acquired_at,id"""
+            )
+            upgraded_gifts = await cur.fetchall()
+        except Exception:  # noqa: BLE001 - trimmed-down schemas (tests, imports) have no gifts
+            LOGGER.warning("gift upgrade backfill skipped: user_gifts is incomplete", exc_info=True)
+            upgraded_gifts = []
+        for row in upgraded_gifts:
+            gift_row_id = int(row[0])
+            serial = str(row[1])
+            gift_key_hint = str(row[2] or "")
+            title_hint = str(row[3] or "")
             try:
-                attributes = json.loads(str(raw_attributes or "{}"))
+                attributes = json.loads(str(row[6] or "{}"))
             except (TypeError, ValueError):
                 attributes = {}
             if not isinstance(attributes, dict):
                 attributes = {}
-            if _has_collectible_traits(attributes):
-                continue
-            attributes["collectible_traits"] = _generate_collectible_traits()
-            await db.execute(
-                "UPDATE user_gifts SET attributes_json=? WHERE id=?",
-                (json.dumps(attributes, ensure_ascii=False, separators=(",", ":")), gift_id),
+            traits = gift_upgrades.traits_of(attributes)
+            if not gift_upgrades.is_current_traits(traits):
+                _, pool = _collectible_trait_pool(gift_key_hint, title_hint)
+                attributes["collectible_traits"] = gift_upgrades.roll_traits(pool, now)
+                await db.execute(
+                    "UPDATE user_gifts SET attributes_json=? WHERE id=?",
+                    (json.dumps(attributes, ensure_ascii=False, separators=(",", ":")),
+                     gift_row_id),
+                )
+            key, _ = gift_upgrades.pool_for_gift(gift_key_hint, title_hint)
+            await _assign_unique_number(
+                db, serial, key or (gift_key_hint or title_hint or "waysgram"), now
             )
         await db.commit()
 
@@ -3299,7 +3324,9 @@ def build_messenger_router(
                                           AND COALESCE(m.sticker_document_id,'')<>'')
                           ) AS sticker_available,
                           EXISTS(SELECT 1 FROM telegram_auction_gift_registry r
-                                 WHERE r.gift_id=user_gifts.telegram_gift_id) AS auction_eligible
+                                 WHERE r.gift_id=user_gifts.telegram_gift_id) AS auction_eligible,
+                          (SELECT n.unique_num FROM gift_unique_numbers n
+                            WHERE n.serial_number=user_gifts.serial_number) AS unique_num
                    FROM user_gifts WHERE owner_telegram_id=? ORDER BY id DESC"""
             query_params: tuple[Any, ...] = (int(user["telegram_id"]),)
             if limit is not None:
@@ -3360,6 +3387,7 @@ def build_messenger_router(
                         **telegram_gift,
                         "upgrade_star_count": UPGRADE_PRICE_STARS,
                     }
+                item["unique_num"] = int(item.get("unique_num") or 0)
                 item["sticker_available"] = bool(
                     item.get("sticker_available")
                     or (telegram_gift and telegram_gift.get("sticker_available"))
@@ -3665,7 +3693,9 @@ def build_messenger_router(
                                  WHERE a.serial_number=user_gifts.serial_number
                                    AND a.status='active') AS is_auctioned,
                           EXISTS(SELECT 1 FROM telegram_auction_gift_registry r
-                                 WHERE r.gift_id=user_gifts.telegram_gift_id) AS auction_eligible
+                                 WHERE r.gift_id=user_gifts.telegram_gift_id) AS auction_eligible,
+                          (SELECT n.unique_num FROM gift_unique_numbers n
+                            WHERE n.serial_number=user_gifts.serial_number) AS unique_num
                    FROM user_gifts
                    WHERE owner_telegram_id=?
                    ORDER BY id DESC""",
@@ -5774,7 +5804,8 @@ def build_messenger_router(
                 await db.rollback()
                 return previous
             cur = await db.execute(
-                """SELECT id,gift_name,telegram_gift_id,upgrade_level,attributes_json
+                """SELECT id,gift_name,telegram_gift_id,upgrade_level,attributes_json,
+                          gift_emoji
                    FROM user_gifts WHERE serial_number=? AND owner_telegram_id=?""",
                 (serial, uid),
             )
@@ -5826,10 +5857,23 @@ def build_messenger_router(
                 "last_upgraded_at": now,
                 "upgrade_source": "waysgram_internal",
             })
-            if not _has_collectible_traits(attributes):
-                # Traits are generated once on the first successful upgrade and
-                # remain unchanged on subsequent upgrades, transfers and sales.
-                attributes["collectible_traits"] = _generate_collectible_traits()
+            gift_key, gift_pool = _collectible_trait_pool(
+                gift["telegram_gift_id"], gift["gift_name"]
+            )
+            if not gift_upgrades.is_current_traits(gift_upgrades.traits_of(attributes)):
+                # Models, patterns and backdrops are rolled once with the chances
+                # Telegram publishes for this gift, and stay with the collectible.
+                # Sets from the older hand-made WaysGram pools are replaced here.
+                attributes["collectible_traits"] = gift_upgrades.roll_traits(
+                    gift_pool, now
+                )
+            traits = gift_upgrades.traits_of(attributes) or {}
+            unique_num = await _assign_unique_number(
+                db,
+                serial,
+                gift_key or str(gift["telegram_gift_id"] or gift["gift_name"]),
+                now,
+            )
             await db.execute(
                 "UPDATE accounts SET stars=?,updated_at=? WHERE telegram_id=?",
                 (new_balance, now, uid),
@@ -5882,11 +5926,17 @@ def build_messenger_router(
                 "status": "upgraded",
                 "serial_number": serial,
                 "gift_name": str(gift["gift_name"]),
+                "gift_emoji": str(gift["gift_emoji"] or ""),
                 "upgrade_level": new_level,
                 "price_stars": price,
                 "upgrade_star_count": price,
                 "stars_balance": new_balance,
+                "unique_num": unique_num,
                 "attributes": attributes,
+                "traits": traits,
+                # Candidate names and colours the client scrolls through while the
+                # upgrade animation runs; its last frame is the rolled result.
+                "roll_pool": gift_upgrades.reveal_pool(gift_pool, traits),
             }
             await idempotency_store(db, uid, scope, descriptor, result, now)
             await db.commit()

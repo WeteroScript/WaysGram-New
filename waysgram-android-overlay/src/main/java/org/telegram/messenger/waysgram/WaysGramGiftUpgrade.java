@@ -40,6 +40,7 @@ public final class WaysGramGiftUpgrade {
         if (context == null || TextUtils.isEmpty(serial)) {
             return;
         }
+        final Context uiContext = context;
         final Context appContext = context.getApplicationContext();
         final WaysGramGiftCatalogClient client = new WaysGramGiftCatalogClient(
                 WaysGramSessionStore.getInstance(appContext, account));
@@ -47,24 +48,26 @@ public final class WaysGramGiftUpgrade {
             @Override
             public void onComplete(JSONObject result) {
                 client.close();
-                AndroidUtilities.runOnUIThread(() -> {
-                    toast(appContext, "Подарок улучшен");
-                    if (onSuccess != null) {
-                        try {
-                            onSuccess.run();
-                        } catch (Exception exception) {
-                            FileLog.e(exception);
-                        }
-                    }
-                    Runnable listener = refreshListener;
-                    if (listener != null) {
-                        try {
-                            listener.run();
-                        } catch (Exception exception) {
-                            FileLog.e(exception);
-                        }
-                    }
-                });
+                // The upgrade is confirmed by the reveal itself (reels of model, pattern and
+                // backdrop plus the new collection number); no toast is shown.
+                AndroidUtilities.runOnUIThread(() -> WaysGramGiftUpgradeReveal.show(
+                        uiContext, serial, result, () -> {
+                            if (onSuccess != null) {
+                                try {
+                                    onSuccess.run();
+                                } catch (Exception exception) {
+                                    FileLog.e(exception);
+                                }
+                            }
+                            Runnable listener = refreshListener;
+                            if (listener != null) {
+                                try {
+                                    listener.run();
+                                } catch (Exception exception) {
+                                    FileLog.e(exception);
+                                }
+                            }
+                        }));
             }
 
             @Override

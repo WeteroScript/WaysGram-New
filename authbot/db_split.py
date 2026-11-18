@@ -73,6 +73,8 @@ MESSENGER_TABLES = frozenset(
         "auction_bids",
         "gift_collectible_auctions",
         "gift_collectible_auction_bids",
+        "gift_unique_numbers",
+        "gift_unique_counters",
         "waysgram_labels",
         "waysgram_label_assignments",
         "economy_transactions",

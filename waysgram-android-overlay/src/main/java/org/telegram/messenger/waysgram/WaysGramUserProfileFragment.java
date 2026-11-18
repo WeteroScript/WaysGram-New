@@ -422,13 +422,19 @@ public final class WaysGramUserProfileFragment extends BaseFragment {
             JSONObject collectibleTraits = attributes.optJSONObject("collectible_traits");
             if (collectibleTraits != null) {
                 addLabel(getParentActivity(), card,
-                        "Редкость: " + collectibleTraits.optString("rarity", "—"), 13, true);
-                addLabel(getParentActivity(), card,
-                        "Модель: " + collectibleTraits.optString("model", "—"), 12, false);
-                addLabel(getParentActivity(), card,
-                        "Символ: " + collectibleTraits.optString("symbol", "—"), 12, false);
-                addLabel(getParentActivity(), card,
-                        "Фон: " + collectibleTraits.optString("backdrop", "—"), 12, false);
+                        "Редкость: " + WaysGramGiftTraits.rarityLabel(collectibleTraits), 13, true);
+                String traitModel = WaysGramGiftTraits.name(collectibleTraits, "model");
+                if (!traitModel.isEmpty()) {
+                    addLabel(getParentActivity(), card, "Модель: " + traitModel, 12, false);
+                }
+                String traitPattern = WaysGramGiftTraits.name(collectibleTraits, "pattern");
+                if (!traitPattern.isEmpty()) {
+                    addLabel(getParentActivity(), card, "Узор: " + traitPattern, 12, false);
+                }
+                String traitBackdrop = WaysGramGiftTraits.name(collectibleTraits, "backdrop");
+                if (!traitBackdrop.isEmpty()) {
+                    addLabel(getParentActivity(), card, "Фон: " + traitBackdrop, 12, false);
+                }
             }
             Iterator<String> attributeKeys = attributes.keys();
             while (attributeKeys.hasNext()) {

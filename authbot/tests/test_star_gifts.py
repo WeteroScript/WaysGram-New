@@ -855,9 +855,13 @@ def test_telegram_gift_upgrade_uses_internal_stars_and_records_level(env) -> Non
             assert replayed.json() == upgraded.json()
             assert (await client.get("/api/me", headers=headers(101))).json()["stars"] == 4955
             traits = upgraded.json()["attributes"]["collectible_traits"]
-            assert traits["version"] == 1
-            assert traits["rarity"] in {"Обычная", "Необычная", "Редкая", "Эпическая", "Легендарная"}
-            assert traits["model"] and traits["symbol"] and traits["backdrop"]
+            # Traits come from the official Telegram pools: model, pattern and
+            # backdrop are objects with the published name and chance.
+            assert traits["version"] == 3
+            assert traits["rarity"] in {"common", "uncommon", "rare", "epic", "legendary"}
+            assert traits["model"]["name"] and traits["pattern"]["name"]
+            assert traits["backdrop"]["name"]
+            assert upgraded.json()["unique_num"] == 1
 
             mine = (await client.get("/api/me/gifts", headers=headers(101))).json()["gifts"]
             assert mine[0]["upgrade_level"] == 1
@@ -922,9 +926,12 @@ def test_startup_backfills_traits_for_previously_upgraded_gifts(env) -> None:
         async with await client_for(app) as client:
             inventory = (await client.get("/api/me/gifts", headers=headers(101))).json()["gifts"]
             traits = inventory[0]["attributes"]["collectible_traits"]
-            assert traits["version"] == 1
-            assert traits["rarity"] in {"Обычная", "Необычная", "Редкая", "Эпическая", "Легендарная"}
-            assert traits["model"] and traits["symbol"] and traits["backdrop"]
+            assert traits["version"] == 3
+            assert traits["rarity"] in {"common", "uncommon", "rare", "epic", "legendary"}
+            assert traits["model"]["name"] and traits["pattern"]["name"]
+            assert traits["backdrop"]["name"]
+            # The backfill also hands out the collection number.
+            assert inventory[0]["unique_num"] == 1
 
         # Startup is idempotent: a second initialization must preserve the assigned traits.
         await init_messenger_storage(path)
@@ -1885,5 +1892,100 @@ def test_upgrade_without_enough_stars_returns_402(env) -> None:
             mine = (await client.get("/api/me/gifts", headers=headers(101))).json()["gifts"]
             assert mine[0]["upgrade_level"] == 0
             assert (await client.get("/api/me", headers=headers(101))).json()["stars"] == 10
+
+    run(scenario())
+
+
+def test_collectibles_are_numbered_inside_their_own_collection(env) -> None:
+    path, app = env
+
+    async def scenario() -> None:
+        await bot_module.set_telegram_gift_values("g1", price=20, supply=2)
+        await bot_module.set_telegram_gift_values("g2", price=30, supply=1)
+        async with await client_for(app) as client:
+            serials = []
+            for _ in range(2):
+                bought = await client.post(
+                    "/api/telegram/gifts/g1/purchase", headers=headers(101), json={}
+                )
+                serials.append(bought.json()["gift"]["serial_number"])
+            other = await client.post(
+                "/api/telegram/gifts/g2/purchase", headers=headers(101), json={}
+            )
+            other_serial = other.json()["gift"]["serial_number"]
+
+            numbers = {}
+            for index, serial in enumerate(serials):
+                upgraded = await client.post(
+                    f"/api/gifts/{serial}/upgrade",
+                    headers={**headers(101), "Idempotency-Key": f"wg-number-g1-test-{index:04d}"},
+                )
+                assert upgraded.status_code == 200
+                numbers[serial] = upgraded.json()["unique_num"]
+            other_upgrade = await client.post(
+                f"/api/gifts/{other_serial}/upgrade",
+                headers={**headers(101), "Idempotency-Key": "wg-number-g2-test-0000"},
+            )
+            assert other_upgrade.status_code == 200
+
+            # Telegram numbers every collection separately: the first upgraded
+            # gift of each type is #1, the second one of the same type is #2.
+            assert sorted(numbers.values()) == [1, 2]
+            assert other_upgrade.json()["unique_num"] == 1
+
+            inventory = (await client.get("/api/me/gifts", headers=headers(101))).json()["gifts"]
+            by_serial = {item["serial_number"]: item for item in inventory}
+            assert by_serial[serials[0]]["unique_num"] == numbers[serials[0]]
+            assert by_serial[other_serial]["unique_num"] == 1
+
+            # A second upgrade of the same gift keeps its number.
+            again = await client.post(
+                f"/api/gifts/{serials[0]}/upgrade",
+                headers={**headers(101), "Idempotency-Key": "wg-number-g1-test-again"},
+            )
+            assert again.json()["upgrade_level"] == 2
+            assert again.json()["unique_num"] == numbers[serials[0]]
+
+    run(scenario())
+
+
+def test_upgrade_uses_the_official_telegram_pools(env) -> None:
+    path, app = env
+    plush_pepe = "5936013938331222567"
+
+    async def scenario() -> None:
+        await bot_module.set_telegram_gift_values(plush_pepe, price=25, supply=1)
+        async with await client_for(app) as client:
+            bought = await client.post(
+                f"/api/telegram/gifts/{plush_pepe}/purchase", headers=headers(101), json={}
+            )
+            serial = bought.json()["gift"]["serial_number"]
+            upgraded = await client.post(
+                f"/api/gifts/{serial}/upgrade",
+                headers={**headers(101), "Idempotency-Key": "wg-official-pools-0001"},
+            )
+            assert upgraded.status_code == 200
+            payload = upgraded.json()
+            traits = payload["traits"]
+            assert traits["version"] == 3
+            assert payload["unique_num"] == 1
+
+            import gift_upgrades
+
+            _, pool = gift_upgrades.pool_for_gift(plush_pepe, None)
+            assert pool is not None
+            assert traits["model"]["name"] in {entry[0] for entry in pool["models"]}
+            assert traits["pattern"]["name"] in {entry[0] for entry in pool["patterns"]}
+            backdrops = {entry[0]: entry for entry in pool["backdrops"]}
+            rolled_backdrop = backdrops[traits["backdrop"]["name"]]
+            # The card is painted exactly with the official backdrop colours.
+            assert traits["backdrop"]["center_color"] == rolled_backdrop[2]
+            assert traits["backdrop"]["edge_color"] == rolled_backdrop[3]
+
+            # The client scrolls through these candidates while it spins the reels.
+            reveal = payload["roll_pool"]
+            assert traits["model"]["name"] in {entry[0] for entry in reveal["models"]}
+            assert traits["pattern"]["name"] in {entry[0] for entry in reveal["patterns"]}
+            assert traits["backdrop"]["name"] in {entry[0] for entry in reveal["backdrops"]}
 
     run(scenario())

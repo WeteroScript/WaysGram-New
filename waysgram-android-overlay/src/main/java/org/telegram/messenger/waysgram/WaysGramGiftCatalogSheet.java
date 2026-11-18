@@ -270,25 +270,26 @@ public final class WaysGramGiftCatalogSheet extends BottomSheet {
         JSONObject collectibleTraits = giftAttributes == null
                 ? null : giftAttributes.optJSONObject("collectible_traits");
         if (collectibleTraits != null) {
-            giftDetails.append("\\nРедкость: ").append(collectibleTraits.optString("rarity", "—"));
-            giftDetails.append("\\nМодель: ").append(collectibleTraits.optString("model", "—"));
-            giftDetails.append("\\nСимвол: ").append(collectibleTraits.optString("symbol", "—"));
-            giftDetails.append("\\nФон: ").append(collectibleTraits.optString("backdrop", "—"));
+            WaysGramGiftTraits.appendDetails(giftDetails, collectibleTraits);
+            int collectionNumber = gift.optInt("unique_num", 0);
+            if (collectionNumber > 0) {
+                giftDetails.append("\nНомер коллекции: #").append(collectionNumber);
+            }
         }
         if (isCollectible && !auctionEligible) {
-            giftDetails.append("\\nWaysGram-аукцион недоступен: модель не выпускалась через аукцион Telegram");
+            giftDetails.append("\nWaysGram-аукцион недоступен: модель не выпускалась через аукцион Telegram");
         }
         if (sellable && sellRefund > 0) {
             int daysLeft = Math.max(0, (gift.optInt("sellable_until", 0)
                     - (int) (System.currentTimeMillis() / 1000L) + 86399) / 86400);
-            giftDetails.append("\\nВозврат WaysGram: ").append(sellAmountText)
+            giftDetails.append("\nВозврат WaysGram: ").append(sellAmountText)
                     .append(" (ещё ").append(daysLeft)
                     .append(daysLeft == 1 ? " день)" : " дн.)");
         }
         if (auctioned) {
-            giftDetails.append("\\nСтатус: на аукционе");
+            giftDetails.append("\nСтатус: на аукционе");
         } else if (listed) {
-            giftDetails.append("\\nСтатус: фиксированная продажа");
+            giftDetails.append("\nСтатус: фиксированная продажа");
         }
         new AlertDialog.Builder(getContext())
                 .setTitle(name)
@@ -315,7 +316,15 @@ public final class WaysGramGiftCatalogSheet extends BottomSheet {
                                         + " WaysGram Stars. Средства спишутся с внутреннего баланса.")
                                 .setNegativeButton("Отмена", null)
                                 .setPositiveButton("Улучшить", (d, w) ->
-                                        catalogClient.upgradeGift(serial, giftActionCallback("Подарок улучшен")))
+                                        WaysGramGiftUpgrade.upgrade(
+                                                getContext(), telegramAccount, serial,
+                                                () -> {
+                                                    showMyGifts();
+                                                    loadCatalog();
+                                                    if (onPurchaseComplete != null) {
+                                                        onPurchaseComplete.run();
+                                                    }
+                                                }))
                                 .show();
                     } else if (action.equals(sellAction)) {
                         String assetName = sellInStars ? "WaysGram Stars" : "Gram";
@@ -416,7 +425,7 @@ public final class WaysGramGiftCatalogSheet extends BottomSheet {
                         JSONObject attributes = auction.optJSONObject("attributes");
                         JSONObject traits = attributes == null
                                 ? null : attributes.optJSONObject("collectible_traits");
-                        String rarity = traits == null ? "" : traits.optString("rarity", "");
+                        String rarity = WaysGramGiftTraits.rarityLabel(traits);
                         String seller = auction.optString("seller_username", "");
                         int currentBid = auction.optInt("current_bid_grams", 0);
                         int price = currentBid > 0
@@ -430,7 +439,7 @@ public final class WaysGramGiftCatalogSheet extends BottomSheet {
                                 + (rarity.isEmpty() ? "" : " · " + rarity)
                                 + " · " + price + " Gram"
                                 + (seller.isEmpty() ? "" : " · @" + seller)
-                                + "\\nДо " + endText;
+                                + "\nДо " + endText;
                     }
                     loading.dismiss();
                     new AlertDialog.Builder(getContext())
@@ -465,28 +474,25 @@ public final class WaysGramGiftCatalogSheet extends BottomSheet {
         JSONObject attributes = auction.optJSONObject("attributes");
         JSONObject traits = attributes == null ? null : attributes.optJSONObject("collectible_traits");
         StringBuilder details = new StringBuilder(auction.optString("gift_name", "Подарок WaysGram"));
-        details.append("\\nСтартовая цена: ")
+        details.append("\nСтартовая цена: ")
                 .append(auction.optInt("starting_price_grams", 0)).append(" Gram");
-        details.append("\\nТекущая ставка: ")
+        details.append("\nТекущая ставка: ")
                 .append(auction.optInt("current_bid_grams", 0)).append(" Gram");
-        details.append("\\nСледующая ставка: ").append(minimumBid).append(" Gram");
-        details.append("\\nСтавок: ").append(auction.optInt("bid_count", 0));
+        details.append("\nСледующая ставка: ").append(minimumBid).append(" Gram");
+        details.append("\nСтавок: ").append(auction.optInt("bid_count", 0));
         String seller = auction.optString("seller_username", "");
         if (!seller.isEmpty()) {
-            details.append("\\nПродавец: @").append(seller);
+            details.append("\nПродавец: @").append(seller);
         }
         long endsAt = auction.optLong("ends_at", 0);
         if (endsAt > 0) {
-            details.append("\\nОкончание: ").append(
+            details.append("\nОкончание: ").append(
                     DateFormat.getDateTimeInstance(DateFormat.SHORT, DateFormat.SHORT)
                             .format(new Date(endsAt * 1000L))
             );
         }
         if (traits != null) {
-            details.append("\\nРедкость: ").append(traits.optString("rarity", "—"));
-            details.append("\\nМодель: ").append(traits.optString("model", "—"));
-            details.append("\\nСимвол: ").append(traits.optString("symbol", "—"));
-            details.append("\\nФон: ").append(traits.optString("backdrop", "—"));
+            WaysGramGiftTraits.appendDetails(details, traits);
         }
         AlertDialog.Builder builder = new AlertDialog.Builder(getContext())
                 .setTitle("Аукцион подарка")
@@ -629,7 +635,7 @@ public final class WaysGramGiftCatalogSheet extends BottomSheet {
                         JSONObject marketAttributes = listing.optJSONObject("attributes");
                         JSONObject marketTraits = marketAttributes == null
                                 ? null : marketAttributes.optJSONObject("collectible_traits");
-                        String rarity = marketTraits == null ? "" : marketTraits.optString("rarity", "");
+                        String rarity = WaysGramGiftTraits.rarityLabel(marketTraits);
                         labels[i] = listing.optString("gift_name", "Подарок WaysGram")
                                 + (rarity.isEmpty() ? "" : " · " + rarity)
                                 + " · " + listing.optInt("price_grams", 0) + " Gram"
@@ -647,15 +653,12 @@ public final class WaysGramGiftCatalogSheet extends BottomSheet {
                                 String giftName = listing.optString("gift_name", "Подарок WaysGram");
                                 int price = listing.optInt("price_grams", 0);
                                 StringBuilder listingDetails = new StringBuilder(giftName)
-                                        .append("\\nЦена: ").append(price).append(" Gram");
+                                        .append("\nЦена: ").append(price).append(" Gram");
                                 JSONObject marketAttributes = listing.optJSONObject("attributes");
                                 JSONObject marketTraits = marketAttributes == null
                                         ? null : marketAttributes.optJSONObject("collectible_traits");
                                 if (marketTraits != null) {
-                                    listingDetails.append("\\nРедкость: ").append(marketTraits.optString("rarity", "—"));
-                                    listingDetails.append("\\nМодель: ").append(marketTraits.optString("model", "—"));
-                                    listingDetails.append("\\nСимвол: ").append(marketTraits.optString("symbol", "—"));
-                                    listingDetails.append("\\nФон: ").append(marketTraits.optString("backdrop", "—"));
+                                    WaysGramGiftTraits.appendDetails(listingDetails, marketTraits);
                                 }
                                 new AlertDialog.Builder(getContext())
                                         .setTitle("Купить подарок")

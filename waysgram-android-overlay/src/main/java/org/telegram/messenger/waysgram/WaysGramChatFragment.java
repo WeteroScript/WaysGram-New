@@ -3586,10 +3586,7 @@ public final class WaysGramChatFragment extends BaseFragment {
                 }
                 JSONObject collectibleTraits = giftAttributes.optJSONObject("collectible_traits");
                 if (collectibleTraits != null) {
-                    giftInfo.append("\nРедкость: ").append(collectibleTraits.optString("rarity", "—"));
-                    giftInfo.append("\nМодель: ").append(collectibleTraits.optString("model", "—"));
-                    giftInfo.append("\nСимвол: ").append(collectibleTraits.optString("symbol", "—"));
-                    giftInfo.append("\nФон: ").append(collectibleTraits.optString("backdrop", "—"));
+                    WaysGramGiftTraits.appendDetails(giftInfo, collectibleTraits);
                 }
                 Iterator<String> attributeKeys = giftAttributes.keys();
                 while (attributeKeys.hasNext()) {
