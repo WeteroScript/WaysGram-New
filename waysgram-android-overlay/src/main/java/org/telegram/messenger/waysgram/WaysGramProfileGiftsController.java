@@ -86,7 +86,7 @@ public final class WaysGramProfileGiftsController {
                         }
                         int account = fragment.getCurrentAccount();
                         fragment.presentFragment(
-                                new WaysGramLoginFragment(account, this::refresh), true
+                                new WaysGramLoginFragment(account, WaysGramProfileGiftsController.this::refresh), true
                         );
                         return;
                     }
