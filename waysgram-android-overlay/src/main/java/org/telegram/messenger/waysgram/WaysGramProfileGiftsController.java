@@ -208,17 +208,17 @@ public final class WaysGramProfileGiftsController {
                 TLRPC.TL_document waysGramTraitDocument =
                         WaysGramGiftMediaStore.getAnimationDocument(serial);
                 if (waysGramTraitDocument != null) {
-                    TL_stars.StarGiftAttributeRarity nativeRarity = nativeRarity(rarity);
+                    TL_stars.StarGiftAttributeRarity nativeGiftRarity = nativeRarity(rarity);
                     TL_stars.starGiftAttributeModel nativeModel = new TL_stars.starGiftAttributeModel();
                     nativeModel.name = model.isEmpty() ? "Модель" : model;
                     nativeModel.document = waysGramTraitDocument;
-                    nativeModel.rarity = nativeRarity;
+                    nativeModel.rarity = nativeGiftRarity;
                     uniqueGift.attributes.add(nativeModel);
 
                     TL_stars.starGiftAttributePattern nativePattern = new TL_stars.starGiftAttributePattern();
                     nativePattern.name = symbol.isEmpty() ? "✦" : symbol;
                     nativePattern.document = waysGramTraitDocument;
-                    nativePattern.rarity = nativeRarity;
+                    nativePattern.rarity = nativeGiftRarity;
                     uniqueGift.attributes.add(nativePattern);
                 }
                 nativeGift = uniqueGift;
@@ -333,24 +333,6 @@ public final class WaysGramProfileGiftsController {
             target.append(" · ");
         }
         target.append(value.trim());
-    }
-
-    /** Maps the WaysGram rarity tier onto Telegram's native attribute rarity. */
-    private static TL_stars.StarGiftAttributeRarity nativeRarity(String rarity) {
-        String value = rarity == null ? "" : rarity.trim().toLowerCase(Locale.ROOT);
-        if (value.startsWith("легендар") || value.contains("legendary")) {
-            return new TL_stars.TL_starGiftAttributeRarityLegendary();
-        }
-        if (value.startsWith("эпич") || value.contains("epic")) {
-            return new TL_stars.TL_starGiftAttributeRarityEpic();
-        }
-        if (value.startsWith("редк") || value.contains("rare")) {
-            return new TL_stars.TL_starGiftAttributeRarityRare();
-        }
-        if (value.startsWith("необыч") || value.contains("uncommon")) {
-            return new TL_stars.TL_starGiftAttributeRarityUncommon();
-        }
-        return new TL_stars.TL_starGiftAttributeRarity();
     }
 
     private static TL_stars.starGiftAttributeBackdrop createNativeBackdrop(JSONObject traits, String rarityName) {
