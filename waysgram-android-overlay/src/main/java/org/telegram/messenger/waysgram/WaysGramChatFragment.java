@@ -3168,6 +3168,27 @@ public final class WaysGramChatFragment extends BaseFragment {
         });
     }
 
+    /**
+     * Android's org.json coerces a JSON {@code null} value to the literal
+     * string "null" instead of falling back to {@code fallback} (this is
+     * documented AOSP behaviour of JSONObject#optString, not a bug in the
+     * parser). The server sends real SQL NULLs for most optional per-message
+     * columns (gift_serial_number, contact_name, reaction_summary, ...), so a
+     * plain optString(key, "") call treats a message with no gift/contact/
+     * reaction as if it had one named "null". Always read nullable string
+     * columns through this helper instead of JSONObject#optString directly.
+     */
+    private static String optNullableString(JSONObject object, String key, String fallback) {
+        if (object == null || object.isNull(key)) {
+            return fallback;
+        }
+        return object.optString(key, fallback);
+    }
+
+    private static String optNullableString(JSONObject object, String key) {
+        return optNullableString(object, key, "");
+    }
+
     private static boolean isLegacyGiftPurchaseReceipt(String body) {
         if (body == null || body.trim().isEmpty()) {
             return false;
@@ -3298,7 +3319,7 @@ public final class WaysGramChatFragment extends BaseFragment {
         String body = prefix + message.optString("body", "");
         String displayText = body;
         if (repliedToId > 0) {
-            String quotedBody = message.optString("reply_to_body", "").trim();
+            String quotedBody = optNullableString(message, "reply_to_body").trim();
             long quotedSender = message.optLong("reply_to_sender_id", 0);
             if (quotedBody.length() > 160) {
                 quotedBody = quotedBody.substring(0, 160) + "…";
@@ -3310,7 +3331,7 @@ public final class WaysGramChatFragment extends BaseFragment {
         }
         long forwardedFromId = message.optLong("forwarded_from_telegram_id", 0);
         if (forwardedFromId > 0) {
-            String forwardedName = message.optString("forwarded_from_display_name", "");
+            String forwardedName = optNullableString(message, "forwarded_from_display_name");
             if (forwardedName.isEmpty()) {
                 forwardedName = "пользователя " + forwardedFromId;
             }
@@ -3327,7 +3348,7 @@ public final class WaysGramChatFragment extends BaseFragment {
                         : "Отправлено");
             }
         }
-        String reactionSummary = message.optString("reaction_summary", "");
+        String reactionSummary = optNullableString(message, "reaction_summary");
         if (!reactionSummary.isEmpty()) {
             displayText += "\n" + reactionSummary.replace(",", " · ").replace(":", " ");
         }
@@ -3404,13 +3425,13 @@ public final class WaysGramChatFragment extends BaseFragment {
                     messageTarget,
                     sharedLatitude,
                     sharedLongitude,
-                    message.optString("location_label", "")
+                    optNullableString(message, "location_label")
             );
         }
 
-        String sharedContactName = message.optString("contact_name", "").trim();
-        String sharedContactPhone = message.optString("contact_phone", "").trim();
-        String sharedContactEmail = message.optString("contact_email", "").trim();
+        String sharedContactName = optNullableString(message, "contact_name").trim();
+        String sharedContactPhone = optNullableString(message, "contact_phone").trim();
+        String sharedContactEmail = optNullableString(message, "contact_email").trim();
         if (!sharedContactName.isEmpty() && !sharedContactPhone.isEmpty()) {
             addContactCard(
                     messageTarget,
@@ -3420,14 +3441,14 @@ public final class WaysGramChatFragment extends BaseFragment {
             );
         }
 
-        String giftSerial = message.optString("gift_serial_number", "");
+        String giftSerial = optNullableString(message, "gift_serial_number");
         if (!giftSerial.isEmpty() || isGiftPurchaseEvent) {
             JSONObject giftAttributes = giftAttributesForMessage;
             int giftLevel = Math.max(
                     message.optInt("gift_upgrade_level", 0),
                     giftAttributes == null ? 0 : giftAttributes.optInt("upgrade_level", 0)
             );
-            String giftName = message.optString("gift_name", "").trim();
+            String giftName = optNullableString(message, "gift_name").trim();
             if (giftName.isEmpty() || "null".equalsIgnoreCase(giftName)) {
                 String purchaseBody = message.optString("body", "");
                 int quoteStart = purchaseBody.indexOf('«');
@@ -3447,9 +3468,9 @@ public final class WaysGramChatFragment extends BaseFragment {
             if (giftName.isEmpty() || "null".equalsIgnoreCase(giftName)) {
                 giftName = "Коллекционный подарок";
             }
-            String giftTelegramId = message.optString("gift_telegram_gift_id", "");
+            String giftTelegramId = optNullableString(message, "gift_telegram_gift_id");
             JSONObject giftTelegramMetadata = message.optJSONObject("gift_telegram_metadata");
-            String giftEmoji = message.optString("gift_emoji", "").trim();
+            String giftEmoji = optNullableString(message, "gift_emoji").trim();
             if (giftEmoji.isEmpty() && giftTelegramMetadata != null) {
                 giftEmoji = giftTelegramMetadata.optString("emoji", "").trim();
             }
@@ -3636,9 +3657,9 @@ public final class WaysGramChatFragment extends BaseFragment {
             }
         }
 
-        String mediaId = message.optString("media_id", "");
-        String mediaType = message.optString("media_type", "");
-        String mediaName = message.optString("media_name", "Вложение");
+        String mediaId = optNullableString(message, "media_id");
+        String mediaType = optNullableString(message, "media_type");
+        String mediaName = optNullableString(message, "media_name", "Вложение");
         if (mediaId.matches("[a-f0-9]{32}") && mediaType.startsWith("image/")) {
             ImageView image = new ImageView(getParentActivity());
             image.setAdjustViewBounds(true);
