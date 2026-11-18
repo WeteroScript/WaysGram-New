@@ -929,7 +929,11 @@ def patch_star_gift_sheet_display_source(original: str) -> str:
         "            }\n"
         "            // WaysGram upgrade: a fixed 25 Stars through the WaysGram backend,\n"
         "            // never through the native Telegram Stars payment flow.\n"
-        "            if (savedStarGift.gift instanceof TL_stars.TL_starGift && button != null) {\n"
+        "            // Only the owner can upgrade: the WaysGram backend upgrades the gift of the\n"
+        "            // signed-in account, and collectibles are upgradable level by level as well.\n"
+        "            if (myProfile && button != null\n"
+        "                    && (savedStarGift.gift instanceof TL_stars.TL_starGift\n"
+        "                        || savedStarGift.gift instanceof TL_stars.TL_starGiftUnique)) {\n"
         "                button.setFilled(true);\n"
         "                button.setText(\"Улучшить за \" + org.telegram.messenger.waysgram.WaysGramGiftUpgrade.DEFAULT_PRICE_STARS + \" \u2b50\", !firstSet);\n"
         "                button.setSubText(null, !firstSet);\n"
@@ -2240,6 +2244,16 @@ def verify_source(android_root: Path) -> None:
             raise ValueError("WaysGram native card detail rendering is incomplete")
     if "performWaysGramGiftUpgrade" in final_star_gift_source:
         raise ValueError("WaysGram profile detail must not route to paid randomized upgrades")
+    # The upgrade button replaces the native bottom action, so it has to be applied after the
+    # native button setup and inside the WaysGram block that follows it.
+    upgrade_index = final_star_gift_source.find("WaysGram upgrade: a fixed 25 Stars")
+    native_button_index = final_star_gift_source.find(
+        "button.setText(getString(R.string.OK), !firstSet)"
+    )
+    if upgrade_index < 0 or native_button_index < 0 or upgrade_index < native_button_index:
+        raise ValueError(
+            "the WaysGram upgrade button must be applied after the native bottom button setup"
+        )
 
     gift_controller = android_root / "TMessagesProj/src/main/java/org/telegram/messenger/waysgram/WaysGramProfileGiftsController.java"
     if not gift_controller.is_file():
