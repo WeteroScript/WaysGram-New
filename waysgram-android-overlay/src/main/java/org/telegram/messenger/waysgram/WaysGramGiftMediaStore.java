@@ -154,12 +154,11 @@ public final class WaysGramGiftMediaStore {
     }
 
     /**
-     * Drops still images of a previous refresh but keeps the animated gift documents,
-     * so an opened gift keeps playing while the inventory is reloaded.
+     * Drops the still images of a previous refresh but keeps the animated documents and the
+     * gift metadata: an opened gift keeps playing, and the fallback emoji keeps working.
      */
     public static synchronized void clearStillImages() {
         CACHE.clear();
-        METADATA.clear();
     }
 
     private static File fileFor(String serial) {

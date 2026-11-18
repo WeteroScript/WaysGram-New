@@ -31,9 +31,9 @@ public final class WaysGramProfileGiftsController {
     private final WaysGramSessionStore sessionStore;
     private final WaysGramApiClient imageClient;
     private boolean loading;
+    private boolean giftViewRefreshScheduled;
     private JSONArray lastInventory;
     private int lastGiftAccount = UserConfig.selectedAccount;
-    private boolean traitRebindScheduled;
 
     public WaysGramProfileGiftsController(
             Context context,
@@ -50,6 +50,8 @@ public final class WaysGramProfileGiftsController {
                 fragment == null ? UserConfig.selectedAccount : fragment.getCurrentAccount());
         WaysGramGiftMediaStore.configure(appContext);
         imageClient = new WaysGramApiClient(sessionStore);
+        // An upgrade started from the native gift sheet must reload this inventory.
+        WaysGramGiftUpgrade.setRefreshListener(this::refresh);
     }
 
     public void refresh() {
@@ -70,8 +72,7 @@ public final class WaysGramProfileGiftsController {
                             ? UserConfig.selectedAccount : fragment.getCurrentAccount();
                     // Animated documents survive the refresh; only the still images are rebuilt.
                     WaysGramGiftMediaStore.clearStillImages();
-                    // Gift cards carry the gift's own name and traits; the internal WaysGram serial
-                    // and the gift level are never shown to the user.
+                    // Inventory cards show artwork only: no serial, level or caption on them.
                     ArrayList<TL_stars.SavedStarGift> nativeGifts = toNativeGifts(inventory,
                             fragment == null ? UserConfig.selectedAccount : fragment.getCurrentAccount(),
                             false);
@@ -206,7 +207,7 @@ public final class WaysGramProfileGiftsController {
                 // change, so the card keeps its own look on every screen. WaysGram has no separate
                 // Telegram model/pattern art, therefore the gift's own artwork document is used.
                 TLRPC.TL_document waysGramTraitDocument =
-                        WaysGramGiftMediaStore.getAnimationDocument(serial);
+                        traitDocument(serial, telegramGiftId, giftEmoji);
                 if (waysGramTraitDocument != null) {
                     TL_stars.StarGiftAttributeRarity nativeGiftRarity = nativeRarity(rarity);
                     TL_stars.starGiftAttributeModel nativeModel = new TL_stars.starGiftAttributeModel();
@@ -399,6 +400,26 @@ public final class WaysGramProfileGiftsController {
         return luminance >= 150 ? 0x00202020 : 0x00FFFFFF;
     }
 
+    /**
+     * Artwork document used by the model and symbol attributes. It is built from the cached
+     * sticker file when the download already happened, so the traits never require a rebind of
+     * the whole inventory (a rebind restarts the playing animations).
+     */
+    private static TLRPC.TL_document traitDocument(
+            String serial, String telegramGiftId, String emoji
+    ) {
+        TLRPC.TL_document document = WaysGramGiftMediaStore.getAnimationDocument(serial);
+        if (document != null) {
+            return document;
+        }
+        long documentId = WaysGramGiftDocuments.documentId(telegramGiftId);
+        java.io.File cached = documentId == 0L ? null : WaysGramGiftDocuments.stickerFile(documentId);
+        if (cached == null || !cached.isFile() || cached.length() == 0) {
+            return null;
+        }
+        return WaysGramGiftDocuments.buildDocument(documentId, cached, emoji);
+    }
+
     private static TL_stars.StarGiftAttributeRarity nativeRarity(String rarityName) {
         String rarity = rarityName == null ? "" : rarityName.trim().toLowerCase(Locale.ROOT);
         if (rarity.equals("необычная") || rarity.equals("uncommon")) {
@@ -523,28 +544,24 @@ public final class WaysGramProfileGiftsController {
             return;
         }
         WaysGramGiftMediaStore.putAnimationDocument(serial, document);
-        AndroidUtilities.runOnUIThread(() -> {
-            container.refreshWaysGramGiftViews();
-            scheduleTraitRebind();
-        });
+        scheduleGiftViewRefresh();
     }
 
     /**
-     * Collectible traits need the artwork document, which usually arrives just after the
-     * inventory. Rebinding once, after the downloads settle, shows model and symbol without
-     * forcing the user to leave and reopen the gift tab.
+     * Sticker downloads finish one by one; a single collapsed refresh keeps the cells from
+     * being rebound (and their animations restarted) again and again.
      */
-    private void scheduleTraitRebind() {
-        if (traitRebindScheduled || lastInventory == null) {
+    private void scheduleGiftViewRefresh() {
+        if (giftViewRefreshScheduled) {
             return;
         }
-        traitRebindScheduled = true;
+        giftViewRefreshScheduled = true;
         AndroidUtilities.runOnUIThread(() -> {
-            if (lastInventory != null && container != null) {
-                container.setWaysGramInventory(
-                        toNativeGifts(lastInventory, lastGiftAccount, false));
+            giftViewRefreshScheduled = false;
+            if (container != null) {
+                container.refreshWaysGramGiftViews();
             }
-        }, 1200L);
+        }, 350L);
     }
 
     private void showError(String message) {

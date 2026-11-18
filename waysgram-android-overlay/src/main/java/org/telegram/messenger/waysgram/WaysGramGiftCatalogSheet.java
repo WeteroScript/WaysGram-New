@@ -227,12 +227,13 @@ public final class WaysGramGiftCatalogSheet extends BottomSheet {
         ArrayList<String> actions = new ArrayList<>();
         boolean listed = gift.optInt("is_listed", gift.optBoolean("is_listed", false) ? 1 : 0) == 1;
         boolean auctioned = gift.optInt("is_auctioned", gift.optBoolean("is_auctioned", false) ? 1 : 0) == 1;
-        // The price is whatever the server charges for this gift (25 Stars once the backend
-        // pins it), so the action always shows the real amount instead of a vague label.
+        // WaysGram upgrades cost a fixed amount; the server may still report its own price.
         int upgradeStarPrice = telegramGift == null
                 ? 0 : Math.max(0, telegramGift.optInt("upgrade_star_count", 0));
-        boolean canUpgrade = gift.optString("telegram_gift_id", "").length() > 0
-                && upgradeStarPrice > 0;
+        if (upgradeStarPrice <= 0) {
+            upgradeStarPrice = WaysGramGiftUpgrade.DEFAULT_PRICE_STARS;
+        }
+        boolean canUpgrade = gift.optString("telegram_gift_id", "").length() > 0;
         boolean auctionEligible = gift.optInt(
                 "auction_eligible", gift.optBoolean("auction_eligible", false) ? 1 : 0
         ) == 1;

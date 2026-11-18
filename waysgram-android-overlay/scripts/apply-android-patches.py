@@ -927,6 +927,16 @@ def patch_star_gift_sheet_display_source(original: str) -> str:
         "            } else {\n"
         "                waysGramEmojiView.setVisibility(View.VISIBLE);\n"
         "            }\n"
+        "            // WaysGram upgrade: a fixed 25 Stars through the WaysGram backend,\n"
+        "            // never through the native Telegram Stars payment flow.\n"
+        "            if (savedStarGift.gift instanceof TL_stars.TL_starGift && button != null) {\n"
+        "                button.setFilled(true);\n"
+        "                button.setText(\"Улучшить за \" + org.telegram.messenger.waysgram.WaysGramGiftUpgrade.DEFAULT_PRICE_STARS + \" \u2b50\", !firstSet);\n"
+        "                button.setSubText(null, !firstSet);\n"
+        "                button.setOnClickListener(v -> org.telegram.messenger.waysgram.WaysGramGiftUpgrade.upgrade(\n"
+        "                        getContext(), currentAccount, waysGramSerial,\n"
+        "                        StarGiftSheet.this::onBackPressed));\n"
+        "            }\n"
         "        }\n\n"
     )
     original = replace_exactly_once(
@@ -999,16 +1009,12 @@ def patch_gift_sheet_source(original: str) -> str:
             + "            if (userGift.gift.slug != null && userGift.gift.slug.startsWith(\"waysgram://\")) {\n"
             + "                String waysGramSerial = userGift.gift.slug.substring(\"waysgram://\".length());\n"
             + "                org.telegram.messenger.waysgram.WaysGramGiftMediaStore.GiftMetadata waysGramMetadata = org.telegram.messenger.waysgram.WaysGramGiftMediaStore.getMetadata(waysGramSerial);\n"
+            + "                // Inventory cards show artwork only: no serials, levels or captions.\n"
+            + "                titleView.setText(\"\");\n"
+            + "                titleView.setVisibility(View.GONE);\n"
+            + "                subtitleView.setText(\"\");\n"
+            + "                subtitleView.setVisibility(View.GONE);\n"
             + "                if (waysGramMetadata != null) {\n"
-            + "                    titleView.setText(waysGramMetadata.title);\n"
-            + "                    titleView.setMaxLines(1);\n"
-            + "                    titleView.setEllipsize(android.text.TextUtils.TruncateAt.END);\n"
-            + "                    titleView.setVisibility(View.VISIBLE);\n"
-            + "                    subtitleView.setText(waysGramMetadata.subtitle);\n"
-            + "                    subtitleView.setTextSize(TypedValue.COMPLEX_UNIT_DIP, 9.5f);\n"
-            + "                    subtitleView.setMaxLines(2);\n"
-            + "                    subtitleView.setEllipsize(android.text.TextUtils.TruncateAt.END);\n"
-            + "                    subtitleView.setVisibility(View.VISIBLE);\n"
             + "                    priceLayout.setVisibility(View.GONE);\n"
             + "                    View waysGramEmojiExisting = card.findViewWithTag(\"waysgramGiftEmoji\");\n"
             + "                    android.widget.TextView waysGramEmojiView;\n"
@@ -1052,11 +1058,14 @@ def patch_gift_sheet_source(original: str) -> str:
             "                String waysGramInventorySerial = userGift.gift.slug.substring(\"waysgram://\".length());\n"
             "                waysGramGiftMetadata = org.telegram.messenger.waysgram.WaysGramGiftMediaStore.getMetadata(waysGramInventorySerial);\n"
             "            }\n"
-            "            if (waysGramGiftMetadata != null) {\n"
-            "                title = new Text(waysGramGiftMetadata.title, 20, AndroidUtilities.bold());\n"
-            "                subtitle = new Text(waysGramGiftMetadata.subtitle, 13);\n"
+            "            // WaysGram inventory cards carry no captions at all.\n"
+            "            boolean waysGramInventoryCard = userGift != null && userGift.gift != null\n"
+            "                    && userGift.gift.slug != null && userGift.gift.slug.startsWith(\"waysgram://\");\n"
+            "            if (waysGramInventoryCard) {\n"
+            "                title = null;\n"
+            "                subtitle = null;\n"
             "            }\n"
-            "            if (gift != null || waysGramGiftMetadata != null) {\n"
+            "            if (gift != null && !waysGramInventoryCard) {\n"
             "                if (title == null) {\n"
             "                    title = new Text(gift.title, 20, AndroidUtilities.bold());\n"
             "                }\n"
@@ -2225,6 +2234,7 @@ def verify_source(android_root: Path) -> None:
         "if (isWaysGramGift()) return false;",
         "if (isWaysGramGift()) return null;",
         "WaysGramGiftUnfold.playOnce(",
+        "WaysGramGiftUpgrade.upgrade(",
     ):
         if marker not in final_star_gift_source:
             raise ValueError("WaysGram native card detail rendering is incomplete")
@@ -2268,8 +2278,8 @@ def verify_source(android_root: Path) -> None:
         "waysgramGiftEmoji",
         "waysGramEmojiView.setText",
         "// WaysGram inventory serial and level display",
-        "waysGramGiftMetadata.title",
-        "waysGramGiftMetadata.subtitle",
+        "// WaysGram inventory cards carry no captions at all.",
+        "// Inventory cards show artwork only: no serials, levels or captions.",
     ):
         if marker not in gift_content:
             raise ValueError("WaysGram native GiftCell artwork, emoji or metadata binding is missing")

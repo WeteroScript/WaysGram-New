@@ -20,6 +20,14 @@ public final class WaysGramGiftArtwork {
     private WaysGramGiftArtwork() {
     }
 
+    /**
+     * Remembers which animation a cell already plays. Re-applying the same document restarts
+     * the player, which the user sees as "plays a moment, freezes, then continues".
+     */
+    private static final java.util.Map<BackupImageView, Long> APPLIED_DOCUMENTS =
+            java.util.Collections.synchronizedMap(
+                    new java.util.WeakHashMap<BackupImageView, Long>());
+
     public static void apply(BackupImageView imageView, String serial) {
         if (imageView == null || serial == null || serial.isEmpty()) {
             return;
@@ -30,14 +38,21 @@ public final class WaysGramGiftArtwork {
                 : null;
         TLRPC.TL_document document = WaysGramGiftMediaStore.getAnimationDocument(serial);
         if (document != null) {
+            Long applied = APPLIED_DOCUMENTS.get(imageView);
+            if (applied != null && applied == document.id) {
+                // Already playing this exact artwork on this cell - leave it running.
+                return;
+            }
             ImageLocation location = ImageLocation.getForDocument(document);
             if (location != null) {
                 imageView.getImageReceiver().setImage(location, null, thumb, null, null, 0);
+                APPLIED_DOCUMENTS.put(imageView, document.id);
                 imageView.invalidate();
                 return;
             }
         }
         if (thumb != null) {
+            APPLIED_DOCUMENTS.remove(imageView);
             imageView.getImageReceiver().setImageBitmap(bitmap);
             imageView.invalidate();
         }
