@@ -6213,9 +6213,9 @@ def build_messenger_router(
             if await cur.fetchone():
                 await db.rollback()
                 raise HTTPException(status_code=409, detail="Сначала отмените аукцион подарка")
-            if not str(gift["telegram_gift_id"] or ""):
-                await db.rollback()
-                raise HTTPException(status_code=409, detail="Этот подарок нельзя улучшить")
+            # A WaysGram gift that is not in the Telegram catalog still upgrades: the price is
+            # set by WaysGram and the traits come from the fallback pool when Telegram published
+            # no models for it.
             # The upgrade price is fixed by WaysGram and does not depend on the Telegram
             # catalog: the same 25 Stars are charged for every gift and every level.
             price = UPGRADE_PRICE_STARS
@@ -6257,6 +6257,8 @@ def build_messenger_router(
             # Telegram publishes every model and pattern as a sticker document. Its id is
             # stored with the traits (name, then chance, then position in the set), so the
             # client can play the official animation instead of matching by name at runtime.
+            # A WaysGram-only gift has no Telegram attribute set: the traits stay exactly as
+            # rolled from the fallback pool and the client draws its own artwork.
             attribute_documents = await _gift_attribute_documents(
                 db, str(gift["telegram_gift_id"] or "")
             )

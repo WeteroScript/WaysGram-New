@@ -61,7 +61,9 @@ public final class WaysGramPeerBadges {
 
     private static final ConcurrentHashMap<Long, Entry> CACHE = new ConcurrentHashMap<>();
     private static final ConcurrentHashMap<Long, long[]> PENDING = new ConcurrentHashMap<>();
-    private static final ConcurrentHashMap<Long, Runnable> CALLBACKS = new ConcurrentHashMap<>();
+    /** Every surface waiting for the marks of a peer, not just the latest one. */
+    private static final ConcurrentHashMap<Long, List<Runnable>> CALLBACKS =
+            new ConcurrentHashMap<>();
     private static final Set<Long> REQUESTED =
             Collections.newSetFromMap(new ConcurrentHashMap<Long, Boolean>());
     private static final AtomicBoolean FLUSH_SCHEDULED = new AtomicBoolean();
@@ -331,7 +333,16 @@ public final class WaysGramPeerBadges {
             int account, long peerId, long key, Runnable invalidate
     ) {
         if (invalidate != null) {
-            CALLBACKS.put(key, invalidate);
+            synchronized (CALLBACKS) {
+                List<Runnable> waiting = CALLBACKS.get(key);
+                if (waiting == null) {
+                    waiting = new ArrayList<>(2);
+                    CALLBACKS.put(key, waiting);
+                }
+                if (!waiting.contains(invalidate)) {
+                    waiting.add(invalidate);
+                }
+            }
         }
         if (!REQUESTED.add(key)) {
             return;
@@ -432,9 +443,14 @@ public final class WaysGramPeerBadges {
         }
         CACHE.put(key, entry);
         REQUESTED.remove(key);
-        Runnable invalidate = CALLBACKS.remove(key);
-        if (invalidate != null && !entry.labels.isEmpty()) {
-            AndroidUtilities.runOnUIThread(invalidate);
+        List<Runnable> waiting;
+        synchronized (CALLBACKS) {
+            waiting = CALLBACKS.remove(key);
+        }
+        if (waiting != null && !entry.labels.isEmpty()) {
+            for (Runnable invalidate : waiting) {
+                AndroidUtilities.runOnUIThread(invalidate);
+            }
         }
     }
 

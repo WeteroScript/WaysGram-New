@@ -1809,14 +1809,17 @@ async def telegram_gift_rows() -> list[dict[str, Any]]:
                     continue
                 item = dict(row)
                 item["title"] = telegram_gift_display_name(
-                    item.get("title"), item.get("sticker_set_name"), gift_id
+                    item.get("title"),
+                    item.get("sticker_set_name"),
+                    gift_id,
+                    item.get("sticker_emoji"),
                 )
                 item["catalog_source"] = catalog_source
                 item["telegram_available"] = bool(item.get("telegram_available"))
                 by_id[gift_id] = item
 
         cur = await db.execute(
-            """SELECT p.gift_id AS id,'Подарок Telegram' AS title,
+            """SELECT p.gift_id AS id,'' AS title,
                       p.price_stars,p.supply,p.sold,0 AS telegram_available
                FROM telegram_gift_prices p
                WHERE NOT EXISTS (SELECT 1 FROM telegram_gift_catalog c WHERE c.gift_id=p.gift_id)
@@ -1827,6 +1830,7 @@ async def telegram_gift_rows() -> list[dict[str, Any]]:
             if gift_id in by_id:
                 continue
             item = dict(row)
+            item["title"] = telegram_gift_display_name("", "", gift_id)
             item["catalog_source"] = "waysgram_manual"
             item["telegram_available"] = False
             by_id[gift_id] = item
@@ -1844,14 +1848,34 @@ async def telegram_gift_rows() -> list[dict[str, Any]]:
     )
     return rows
 
-def telegram_gift_display_name(title: Any, sticker_set_name: Any, gift_id: str = "") -> str:
+#: Titles the catalog sync writes when Telegram publishes none. They are not names of a gift:
+#: the administrator saw dozens of identical "Подарок Telegram" rows on the gifts page.
+GENERIC_GIFT_TITLES = {
+    "gift",
+    "star gift",
+    "telegram",
+    "telegram gift",
+    "подарок",
+    "подарок telegram",
+    "подарок телеграм",
+    "подарок телеграмм",
+    "подарок в telegram",
+    "подарок в телеграм",
+}
+GENERIC_GIFT_PREFIXES = ("telegram gift", "подарок telegram", "подарок телеграм")
+
+
+def telegram_gift_display_name(
+    title: Any, sticker_set_name: Any, gift_id: str = "", sticker_emoji: Any = ""
+) -> str:
     if str(gift_id or "").strip() == "5936013938331222567":
         return "Plush Pepe"
     raw_title = str(title or "").strip()
+    folded = " ".join(raw_title.casefold().split())
     generic = (
         not raw_title
-        or raw_title.casefold().startswith("telegram gift")
-        or raw_title.casefold() in {"gift", "star gift", "telegram"}
+        or folded in GENERIC_GIFT_TITLES
+        or folded.startswith(GENERIC_GIFT_PREFIXES)
         or not any(character.isalnum() for character in raw_title)
     )
     if not generic:
@@ -1869,7 +1893,18 @@ def telegram_gift_display_name(title: Any, sticker_set_name: Any, gift_id: str =
         readable = re.sub(r"^(?:telegram\s*)?gift\s*", "", readable, flags=re.IGNORECASE).strip()
         if readable and any(character.isalnum() for character in readable):
             return readable[:160]
-    return "Подарок Telegram"
+    # Nothing readable is published for this gift: name it so the administrator can still tell
+    # the rows apart instead of showing the same placeholder for the whole catalog.
+    emoji = str(sticker_emoji or "").strip()
+    raw_id = str(gift_id or "").strip()
+    digits = "".join(character for character in raw_id if character.isdigit())
+    if digits:
+        suffix = f" №{digits[-6:]}"
+    elif raw_id:
+        suffix = f" · {raw_id[:16]}"
+    else:
+        suffix = ""
+    return f"Подарок{(' ' + emoji) if emoji else ''}{suffix}"
 
 
 def telegram_gift_label(row: dict[str, Any]) -> str:

@@ -3,6 +3,7 @@ import json
 import time
 from pathlib import Path
 
+import aiosqlite
 import httpx
 import pytest
 from cryptography.fernet import Fernet
@@ -2055,5 +2056,36 @@ def test_upgrade_matches_telegram_models_by_position_when_names_are_localised(en
                 stored["attributes"]["collectible_traits"]["model"]["document_id"]
                 == traits["model"]["document_id"]
             )
+
+    run(scenario())
+
+
+def test_gift_outside_the_telegram_catalog_still_upgrades(env) -> None:
+    """A WaysGram-only gift has no Telegram models, but the upgrade is WaysGram's own."""
+    path, app = env
+
+    async def scenario() -> None:
+        async with aiosqlite.connect(path) as db:
+            await db.execute(
+                """INSERT INTO user_gifts
+                   (serial_number,gift_id,gift_name,owner_telegram_id,acquired_at,
+                    telegram_gift_id,gift_emoji,purchase_asset,purchase_price)
+                   VALUES('WG-000000000001','',  'Подарок WaysGram',101,?, '',  '🎁','stars',100)""",
+                (int(time.time()),),
+            )
+            await db.execute("UPDATE accounts SET stars=stars+100 WHERE telegram_id=101")
+            await db.commit()
+        async with await client_for(app) as client:
+            upgraded = await client.post("/api/gifts/WG-000000000001/upgrade", headers=headers(101))
+            assert upgraded.status_code == 200, upgraded.text
+            payload = upgraded.json()
+            assert payload["upgrade_level"] == 1
+            traits = payload["attributes"]["collectible_traits"]
+            # The fallback pool publishes a model, a pattern and a backdrop for every gift.
+            assert traits["model"]["name"]
+            assert traits["pattern"]["name"]
+            inventory = (await client.get("/api/me/gifts", headers=headers(101))).json()["gifts"]
+            stored = next(item for item in inventory if item["serial_number"] == "WG-000000000001")
+            assert stored["upgrade_level"] == 1
 
     run(scenario())

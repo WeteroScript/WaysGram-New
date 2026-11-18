@@ -254,6 +254,12 @@ def test_admin_gift_display_name_uses_sticker_set_name() -> None:
     assert bot_module.telegram_gift_display_name("Telegram Gift 123", "plush_pepe", "5936013938331222567") == "Plush Pepe"
     assert bot_module.telegram_gift_display_name("", "GoldenDuck", "456") == "Golden Duck"
     assert bot_module.telegram_gift_display_name("Rare Gift", "SomeSet", "789") == "Rare Gift"
+    # A placeholder written by an older catalog sync is not the name of a gift.
+    assert bot_module.telegram_gift_display_name("Подарок Telegram", "GoldenDuck", "456") == "Golden Duck"
+    assert bot_module.telegram_gift_display_name("Подарок Телеграмм", "", "500123") == "Подарок №500123"
+    assert (
+        bot_module.telegram_gift_display_name("", "", "500123", "🐸") == "Подарок 🐸 №500123"
+    )
 
 
 def test_admin_edits_telegram_gift_prices_from_the_bot(panel) -> None:
@@ -337,7 +343,7 @@ def test_admin_adds_telegram_gift_by_id(panel, monkeypatch: pytest.MonkeyPatch) 
     assert "добавлен в управление WaysGram" in added_unknown.sent[0][0]
     assert "ID: unknown-id" in added_unknown.sent[0][0]
     assert "метаданные Telegram не найдены" in added_unknown.sent[0][0]
-    assert "Подарок Telegram" in added_unknown.sent[0][0]
+    assert "Подарок · unknown-id" in added_unknown.sent[0][0]
     assert "Telegram Gift unknown-id" not in added_unknown.sent[0][0]
     assert query(path, "SELECT price_stars,supply FROM telegram_gift_prices WHERE gift_id='unknown-id'") == [(0, 0)]
 

@@ -809,11 +809,41 @@ def patch_profile_gifts_container_source(original: str) -> str:
         "        if (page != null) page.update(false);\n"
         "        updateButton();\n"
         "    }\n\n"
+        "    public void replaceWaysGramInventory(ArrayList<TL_stars.SavedStarGift> gifts) {\n"
+        "        if (!waysGramInventory || gifts == null) return;\n"
+        "        Page page = getCurrentPage();\n"
+        "        int waysGramFirst = -1;\n"
+        "        int waysGramOffset = 0;\n"
+        "        if (page != null && page.listView.getLayoutManager()\n"
+        "                instanceof androidx.recyclerview.widget.LinearLayoutManager) {\n"
+        "            androidx.recyclerview.widget.LinearLayoutManager manager =\n"
+        "                    (androidx.recyclerview.widget.LinearLayoutManager) page.listView.getLayoutManager();\n"
+        "            waysGramFirst = manager.findFirstVisibleItemPosition();\n"
+        "            View firstChild = manager.findViewByPosition(waysGramFirst);\n"
+        "            waysGramOffset = firstChild == null ? 0 : firstChild.getTop();\n"
+        "        }\n"
+        "        list.gifts.clear();\n"
+        "        list.gifts.addAll(gifts);\n"
+        "        list.totalCount = list.gifts.size();\n"
+        "        list.notifyUpdate();\n"
+        "        if (page != null) {\n"
+        "            page.update(false);\n"
+        "            if (waysGramFirst > 0 && page.listView.getLayoutManager()\n"
+        "                    instanceof androidx.recyclerview.widget.LinearLayoutManager) {\n"
+        "                ((androidx.recyclerview.widget.LinearLayoutManager) page.listView.getLayoutManager())\n"
+        "                        .scrollToPositionWithOffset(waysGramFirst, waysGramOffset);\n"
+        "            }\n"
+        "        }\n"
+        "        updateButton();\n"
+        "    }\n"
+        "\n"
         "    public void refreshWaysGramGiftViews() {\n"
         "        if (!waysGramInventory) return;\n"
         "        Page page = getCurrentPage();\n"
         "        if (page != null) {\n"
-        "            page.update(false);\n"
+        "            // Artwork arrives gift by gift: repaint the visible cells instead of\n"
+        "            // rebuilding the list, which restarted every animation and swallowed\n"
+        "            // the scroll gestures of a long inventory.\n"
         "            for (int i = 0; i < page.listView.getChildCount(); i++) {\n"
         "                android.view.View child = page.listView.getChildAt(i);\n"
         "                if (!(child instanceof GiftSheet.GiftCell)) continue;\n"
@@ -908,7 +938,6 @@ def patch_star_gift_sheet_display_source(original: str) -> str:
         "            topView.buttonsLayout.setVisibility(View.GONE);\n"
         "            String waysGramSerial = waysGramGiftSerial();\n"
         "            org.telegram.messenger.waysgram.WaysGramGiftMediaStore.GiftMetadata waysGramMetadata = org.telegram.messenger.waysgram.WaysGramGiftMediaStore.getMetadata(waysGramSerial);\n"
-        "            android.graphics.Bitmap waysGramBitmap = org.telegram.messenger.waysgram.WaysGramGiftMediaStore.get(waysGramSerial);\n"
         "            View waysGramEmojiExisting = topView.imageLayout.findViewWithTag(\"waysgramGiftDetailEmoji\");\n"
         "            android.widget.TextView waysGramEmojiView;\n"
         "            if (waysGramEmojiExisting instanceof android.widget.TextView) {\n"
@@ -921,8 +950,12 @@ def patch_star_gift_sheet_display_source(original: str) -> str:
         "                topView.imageLayout.addView(waysGramEmojiView, new FrameLayout.LayoutParams(dp(112), dp(112), Gravity.CENTER));\n"
         "            }\n"
         "            waysGramEmojiView.setText(waysGramMetadata == null || TextUtils.isEmpty(waysGramMetadata.emoji) ? \"🎁\" : waysGramMetadata.emoji);\n"
-        "            if (waysGramBitmap != null && topView.imageView[0] != null) {\n"
-        "                topView.imageView[0].getImageReceiver().setImageBitmap(waysGramBitmap);\n"
+        "            if (topView.imageView[0] != null) {\n"
+        "                // Still frame or the animated sticker: whatever the grid shows is\n"
+        "                // shown here too, so the card never comes up without artwork.\n"
+        "                org.telegram.messenger.waysgram.WaysGramGiftArtwork.apply(topView.imageView[0], waysGramSerial);\n"
+        "            }\n"
+        "            if (org.telegram.messenger.waysgram.WaysGramGiftArtwork.hasArtwork(waysGramSerial)) {\n"
         "                waysGramEmojiView.setVisibility(View.GONE);\n"
         "            } else {\n"
         "                waysGramEmojiView.setVisibility(View.VISIBLE);\n"
@@ -1083,6 +1116,36 @@ def patch_gift_sheet_source(original: str) -> str:
         )
 
     return updated
+
+def patch_star_gift_sheet_sell_row(original: str) -> str:
+    """Offer "Продать подарок" in the saved-gift card of a WaysGram gift.
+
+    Telegram's own conversion row stays empty for WaysGram gifts, so the row sits between the
+    acquisition date and the value. Only a gift that was never upgraded is sold.
+    """
+    marker = "WaysGram: sell row of a saved gift"
+    if marker in original:
+        return original
+    match = re.search(
+        r"(?m)^[ \t]*tableView\.addRow\(\)?getString\(R\.string\.Gift2Value\), "
+        r"replaceStarsWithPlain\(TextUtils\.concat\(\"\u2b50\ufe0f \" \+ "
+        r"LocaleController\.formatNumber\(savedStarGift\.gift\.stars",
+        original,
+    )
+    if match is None:
+        raise ValueError("Could not locate the saved gift value row of the native gift sheet")
+    indent = re.match(r"[ \t]*", original[match.start():]).group(0)
+    row = (
+        indent + "// " + marker + "." + "\n"
+        + indent + "if (isWaysGramGift() && savedStarGift.gift instanceof TL_stars.TL_starGift) {\n"
+        + indent + "    tableView.addRow(\"Продать подарок\", \"Вернём половину цены в Stars\", \"Продать\",\n"
+        + indent + "            () -> org.telegram.messenger.waysgram.WaysGramGiftSell.confirm(\n"
+        + indent + "                    getContext(), currentAccount, waysGramGiftSerial(),\n"
+        + indent + "                    StarGiftSheet.this::onBackPressed));\n"
+        + indent + "}\n"
+    )
+    return original[:match.start()] + row + original[match.start():]
+
 
 def patch_waysgram_mapper_source(original: str) -> str:
     """Render WaysGram gift messages as Telegram's native gift cards."""
@@ -2101,7 +2164,14 @@ def patch_chat_list_marks_reserve(original: str) -> str:
         + "        // WaysGram: keep room for the marks drawn next to the badge.\n"
         + "        waysGramMarksWidth = org.telegram.messenger.waysgram.WaysGramPeerBadges.reservedWidth(\n"
         + "                currentAccount, getDialogId(), Theme.dialogs_namePaint[paintIndex].getTextSize(),\n"
-        + "                () -> requestLayout());\n"
+        + "                () -> {\n"
+        + "                    // buildLayout() is what measures the marks, and it only runs\n"
+        + "                    // when the row is rebuilt: without the flag the pills of an\n"
+        + "                    // already measured row would never appear.\n"
+        + "                    updateLayout = true;\n"
+        + "                    requestLayout();\n"
+        + "                    invalidate();\n"
+        + "                });\n"
         + "        if (waysGramMarksWidth > 0) {\n"
         + "            waysGramMarksWidth += dp(drawPremium ? 24 : 18);\n"
         + "            if (dialogsType != 2 && (dialogMuted || drawUnmute || isHiddenInCommunity)\n"
@@ -2345,6 +2415,8 @@ def verify_source(android_root: Path) -> None:
         or "parent.waysGramGiftUpdatedListener.run();" not in final_gifts_container
         or "if (parent.waysGramInventory || list == null) return;" in final_gifts_container
         or "page.listView.getChildCount()" not in final_gifts_container
+        or "replaceWaysGramInventory(ArrayList<TL_stars.SavedStarGift> gifts)" not in final_gifts_container
+        or "scrollToPositionWithOffset(waysGramFirst, waysGramOffset)" not in final_gifts_container
         or "WaysGramGiftArtwork.apply(cell.imageView, serial);" not in final_gifts_container
         or "waysGramInventoryBottomSpace" not in final_gifts_container
     ):
@@ -2356,6 +2428,7 @@ def verify_source(android_root: Path) -> None:
     star_gift_source = star_gift_sheet.read_text(encoding="utf-8")
     patched_star_gift_source = patch_star_gift_sheet_display_source(star_gift_source)
     patched_star_gift_source = patch_star_gift_sheet_unfold_source(patched_star_gift_source)
+    patched_star_gift_source = patch_star_gift_sheet_sell_row(patched_star_gift_source)
     if patched_star_gift_source != star_gift_source:
         star_gift_sheet.write_text(patched_star_gift_source, encoding="utf-8")
     final_star_gift_source = star_gift_sheet.read_text(encoding="utf-8")
@@ -2366,6 +2439,8 @@ def verify_source(android_root: Path) -> None:
         "if (isWaysGramGift()) return null;",
         "WaysGramGiftUnfold.playOnce(",
         "WaysGramGiftUpgrade.upgrade(",
+        "WaysGram: sell row of a saved gift",
+        "WaysGramGiftSell.confirm(",
     ):
         if marker not in final_star_gift_source:
             raise ValueError("WaysGram native card detail rendering is incomplete")

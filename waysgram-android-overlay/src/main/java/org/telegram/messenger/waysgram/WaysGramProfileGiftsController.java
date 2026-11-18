@@ -32,6 +32,7 @@ public final class WaysGramProfileGiftsController {
     private final WaysGramApiClient imageClient;
     private boolean loading;
     private boolean giftViewRefreshScheduled;
+    private boolean inventoryRebuildScheduled;
     private final WaysGramGiftAttributes.Listener attributesListener;
     private JSONArray lastInventory;
     private int lastGiftAccount = UserConfig.selectedAccount;
@@ -53,9 +54,10 @@ public final class WaysGramProfileGiftsController {
         imageClient = new WaysGramApiClient(sessionStore);
         WaysGramGiftAttributes.attach(appContext, fragment == null
                 ? UserConfig.selectedAccount : fragment.getCurrentAccount());
-        // Official Telegram model and pattern animations arrive one by one; a single collapsed
-        // refresh shows them on the native cards without rebinding the whole inventory.
-        attributesListener = changedGiftId -> scheduleGiftViewRefresh();
+        // Official Telegram model and pattern animations arrive one by one. A card can only
+        // show the real model once its document is on disk, so the inventory is rebuilt once
+        // (debounced) instead of stamping the gift's own sticker into the model slot.
+        attributesListener = changedGiftId -> scheduleInventoryRebuild();
         WaysGramGiftAttributes.addListener(attributesListener);
         // An upgrade started from the native gift sheet must reload this inventory.
         WaysGramGiftUpgrade.setRefreshListener(this::refresh);
@@ -77,8 +79,8 @@ public final class WaysGramProfileGiftsController {
                     lastInventory = inventory;
                     lastGiftAccount = fragment == null
                             ? UserConfig.selectedAccount : fragment.getCurrentAccount();
-                    // Animated documents survive the refresh; only the still images are rebuilt.
-                    WaysGramGiftMediaStore.clearStillImages();
+                    // Still frames and animated documents stay cached: dropping them makes every
+                    // card decode its artwork again, which reads as flicker in the grid.
                     // Inventory cards show artwork only: no serial, level or caption on them.
                     ArrayList<TL_stars.SavedStarGift> nativeGifts = toNativeGifts(inventory,
                             fragment == null ? UserConfig.selectedAccount : fragment.getCurrentAccount(),
@@ -225,29 +227,23 @@ public final class WaysGramProfileGiftsController {
                 }
                 // Model and symbol are rolled once by the server for this collectible and never
                 // change. Telegram publishes every model and pattern as its own animation, so the
-                // native card plays the official art; the gift's own artwork is only a stand-in
-                // until those documents are downloaded.
+                // native card plays the official art once it is downloaded.
                 if (!telegramGiftIdText.isEmpty() && traits != null) {
                     WaysGramGiftAttributes.wantRolled(telegramGiftIdText, traits);
                 }
                 // The rolled traits carry the Telegram document id, so the official model and
                 // pattern animations are used even if Telegram localises their names.
+                //
+                // A document that is not on disk yet must never be replaced by the gift's own
+                // sticker: that turned every upgraded gift back into its stock artwork and put a
+                // square sticker layer behind the model. The attribute is simply left out until
+                // the download lands and the inventory is rebuilt.
                 TLRPC.TL_document modelDocument = WaysGramGiftAttributes.traitDocument(
                         telegramGiftIdText, WaysGramGiftAttributes.MODEL, traits, "model"
                 );
                 TLRPC.TL_document patternDocument = WaysGramGiftAttributes.traitDocument(
                         telegramGiftIdText, WaysGramGiftAttributes.PATTERN, traits, "pattern"
                 );
-                if (modelDocument == null || patternDocument == null) {
-                    TLRPC.TL_document fallbackDocument =
-                            traitDocument(serial, telegramGiftIdText, giftEmoji);
-                    if (modelDocument == null) {
-                        modelDocument = fallbackDocument;
-                    }
-                    if (patternDocument == null) {
-                        patternDocument = fallbackDocument;
-                    }
-                }
                 if (modelDocument != null) {
                     TL_stars.starGiftAttributeModel nativeModel = new TL_stars.starGiftAttributeModel();
                     nativeModel.name = model.isEmpty() ? "Модель" : model;
@@ -397,9 +393,8 @@ public final class WaysGramProfileGiftsController {
                 nativeBackdrop.pattern_color =
                         backdropEntry.optInt("pattern_color", 0) & 0x00FFFFFF;
                 nativeBackdrop.text_color = backdropEntry.optInt("text_color", 0) & 0x00FFFFFF;
-                if (nativeBackdrop.pattern_color == 0) {
-                    nativeBackdrop.pattern_color = contrastColor(center);
-                }
+                // No contrast fallback here: Telegram draws pattern_color as a flat square
+                // behind the model, which is the pale box that appeared behind every gift.
                 if (nativeBackdrop.text_color == 0) {
                     nativeBackdrop.text_color = contrastColor(center);
                 }
@@ -446,7 +441,9 @@ public final class WaysGramProfileGiftsController {
         backdrop.backdrop_id = 0; // WaysGram API exposes the name and color, not Telegram's backdrop ID.
         backdrop.center_color = center;
         backdrop.edge_color = darken(center, 0.78f);
-        backdrop.pattern_color = contrast;
+        // Legacy backdrops carry no pattern colour: the pale square behind the model was this
+        // invented value, so it stays empty and only the text colour keeps its contrast.
+        backdrop.pattern_color = 0;
         backdrop.text_color = contrast;
         backdrop.rarity = nativeRarity(rarityKey);
         return backdrop;
@@ -582,22 +579,84 @@ public final class WaysGramProfileGiftsController {
                 continue;
             }
             final String cacheKey = serial;
-            imageClient.downloadTelegramGiftSticker(telegramGiftId, new WaysGramApiClient.ImageCallback() {
+            final String giftId = telegramGiftId;
+            imageClient.downloadTelegramGiftSticker(giftId, new WaysGramApiClient.ImageCallback() {
                 @Override
                 public void onSuccess(Bitmap bitmap) {
                     if (bitmap == null || bitmap.isRecycled()) {
                         return;
                     }
                     WaysGramGiftMediaStore.put(cacheKey, bitmap);
-                    container.refreshWaysGramGiftViews();
+                    scheduleGiftViewRefresh();
                 }
 
                 @Override
                 public void onError(String message, int statusCode) {
-                    // Keep Telegram's native GiftCell background when no sticker is available.
+                    // An animated-only sticker has no preview frame to decode. The grid can still
+                    // play its animation, so the card keeps its artwork instead of going blank.
+                    String emoji = "";
+                    JSONObject entry = findInventoryItem(cacheKey);
+                    if (entry != null) {
+                        emoji = optText(entry, "gift_emoji");
+                        if (emoji.isEmpty()) {
+                            emoji = optText(entry.optJSONObject("telegram_gift"), "emoji");
+                        }
+                    }
+                    downloadGiftAnimation(cacheKey, giftId, emoji);
                 }
             });
         }
+    }
+
+    /** @return the inventory entry of a serial, or {@code null} when it is gone. */
+    private JSONObject findInventoryItem(String serial) {
+        if (lastInventory == null || serial == null) {
+            return null;
+        }
+        for (int i = 0; i < lastInventory.length(); i++) {
+            JSONObject item = lastInventory.optJSONObject(i);
+            if (item != null && serial.equals(item.optString("serial_number", "").trim())) {
+                return item;
+            }
+        }
+        return null;
+    }
+
+    /** Downloads the animated artwork of one gift; the still frame stays as its placeholder. */
+    private void downloadGiftAnimation(String serial, String telegramGiftId, String emoji) {
+        if (serial == null || serial.isEmpty() || telegramGiftId == null || telegramGiftId.isEmpty()) {
+            return;
+        }
+        final String cacheKey = serial;
+        final String giftEmoji = emoji == null ? "" : emoji;
+        final long documentId = WaysGramGiftDocuments.documentId(telegramGiftId);
+        if (documentId == 0L) {
+            return;
+        }
+        java.io.File cached = WaysGramGiftDocuments.stickerFile(documentId);
+        if (cached != null && cached.isFile() && cached.length() > 0) {
+            applyAnimationDocument(cacheKey, documentId, cached, giftEmoji);
+            return;
+        }
+        imageClient.downloadTelegramGiftStickerBytes(
+                telegramGiftId,
+                true,
+                new WaysGramApiClient.StickerBytesCallback() {
+                    @Override
+                    public void onSuccess(byte[] bytes, String mimeType) {
+                        java.io.File stored = WaysGramGiftDocuments.storeSticker(documentId, bytes);
+                        if (stored == null) {
+                            return;
+                        }
+                        applyAnimationDocument(cacheKey, documentId, stored, giftEmoji);
+                    }
+
+                    @Override
+                    public void onError(String message, int statusCode) {
+                        // Nothing else to try: the emoji overlay of the cell stays visible.
+                    }
+                }
+        );
     }
 
     /**
@@ -628,36 +687,7 @@ public final class WaysGramProfileGiftsController {
             if (emoji.isEmpty()) {
                 emoji = optText(telegramGift, "emoji");
             }
-            final String cacheKey = serial;
-            final String giftEmoji = emoji;
-            final long documentId = WaysGramGiftDocuments.documentId(telegramGiftId);
-            if (documentId == 0L) {
-                continue;
-            }
-            java.io.File cached = WaysGramGiftDocuments.stickerFile(documentId);
-            if (cached != null && cached.isFile() && cached.length() > 0) {
-                applyAnimationDocument(cacheKey, documentId, cached, giftEmoji);
-                continue;
-            }
-            imageClient.downloadTelegramGiftStickerBytes(
-                    telegramGiftId,
-                    true,
-                    new WaysGramApiClient.StickerBytesCallback() {
-                        @Override
-                        public void onSuccess(byte[] bytes, String mimeType) {
-                            java.io.File stored = WaysGramGiftDocuments.storeSticker(documentId, bytes);
-                            if (stored == null) {
-                                return;
-                            }
-                            applyAnimationDocument(cacheKey, documentId, stored, giftEmoji);
-                        }
-
-                        @Override
-                        public void onError(String message, int statusCode) {
-                            // The still frame from the preview download stays visible.
-                        }
-                    }
-            );
+            downloadGiftAnimation(serial, telegramGiftId, emoji);
         }
     }
 
@@ -671,6 +701,31 @@ public final class WaysGramProfileGiftsController {
         }
         WaysGramGiftMediaStore.putAnimationDocument(serial, document);
         scheduleGiftViewRefresh();
+    }
+
+    /**
+     * Model and pattern animations arrive one by one. Rebuilding the whole inventory for each of
+     * them makes the grid flicker, so the rebuild is collapsed into a single pass and the pages
+     * keep their scroll position.
+     */
+    private void scheduleInventoryRebuild() {
+        if (inventoryRebuildScheduled) {
+            return;
+        }
+        inventoryRebuildScheduled = true;
+        AndroidUtilities.runOnUIThread(() -> {
+            inventoryRebuildScheduled = false;
+            rebuildInventory();
+        }, 600L);
+    }
+
+    /** Rebuilds the native cards of the current inventory, keeping the scroll position. */
+    private void rebuildInventory() {
+        if (container == null || lastInventory == null) {
+            return;
+        }
+        ArrayList<TL_stars.SavedStarGift> nativeGifts = toNativeGifts(lastInventory, lastGiftAccount, false);
+        container.replaceWaysGramInventory(nativeGifts);
     }
 
     /**
