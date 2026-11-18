@@ -119,6 +119,13 @@ public final class WaysGramGiftMediaStore {
         if (serial == null || serial.isEmpty() || document == null) {
             return;
         }
+        // The same artwork must keep the same document object: replacing it restarts the
+        // sticker player, which the user sees as a glitch or a frozen first frame.
+        TLRPC.TL_document existing = ANIMATED_DOCUMENTS.get(serial);
+        if (existing != null && existing.id == document.id
+                && existing.mime_type != null && existing.mime_type.equals(document.mime_type)) {
+            return;
+        }
         ANIMATED_DOCUMENTS.put(serial, document);
     }
 
@@ -144,6 +151,15 @@ public final class WaysGramGiftMediaStore {
         CACHE.clear();
         METADATA.clear();
         ANIMATED_DOCUMENTS.clear();
+    }
+
+    /**
+     * Drops still images of a previous refresh but keeps the animated gift documents,
+     * so an opened gift keeps playing while the inventory is reloaded.
+     */
+    public static synchronized void clearStillImages() {
+        CACHE.clear();
+        METADATA.clear();
     }
 
     private static File fileFor(String serial) {

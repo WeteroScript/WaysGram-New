@@ -62,7 +62,8 @@ public final class WaysGramProfileGiftsController {
                     loading = false;
                     client.close();
                     JSONArray inventory = gifts == null ? new JSONArray() : gifts;
-                    WaysGramGiftMediaStore.clear();
+                    // Animated documents survive the refresh; only the still images are rebuilt.
+                    WaysGramGiftMediaStore.clearStillImages();
                     // Gift cards carry the gift's own name and traits; the internal WaysGram serial
                     // and the gift level are never shown to the user.
                     ArrayList<TL_stars.SavedStarGift> nativeGifts = toNativeGifts(inventory,
