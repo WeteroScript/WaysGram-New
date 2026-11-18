@@ -63,8 +63,11 @@ public final class WaysGramProfileGiftsController {
                     client.close();
                     JSONArray inventory = gifts == null ? new JSONArray() : gifts;
                     WaysGramGiftMediaStore.clear();
+                    // showSerialAsTitle=true: show "WG-<id>" and the gift's level, matching
+                    // the dedicated "Мои подарки" inventory sheet.
                     ArrayList<TL_stars.SavedStarGift> nativeGifts = toNativeGifts(inventory,
-                            fragment == null ? UserConfig.selectedAccount : fragment.getCurrentAccount());
+                            fragment == null ? UserConfig.selectedAccount : fragment.getCurrentAccount(),
+                            true);
                     container.setWaysGramInventory(nativeGifts);
                     downloadGiftStickers(inventory);
                 });
@@ -75,22 +78,11 @@ public final class WaysGramProfileGiftsController {
                 AndroidUtilities.runOnUIThread(() -> {
                     loading = false;
                     client.close();
-                    boolean missingSession = message != null
-                            && message.contains("WaysGram session is missing");
-                    boolean expiredSession = message != null
-                            && message.contains("HTTP 401");
-                    if ((missingSession || expiredSession) && fragment != null
-                            && fragment.getParentActivity() != null) {
-                        if (expiredSession) {
-                            sessionStore.clearSession();
-                        }
-                        int account = fragment.getCurrentAccount();
-                        fragment.presentFragment(
-                                new WaysGramLoginFragment(account, WaysGramProfileGiftsController.this::refresh), true
-                        );
-                        return;
-                    }
-                    // Network and server errors keep the current session untouched.
+                    // Never navigate the user away to a login screen from here. A missing or
+                    // expired WaysGram session for this Telegram account is reported inline
+                    // only; the account's own session is left untouched so a wrong/expired
+                    // session on account A can never force-close or redirect a screen that
+                    // the user opened on account B.
                     showError(message);
                 });
             }
@@ -482,4 +474,4 @@ public final class WaysGramProfileGiftsController {
             return (int) (stableId(serial) & 0x7fffffff);
         }
     }
-}
+                         }
