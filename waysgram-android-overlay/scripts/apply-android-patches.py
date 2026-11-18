@@ -2002,7 +2002,7 @@ def patch_profile_own_marks_source(original: str) -> str:
         "                            ? org.telegram.messenger.waysgram.WaysGramPeerBadges.decorate(\n"
         "                                    currentAccount, dialogId, newString,\n"
         "                                    () -> {\n"
-        "                                        if (!isPaused) {\n"
+        "                                        if (getParentActivity() != null) {\n"
         "                                            updateProfileData(false);\n"
         "                                        }\n"
         "                                    })\n"
