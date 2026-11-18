@@ -234,6 +234,12 @@ public final class WaysGramGiftCatalogSheet extends BottomSheet {
             upgradeStarPrice = WaysGramGiftUpgrade.DEFAULT_PRICE_STARS;
         }
         boolean canUpgrade = gift.optString("telegram_gift_id", "").length() > 0;
+        // WaysGram buys a gift back for half of its price during the first week.
+        boolean sellable = gift.optInt("sellable", gift.optBoolean("sellable", false) ? 1 : 0) == 1;
+        int sellRefund = Math.max(0, gift.optInt("sell_refund", 0));
+        boolean sellInStars = !"grams".equalsIgnoreCase(gift.optString("sell_refund_asset", "stars"));
+        String sellAmountText = sellRefund + (sellInStars ? " ⭐" : " Gram");
+        String sellAction = "Продать за " + sellAmountText;
         boolean auctionEligible = gift.optInt(
                 "auction_eligible", gift.optBoolean("auction_eligible", false) ? 1 : 0
         ) == 1;
@@ -254,6 +260,9 @@ public final class WaysGramGiftCatalogSheet extends BottomSheet {
             if (canUpgrade) {
                 actions.add("Улучшить за " + upgradeStarPrice + " ⭐");
             }
+            if (sellable && sellRefund > 0) {
+                actions.add(sellAction);
+            }
             actions.add("Передать пользователю");
         }
         StringBuilder giftDetails = new StringBuilder("Серийный номер: ").append(serial);
@@ -268,6 +277,13 @@ public final class WaysGramGiftCatalogSheet extends BottomSheet {
         }
         if (isCollectible && !auctionEligible) {
             giftDetails.append("\\nWaysGram-аукцион недоступен: модель не выпускалась через аукцион Telegram");
+        }
+        if (sellable && sellRefund > 0) {
+            int daysLeft = Math.max(0, (gift.optInt("sellable_until", 0)
+                    - (int) (System.currentTimeMillis() / 1000L) + 86399) / 86400);
+            giftDetails.append("\\nВозврат WaysGram: ").append(sellAmountText)
+                    .append(" (ещё ").append(daysLeft)
+                    .append(daysLeft == 1 ? " день)" : " дн.)");
         }
         if (auctioned) {
             giftDetails.append("\\nСтатус: на аукционе");
@@ -300,6 +316,18 @@ public final class WaysGramGiftCatalogSheet extends BottomSheet {
                                 .setNegativeButton("Отмена", null)
                                 .setPositiveButton("Улучшить", (d, w) ->
                                         catalogClient.upgradeGift(serial, giftActionCallback("Подарок улучшен")))
+                                .show();
+                    } else if (action.equals(sellAction)) {
+                        String assetName = sellInStars ? "WaysGram Stars" : "Gram";
+                        new AlertDialog.Builder(getContext())
+                                .setTitle("Продать подарок")
+                                .setMessage("WaysGram вернёт " + sellAmountText + " (" + assetName
+                                        + ") — половину уплаченной цены. Подарок исчезнет из инвентаря,"
+                                        + " карточка останется в истории чата.\n\nВернуть подарок можно"
+                                        + " только в первые 7 дней после получения.")
+                                .setNegativeButton("Отмена", null)
+                                .setPositiveButton("Продать", (d, w) ->
+                                        catalogClient.sellGift(serial, giftActionCallback("Подарок продан")))
                                 .show();
                     } else if (action.equals("Передать пользователю")) {
                         showGiftTransfer(serial);

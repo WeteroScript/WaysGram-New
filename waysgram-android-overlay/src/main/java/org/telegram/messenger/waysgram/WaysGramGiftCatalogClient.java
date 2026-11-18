@@ -175,8 +175,10 @@ public final class WaysGramGiftCatalogClient implements AutoCloseable {
     private final ExecutorService ioExecutor;
     private final ConcurrentHashMap<String, String> purchaseIdempotencyKeys = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, String> upgradeIdempotencyKeys = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<String, String> sellIdempotencyKeys = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, Boolean> inFlightPurchaseScopes = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, Boolean> inFlightUpgradeSerials = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<String, Boolean> inFlightSellSerials = new ConcurrentHashMap<>();
 
     public WaysGramGiftCatalogClient(SessionProvider sessionProvider) {
         if (sessionProvider == null) {
@@ -477,6 +479,50 @@ public final class WaysGramGiftCatalogClient implements AutoCloseable {
                     public void onError(String message) {
                         // Retain the key so a retry after a lost response cannot charge twice.
                         inFlightUpgradeSerials.remove(giftSerial);
+                        callback.onError(message);
+                    }
+                }
+        );
+    }
+
+    /**
+     * Sells a gift back to WaysGram: half of the paid price during the first week after the
+     * gift was received. The server removes the gift from the inventory.
+     */
+    public void sellGift(String serial, ActionCallback callback) {
+        if (callback == null) {
+            return;
+        }
+        String giftSerial = serial == null ? "" : serial.trim();
+        if (giftSerial.isEmpty()) {
+            callback.onError("Не указан серийный номер подарка");
+            return;
+        }
+        if (inFlightSellSerials.putIfAbsent(giftSerial, Boolean.TRUE) != null) {
+            callback.onError("Возврат этого подарка уже выполняется");
+            return;
+        }
+        String idempotencyKey = sellIdempotencyKeys.computeIfAbsent(
+                giftSerial,
+                ignored -> "wg-gift-sell-" + UUID.randomUUID()
+        );
+        runGiftAction(
+                "/api/gifts/" + encodePathSegment(giftSerial) + "/sell",
+                "POST",
+                "{}",
+                idempotencyKey,
+                new ActionCallback() {
+                    @Override
+                    public void onComplete(JSONObject result) {
+                        sellIdempotencyKeys.remove(giftSerial, idempotencyKey);
+                        inFlightSellSerials.remove(giftSerial);
+                        callback.onComplete(result);
+                    }
+
+                    @Override
+                    public void onError(String message) {
+                        // Retain the key so a retry after a lost response cannot refund twice.
+                        inFlightSellSerials.remove(giftSerial);
                         callback.onError(message);
                     }
                 }
