@@ -3488,6 +3488,7 @@ async def sync_telegram_gifts_internal(
     try:
         if mtproto_gift_catalog is not None:
             result = await mtproto_gift_catalog.sync(DATABASE_PATH)
+            await mtproto_gift_catalog.start_prefetch(DATABASE_PATH)
         else:
             result = await sync_telegram_gifts(DATABASE_PATH, bot)
     except Exception as exc:
@@ -3599,12 +3600,17 @@ async def main() -> None:
             session_file = Path(str(session_base) + ".session")
             if session_file.exists():
                 os.chmod(session_file, 0o600)
-            mtproto_gift_catalog = TelegramMTProtoGiftCatalog(mtproto_client)
+            mtproto_gift_catalog = TelegramMTProtoGiftCatalog(
+                mtproto_client, DATABASE_PATH
+            )
             sync_result = await mtproto_gift_catalog.sync(DATABASE_PATH)
             log.info(
                 "Loaded %s Telegram gifts through MTProto",
                 sync_result["gift_count"],
             )
+            # The whole catalogue is downloaded ahead of time, so the shop and the
+            # "My gifts" grid open with artwork instead of waiting for Telegram.
+            await mtproto_gift_catalog.start_prefetch(DATABASE_PATH)
         except Exception as exc:
             log.warning("MTProto gift catalog unavailable (%s); using Bot API fallback", type(exc).__name__)
             mtproto_gift_catalog = None

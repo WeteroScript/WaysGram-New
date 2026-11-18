@@ -93,6 +93,8 @@ public final class WaysGramGiftUpgradeReveal {
         private final GradientDrawable frameBackground;
         private final GradientDrawable cardBackground;
         private final BackupImageView artworkView;
+        private final BackupImageView modelView;
+        private final BackupImageView patternView;
         private final ColorDrawable tintDrawable;
         private final int[] gradientColors = new int[2];
         private final View tint;
@@ -124,6 +126,13 @@ public final class WaysGramGiftUpgradeReveal {
         private final int accentColor;
         private final int collectionNumber;
 
+        private final String giftId;
+        private final JSONObject traitsSnapshot;
+        private final WaysGramGiftAttributes.Listener attributesListener;
+        private long appliedModelDocument;
+        private long appliedPatternDocument;
+        private int lastModelSlot = Integer.MIN_VALUE;
+
         private final ArgbEvaluator argb = new ArgbEvaluator();
         private final ArrayList<ValueAnimator> animators = new ArrayList<>();
         private float lastGradientPosition = -1f;
@@ -143,6 +152,8 @@ public final class WaysGramGiftUpgradeReveal {
                 traits = attributes == null
                         ? null : attributes.optJSONObject("collectible_traits");
             }
+            traitsSnapshot = traits;
+            giftId = result.optString("telegram_gift_id", "").trim();
             JSONObject model = traitObject(traits, "model");
             JSONObject pattern = traitObject(traits, "pattern");
             JSONObject backdrop = traitObject(traits, "backdrop");
@@ -220,6 +231,22 @@ public final class WaysGramGiftUpgradeReveal {
                 artworkHolder.addView(emojiView, new FrameLayout.LayoutParams(-1, -1));
             }
 
+            // Official Telegram attribute animations: the model is the gift itself with that
+            // model, the pattern is drawn on top of it. Both stay invisible until their
+            // documents are downloaded, so the reveal never waits for the network.
+            modelView = new BackupImageView(context);
+            modelView.setAlpha(0f);
+            artworkHolder.addView(modelView, new FrameLayout.LayoutParams(-1, -1));
+
+            patternView = new BackupImageView(context);
+            patternView.setAlpha(0f);
+            FrameLayout.LayoutParams patternParams = new FrameLayout.LayoutParams(-1, -1);
+            patternParams.leftMargin = dp(6);
+            patternParams.rightMargin = dp(6);
+            patternParams.topMargin = dp(2);
+            patternParams.bottomMargin = dp(2);
+            artworkHolder.addView(patternView, patternParams);
+
             tintDrawable = new ColorDrawable(modelColor(models[0]));
             tint = new View(context);
             tint.setBackground(tintDrawable);
@@ -291,11 +318,26 @@ public final class WaysGramGiftUpgradeReveal {
                 attributes.height = WindowManager.LayoutParams.WRAP_CONTENT;
                 window.setAttributes(attributes);
             }
+            attributesListener = changedGiftId -> {
+                if (closed) {
+                    return;
+                }
+                if (finished) {
+                    applyModelArtwork(finalModel);
+                    applyPatternArtwork(finalPattern);
+                }
+            };
             dialog.setOnDismissListener(d -> close());
         }
 
         void show() {
             dialog.show();
+            WaysGramGiftAttributes.attach(context, -1);
+            WaysGramGiftAttributes.addListener(attributesListener);
+            if (!giftId.isEmpty()) {
+                WaysGramGiftAttributes.ensure(giftId);
+                WaysGramGiftAttributes.wantRolled(giftId, traitsSnapshot);
+            }
             applyBackdrop(0f);
             // Animated text and background on a hardware layer keep the frames off the software
             // rasterizer; the layer is released as soon as the reels settle.
@@ -311,7 +353,10 @@ public final class WaysGramGiftUpgradeReveal {
         }
 
         private void startReels() {
-            launch(modelReel, models, finalModel, MODEL_DURATION, 0L);
+            ValueAnimator modelAnimator = launch(modelReel, models, finalModel, MODEL_DURATION, 0L);
+            modelAnimator.addUpdateListener(
+                    animation -> refreshModelArtwork((float) animation.getAnimatedValue())
+            );
             launch(patternReel, patterns, finalPattern, PATTERN_DURATION, PATTERN_DELAY);
             ValueAnimator backdropAnimator = launch(
                     backdropReel, backdrops, finalBackdrop, BACKDROP_DURATION, BACKDROP_DELAY
@@ -428,6 +473,11 @@ public final class WaysGramGiftUpgradeReveal {
             tintDrawable.setColor(modelColor(finalModel));
             tint.setAlpha(0.24f);
             card.setLayerType(View.LAYER_TYPE_NONE, null);
+            if (!giftId.isEmpty()) {
+                WaysGramGiftAttributes.wantRolled(giftId, traitsSnapshot);
+            }
+            applyModelArtwork(finalModel);
+            applyPatternArtwork(finalPattern);
             // From here the gift's own animation loops for as long as the panel is open.
             if (WaysGramGiftArtwork.hasArtwork(serial)) {
                 WaysGramGiftArtwork.apply(artworkView, serial);
@@ -489,12 +539,68 @@ public final class WaysGramGiftUpgradeReveal {
             }
         }
 
+        /**
+         * Follows the model reel: as soon as the slot under the clicker has its official
+         * animation on the device, the real model is drawn over the gift picture.
+         */
+        private void refreshModelArtwork(float position) {
+            if (models.length == 0) {
+                return;
+            }
+            int index = (int) Math.floor(position);
+            float fraction = position - index;
+            int slot = fraction < 0.5f ? index : index + 1;
+            if (slot == lastModelSlot) {
+                return;
+            }
+            lastModelSlot = slot;
+            applyModelArtwork(models[circular(slot, models.length)]);
+        }
+
+        private void applyModelArtwork(String model) {
+            if (giftId.isEmpty() || model == null || model.isEmpty()) {
+                return;
+            }
+            org.telegram.tgnet.TLRPC.TL_document document = WaysGramGiftAttributes.document(
+                    giftId, WaysGramGiftAttributes.MODEL, model
+            );
+            if (document == null || appliedModelDocument == document.id) {
+                return;
+            }
+            appliedModelDocument = document.id;
+            WaysGramGiftArtwork.applyDocument(modelView, document);
+            modelView.animate().cancel();
+            modelView.animate().alpha(1f).setDuration(180L).start();
+            // The real model carries its own colours; the placeholder tint only stays faint.
+            tint.animate().cancel();
+            tint.animate().alpha(0.12f).setDuration(180L).start();
+        }
+
+        private void applyPatternArtwork(String pattern) {
+            if (giftId.isEmpty() || pattern == null || pattern.isEmpty()) {
+                return;
+            }
+            org.telegram.tgnet.TLRPC.TL_document document = WaysGramGiftAttributes.document(
+                    giftId, WaysGramGiftAttributes.PATTERN, pattern
+            );
+            if (document == null || appliedPatternDocument == document.id) {
+                return;
+            }
+            appliedPatternDocument = document.id;
+            WaysGramGiftArtwork.applyDocument(patternView, document);
+            patternView.animate().cancel();
+            patternView.animate().alpha(0.92f).setDuration(220L).start();
+        }
+
         private void close() {
             if (closed) {
                 return;
             }
             closed = true;
+            WaysGramGiftAttributes.removeListener(attributesListener);
             WaysGramGiftArtwork.stop(artworkView);
+            WaysGramGiftArtwork.stop(modelView);
+            WaysGramGiftArtwork.stop(patternView);
             for (int i = 0; i < animators.size(); i++) {
                 animators.get(i).cancel();
             }

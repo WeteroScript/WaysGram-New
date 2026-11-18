@@ -796,6 +796,33 @@ async def init_messenger_storage(database_path: Path) -> None:
             );
             CREATE INDEX IF NOT EXISTS idx_telegram_mtproto_gifts_available
                 ON telegram_mtproto_gift_catalog(is_available,position);
+            CREATE TABLE IF NOT EXISTS telegram_mtproto_gift_attributes (
+                gift_id TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                position INTEGER NOT NULL DEFAULT 0,
+                name TEXT NOT NULL,
+                rarity TEXT NOT NULL DEFAULT '',
+                permille INTEGER NOT NULL DEFAULT 0,
+                document_id INTEGER NOT NULL DEFAULT 0,
+                dc_id INTEGER,
+                mime_type TEXT NOT NULL DEFAULT 'application/octet-stream',
+                size INTEGER,
+                center_color INTEGER,
+                edge_color INTEGER,
+                pattern_color INTEGER,
+                text_color INTEGER,
+                payload_json TEXT NOT NULL DEFAULT '{}',
+                fetched_at INTEGER NOT NULL,
+                is_available INTEGER NOT NULL DEFAULT 1,
+                PRIMARY KEY(gift_id, kind, position)
+            );
+            CREATE INDEX IF NOT EXISTS idx_telegram_mtproto_gift_attributes_gift
+                ON telegram_mtproto_gift_attributes(gift_id);
+            CREATE TABLE IF NOT EXISTS telegram_mtproto_gift_attribute_sync (
+                gift_id TEXT PRIMARY KEY,
+                attribute_count INTEGER NOT NULL DEFAULT 0,
+                fetched_at INTEGER NOT NULL
+            );
             CREATE TABLE IF NOT EXISTS telegram_auction_gift_registry (
                 gift_id TEXT PRIMARY KEY,
                 title TEXT NOT NULL DEFAULT '',
@@ -4717,6 +4744,12 @@ def build_messenger_router(
                     )
                 except Exception:
                     continue
+            # A stale Bot API row (the original file_id expired) must not hide the real
+            # animation: MTProto still knows the gift, and for sold-out collections such as
+            # Plush Pepe the official animation comes from the gift's model attribute.
+            provider_response = await mtproto_sticker_fallback()
+            if provider_response is not None:
+                return provider_response
             raise HTTPException(status_code=502, detail="Не удалось загрузить исходную анимацию подарка")
 
         for catalog_source, sticker_row in candidates:
@@ -4810,6 +4843,171 @@ def build_messenger_router(
                 headers={"Cache-Control": "private, max-age=3600"},
             )
         raise HTTPException(status_code=502, detail="Не удалось загрузить стикер Telegram из доступных источников")
+
+    def _gift_provider() -> Any:
+        return mtproto_gift_provider() if mtproto_gift_provider else None
+
+    def _attribute_cached(provider: Any, document_id: int) -> bool:
+        getter = getattr(provider, "asset_path", None)
+        if getter is None:
+            return False
+        try:
+            path = getter(int(document_id), db_path())
+        except Exception:
+            return False
+        try:
+            return bool(path) and Path(str(path)).is_file()
+        except OSError:
+            return False
+
+    def _attribute_json(key: str, row: dict[str, Any], provider: Any) -> dict[str, Any] | None:
+        kind = str(row.get("kind") or "")
+        if kind == "backdrop":
+            backdrop = {
+                "kind": "backdrop",
+                "name": str(row.get("name") or ""),
+                "position": int(row.get("position") or 0),
+                "rarity": str(row.get("rarity") or ""),
+                "permille": int(row.get("permille") or 0),
+            }
+            for field in ("center_color", "edge_color", "pattern_color", "text_color"):
+                backdrop[field] = _optional_int(row.get(field))
+            return backdrop
+        if kind not in ("model", "pattern"):
+            return None
+        document_id = int(row.get("document_id") or 0)
+        if not document_id:
+            return None
+        return {
+            "kind": kind,
+            "name": str(row.get("name") or ""),
+            "position": int(row.get("position") or 0),
+            "rarity": str(row.get("rarity") or ""),
+            "permille": int(row.get("permille") or 0),
+            "document_id": document_id,
+            "mime_type": str(row.get("mime_type") or "application/octet-stream"),
+            "size": _optional_int(row.get("size")),
+            "url": (
+                f"/api/telegram/gifts/{quote(key, safe='')}/attributes/{document_id}"
+            ),
+            "cached": _attribute_cached(provider, document_id),
+        }
+
+    @router.get("/api/telegram/gifts/{gift_id}/attributes")
+    async def telegram_gift_attributes(
+        gift_id: str,
+        authorization: str | None = Header(default=None),
+        refresh: int = Query(default=0, ge=0, le=1),
+    ) -> dict[str, Any]:
+        """Official Telegram model/pattern/backdrop set of a gift.
+
+        Models and patterns are the real TGS/WebM animations Telegram publishes for the
+        upgrade: the client plays them instead of drawing a placeholder.
+        """
+        await current_user(authorization)
+        key = str(gift_id or "").strip()
+        if not key.isdigit():
+            raise HTTPException(status_code=400, detail="Некорректный идентификатор подарка")
+        provider = _gift_provider()
+        if provider is None:
+            raise HTTPException(status_code=503, detail="Каталог подарков Telegram недоступен")
+        rows: list[dict[str, Any]] = []
+        last_error: Exception | None = None
+        for attempt in range(2):
+            try:
+                rows = await provider.attributes(
+                    db_path(), key, refresh=bool(refresh) or attempt > 0
+                )
+                last_error = None
+                break
+            except Exception as error:
+                last_error = error
+        if last_error is not None and not rows:
+            raise HTTPException(
+                status_code=502, detail="Не удалось получить атрибуты подарка из Telegram"
+            ) from last_error
+
+        models: list[dict[str, Any]] = []
+        patterns: list[dict[str, Any]] = []
+        backdrops: list[dict[str, Any]] = []
+        for row in rows or []:
+            item = _attribute_json(key, row, provider)
+            if item is None:
+                continue
+            if item["kind"] == "model":
+                models.append(item)
+            elif item["kind"] == "pattern":
+                patterns.append(item)
+            else:
+                backdrops.append(item)
+        if not models and not patterns and not backdrops:
+            raise HTTPException(status_code=404, detail="У подарка нет атрибутов улучшения")
+        return {
+            "gift_id": key,
+            "models": models,
+            "patterns": patterns,
+            "backdrops": backdrops,
+            "count": len(models) + len(patterns) + len(backdrops),
+        }
+
+    @router.get("/api/telegram/gifts/{gift_id}/attributes/{document_id}")
+    async def telegram_gift_attribute_document(
+        gift_id: str,
+        document_id: str,
+        authorization: str | None = Header(default=None),
+    ) -> Response:
+        """Original Telegram animation of one model or pattern."""
+        await current_user(authorization)
+        key = str(gift_id or "").strip()
+        if not key.isdigit():
+            raise HTTPException(status_code=400, detail="Некорректный идентификатор подарка")
+        try:
+            numeric_document = int(str(document_id or "").strip())
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=400, detail="Некорректный документ атрибута") from None
+        provider = _gift_provider()
+        if provider is None:
+            raise HTTPException(status_code=503, detail="Каталог подарков Telegram недоступен")
+        try:
+            content, media_type = await provider.download_attribute(
+                db_path(), key, numeric_document
+            )
+        except Exception as error:
+            raise HTTPException(
+                status_code=502, detail="Не удалось загрузить анимацию атрибута"
+            ) from error
+        return Response(
+            content=content,
+            media_type=media_type,
+            headers={"Cache-Control": "private, max-age=604800"},
+        )
+
+    @router.get("/api/telegram/gifts/prefetch")
+    async def telegram_gift_prefetch_state(
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        """How much of the catalog artwork is already cached on the server."""
+        await current_user(authorization)
+        provider = _gift_provider()
+        if provider is None:
+            return {"enabled": False, "running": False, "total": 0, "done": 0}
+        return provider.prefetch_state()
+
+    @router.post("/api/telegram/gifts/prefetch")
+    async def telegram_gift_prefetch_start(
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        """Starts downloading the artwork of the whole catalog in the background."""
+        await current_user(authorization)
+        provider = _gift_provider()
+        if provider is None:
+            raise HTTPException(status_code=503, detail="Каталог подарков Telegram недоступен")
+        try:
+            return await provider.start_prefetch(db_path())
+        except Exception as error:
+            raise HTTPException(
+                status_code=502, detail="Не удалось запустить подготовку каталога"
+            ) from error
 
     @router.get("/api/gifts")
     async def gift_catalog(authorization: str | None = Header(default=None)) -> dict[str, Any]:
@@ -5925,6 +6123,7 @@ def build_messenger_router(
             result = {
                 "status": "upgraded",
                 "serial_number": serial,
+                "telegram_gift_id": str(gift["telegram_gift_id"] or ""),
                 "gift_name": str(gift["gift_name"]),
                 "gift_emoji": str(gift["gift_emoji"] or ""),
                 "upgrade_level": new_level,

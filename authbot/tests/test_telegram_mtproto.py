@@ -351,3 +351,241 @@ def test_mtproto_registry_records_only_started_auctions_and_is_append_only(tmp_p
         assert persisted == (1,)
 
     asyncio.run(scenario())
+
+
+class _AttrRarity:
+    def __init__(self, permille: int, kind: str = ""):
+        self.permille = permille
+        self._kind = kind
+
+
+class StarGiftAttributeRarity:
+    def __init__(self, permille: int = 0):
+        self.permille = permille
+
+
+class StarGiftAttributeRarityRare(StarGiftAttributeRarity):
+    pass
+
+
+class StarGiftAttributeModel:
+    def __init__(self, name: str, document, rarity):
+        self.name = name
+        self.document = document
+        self.rarity = rarity
+        self.rarity_permille = getattr(rarity, "permille", 0)
+
+
+class StarGiftAttributePattern(StarGiftAttributeModel):
+    pass
+
+
+class StarGiftAttributeBackdrop:
+    def __init__(self, name: str, backdrop_id: int, center_color: int, edge_color: int,
+                 pattern_color: int, text_color: int, rarity):
+        self.name = name
+        self.backdrop_id = backdrop_id
+        self.center_color = center_color
+        self.edge_color = edge_color
+        self.pattern_color = pattern_color
+        self.text_color = text_color
+        self.rarity = rarity
+
+
+def _attribute_document(document_id: int, mime_type: str = "application/x-tgsticker"):
+    return SimpleNamespace(
+        id=document_id,
+        dc_id=2,
+        size=2048,
+        mime_type=mime_type,
+        attributes=[DocumentAttributeSticker("🎁", "GiftSet")],
+    )
+
+
+class FakeAttributeClient:
+    """MTProto client that knows one gift's official upgrade attributes."""
+
+    def __init__(self, gift_id: int = 123456789):
+        self.gift_id = gift_id
+        self.requests = []
+        self.downloads = []
+        self.model_document = _attribute_document(7001)
+        self.pattern_document = _attribute_document(7002)
+        self.attributes = [
+            StarGiftAttributeModel("Gucci Leap", self.model_document, StarGiftAttributeRarity(10)),
+            StarGiftAttributeModel("Emerald Plush", _attribute_document(7003),
+                                   StarGiftAttributeRarityRare(2)),
+            StarGiftAttributePattern("Cheese", self.pattern_document, StarGiftAttributeRarity(5)),
+            StarGiftAttributeBackdrop("Purple", 11, 11431086, 8669060, 4656199, 15977459,
+                                      StarGiftAttributeRarity(10)),
+        ]
+        self.fail_attributes = False
+
+    async def __call__(self, request):
+        name = type(request).__name__
+        self.requests.append(request)
+        if name == "GetStarGiftsRequest":
+            return SimpleNamespace(gifts=[])
+        if name == "GetStarGiftUpgradeAttributesRequest":
+            if self.fail_attributes:
+                raise RuntimeError("Telegram rejected the attribute request")
+            return SimpleNamespace(attributes=list(self.attributes))
+        if name == "GetStarGiftUpgradePreviewRequest":
+            return SimpleNamespace(sample_attributes=list(self.attributes[:1]))
+        raise AssertionError(f"unexpected request {name}")
+
+    async def download_media(self, document, file=bytes):
+        self.downloads.append(document)
+        return b"\x1f\x8b\x08" + bytes([document.id % 256]) * 32
+
+
+async def _prepare_database(database: Path) -> None:
+    database.parent.mkdir(parents=True, exist_ok=True)
+    async with aiosqlite.connect(database) as db:
+        await db.execute("CREATE TABLE user_gifts (id INTEGER PRIMARY KEY, serial_number TEXT)")
+        await db.execute("CREATE TABLE gift_transactions (serial_number TEXT)")
+        await db.commit()
+    await init_messenger_storage(database)
+
+
+def test_mtproto_upgrade_attributes_are_stored_and_downloaded(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        database = tmp_path / "waysgram.sqlite3"
+        await _prepare_database(database)
+        client = FakeAttributeClient()
+        provider = TelegramMTProtoGiftCatalog(client, database)
+
+        rows = await provider.attributes(database, "123456789")
+        kinds = [row["kind"] for row in rows]
+        assert kinds == ["model", "model", "pattern", "backdrop"]
+        assert rows[0]["name"] == "Gucci Leap"
+        assert rows[0]["document_id"] == 7001
+        assert rows[0]["mime_type"] == "application/x-tgsticker"
+        assert rows[0]["permille"] == 10
+        assert rows[1]["rarity"] == "rare"
+        assert rows[3]["center_color"] == 11431086
+        assert rows[3]["edge_color"] == 8669060
+
+        content, mime_type = await provider.download_attribute(database, "123456789", 7002)
+        assert content.startswith(b"\x1f\x8b\x08")
+        assert mime_type == "application/x-tgsticker"
+        # The animation is cached on disk, so the next request never touches Telegram.
+        downloads = len(client.downloads)
+        cached, cached_mime = await provider.download_attribute(database, "123456789", 7002)
+        assert cached == content
+        assert cached_mime == "image/x-tgsticker" or cached_mime == "application/x-tgsticker"
+        assert len(client.downloads) == downloads
+        assert (database.parent / "gift_assets" / "7002.bin").is_file()
+
+        # A second read is served from the database: Telegram is asked only once.
+        attribute_requests = [
+            request for request in client.requests
+            if type(request).__name__ == "GetStarGiftUpgradeAttributesRequest"
+        ]
+        await provider.attributes(database, "123456789")
+        assert len(attribute_requests) == 1
+
+    asyncio.run(scenario())
+
+
+def test_mtproto_upgrade_attributes_fall_back_to_the_preview(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        database = tmp_path / "waysgram.sqlite3"
+        await _prepare_database(database)
+        client = FakeAttributeClient()
+        client.fail_attributes = True
+        provider = TelegramMTProtoGiftCatalog(client, database)
+
+        rows = await provider.attributes(database, "123456789")
+
+        assert [row["name"] for row in rows] == ["Gucci Leap"]
+        assert [type(request).__name__ for request in client.requests] == [
+            "GetStarGiftUpgradeAttributesRequest",
+            "GetStarGiftUpgradePreviewRequest",
+        ]
+
+    asyncio.run(scenario())
+
+
+def test_mtproto_sold_out_gift_artwork_comes_from_its_model_document(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        database = tmp_path / "waysgram.sqlite3"
+        await _prepare_database(database)
+        client = FakeAttributeClient(gift_id=5936013938331222567)
+        provider = TelegramMTProtoGiftCatalog(client, database)
+
+        # payments.getStarGifts no longer lists Plush Pepe, so the catalog is empty.
+        await provider.sync(database)
+        assert provider._gifts == {}
+
+        content, mime_type = await provider.download_sticker("5936013938331222567")
+
+        assert content.startswith(b"\x1f\x8b\x08")
+        assert mime_type == "application/x-tgsticker"
+        assert client.downloads[0] is client.model_document
+        # The animation is reused as the gift artwork on the next request.
+        assert (database.parent / "gift_assets" / "7001.bin").is_file()
+
+    asyncio.run(scenario())
+
+
+def test_mtproto_prefetch_downloads_the_catalog_artwork(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        database = tmp_path / "waysgram.sqlite3"
+        await _prepare_database(database)
+        client = FakeAttributeClient()
+        provider = TelegramMTProtoGiftCatalog(client, database)
+        await provider.sync(database)
+        async with aiosqlite.connect(database) as db:
+            await db.execute(
+                """INSERT INTO telegram_mtproto_gift_catalog
+                   (gift_id,title,source_payload,synced_at,position,is_available)
+                   VALUES('123456789','Plush Pepe','{}',0,0,1)"""
+            )
+            await db.commit()
+
+        await provider.start_prefetch(database)
+        for _ in range(200):
+            if not provider.prefetch_state()["running"]:
+                break
+            await asyncio.sleep(0.02)
+
+        state = provider.prefetch_state()
+        assert state["total"] == 1
+        assert state["done"] == 1
+        assert state["attributes"] >= 2
+        assert (database.parent / "gift_assets" / "7001.bin").is_file()
+        assert (database.parent / "gift_assets" / "7002.bin").is_file()
+
+    asyncio.run(scenario())
+
+
+def test_mtproto_prefetch_covers_priced_gifts_outside_the_mtproto_catalog(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        database = tmp_path / "waysgram.sqlite3"
+        await _prepare_database(database)
+        client = FakeAttributeClient()
+        provider = TelegramMTProtoGiftCatalog(client, database)
+        await provider.sync(database)
+        # Plush Pepe is not part of payments.getStarGifts any more, but the shop still
+        # sells it, so its artwork has to be prepared as well.
+        async with aiosqlite.connect(database) as db:
+            await db.execute(
+                """INSERT INTO telegram_gift_prices
+                   (gift_id,price_stars,supply,sold,updated_at)
+                   VALUES('5936013938331222567',25,10,0,0)"""
+            )
+            await db.commit()
+
+        await provider.start_prefetch(database)
+        for _ in range(200):
+            if not provider.prefetch_state()["running"]:
+                break
+            await asyncio.sleep(0.02)
+
+        state = provider.prefetch_state()
+        assert state["total"] == 1
+        assert state["attributes"] >= 2
+        assert (database.parent / "gift_assets" / "7001.bin").is_file()
+
+    asyncio.run(scenario())

@@ -5690,3 +5690,243 @@ def test_video_gift_preview_prefers_mtproto_over_bot_api_thumbnail(api_env, monk
 
     run(scenario())
 
+
+
+class FakeAttributesProvider:
+    """MTProto provider that exposes Telegram's official upgrade attributes."""
+
+    def __init__(self, tmp_path: Path):
+        self.asset_directory = tmp_path / "gift_assets"
+        self.asset_directory.mkdir(parents=True, exist_ok=True)
+        self.attribute_requests = []
+        self.document_requests = []
+        self.prefetch_calls = 0
+
+    def asset_path(self, document_id: int, database_path=None):
+        return self.asset_directory / f"{int(document_id)}.bin"
+
+    async def attributes(self, database_path, gift_id: str, refresh: bool = False):
+        self.attribute_requests.append((gift_id, refresh))
+        return [
+            {
+                "kind": "model",
+                "name": "Gucci Leap",
+                "position": 0,
+                "rarity": "rare",
+                "permille": 10,
+                "document_id": 7001,
+                "dc_id": 2,
+                "mime_type": "application/x-tgsticker",
+                "size": 2048,
+                "center_color": None,
+                "edge_color": None,
+                "pattern_color": None,
+                "text_color": None,
+            },
+            {
+                "kind": "pattern",
+                "name": "Cheese",
+                "position": 0,
+                "rarity": "",
+                "permille": 5,
+                "document_id": 7002,
+                "dc_id": 2,
+                "mime_type": "application/x-tgsticker",
+                "size": 1024,
+                "center_color": None,
+                "edge_color": None,
+                "pattern_color": None,
+                "text_color": None,
+            },
+            {
+                "kind": "backdrop",
+                "name": "Purple",
+                "position": 0,
+                "rarity": "",
+                "permille": 10,
+                "document_id": 0,
+                "dc_id": None,
+                "mime_type": "",
+                "size": None,
+                "center_color": 11431086,
+                "edge_color": 8669060,
+                "pattern_color": 4656199,
+                "text_color": 15977459,
+            },
+        ]
+
+    async def download_attribute(self, database_path, gift_id: str, document_id: int):
+        self.document_requests.append((gift_id, document_id))
+        return b"\x1f\x8b\x08telegram-model-animation", "application/x-tgsticker"
+
+    def prefetch_state(self):
+        return {"enabled": True, "running": False, "total": 3, "done": 3, "failed": 0}
+
+    async def start_prefetch(self, database_path, gift_ids=None):
+        self.prefetch_calls += 1
+        return {"enabled": True, "running": True, "total": 3, "done": 0, "failed": 0}
+
+
+def test_telegram_gift_attributes_endpoint_returns_official_documents(
+    api_env, tmp_path: Path
+) -> None:
+    path, auth_store, fake_bot, _old_app = api_env
+    add_account(api_env, 88130, "attributes_user")
+    add_session(path, 88130, "attributes-session")
+    provider = FakeAttributesProvider(tmp_path)
+    app = FastAPI()
+    app.include_router(
+        build_messenger_router(
+            path,
+            auth_store,
+            lambda: fake_bot,
+            bot_module.account_is_banned,
+            lambda: provider,
+        )
+    )
+
+    async def scenario() -> None:
+        async with await client_for(app) as client:
+            response = await client.get(
+                "/api/telegram/gifts/123456789/attributes",
+                headers={"Authorization": "Bearer attributes-session"},
+            )
+        assert response.status_code == 200
+        payload = response.json()
+        assert [model["name"] for model in payload["models"]] == ["Gucci Leap"]
+        assert payload["models"][0]["document_id"] == 7001
+        assert payload["models"][0]["mime_type"] == "application/x-tgsticker"
+        assert payload["models"][0]["url"] == "/api/telegram/gifts/123456789/attributes/7001"
+        assert payload["models"][0]["rarity"] == "rare"
+        assert payload["patterns"][0]["name"] == "Cheese"
+        assert payload["backdrops"][0]["center_color"] == 11431086
+        assert payload["count"] == 3
+
+    run(scenario())
+
+
+def test_telegram_gift_attribute_document_streams_the_animation(
+    api_env, tmp_path: Path
+) -> None:
+    path, auth_store, fake_bot, _old_app = api_env
+    add_account(api_env, 88131, "attribute_document_user")
+    add_session(path, 88131, "attribute-document-session")
+    provider = FakeAttributesProvider(tmp_path)
+    app = FastAPI()
+    app.include_router(
+        build_messenger_router(
+            path,
+            auth_store,
+            lambda: fake_bot,
+            bot_module.account_is_banned,
+            lambda: provider,
+        )
+    )
+
+    async def scenario() -> None:
+        async with await client_for(app) as client:
+            response = await client.get(
+                "/api/telegram/gifts/123456789/attributes/7001",
+                headers={"Authorization": "Bearer attribute-document-session"},
+            )
+        assert response.status_code == 200
+        assert response.content.startswith(b"\x1f\x8b\x08")
+        assert response.headers["content-type"].startswith("application/x-tgsticker")
+        assert provider.document_requests == [("123456789", 7001)]
+
+    run(scenario())
+
+
+def test_telegram_gift_prefetch_endpoints_prepare_the_whole_catalog(
+    api_env, tmp_path: Path
+) -> None:
+    path, auth_store, fake_bot, _old_app = api_env
+    add_account(api_env, 88132, "prefetch_user")
+    add_session(path, 88132, "prefetch-session")
+    provider = FakeAttributesProvider(tmp_path)
+    app = FastAPI()
+    app.include_router(
+        build_messenger_router(
+            path,
+            auth_store,
+            lambda: fake_bot,
+            bot_module.account_is_banned,
+            lambda: provider,
+        )
+    )
+
+    async def scenario() -> None:
+        async with await client_for(app) as client:
+            started = await client.post(
+                "/api/telegram/gifts/prefetch",
+                headers={"Authorization": "Bearer prefetch-session"},
+            )
+            state = await client.get(
+                "/api/telegram/gifts/prefetch",
+                headers={"Authorization": "Bearer prefetch-session"},
+            )
+        assert started.status_code == 200
+        assert started.json()["running"] is True
+        assert provider.prefetch_calls == 1
+        assert state.status_code == 200
+        assert state.json()["total"] == 3
+
+    run(scenario())
+
+
+def test_mtproto_sticker_proxy_serves_official_animation_for_a_stale_bot_row(api_env) -> None:
+    """Plush Pepe and other sold-out gifts: the Bot API file_id expired long ago."""
+    path, auth_store, fake_bot, _old_app = api_env
+    add_account(api_env, 88140, "stale_row_user")
+    add_session(path, 88140, "stale-row-session")
+    now = int(time.time())
+    with db_split.sqlite_connect(path) as db:
+        db.execute(
+            """INSERT INTO telegram_gift_sync_state(id,last_synced_at,gift_count,source)
+               VALUES(1,?,1,'telegram_bot_api')
+               ON CONFLICT(id) DO UPDATE SET source='telegram_bot_api'""",
+            (now,),
+        )
+        db.execute(
+            """INSERT INTO telegram_gift_catalog
+               (gift_id,title,sticker_file_id,sticker_type,sticker_is_animated,
+                sticker_mime_type,star_count,source_payload,synced_at)
+               VALUES('5936013938331222567','Plush Pepe','expired-file-id','regular',0,
+                      'image/webp',25,'{}',?)""",
+            (now,),
+        )
+
+    class FakeMTProtoProvider:
+        def __init__(self):
+            self.animation_requests = []
+
+        async def download_sticker_preview(self, gift_id: str):
+            return b"preview", "image/png"
+
+        async def download_sticker(self, gift_id: str):
+            self.animation_requests.append(gift_id)
+            return b"\x1f\x8b\x08official-model-animation", "application/x-tgsticker"
+
+    provider = FakeMTProtoProvider()
+    app = FastAPI()
+    app.include_router(
+        build_messenger_router(
+            path,
+            auth_store,
+            lambda: fake_bot,
+            bot_module.account_is_banned,
+            lambda: provider,
+        )
+    )
+
+    async def scenario() -> None:
+        async with await client_for(app) as client:
+            response = await client.get(
+                "/api/telegram/gifts/5936013938331222567/sticker?animated=1",
+                headers={"Authorization": "Bearer stale-row-session"},
+            )
+        assert response.status_code == 200
+        assert response.content.startswith(b"\x1f\x8b\x08")
+        assert provider.animation_requests == ["5936013938331222567"]
+
+    run(scenario())

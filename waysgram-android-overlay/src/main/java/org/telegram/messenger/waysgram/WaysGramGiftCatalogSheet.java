@@ -719,6 +719,12 @@ public final class WaysGramGiftCatalogSheet extends BottomSheet {
                         return;
                     }
                     adapter.setItems(gifts);
+                    // The whole catalog is prepared ahead of time: the server downloads every
+                    // gift's official artwork once, and the list prefetches its stickers so
+                    // scrolling never waits for a picture.
+                    WaysGramGiftAttributes.attach(getContext(), org.telegram.messenger.UserConfig.selectedAccount);
+                    WaysGramGiftAttributes.startServerPrefetch();
+                    adapter.prefetchAll();
                     progressBar.setVisibility(View.GONE);
                     String state = stale ? "Показан последний сохранённый каталог" : "Каталог обновлён";
                     statusView.setText(gifts.isEmpty()
@@ -893,6 +899,13 @@ public final class WaysGramGiftCatalogSheet extends BottomSheet {
         public void onViewRecycled(@NonNull GiftHolder holder) {
             holder.clearSticker();
             super.onViewRecycled(holder);
+        }
+
+        /** Warms the artwork of every catalog entry, one sticker at a time. */
+        void prefetchAll() {
+            for (int i = 0; i < items.size(); i++) {
+                requestSticker(items.get(i));
+            }
         }
 
         private void requestSticker(WaysGramGiftCatalogClient.Gift gift) {

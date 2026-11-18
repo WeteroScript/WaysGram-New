@@ -32,6 +32,7 @@ public final class WaysGramProfileGiftsController {
     private final WaysGramApiClient imageClient;
     private boolean loading;
     private boolean giftViewRefreshScheduled;
+    private final WaysGramGiftAttributes.Listener attributesListener;
     private JSONArray lastInventory;
     private int lastGiftAccount = UserConfig.selectedAccount;
 
@@ -50,6 +51,12 @@ public final class WaysGramProfileGiftsController {
                 fragment == null ? UserConfig.selectedAccount : fragment.getCurrentAccount());
         WaysGramGiftMediaStore.configure(appContext);
         imageClient = new WaysGramApiClient(sessionStore);
+        WaysGramGiftAttributes.attach(appContext, fragment == null
+                ? UserConfig.selectedAccount : fragment.getCurrentAccount());
+        // Official Telegram model and pattern animations arrive one by one; a single collapsed
+        // refresh shows them on the native cards without rebinding the whole inventory.
+        attributesListener = changedGiftId -> scheduleGiftViewRefresh();
+        WaysGramGiftAttributes.addListener(attributesListener);
         // An upgrade started from the native gift sheet must reload this inventory.
         WaysGramGiftUpgrade.setRefreshListener(this::refresh);
     }
@@ -217,20 +224,40 @@ public final class WaysGramProfileGiftsController {
                     uniqueGift.attributes.add(nativeBackdrop);
                 }
                 // Model and symbol are rolled once by the server for this collectible and never
-                // change, so the card keeps its own look on every screen. WaysGram has no separate
-                // Telegram model/pattern art, therefore the gift's own artwork document is used.
-                TLRPC.TL_document waysGramTraitDocument =
-                        traitDocument(serial, optText(item, "telegram_gift_id"), giftEmoji);
-                if (waysGramTraitDocument != null) {
+                // change. Telegram publishes every model and pattern as its own animation, so the
+                // native card plays the official art; the gift's own artwork is only a stand-in
+                // until those documents are downloaded.
+                String telegramGiftIdText = optText(item, "telegram_gift_id");
+                if (!telegramGiftIdText.isEmpty() && traits != null) {
+                    WaysGramGiftAttributes.wantRolled(telegramGiftIdText, traits);
+                }
+                TLRPC.TL_document modelDocument = WaysGramGiftAttributes.document(
+                        telegramGiftIdText, WaysGramGiftAttributes.MODEL, model
+                );
+                TLRPC.TL_document patternDocument = WaysGramGiftAttributes.document(
+                        telegramGiftIdText, WaysGramGiftAttributes.PATTERN, pattern
+                );
+                if (modelDocument == null || patternDocument == null) {
+                    TLRPC.TL_document fallbackDocument =
+                            traitDocument(serial, telegramGiftIdText, giftEmoji);
+                    if (modelDocument == null) {
+                        modelDocument = fallbackDocument;
+                    }
+                    if (patternDocument == null) {
+                        patternDocument = fallbackDocument;
+                    }
+                }
+                if (modelDocument != null) {
                     TL_stars.starGiftAttributeModel nativeModel = new TL_stars.starGiftAttributeModel();
                     nativeModel.name = model.isEmpty() ? "Модель" : model;
-                    nativeModel.document = waysGramTraitDocument;
+                    nativeModel.document = modelDocument;
                     nativeModel.rarity = nativeRarity(modelRarity);
                     uniqueGift.attributes.add(nativeModel);
-
+                }
+                if (patternDocument != null) {
                     TL_stars.starGiftAttributePattern nativePattern = new TL_stars.starGiftAttributePattern();
                     nativePattern.name = pattern.isEmpty() ? "Узор" : pattern;
-                    nativePattern.document = waysGramTraitDocument;
+                    nativePattern.document = patternDocument;
                     nativePattern.rarity = nativeRarity(patternRarity);
                     uniqueGift.attributes.add(nativePattern);
                 }
