@@ -1503,6 +1503,141 @@ async def init_messenger_storage(database_path: Path) -> None:
             """
             )
         )
+        await db.executescript(
+            db_split.qualify_ddl(
+                """
+            CREATE TABLE IF NOT EXISTS ai_clone_settings (
+                telegram_id INTEGER PRIMARY KEY,
+                enabled INTEGER NOT NULL DEFAULT 0,
+                only_when_offline INTEGER NOT NULL DEFAULT 1,
+                offline_seconds INTEGER NOT NULL DEFAULT 300,
+                tone TEXT NOT NULL DEFAULT 'friendly',
+                signature TEXT NOT NULL DEFAULT '',
+                updated_at INTEGER NOT NULL DEFAULT 0
+            );
+            CREATE TABLE IF NOT EXISTS chat_rooms (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                scope TEXT NOT NULL CHECK(scope IN ('dm','group')),
+                chat_id INTEGER NOT NULL,
+                owner_telegram_id INTEGER NOT NULL,
+                title TEXT NOT NULL DEFAULT '',
+                media_url TEXT NOT NULL DEFAULT '',
+                media_title TEXT NOT NULL DEFAULT '',
+                media_kind TEXT NOT NULL DEFAULT 'audio',
+                is_playing INTEGER NOT NULL DEFAULT 0,
+                position_seconds REAL NOT NULL DEFAULT 0,
+                started_at INTEGER,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL,
+                UNIQUE(scope,chat_id)
+            );
+            CREATE TABLE IF NOT EXISTS chat_streaks (
+                user_low INTEGER NOT NULL,
+                user_high INTEGER NOT NULL,
+                current_streak INTEGER NOT NULL DEFAULT 0,
+                best_streak INTEGER NOT NULL DEFAULT 0,
+                last_mutual_day TEXT NOT NULL DEFAULT '',
+                low_day TEXT NOT NULL DEFAULT '',
+                high_day TEXT NOT NULL DEFAULT '',
+                updated_at INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY(user_low,user_high)
+            );
+            CREATE TABLE IF NOT EXISTS streak_rewards (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_low INTEGER NOT NULL,
+                user_high INTEGER NOT NULL,
+                milestone INTEGER NOT NULL,
+                reward_type TEXT NOT NULL,
+                reward_value TEXT NOT NULL DEFAULT '',
+                claimed_by INTEGER,
+                claimed_at INTEGER,
+                created_at INTEGER NOT NULL,
+                UNIQUE(user_low,user_high,milestone,claimed_by)
+            );
+            CREATE TABLE IF NOT EXISTS fragment_listings (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                asset_type TEXT NOT NULL CHECK(asset_type IN ('username','vanity_id','number')),
+                asset_value TEXT NOT NULL,
+                seller_telegram_id INTEGER,
+                currency TEXT NOT NULL CHECK(currency IN ('stars','grams')),
+                starting_bid INTEGER NOT NULL,
+                current_bid INTEGER NOT NULL DEFAULT 0,
+                current_bidder_id INTEGER,
+                status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active','ended','cancelled')),
+                ends_at INTEGER NOT NULL,
+                created_at INTEGER NOT NULL,
+                settled_at INTEGER,
+                winner_telegram_id INTEGER,
+                UNIQUE(asset_type,asset_value)
+            );
+            CREATE INDEX IF NOT EXISTS idx_fragment_listings_status ON fragment_listings(status,ends_at);
+            CREATE TABLE IF NOT EXISTS fragment_bids (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                listing_id INTEGER NOT NULL,
+                bidder_telegram_id INTEGER NOT NULL,
+                amount INTEGER NOT NULL,
+                created_at INTEGER NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS fragment_owned (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                telegram_id INTEGER NOT NULL,
+                asset_type TEXT NOT NULL,
+                asset_value TEXT NOT NULL,
+                equipped INTEGER NOT NULL DEFAULT 0,
+                acquired_at INTEGER NOT NULL,
+                UNIQUE(telegram_id,asset_type,asset_value)
+            );
+            CREATE TABLE IF NOT EXISTS duels (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                scope TEXT NOT NULL CHECK(scope IN ('dm','group')),
+                chat_id INTEGER NOT NULL,
+                challenger_id INTEGER NOT NULL,
+                opponent_id INTEGER NOT NULL DEFAULT 0,
+                game TEXT NOT NULL CHECK(game IN ('dice','coin','roulette')),
+                wager_type TEXT NOT NULL CHECK(wager_type IN ('stars','grams','gift')),
+                wager_amount INTEGER NOT NULL DEFAULT 0,
+                wager_serial TEXT NOT NULL DEFAULT '',
+                opponent_wager_serial TEXT NOT NULL DEFAULT '',
+                status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','accepted','finished','cancelled','expired')),
+                server_seed TEXT NOT NULL DEFAULT '',
+                seed_hash TEXT NOT NULL DEFAULT '',
+                roll INTEGER,
+                winner_id INTEGER,
+                message_id INTEGER,
+                created_at INTEGER NOT NULL,
+                expires_at INTEGER NOT NULL,
+                finished_at INTEGER
+            );
+            CREATE INDEX IF NOT EXISTS idx_duels_chat ON duels(scope,chat_id,status,id DESC);
+            CREATE TABLE IF NOT EXISTS forbes_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                kind TEXT NOT NULL,
+                telegram_id INTEGER,
+                text TEXT NOT NULL,
+                value INTEGER NOT NULL DEFAULT 0,
+                created_at INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_forbes_events_time ON forbes_events(created_at DESC,id DESC);
+            """
+            )
+        )
+        # Seed the built-in Fragment catalogue (short names, vanity ids, +888 numbers).
+        _now_seed = int(time.time())
+        for _asset_type, _asset_value, _currency, _start in (
+            ("username", "@king", "stars", 500), ("username", "@gold", "grams", 250),
+            ("username", "@ways", "stars", 300), ("username", "@rich", "grams", 400),
+            ("username", "@moon", "stars", 150), ("vanity_id", "ID 777", "stars", 700),
+            ("vanity_id", "ID 1000", "grams", 500), ("vanity_id", "ID 888", "stars", 888),
+            ("number", "+888 0001", "grams", 600), ("number", "+888 7777", "stars", 900),
+            ("number", "+888 1000", "grams", 350),
+        ):
+            await db.execute(
+                """INSERT OR IGNORE INTO fragment_listings
+                   (asset_type,asset_value,seller_telegram_id,currency,starting_bid,ends_at,created_at)
+                   VALUES(?,?,NULL,?,?,?,?)""",
+                (_asset_type, _asset_value, _currency, _start, _now_seed + 7 * 86400, _now_seed),
+            )
+        await db.commit()
 
         # Previously upgraded gifts either had no traits at all or carried the
         # hand-made WaysGram pools. Re-roll them from the official Telegram pools
@@ -2325,7 +2460,8 @@ def build_messenger_router(
         Marks are read-only here: they are created, handed out and removed in the AuthBot panel
         (``🏷 Метки``), never from the application.
         """
-        await current_user(authorization)
+        _viewer = await current_user(authorization)
+        _viewer_id = int(_viewer["telegram_id"])
         wanted: list[tuple[str, int]] = []
         seen: set[tuple[str, int]] = set()
         for raw in str(targets or "").split(","):
@@ -2366,6 +2502,22 @@ def build_messenger_router(
             labels.setdefault(key, []).append(
                 {"text": str(row["text"]), "color": str(row["color"])}
             )
+        # «Огонёк»: the mutual DM streak rides the same pill pipeline as admin marks,
+        # so it appears in the chat header and the dialog list with no extra requests.
+        account_ids = [tid for kind, tid in wanted if kind == "account" and tid != _viewer_id]
+        if account_ids:
+            try:
+                async with aiosqlite.connect(db_path()) as db:
+                    for peer_id in account_ids:
+                        low, high = (_viewer_id, peer_id) if _viewer_id < peer_id else (peer_id, _viewer_id)
+                        cur = await db.execute(
+                            "SELECT current_streak FROM chat_streaks WHERE user_low=? AND user_high=?", (low, high))
+                        streak_row = await cur.fetchone()
+                        if streak_row and int(streak_row[0]) > 0:
+                            labels.setdefault(f"account:{peer_id}", []).append(
+                                {"text": f"🔥 {int(streak_row[0])}", "color": "#F38B31"})
+            except Exception:
+                pass
         return {"labels": labels}
 
     @router.post("/api/push/register")
@@ -7807,6 +7959,14 @@ def build_messenger_router(
             }
             await idempotency_store(db, uid, "/api/messages", descriptor, result, now)
             await db.commit()
+        if recipient_id != uid:
+            try:
+                async with aiosqlite.connect(db_path()) as hook_db:
+                    await hook_db.execute("BEGIN IMMEDIATE")
+                    await _after_dm(hook_db, uid, recipient_id, body, now)
+                    await hook_db.commit()
+            except Exception:
+                LOGGER.warning("streak/ai-clone hook failed", exc_info=True)
         if not silent and recipient_id != uid:
             await deliver_push_notifications(
                 [recipient_id],
@@ -11123,5 +11283,534 @@ def build_messenger_router(
             "ok":True,
             "result":{"message_id":message_id,"chat":{"id":chat_id},"text":body},
         }
+
+    # ================= WaysGram features: AI, rooms, streaks, Fragment, Forbes, duels =================
+    STREAK_MILESTONES = {3: ("stars", 50), 7: ("stars", 150), 14: ("stars", 300), 30: ("gift", 0), 100: ("stars", 5000)}
+
+    def _feat_int(payload: dict[str, Any], key: str, default: int = 0) -> int:
+        value = payload.get(key, default)
+        if isinstance(value, bool):
+            raise HTTPException(status_code=400, detail=f"{key} должно быть целым числом")
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=400, detail=f"{key} должно быть целым числом")
+
+    async def _adjust(db: Any, uid: int, asset: str, delta: int, reason: str) -> int:
+        column = "stars" if asset == "stars" else "grams"
+        cur = await db.execute(f"SELECT {column} FROM accounts WHERE telegram_id=?", (uid,))
+        row = await cur.fetchone()
+        if row is None:
+            raise HTTPException(status_code=404, detail="Аккаунт не найден")
+        balance = int(row[0]) + int(delta)
+        if balance < 0:
+            raise HTTPException(status_code=402, detail="Недостаточно средств")
+        await db.execute(f"UPDATE accounts SET {column}=?,updated_at=? WHERE telegram_id=?", (balance, int(time.time()), uid))
+        await db.execute(
+            "INSERT INTO economy_transactions(telegram_id,asset,amount,balance_after,reason,admin_id,created_at) VALUES(?,?,?,?,?,NULL,?)",
+            (uid, asset, int(delta), balance, reason, int(time.time())),
+        )
+        return balance
+
+    async def _forbes(db: Any, kind: str, uid: int | None, text: str, value: int = 0) -> None:
+        await db.execute("INSERT INTO forbes_events(kind,telegram_id,text,value,created_at) VALUES(?,?,?,?,?)",
+                         (kind, uid, text[:300], int(value), int(time.time())))
+
+    async def _ai_text(system: str, prompt: str, fallback: str) -> str:
+        key = os.getenv("OPENAI_API_KEY", "").strip()
+        if not key:
+            return fallback
+        try:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(20.0)) as client:
+                resp = await client.post("https://api.openai.com/v1/chat/completions",
+                    headers={"Authorization": f"Bearer {key}"},
+                    json={"model": os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
+                          "messages": [{"role": "system", "content": system}, {"role": "user", "content": prompt}],
+                          "temperature": 0.7})
+                resp.raise_for_status()
+                text = str(resp.json()["choices"][0]["message"]["content"]).strip()
+                return text[:4000] if text else fallback
+        except Exception:
+            return fallback
+
+    def _fallback_summarize(bodies: list[str]) -> str:
+        if not bodies:
+            return "Сообщений для пересказа пока нет."
+        joined = " ".join(bodies)
+        points = []
+        for body in bodies[-12:]:
+            clean = " ".join(body.split())
+            if clean:
+                points.append("• " + (clean[:140] + ("…" if len(clean) > 140 else "")))
+        return "Краткий пересказ переписки:\n" + "\n".join(points[:8]) + f"\n\nВсего сообщений учтено: {len(bodies)}. Объём: {len(joined)} символов."
+
+    def _fallback_rewrite(text: str, tone: str) -> str:
+        t = " ".join(text.split())
+        if tone == "short":
+            return t[:280]
+        if tone == "business":
+            return "Добрый день! " + t[0].upper() + t[1:] + ("" if t.endswith((".", "!", "?")) else ".")
+        if tone == "funny":
+            return t + " 😄"
+        if tone == "rude":
+            return t + " Короче, именно так."
+        return t + " 🙂" if not any(e in t for e in "🙂😄🔥") else t
+
+    async def _touch_streak(db: Any, sender: int, recipient: int, now: int) -> dict[str, Any] | None:
+        if sender == recipient:
+            return None
+        low, high = (sender, recipient) if sender < recipient else (recipient, sender)
+        day = datetime.utcfromtimestamp(now).strftime("%Y-%m-%d")
+        yesterday = datetime.utcfromtimestamp(now - 86400).strftime("%Y-%m-%d")
+        await db.execute("INSERT OR IGNORE INTO chat_streaks(user_low,user_high,updated_at) VALUES(?,?,?)", (low, high, now))
+        cur = await db.execute("SELECT current_streak,best_streak,last_mutual_day,low_day,high_day FROM chat_streaks WHERE user_low=? AND user_high=?", (low, high))
+        cur_s, best, last_day, low_day, high_day = await cur.fetchone()
+        if sender == low:
+            low_day = day
+        else:
+            high_day = day
+        if low_day == day and high_day == day and last_day != day:
+            cur_s = int(cur_s) + 1 if last_day == yesterday else 1
+            best = max(int(best), cur_s)
+            last_day = day
+        await db.execute("UPDATE chat_streaks SET current_streak=?,best_streak=?,last_mutual_day=?,low_day=?,high_day=?,updated_at=? WHERE user_low=? AND user_high=?",
+                         (cur_s, best, last_day, low_day, high_day, now, low, high))
+        return {"peer_id": recipient if sender == low else sender, "current_streak": int(cur_s), "best_streak": int(best), "last_mutual_day": last_day}
+
+    async def _after_dm(db: Any, sender: int, recipient: int, body: str, now: int) -> None:
+        await _touch_streak(db, sender, recipient, now)
+        # AI clone: reply on behalf of recipient when enabled (and offline if configured).
+        cur = await db.execute("SELECT enabled,only_when_offline,offline_seconds,tone,signature FROM ai_clone_settings WHERE telegram_id=?", (recipient,))
+        row = await cur.fetchone()
+        if not row or not int(row[0]):
+            return
+        if int(row[1]):
+            cur = await db.execute("SELECT last_seen_at FROM api_user_presence WHERE telegram_id=?", (recipient,))
+            seen = await cur.fetchone()
+            if seen and now - int(seen[0]) < max(30, int(row[2])):
+                return
+        cur = await db.execute("SELECT COUNT(*) FROM messages WHERE sender_telegram_id=? AND recipient_telegram_id=? AND created_at>?", (recipient, sender, now - 60))
+        if int((await cur.fetchone())[0]) > 0:
+            return
+        cur = await db.execute("SELECT body FROM messages WHERE sender_telegram_id=? ORDER BY id DESC LIMIT 8", (recipient,))
+        history = [str(r[0]) for r in await cur.fetchall()]
+        style_hint = history[0][:120] if history else ""
+        fallback = "Привет! Я сейчас не на связи, но обязательно всё прочитаю и отвечу чуть позже. Спасибо за сообщение!"
+        if style_hint and len(style_hint) < 40:
+            fallback = style_hint + " Я чуть позже отвечу подробнее!"
+        tone = str(row[3] or "friendly")
+        text = await _ai_text("Ты — AI-клон пользователя WaysGram. Отвечай кратко, в его стиле, от его имени, сообщи что он скоро вернётся.",
+                              f"Тон: {tone}. Примеры сообщений пользователя: {history}. Входящее: {body}", fallback)
+        if str(row[4] or "").strip():
+            text = text[:3800] + "\n" + str(row[4]).strip()[:100]
+        cur = await db.execute("INSERT INTO messages(sender_telegram_id,recipient_telegram_id,body,created_at) VALUES(?,?,?,?)", (recipient, sender, text[:4000], now))
+        clone_id = int(cur.lastrowid)
+        await record_event(db, "dm", clone_id, "new_message", recipient, user_a=recipient, user_b=sender)
+
+    # expose for send_message hook (resolved at call time)
+    router.state_after_dm = _after_dm  # type: ignore[attr-defined]
+
+    @router.get("/api/ai/clone")
+    async def get_clone(authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        user = await current_user(authorization); uid = int(user["telegram_id"])
+        async with aiosqlite.connect(db_path()) as db:
+            db.row_factory = aiosqlite.Row
+            cur = await db.execute("SELECT * FROM ai_clone_settings WHERE telegram_id=?", (uid,))
+            row = await cur.fetchone()
+        if row is None:
+            return {"enabled": False, "only_when_offline": True, "offline_seconds": 300, "tone": "friendly", "signature": ""}
+        item = dict(row); item["enabled"] = bool(item["enabled"]); item["only_when_offline"] = bool(item["only_when_offline"]); return item
+
+    @router.put("/api/ai/clone")
+    async def put_clone(payload: dict[str, Any], authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        user = await current_user(authorization); uid = int(user["telegram_id"])
+        tone = str(payload.get("tone") or "friendly")[:32]
+        now = int(time.time())
+        async with aiosqlite.connect(db_path()) as db:
+            await db.execute("""INSERT INTO ai_clone_settings(telegram_id,enabled,only_when_offline,offline_seconds,tone,signature,updated_at)
+                VALUES(?,?,?,?,?,?,?) ON CONFLICT(telegram_id) DO UPDATE SET enabled=excluded.enabled,only_when_offline=excluded.only_when_offline,
+                offline_seconds=excluded.offline_seconds,tone=excluded.tone,signature=excluded.signature,updated_at=excluded.updated_at""",
+                (uid, 1 if payload.get("enabled") else 0, 1 if payload.get("only_when_offline", True) else 0,
+                 min(86400, max(30, _feat_int(payload, "offline_seconds", 300))), tone, str(payload.get("signature") or "")[:100], now))
+            await db.commit()
+        return {"ok": True, "enabled": bool(payload.get("enabled")), "tone": tone}
+
+    @router.post("/api/ai/summarize")
+    async def ai_summarize(payload: dict[str, Any], authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        user = await current_user(authorization); uid = int(user["telegram_id"])
+        scope = str(payload.get("scope") or "dm"); limit = min(100, max(1, _feat_int(payload, "limit", 50)))
+        bodies: list[str] = []
+        async with aiosqlite.connect(db_path()) as db:
+            if scope == "group":
+                gid = _feat_int(payload, "chat_id")
+                cur = await db.execute("SELECT 1 FROM group_members WHERE group_id=? AND telegram_id=?", (gid, uid))
+                if not await cur.fetchone(): raise HTTPException(status_code=403, detail="Нет доступа к группе")
+                cur = await db.execute("SELECT body FROM group_messages WHERE group_id=? ORDER BY id DESC LIMIT ?", (gid, limit))
+            else:
+                peer = _feat_int(payload, "peer_id")
+                if peer <= 0: raise HTTPException(status_code=400, detail="Укажите peer_id")
+                cur = await db.execute("SELECT body FROM messages WHERE (sender_telegram_id=? AND recipient_telegram_id=?) OR (sender_telegram_id=? AND recipient_telegram_id=?) ORDER BY id DESC LIMIT ?", (uid, peer, peer, uid, limit))
+            bodies = [str(r[0]) for r in reversed(await cur.fetchall())]
+        fallback = _fallback_summarize(bodies)
+        summary = await _ai_text("Сделай краткий пересказ переписки на русском: главное, договорённости, вопросы без ответа.", "\n".join(bodies), fallback)
+        return {"summary": summary, "count": len(bodies), "scope": scope}
+
+    @router.post("/api/ai/rewrite")
+    async def ai_rewrite(payload: dict[str, Any], authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        await current_user(authorization)
+        text = str(payload.get("text") or "").strip()
+        if not text or len(text) > 4000: raise HTTPException(status_code=400, detail="Текст 1–4000 символов")
+        tone = str(payload.get("tone") or "friendly")
+        if tone not in ("friendly", "business", "short", "funny", "rude"): raise HTTPException(status_code=400, detail="Неизвестный тон")
+        result = await _ai_text(f"Перепиши сообщение в тоне {tone}, сохрани смысл, ответ — только новый текст.", text, _fallback_rewrite(text, tone))
+        return {"text": result, "tone": tone}
+
+    @router.get("/api/rooms")
+    async def get_room(scope: str = "dm", chat_id: int = 0, authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        await current_user(authorization)
+        async with aiosqlite.connect(db_path()) as db:
+            db.row_factory = aiosqlite.Row
+            cur = await db.execute("SELECT * FROM chat_rooms WHERE scope=? AND chat_id=?", (scope, chat_id)); row = await cur.fetchone()
+        if row is None: return {"room": None}
+        item = dict(row); item["is_playing"] = bool(item["is_playing"])
+        if item["is_playing"] and item.get("started_at"): item["position_seconds"] = float(item["position_seconds"]) + (int(time.time()) - int(item["started_at"]))
+        return {"room": item}
+
+    @router.post("/api/rooms", status_code=201)
+    async def upsert_room(payload: dict[str, Any], authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        user = await current_user(authorization); uid = int(user["telegram_id"])
+        scope = str(payload.get("scope") or "dm")
+        if scope not in ("dm", "group"): raise HTTPException(status_code=400, detail="scope: dm или group")
+        chat_id = _feat_int(payload, "chat_id"); now = int(time.time())
+        async with aiosqlite.connect(db_path()) as db:
+            await db.execute("""INSERT INTO chat_rooms(scope,chat_id,owner_telegram_id,title,media_url,media_title,media_kind,is_playing,position_seconds,started_at,created_at,updated_at)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(scope,chat_id) DO UPDATE SET media_url=excluded.media_url,media_title=excluded.media_title,
+                media_kind=excluded.media_kind,title=excluded.title,updated_at=excluded.updated_at""",
+                (scope, chat_id, uid, str(payload.get("title") or "Слушаем вместе")[:120], str(payload.get("media_url") or "")[:1000],
+                 str(payload.get("media_title") or "")[:200], str(payload.get("media_kind") or "audio")[:16],
+                 1 if payload.get("is_playing") else 0, float(payload.get("position_seconds") or 0), now if payload.get("is_playing") else None, now, now))
+            await db.commit()
+            db.row_factory = aiosqlite.Row
+            cur = await db.execute("SELECT * FROM chat_rooms WHERE scope=? AND chat_id=?", (scope, chat_id)); row = dict(await cur.fetchone())
+        # Invite card into the chat itself
+        try:
+            async with aiosqlite.connect(db_path()) as db:
+                await db.execute("BEGIN IMMEDIATE")
+                body = f"🎧 Комната «Слушать вместе»: {row['media_title'] or row['title']} — откройте чат и нажмите Play, воспроизведение синхронизировано."
+                if scope == "dm" and chat_id > 0:
+                    cur = await db.execute("INSERT INTO messages(sender_telegram_id,recipient_telegram_id,body,created_at) VALUES(?,?,?,?)", (uid, chat_id, body, now)); mid = int(cur.lastrowid)
+                    await record_event(db, "dm", mid, "new_message", uid, user_a=uid, user_b=chat_id)
+                elif scope == "group":
+                    cur = await db.execute("INSERT INTO group_messages(group_id,sender_telegram_id,body,created_at) VALUES(?,?,?,?)", (chat_id, uid, body, now)); mid = int(cur.lastrowid)
+                    await record_event(db, "group", mid, "new_message", uid, chat_id=chat_id)
+                await db.commit()
+        except Exception:
+            pass
+        row["is_playing"] = bool(row["is_playing"]); return {"room": row}
+
+    @router.post("/api/rooms/{room_id}/control")
+    async def room_control(room_id: int, payload: dict[str, Any], authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        await current_user(authorization); action = str(payload.get("action") or ""); now = int(time.time())
+        if action not in ("play", "pause", "seek", "set_media"): raise HTTPException(status_code=400, detail="action: play/pause/seek/set_media")
+        async with aiosqlite.connect(db_path()) as db:
+            db.row_factory = aiosqlite.Row
+            cur = await db.execute("SELECT * FROM chat_rooms WHERE id=?", (room_id,)); row = await cur.fetchone()
+            if row is None: raise HTTPException(status_code=404, detail="Комната не найдена")
+            pos = float(row["position_seconds"]) + ((now - int(row["started_at"])) if row["is_playing"] and row["started_at"] else 0)
+            if action == "seek": pos = max(0.0, float(payload.get("position_seconds") or 0))
+            playing = 1 if action == "play" else (0 if action == "pause" else int(row["is_playing"]))
+            if action == "set_media":
+                await db.execute("UPDATE chat_rooms SET media_url=?,media_title=?,media_kind=?,position_seconds=0,started_at=?,is_playing=1,updated_at=? WHERE id=?",
+                                 (str(payload.get("media_url") or "")[:1000], str(payload.get("media_title") or "")[:200], str(payload.get("media_kind") or "audio")[:16], now, now, room_id))
+            else:
+                await db.execute("UPDATE chat_rooms SET is_playing=?,position_seconds=?,started_at=?,updated_at=? WHERE id=?", (playing, pos, now if playing else None, now, room_id))
+            await db.commit()
+            cur = await db.execute("SELECT * FROM chat_rooms WHERE id=?", (room_id,)); item = dict(await cur.fetchone())
+        item["is_playing"] = bool(item["is_playing"]); return {"room": item}
+
+    @router.get("/api/streaks")
+    async def list_streaks(authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        user = await current_user(authorization); uid = int(user["telegram_id"])
+        async with aiosqlite.connect(db_path()) as db:
+            db.row_factory = aiosqlite.Row
+            cur = await db.execute("""SELECT s.*, CASE WHEN s.user_low=? THEN s.user_high ELSE s.user_low END AS peer_id,
+                a.username AS peer_username,a.display_name AS peer_display_name FROM chat_streaks s
+                JOIN accounts a ON a.telegram_id=CASE WHEN s.user_low=? THEN s.user_high ELSE s.user_low END
+                WHERE s.user_low=? OR s.user_high=? ORDER BY s.current_streak DESC LIMIT 100""", (uid, uid, uid, uid))
+            rows = [dict(r) for r in await cur.fetchall()]
+        for r in rows: r["badge"] = f"🔥 {r['current_streak']}" if r["current_streak"] else ""
+        return {"streaks": rows}
+
+    @router.get("/api/streaks/{peer_id}")
+    async def get_streak(peer_id: int, authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        user = await current_user(authorization); uid = int(user["telegram_id"])
+        low, high = (uid, peer_id) if uid < peer_id else (peer_id, uid)
+        async with aiosqlite.connect(db_path()) as db:
+            db.row_factory = aiosqlite.Row
+            cur = await db.execute("SELECT * FROM chat_streaks WHERE user_low=? AND user_high=?", (low, high)); row = await cur.fetchone()
+            claimed: dict[int, bool] = {}
+            if row:
+                cur = await db.execute("SELECT milestone FROM streak_rewards WHERE user_low=? AND user_high=? AND claimed_by=?", (low, high, uid))
+                claimed = {int(r[0]): True for r in await cur.fetchall()}
+        if row is None: return {"peer_id": peer_id, "current_streak": 0, "best_streak": 0, "badge": "", "available_rewards": []}
+        item = dict(row); item["peer_id"] = peer_id; item["badge"] = f"🔥 {item['current_streak']}"
+        item["available_rewards"] = [{"milestone": m, "reward_type": t, "reward_value": v, "claimed": bool(claimed.get(m))}
+                                     for m, (t, v) in STREAK_MILESTONES.items() if m <= int(item["current_streak"])]
+        return item
+
+    @router.post("/api/streaks/{peer_id}/claim")
+    async def claim_streak(peer_id: int, payload: dict[str, Any], authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        user = await current_user(authorization); uid = int(user["telegram_id"])
+        milestone = _feat_int(payload, "milestone")
+        if milestone not in STREAK_MILESTONES: raise HTTPException(status_code=400, detail="Неизвестная веха огонёк")
+        low, high = (uid, peer_id) if uid < peer_id else (peer_id, uid); now = int(time.time())
+        reward_type, reward_value = STREAK_MILESTONES[milestone]
+        async with aiosqlite.connect(db_path()) as db:
+            await db.execute("BEGIN IMMEDIATE")
+            cur = await db.execute("SELECT current_streak FROM chat_streaks WHERE user_low=? AND user_high=?", (low, high)); row = await cur.fetchone()
+            if not row or int(row[0]) < milestone: await db.rollback(); raise HTTPException(status_code=409, detail="Огонёк ещё не достиг этой вехи")
+            try:
+                await db.execute("INSERT INTO streak_rewards(user_low,user_high,milestone,reward_type,reward_value,claimed_by,claimed_at,created_at) VALUES(?,?,?,?,?,?,?,?)",
+                                 (low, high, milestone, reward_type, str(reward_value), uid, now, now))
+            except Exception:
+                await db.rollback(); raise HTTPException(status_code=409, detail="Награда уже получена")
+            granted: dict[str, Any] = {}
+            if reward_type == "stars":
+                granted["stars"] = await _adjust(db, uid, "stars", int(reward_value), f"streak_reward_{milestone}d")
+            else:
+                serial = "WG-" + secrets.token_hex(6).upper()
+                await db.execute("INSERT INTO user_gifts(serial_number,gift_id,gift_name,owner_telegram_id,acquired_at,gift_emoji,purchase_asset,purchase_price) VALUES(?,NULL,?, ?,?,'🔥','stars',0)",
+                                 (serial, f"Огонёк {milestone} дней — эксклюзив WaysGram", uid, now))
+                granted["gift_serial"] = serial
+                await _forbes(db, "streak_gift", uid, f"🔥 Эксклюзивный подарок за огонёк {milestone} дней", milestone)
+            await db.commit()
+        return {"ok": True, "milestone": milestone, "granted": granted}
+
+    async def _settle_fragment(db: Any, now: int) -> int:
+        cur = await db.execute("SELECT * FROM fragment_listings WHERE status='active' AND ends_at<=?", (now,))
+        due = await cur.fetchall(); cols = [d[0] for d in cur.description] if cur.description else []
+        settled = 0
+        for raw in due:
+            item = dict(zip(cols, raw))
+            winner = item.get("current_bidder_id"); amount = int(item.get("current_bid") or 0)
+            if winner and amount > 0:
+                # escrow was already taken from winner at bid time; seller receives it now
+                if item.get("seller_telegram_id"):
+                    await _adjust(db, int(item["seller_telegram_id"]), str(item["currency"]), amount, f"fragment_sale_{item['id']}")
+                await db.execute("INSERT OR IGNORE INTO fragment_owned(telegram_id,asset_type,asset_value,acquired_at) VALUES(?,?,?,?)", (int(winner), item["asset_type"], item["asset_value"], now))
+                await _forbes(db, "fragment_win", int(winner), f"🏷 Fragment: {item['asset_value']} ушёл за {amount} {item['currency']}", amount)
+            elif item.get("seller_telegram_id"):
+                pass  # no bids: asset simply stays with seller / catalogue
+            await db.execute("UPDATE fragment_listings SET status='ended',settled_at=?,winner_telegram_id=? WHERE id=?", (now, winner, item["id"]))
+            settled += 1
+        return settled
+
+    @router.get("/api/fragment/listings")
+    async def fragment_listings(authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        await current_user(authorization); now = int(time.time())
+        async with aiosqlite.connect(db_path()) as db:
+            db.row_factory = aiosqlite.Row; await db.execute("BEGIN IMMEDIATE"); await _settle_fragment(db, now)
+            cur = await db.execute("SELECT * FROM fragment_listings WHERE status='active' ORDER BY ends_at ASC LIMIT 100")
+            rows = [dict(r) for r in await cur.fetchall()]; await db.commit()
+        for r in rows: r["minimum_bid"] = int(r["current_bid"]) + 1 if int(r["current_bid"]) else int(r["starting_bid"])
+        return {"listings": rows, "count": len(rows)}
+
+    @router.post("/api/fragment/listings/{listing_id}/bid")
+    async def fragment_bid(listing_id: int, payload: dict[str, Any], authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        user = await current_user(authorization); uid = int(user["telegram_id"]); amount = _feat_int(payload, "amount"); now = int(time.time())
+        if amount <= 0: raise HTTPException(status_code=400, detail="Ставка должна быть положительной")
+        async with aiosqlite.connect(db_path()) as db:
+            await db.execute("BEGIN IMMEDIATE"); await _settle_fragment(db, now)
+            cur = await db.execute("SELECT * FROM fragment_listings WHERE id=?", (listing_id,)); cols = [d[0] for d in cur.description]; raw = await cur.fetchone()
+            if not raw: await db.rollback(); raise HTTPException(status_code=404, detail="Лот не найден")
+            item = dict(zip(cols, raw))
+            if item["status"] != "active" or int(item["ends_at"]) <= now: await db.rollback(); raise HTTPException(status_code=409, detail="Аукцион завершён")
+            minimum = int(item["current_bid"]) + 1 if int(item["current_bid"]) else int(item["starting_bid"])
+            if amount < minimum: await db.rollback(); raise HTTPException(status_code=400, detail=f"Минимальная ставка: {minimum}")
+            currency = str(item["currency"])
+            await _adjust(db, uid, currency, -amount, f"fragment_bid_{listing_id}")
+            if item.get("current_bidder_id") and int(item["current_bid"]) > 0:
+                await _adjust(db, int(item["current_bidder_id"]), currency, int(item["current_bid"]), f"fragment_refund_{listing_id}")
+            await db.execute("UPDATE fragment_listings SET current_bid=?,current_bidder_id=? WHERE id=?", (amount, uid, listing_id))
+            await db.execute("INSERT INTO fragment_bids(listing_id,bidder_telegram_id,amount,created_at) VALUES(?,?,?,?)", (listing_id, uid, amount, now))
+            await db.commit()
+        return {"ok": True, "listing_id": listing_id, "current_bid": amount, "currency": currency}
+
+    @router.post("/api/fragment/create", status_code=201)
+    async def fragment_create(payload: dict[str, Any], authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        user = await current_user(authorization); uid = int(user["telegram_id"])
+        asset_type = str(payload.get("asset_type") or ""); asset_value = str(payload.get("asset_value") or "").strip()
+        currency = str(payload.get("currency") or "stars"); start = _feat_int(payload, "starting_bid"); duration = _feat_int(payload, "duration_seconds", 86400)
+        if asset_type not in ("username", "vanity_id", "number") or not asset_value or len(asset_value) > 64: raise HTTPException(status_code=400, detail="Некорректный актив")
+        if currency not in ("stars", "grams") or start <= 0 or duration not in (3600, 21600, 86400, 259200, 604800): raise HTTPException(status_code=400, detail="Некорректные параметры аукциона")
+        now = int(time.time())
+        async with aiosqlite.connect(db_path()) as db:
+            await db.execute("BEGIN IMMEDIATE")
+            cur = await db.execute("SELECT 1 FROM fragment_owned WHERE asset_type=? AND asset_value=? AND telegram_id<>?", (asset_type, asset_value, uid))
+            if await cur.fetchone(): await db.rollback(); raise HTTPException(status_code=409, detail="Актив принадлежит другому пользователю")
+            cur = await db.execute("INSERT INTO fragment_listings(asset_type,asset_value,seller_telegram_id,currency,starting_bid,ends_at,created_at) VALUES(?,?,?,?,?,?,?)", (asset_type, asset_value, uid, currency, start, now + duration, now))
+            lid = int(cur.lastrowid); await db.commit()
+        return {"id": lid, "asset_type": asset_type, "asset_value": asset_value, "ends_at": now + duration}
+
+    @router.get("/api/fragment/my")
+    async def fragment_my(authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        user = await current_user(authorization); uid = int(user["telegram_id"])
+        async with aiosqlite.connect(db_path()) as db:
+            db.row_factory = aiosqlite.Row
+            cur = await db.execute("SELECT * FROM fragment_owned WHERE telegram_id=? ORDER BY acquired_at DESC", (uid,)); owned = [dict(r) for r in await cur.fetchall()]
+            cur = await db.execute("SELECT * FROM fragment_listings WHERE seller_telegram_id=? OR current_bidder_id=? ORDER BY id DESC LIMIT 50", (uid, uid)); lots = [dict(r) for r in await cur.fetchall()]
+        for o in owned: o["equipped"] = bool(o["equipped"])
+        return {"owned": owned, "listings": lots}
+
+    @router.post("/api/fragment/equip")
+    async def fragment_equip(payload: dict[str, Any], authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        user = await current_user(authorization); uid = int(user["telegram_id"])
+        asset_type = str(payload.get("asset_type") or ""); asset_value = str(payload.get("asset_value") or "")
+        now = int(time.time())
+        async with aiosqlite.connect(db_path()) as db:
+            await db.execute("BEGIN IMMEDIATE")
+            cur = await db.execute("SELECT id FROM fragment_owned WHERE telegram_id=? AND asset_type=? AND asset_value=?", (uid, asset_type, asset_value))
+            if not await cur.fetchone(): await db.rollback(); raise HTTPException(status_code=404, detail="Актив не принадлежит вам")
+            await db.execute("UPDATE fragment_owned SET equipped=0 WHERE telegram_id=? AND asset_type=?", (uid, asset_type))
+            await db.execute("UPDATE fragment_owned SET equipped=1 WHERE telegram_id=? AND asset_type=? AND asset_value=?", (uid, asset_type, asset_value))
+            if asset_type == "username":
+                await db.execute("UPDATE accounts SET username=?,updated_at=? WHERE telegram_id=?", (asset_value.lstrip("@")[:64], now, uid))
+            await db.commit()
+        return {"ok": True, "equipped": asset_value, "note": "Для номера +888 это отображаемый номер профиля; номер для входа не меняется." if asset_type == "number" else ""}
+
+    @router.get("/api/forbes")
+    async def forbes(authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        await current_user(authorization)
+        async with aiosqlite.connect(db_path()) as db:
+            db.row_factory = aiosqlite.Row
+            async def top(sql: str, params: tuple = ()) -> list[dict[str, Any]]:
+                cur = await db.execute(sql, params); return [dict(r) for r in await cur.fetchall()]
+            richest_stars = await top("SELECT telegram_id,username,display_name,stars FROM accounts WHERE is_banned=0 ORDER BY stars DESC LIMIT 10")
+            richest_grams = await top("SELECT telegram_id,username,display_name,grams FROM accounts WHERE is_banned=0 ORDER BY grams DESC LIMIT 10")
+            collectors = await top("""SELECT owner_telegram_id AS telegram_id,COUNT(*) AS gifts,
+                SUM(100 + COALESCE(upgrade_level,0)*250) AS collection_value FROM user_gifts GROUP BY owner_telegram_id ORDER BY collection_value DESC LIMIT 10""")
+            duelists = await top("SELECT winner_id AS telegram_id,COUNT(*) AS wins FROM duels WHERE status='finished' AND winner_id IS NOT NULL GROUP BY winner_id ORDER BY wins DESC LIMIT 10")
+            streaks_top = await top("SELECT user_low,user_high,best_streak FROM chat_streaks ORDER BY best_streak DESC LIMIT 10")
+            cur = await db.execute("SELECT * FROM forbes_events ORDER BY id DESC LIMIT 30"); feed = [dict(r) for r in await cur.fetchall()]
+        return {"richest_stars": richest_stars, "richest_grams": richest_grams, "top_collectors": collectors,
+                "top_duelists": duelists, "top_streaks": streaks_top, "feed": feed}
+
+    @router.post("/api/duels", status_code=201)
+    async def create_duel(payload: dict[str, Any], authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        user = await current_user(authorization); uid = int(user["telegram_id"])
+        scope = str(payload.get("scope") or "dm"); chat_id = _feat_int(payload, "chat_id"); opponent = _feat_int(payload, "opponent_id")
+        game = str(payload.get("game") or "dice"); wager_type = str(payload.get("wager_type") or "stars")
+        amount = _feat_int(payload, "wager_amount"); serial = str(payload.get("wager_serial") or "").strip().upper()
+        if scope not in ("dm", "group") or game not in ("dice", "coin", "roulette") or wager_type not in ("stars", "grams", "gift"): raise HTTPException(status_code=400, detail="Некорректные параметры дуэли")
+        if wager_type in ("stars", "grams") and amount <= 0: raise HTTPException(status_code=400, detail="Укажите ставку")
+        if wager_type == "gift" and not serial: raise HTTPException(status_code=400, detail="Укажите serial подарка")
+        if scope == "dm" and opponent <= 0: opponent = chat_id
+        now = int(time.time()); seed = secrets.token_hex(32); seed_hash = hashlib.sha256(seed.encode()).hexdigest()
+        async with aiosqlite.connect(db_path()) as db:
+            await db.execute("BEGIN IMMEDIATE")
+            if wager_type in ("stars", "grams"): await _adjust(db, uid, wager_type, -amount, "duel_escrow")
+            else:
+                cur = await db.execute("SELECT 1 FROM user_gifts WHERE serial_number=? AND owner_telegram_id=?", (serial, uid))
+                if not await cur.fetchone(): await db.rollback(); raise HTTPException(status_code=404, detail="Подарок не найден у вас")
+            cur = await db.execute("""INSERT INTO duels(scope,chat_id,challenger_id,opponent_id,game,wager_type,wager_amount,wager_serial,server_seed,seed_hash,created_at,expires_at)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""", (scope, chat_id, uid, opponent, game, wager_type, amount, serial, seed, seed_hash, now, now + 900))
+            duel_id = int(cur.lastrowid)
+            body = f"⚔️ Дуэль #{duel_id}: {game}, ставка {serial if wager_type=='gift' else f'{amount} {wager_type}'}. Соперник, прими вызов кнопкой в приложении WaysGram! Hash: {seed_hash[:16]}…"
+            mid = None
+            try:
+                if scope == "dm" and opponent > 0:
+                    cur = await db.execute("INSERT INTO messages(sender_telegram_id,recipient_telegram_id,body,created_at) VALUES(?,?,?,?)", (uid, opponent, body, now)); mid = int(cur.lastrowid)
+                    await record_event(db, "dm", mid, "new_message", uid, user_a=uid, user_b=opponent)
+                elif scope == "group":
+                    cur = await db.execute("INSERT INTO group_messages(group_id,sender_telegram_id,body,created_at) VALUES(?,?,?,?)", (chat_id, uid, body, now)); mid = int(cur.lastrowid)
+                    await record_event(db, "group", mid, "new_message", uid, chat_id=chat_id)
+            except Exception: pass
+            await db.execute("UPDATE duels SET message_id=? WHERE id=?", (mid, duel_id)); await db.commit()
+        return {"id": duel_id, "status": "pending", "seed_hash": seed_hash, "message_id": mid, "expires_at": now + 900}
+
+    @router.post("/api/duels/{duel_id}/accept")
+    async def accept_duel(duel_id: int, payload: dict[str, Any] | None = None, authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        user = await current_user(authorization); uid = int(user["telegram_id"]); payload = payload or {}
+        now = int(time.time())
+        async with aiosqlite.connect(db_path()) as db:
+            await db.execute("BEGIN IMMEDIATE")
+            cur = await db.execute("SELECT * FROM duels WHERE id=?", (duel_id,)); cols = [d[0] for d in cur.description]; raw = await cur.fetchone()
+            if not raw: await db.rollback(); raise HTTPException(status_code=404, detail="Дуэль не найдена")
+            d = dict(zip(cols, raw))
+            if d["status"] != "pending": await db.rollback(); raise HTTPException(status_code=409, detail="Дуэль недоступна")
+            if int(d["expires_at"]) < now: await db.rollback(); raise HTTPException(status_code=409, detail="Дуэль истекла")
+            challenger = int(d["challenger_id"])
+            if uid == challenger: await db.rollback(); raise HTTPException(status_code=400, detail="Нельзя принять собственный вызов")
+            if int(d["opponent_id"] or 0) not in (0, uid): await db.rollback(); raise HTTPException(status_code=403, detail="Вызов адресован другому игроку")
+            wager_type = str(d["wager_type"]); amount = int(d["wager_amount"])
+            opp_serial = str(payload.get("wager_serial") or d["wager_serial"] or "").strip().upper()
+            if wager_type in ("stars", "grams"): await _adjust(db, uid, wager_type, -amount, "duel_escrow")
+            else:
+                cur = await db.execute("SELECT 1 FROM user_gifts WHERE serial_number=? AND owner_telegram_id=?", (opp_serial, uid))
+                if not await cur.fetchone(): await db.rollback(); raise HTTPException(status_code=404, detail="Укажите свой подарок для ставки")
+                cur = await db.execute("SELECT 1 FROM user_gifts WHERE serial_number=? AND owner_telegram_id=?", (str(d["wager_serial"]), challenger))
+                if not await cur.fetchone(): await db.rollback(); raise HTTPException(status_code=409, detail="Подарок вызывающего недоступен")
+            # Provably fair roll from revealed seed
+            seed = str(d["server_seed"]); roll = int(hashlib.sha256(f"{seed}:{duel_id}".encode()).hexdigest()[:8], 16)
+            game = str(d["game"])
+            if game == "dice":
+                c_roll, o_roll = roll % 6 + 1, int(hashlib.sha256(f"{seed}:{duel_id}:opp".encode()).hexdigest()[:8], 16) % 6 + 1
+                winner = challenger if c_roll > o_roll else (uid if o_roll > c_roll else (challenger if roll % 2 == 0 else uid))
+                detail = f"🎲 {c_roll} : {o_roll}"
+            elif game == "coin":
+                winner = challenger if roll % 2 == 0 else uid; detail = "🪙 Орёл" if roll % 2 == 0 else "🪙 Решка"
+            else:
+                winner = challenger if roll % 2 == 0 else uid; detail = f"🎰 Выпало {roll % 37}"
+            loser = uid if winner == challenger else challenger
+            if wager_type in ("stars", "grams"):
+                await _adjust(db, winner, wager_type, amount * 2, "duel_win")
+            else:
+                for serial_owner, serial in ((challenger, str(d["wager_serial"])), (uid, opp_serial)):
+                    await db.execute("UPDATE user_gifts SET owner_telegram_id=? WHERE serial_number=? AND owner_telegram_id=?", (winner, serial, serial_owner))
+                await db.execute("INSERT INTO gift_transactions(event_type,serial_number,gift_name,from_telegram_id,to_telegram_id,created_at) VALUES('duel',?,'PvP-дуэль',?,?,?)", (str(d["wager_serial"]), loser, winner, now))
+            await db.execute("UPDATE duels SET status='finished',opponent_id=?,opponent_wager_serial=?,roll=?,winner_id=?,finished_at=? WHERE id=?", (uid, opp_serial, roll, winner, now, duel_id))
+            await _forbes(db, "duel", winner, f"⚔️ Победа в дуэли #{duel_id}: {detail}", amount)
+            body = f"⚔️ Дуэль #{duel_id} завершена! {detail}. Победитель получил приз. Seed: {seed[:16]}… Hash: {str(d['seed_hash'])[:16]}…"
+            try:
+                if d["scope"] == "dm":
+                    cur = await db.execute("INSERT INTO messages(sender_telegram_id,recipient_telegram_id,body,created_at) VALUES(?,?,?,?)", (winner, loser, body, now)); mid = int(cur.lastrowid)
+                    await record_event(db, "dm", mid, "new_message", winner, user_a=winner, user_b=loser)
+                else:
+                    cur = await db.execute("INSERT INTO group_messages(group_id,sender_telegram_id,body,created_at) VALUES(?,?,?,?)", (int(d["chat_id"]), winner, body, now)); mid = int(cur.lastrowid)
+                    await record_event(db, "group", mid, "new_message", winner, chat_id=int(d["chat_id"]))
+            except Exception: mid = None
+            await db.commit()
+        return {"id": duel_id, "status": "finished", "winner_id": winner, "roll": roll, "detail": detail, "server_seed": seed, "seed_hash": d["seed_hash"], "message_id": mid}
+
+    @router.post("/api/duels/{duel_id}/cancel")
+    async def cancel_duel(duel_id: int, authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        user = await current_user(authorization); uid = int(user["telegram_id"])
+        async with aiosqlite.connect(db_path()) as db:
+            await db.execute("BEGIN IMMEDIATE")
+            cur = await db.execute("SELECT * FROM duels WHERE id=?", (duel_id,)); cols = [d[0] for d in cur.description]; raw = await cur.fetchone()
+            if not raw: await db.rollback(); raise HTTPException(status_code=404, detail="Дуэль не найдена")
+            d = dict(zip(cols, raw))
+            if d["status"] != "pending" or uid not in (int(d["challenger_id"]), int(d["opponent_id"] or 0)): await db.rollback(); raise HTTPException(status_code=409, detail="Нельзя отменить")
+            if d["wager_type"] in ("stars", "grams"): await _adjust(db, int(d["challenger_id"]), str(d["wager_type"]), int(d["wager_amount"]), "duel_refund")
+            await db.execute("UPDATE duels SET status='cancelled' WHERE id=?", (duel_id,)); await db.commit()
+        return {"ok": True, "status": "cancelled"}
+
+    @router.get("/api/duels/{duel_id}")
+    async def get_duel(duel_id: int, authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        await current_user(authorization)
+        async with aiosqlite.connect(db_path()) as db:
+            db.row_factory = aiosqlite.Row
+            cur = await db.execute("SELECT id,scope,chat_id,challenger_id,opponent_id,game,wager_type,wager_amount,wager_serial,status,seed_hash,roll,winner_id,created_at,expires_at,finished_at FROM duels WHERE id=?", (duel_id,)); row = await cur.fetchone()
+        if row is None: raise HTTPException(status_code=404, detail="Дуэль не найдена")
+        return dict(row)
+
+    @router.get("/api/duels")
+    async def list_duels(scope: str = "dm", chat_id: int = 0, authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        await current_user(authorization)
+        async with aiosqlite.connect(db_path()) as db:
+            db.row_factory = aiosqlite.Row
+            cur = await db.execute("SELECT id,scope,chat_id,challenger_id,opponent_id,game,wager_type,wager_amount,wager_serial,status,seed_hash,roll,winner_id,created_at FROM duels WHERE scope=? AND chat_id=? ORDER BY id DESC LIMIT 50", (scope, chat_id))
+            rows = [dict(r) for r in await cur.fetchall()]
+        return {"duels": rows}
 
     return router

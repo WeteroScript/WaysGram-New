@@ -85,6 +85,15 @@ MESSENGER_TABLES = frozenset(
         "telegram_mtproto_gift_attributes",
         "telegram_mtproto_gift_attribute_sync",
         "telegram_auction_gift_registry",
+        "ai_clone_settings",
+        "chat_rooms",
+        "chat_streaks",
+        "streak_rewards",
+        "fragment_listings",
+        "fragment_bids",
+        "fragment_owned",
+        "duels",
+        "forbes_events",
     }
 )
 
