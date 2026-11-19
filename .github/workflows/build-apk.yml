@@ -21,7 +21,9 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  # The release step below publishes the APK as an asset: artifacts cannot be resumed and a
+  # dropped download leaves a truncated zip ("invalid stored block lengths").
+  contents: write
   pull-requests: write
 
 jobs:
@@ -314,5 +316,35 @@ jobs:
           path: TMessagesProj_App/build/outputs/apk/afat/release/app.apk
           if-no-files-found: error
           retention-days: 14
+
+      # A release asset is served with range requests, so a dropped download can be resumed,
+      # and the size and sha256 sit next to the APK. That is the link users should install from.
+      - name: Publish APK as a release asset
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          APK="TMessagesProj_App/build/outputs/apk/afat/release/app.apk"
+          TAG="apk-latest"
+          mkdir -p release
+          cp "$APK" release/WaysGram.apk
+          ( cd release && sha256sum WaysGram.apk > WaysGram.apk.sha256 )
+          SIZE="$(stat -c '%s' release/WaysGram.apk)"
+          SHA="$(cut -d' ' -f1 release/WaysGram.apk.sha256)"
+          gh release delete "$TAG" --repo "$GITHUB_REPOSITORY" --yes --cleanup-tag || true
+          gh release create "$TAG" release/WaysGram.apk release/WaysGram.apk.sha256 \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "WaysGram APK — build $GITHUB_RUN_NUMBER" \
+            --prerelease \
+            --notes "APK of build $GITHUB_RUN_NUMBER (commit $GITHUB_SHA).
+
+          Size: $SIZE bytes
+          SHA-256: $SHA
+
+          Download: https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG/WaysGram.apk
+
+          This link supports resuming. Check the size and run \`sha256sum WaysGram.apk\`:
+          a different size means a dropped download, not a broken APK."
 
 # Trigger a fresh build after Firebase configuration was added.
