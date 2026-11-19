@@ -60,3 +60,41 @@ def test_session_setup_rejects_bot_and_removes_partial_file(tmp_path, monkeypatc
     with pytest.raises(RuntimeError):
         asyncio.run(setup.create(output, 123, "hash"))
     assert not output.exists()
+
+
+def test_pydroid_session_file_and_cleanup(tmp_path, monkeypatch):
+    script = SCRIPT.with_name("pydroid3_gift_session.py")
+    spec = importlib.util.spec_from_file_location("pydroid_gift_session", script)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    class FakeClient:
+        bot = False
+        disconnected = False
+
+        def __init__(self, *args):
+            self.session = SimpleNamespace(save=lambda: "session-secret")
+
+        async def start(self):
+            pass
+
+        async def get_me(self):
+            return SimpleNamespace(bot=self.bot)
+
+        async def disconnect(self):
+            type(self).disconnected = True
+
+    monkeypatch.setattr(module, "TelegramClient", FakeClient)
+    output = tmp_path / "waysgram-gift.session"
+    asyncio.run(module.create_session(123, "hash", output))
+    assert output.read_text() == "session-secret\n"
+    assert FakeClient.disconnected
+    with pytest.raises(FileExistsError):
+        asyncio.run(module.create_session(123, "hash", output))
+    assert output.read_text() == "session-secret\n"
+
+    FakeClient.bot = True
+    rejected = tmp_path / "bot.session"
+    with pytest.raises(ValueError):
+        asyncio.run(module.create_session(123, "hash", rejected))
+    assert not rejected.exists()
