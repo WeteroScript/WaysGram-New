@@ -881,14 +881,18 @@ def test_telegram_gift_upgrade_uses_internal_stars_and_records_level(env) -> Non
             assert receipt["gift_attributes"]["collectible_traits"] == upgraded.json()["attributes"]["collectible_traits"]
             assert mine[0]["attributes"]["collectible_traits"] == traits
 
-            # A later level-up changes the level but never rerolls the collectible traits.
+            # A later level-up rolls the attributes again, so the card always changes.
+            # This gift is outside the Telegram catalog: its fallback pool has one model
+            # and one pattern, so the visible change is the backdrop colour.
             second_headers = {**headers(101), "Idempotency-Key": "wg-gift-upgrade-test-0002"}
             second_upgrade = await client.post(
                 f"/api/gifts/{serial}/upgrade", headers=second_headers
             )
             assert second_upgrade.status_code == 200
             assert second_upgrade.json()["upgrade_level"] == 2
-            assert second_upgrade.json()["attributes"]["collectible_traits"] == traits
+            rerolled = second_upgrade.json()["attributes"]["collectible_traits"]
+            assert rerolled["backdrop"]["name"] != traits["backdrop"]["name"]
+            assert rerolled["backdrop"]["center_color"] != traits["backdrop"]["center_color"]
 
     run(scenario())
 
@@ -2056,6 +2060,180 @@ def test_upgrade_matches_telegram_models_by_position_when_names_are_localised(en
                 stored["attributes"]["collectible_traits"]["model"]["document_id"]
                 == traits["model"]["document_id"]
             )
+
+    run(scenario())
+
+
+class AttributeRowsProvider:
+    """Stands in for the MTProto catalog: writes Telegram's attribute rows on first use."""
+
+    def __init__(self, models: int, patterns: int) -> None:
+        self.models = models
+        self.patterns = patterns
+        self.calls = 0
+
+    async def attributes(self, database_path, gift_id, refresh: bool = False):
+        self.calls += 1
+        rows = []
+        async with aiosqlite.connect(database_path) as db:
+            for kind, count, base in (
+                ("model", self.models, 9000),
+                ("pattern", self.patterns, 8000),
+            ):
+                for index in range(count):
+                    await db.execute(
+                        """INSERT INTO telegram_mtproto_gift_attributes
+                           (gift_id,kind,position,name,rarity,permille,document_id,dc_id,
+                            mime_type,size,payload_json,is_available,fetched_at)
+                           VALUES(?,?,?,?,'',0,?,2,'application/x-tgsticker',1024,'{}',1,0)""",
+                        (gift_id, kind, index, f"Локализованное {kind} {index}", base + index),
+                    )
+                    rows.append({
+                        "kind": kind,
+                        "position": index,
+                        "name": f"Локализованное {kind} {index}",
+                        "rarity": "",
+                        "permille": 0,
+                        "document_id": base + index,
+                    })
+            await db.commit()
+        return rows
+
+
+def test_every_upgrade_rerolls_model_pattern_and_backdrop(env) -> None:
+    """Each upgrade changes the whole card, not only the level number."""
+    path, app = env
+    plush_pepe = "5936013938331222567"
+
+    async def scenario() -> None:
+        await bot_module.set_telegram_gift_values(plush_pepe, price=25, supply=1)
+        async with await client_for(app) as client:
+            bought = await client.post(
+                f"/api/telegram/gifts/{plush_pepe}/purchase", headers=headers(101), json={}
+            )
+            serial = bought.json()["gift"]["serial_number"]
+            seen: list[dict[str, str]] = []
+            colours: list[int] = []
+            for level in range(1, 4):
+                upgraded = await client.post(
+                    f"/api/gifts/{serial}/upgrade",
+                    headers={**headers(101), "Idempotency-Key": f"wg-gift-reroll-{level:04d}"},
+                )
+                assert upgraded.status_code == 200
+                payload = upgraded.json()
+                assert payload["upgrade_level"] == level
+                traits = payload["traits"]
+                for key in ("model", "pattern", "backdrop"):
+                    assert traits[key]["name"] not in {item[key] for item in seen}, (level, key)
+                seen.append({
+                    "model": traits["model"]["name"],
+                    "pattern": traits["pattern"]["name"],
+                    "backdrop": traits["backdrop"]["name"],
+                })
+                colours.append(traits["backdrop"]["center_color"])
+            # Nine different backdrops exist in the official pool: colours never repeat.
+            assert len(set(colours)) == len(colours)
+
+    run(scenario())
+
+
+def test_upgrade_fetches_telegram_attribute_documents_when_missing(env) -> None:
+    """Without Telegram's attribute rows the rolled model could not carry a document."""
+    path, app = env
+    plush_pepe = "5936013938331222567"
+
+    async def scenario() -> None:
+        import gift_upgrades
+
+        _, pool = gift_upgrades.pool_for_gift(plush_pepe, None)
+        provider = AttributeRowsProvider(len(pool["models"]), len(pool["patterns"]))
+        provider_app = FastAPI()
+        provider_app.include_router(
+            build_messenger_router(
+                path,
+                bot_module.Store(path),
+                lambda: FakeBot(),
+                bot_module.account_is_banned,
+                mtproto_gift_provider=lambda: provider,
+                admin_id=ADMIN,
+            )
+        )
+        await bot_module.set_telegram_gift_values(plush_pepe, price=25, supply=1)
+        async with await client_for(provider_app) as client:
+            bought = await client.post(
+                f"/api/telegram/gifts/{plush_pepe}/purchase", headers=headers(101), json={}
+            )
+            serial = bought.json()["gift"]["serial_number"]
+            upgraded = await client.post(
+                f"/api/gifts/{serial}/upgrade",
+                headers={**headers(101), "Idempotency-Key": "wg-attr-sync-0001"},
+            )
+            assert upgraded.status_code == 200
+            traits = upgraded.json()["traits"]
+            assert provider.calls >= 1
+            assert traits["model"]["document_id"] == (
+                9000 + [entry[0] for entry in pool["models"]].index(traits["model"]["name"])
+            )
+            assert traits["pattern"]["document_id"] == (
+                8000 + [entry[0] for entry in pool["patterns"]].index(traits["pattern"]["name"])
+            )
+
+    run(scenario())
+
+
+def test_inventory_restores_missing_attribute_documents(env) -> None:
+    """A gift upgraded before the catalog was known gets its document ids back."""
+    path, app = env
+    plush_pepe = "5936013938331222567"
+
+    async def scenario() -> None:
+        import gift_upgrades
+
+        _, pool = gift_upgrades.pool_for_gift(plush_pepe, None)
+        await bot_module.set_telegram_gift_values(plush_pepe, price=25, supply=1)
+        async with await client_for(app) as client:
+            bought = await client.post(
+                f"/api/telegram/gifts/{plush_pepe}/purchase", headers=headers(101), json={}
+            )
+            serial = bought.json()["gift"]["serial_number"]
+            upgraded = await client.post(
+                f"/api/gifts/{serial}/upgrade",
+                headers={**headers(101), "Idempotency-Key": "wg-attr-repair-0001"},
+            )
+            assert upgraded.status_code == 200
+            traits = upgraded.json()["traits"]
+            assert not int(traits["model"].get("document_id") or 0)
+
+            # Telegram's catalog arrives after the upgrade: the next inventory read fills
+            # the document ids in, so the card plays the official model and pattern.
+            with db_split.sqlite_connect(path) as db:
+                for kind, entries, base in (
+                    ("model", pool["models"], 9000),
+                    ("pattern", pool["patterns"], 8000),
+                ):
+                    for index, entry in enumerate(entries):
+                        db.execute(
+                            """INSERT INTO telegram_mtproto_gift_attributes
+                               (gift_id,kind,position,name,rarity,permille,document_id,dc_id,
+                                mime_type,size,payload_json,is_available,fetched_at)
+                               VALUES(?,?,?,?,'',0,?,2,'application/x-tgsticker',1024,'{}',1,0)""",
+                            (plush_pepe, kind, index, entry[0], base + index),
+                        )
+
+            inventory = (await client.get("/api/me/gifts", headers=headers(101))).json()["gifts"]
+            stored = next(item for item in inventory if item["serial_number"] == serial)
+            repaired = stored["attributes"]["collectible_traits"]
+            assert repaired["model"]["document_id"] == (
+                9000 + [entry[0] for entry in pool["models"]].index(repaired["model"]["name"])
+            )
+            assert repaired["pattern"]["document_id"] == (
+                8000 + [entry[0] for entry in pool["patterns"]].index(repaired["pattern"]["name"])
+            )
+            assert repaired["model"]["name"] == traits["model"]["name"]
+
+            # The repair is stored, not recomputed on every read.
+            again = (await client.get("/api/me/gifts", headers=headers(101))).json()["gifts"]
+            assert again[0]["attributes"]["collectible_traits"] == repaired
 
     run(scenario())
 

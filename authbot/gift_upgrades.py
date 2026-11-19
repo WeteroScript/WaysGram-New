@@ -38,9 +38,15 @@ FALLBACK_POOL: dict[str, Any] = {
     "models": [["Оригинальная", 1000]],
     "patterns": [["Без узора", 1000]],
     "backdrops": [
-        ["Лазурный", 500, 0xD4E4FF, 0x8AB4F8, 0x2C4C7A, 0x0E2A47],
-        ["Аметистовый", 300, 0xE8D9FF, 0xA97BF5, 0x4B2A7A, 0x241040],
-        ["Золотой", 200, 0xFFF1CE, 0xE8B44A, 0x7A5A18, 0x3A2A08],
+        ["Лазурный", 200, 0xD4E4FF, 0x8AB4F8, 0x2C4C7A, 0x0E2A47],
+        ["Аметистовый", 160, 0xE8D9FF, 0xA97BF5, 0x4B2A7A, 0x241040],
+        ["Золотой", 140, 0xFFF1CE, 0xE8B44A, 0x7A5A18, 0x3A2A08],
+        ["Изумрудный", 120, 0xD6F5DC, 0x63C98A, 0x1E5A38, 0x0B2C1B],
+        ["Коралловый", 100, 0xFFDFD6, 0xF2866B, 0x7A2F22, 0x3A130D],
+        ["Стальной", 90, 0xE1E6EE, 0x93A2B8, 0x334155, 0x141C26],
+        ["Розовый", 80, 0xFFD9EC, 0xF077B6, 0x7A2450, 0x3A0F26],
+        ["Графитовый", 60, 0xD5D7DB, 0x6E7480, 0x24272E, 0x0D0F13],
+        ["Медный", 50, 0xF7DFC8, 0xC98A54, 0x6B3A17, 0x301809],
     ],
 }
 
@@ -153,8 +159,49 @@ def _rarest(kinds: Iterable[str]) -> str:
     return RARITY_ORDER[best]
 
 
-def roll_traits(pool: dict[str, Any], now: int) -> dict[str, Any]:
-    """Rolls one immutable trait set with the original Telegram chances."""
+def _pick(
+        entries: list[list[Any]], weights: list[int], avoid: str = ""
+) -> list[Any]:
+    """Picks one entry, never repeating ``avoid`` while another slot can be rolled.
+
+    Telegram rolls the three attributes exactly once, when a gift is upgraded for the
+    first and only time. A WaysGram gift can be upgraded again for the same 25 Stars, and
+    every upgrade must visibly change the card, so the previous winner of a slot is dropped
+    from the candidates. Chances stay as published for every other candidate.
+    """
+    banned = str(avoid or "").strip().lower()
+    if banned:
+        kept = [
+            (entry, weight)
+            for entry, weight in zip(entries, weights)
+            if str(entry[0]).strip().lower() != banned
+        ]
+        if kept and any(weight > 0 for _, weight in kept):
+            entries = [entry for entry, _ in kept]
+            weights = [weight for _, weight in kept]
+    return _choose(entries, weights)
+
+
+def _avoided_names(previous: Any) -> dict[str, str]:
+    """Names of the traits a gift already carries, per slot."""
+    result = {"model": "", "pattern": "", "backdrop": ""}
+    if not isinstance(previous, dict):
+        return result
+    for key in result:
+        entry = previous.get(key)
+        if isinstance(entry, dict):
+            result[key] = str(entry.get("name") or "").strip()
+    return result
+
+
+def roll_traits(
+        pool: dict[str, Any], now: int, previous: dict[str, Any] | None = None
+) -> dict[str, Any]:
+    """Rolls one trait set with the original Telegram chances.
+
+    ``previous`` holds the traits the gift already had; every slot then avoids repeating
+    them, so a repeated upgrade always changes model, pattern and backdrop colours.
+    """
     models = [entry for entry in pool.get("models") or [] if isinstance(entry, list) and entry]
     patterns = [entry for entry in pool.get("patterns") or [] if isinstance(entry, list) and entry]
     backdrops = [entry for entry in pool.get("backdrops") or [] if isinstance(entry, list) and entry]
@@ -165,9 +212,10 @@ def roll_traits(pool: dict[str, Any], now: int) -> dict[str, Any]:
     if not backdrops:
         backdrops = FALLBACK_POOL["backdrops"]
 
-    model = _model_traits(_choose(models, _slot_weights(models)))
-    pattern = _model_traits(_choose(patterns, _slot_weights(patterns)))
-    backdrop = _backdrop_traits(_choose(backdrops, _slot_weights(backdrops)))
+    avoid = _avoided_names(previous)
+    model = _model_traits(_pick(models, _slot_weights(models), avoid["model"]))
+    pattern = _model_traits(_pick(patterns, _slot_weights(patterns), avoid["pattern"]))
+    backdrop = _backdrop_traits(_pick(backdrops, _slot_weights(backdrops), avoid["backdrop"]))
     return {
         "version": TRAITS_VERSION,
         "rolled_at": int(now),

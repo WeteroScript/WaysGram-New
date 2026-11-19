@@ -402,6 +402,34 @@ def _match_attribute_document(
     return 0
 
 
+async def _sync_gift_attribute_documents(
+        database_path: Any, gift_id: Any, provider: Any
+) -> None:
+    """Makes sure Telegram's model/pattern documents of a gift are known locally.
+
+    The document id is what lets the client play the official model animation instead of
+    falling back to the gifted name lookup (which breaks on localised names). The sync runs
+    outside the caller's write transaction, because the MTProto catalog writes to the same
+    database.
+    """
+    key = str(gift_id or "").strip()
+    if not key.isdigit() or provider is None:
+        return
+    try:
+        async with aiosqlite.connect(database_path) as db:
+            cur = await db.execute(
+                """SELECT 1 FROM telegram_mtproto_gift_attributes
+                   WHERE gift_id=? AND is_available=1 AND kind IN ('model','pattern')
+                   LIMIT 1""",
+                (key,),
+            )
+            if await cur.fetchone() is not None:
+                return
+        await provider.attributes(database_path, key)
+    except Exception:  # noqa: BLE001 - a missing catalog must never block an upgrade
+        LOGGER.warning("gift attribute sync skipped for %s", key, exc_info=True)
+
+
 def _enrich_traits_documents(
     traits: dict[str, Any], pool: dict[str, Any], documents: dict[str, list[dict[str, Any]]]
 ) -> bool:
@@ -3580,6 +3608,34 @@ def build_messenger_router(
                     metadata_by_id[gift_id] = await _telegram_gift_metadata(gift_db, gift_id)
                 telegram_gift = _merge_telegram_gift_metadata(metadata_by_id[gift_id], snapshot)
                 item["telegram_gift"] = telegram_gift
+                # Older upgrades were rolled before Telegram's attribute set was known, so
+                # their traits carry no document id: the native card then cannot play the
+                # official model and pattern. The id is restored from the local catalog and
+                # stored back once, so every later read has it straight away.
+                collectible = gift_upgrades.traits_of(item["attributes"])
+                if gift_upgrades.is_current_traits(collectible) and any(
+                    isinstance(collectible.get(key), dict)
+                    and not int((collectible.get(key) or {}).get("document_id") or 0)
+                    for key in ("model", "pattern")
+                ):
+                    documents = await _gift_attribute_documents(gift_db, gift_id)
+                    if documents:
+                        _, pool = _collectible_trait_pool(
+                            gift_id,
+                            telegram_gift.get("title") if telegram_gift else item.get("gift_name"),
+                        )
+                        if _enrich_traits_documents(collectible, pool, documents):
+                            await gift_db.execute(
+                                "UPDATE user_gifts SET attributes_json=? WHERE id=?",
+                                (
+                                    json.dumps(
+                                        item["attributes"], ensure_ascii=False,
+                                        separators=(",", ":"),
+                                    ),
+                                    int(item.get("id") or 0),
+                                ),
+                            )
+                            await gift_db.commit()
                 if telegram_gift and str(telegram_gift.get("title") or "").strip():
                     item["gift_name"] = str(telegram_gift["title"]).strip()
                 item["gift_emoji"] = (
@@ -6182,6 +6238,21 @@ def build_messenger_router(
         now = int(time.time())
         scope = f"/api/gifts/{serial}/upgrade"
         descriptor = idempotency_descriptor(scope, {}, idempotency_key)
+        # Telegram's own attribute set of the gift is fetched before the write transaction
+        # opens: the rolled model and pattern then carry the real document ids.
+        async with aiosqlite.connect(db_path()) as attribute_db:
+            attribute_db.row_factory = aiosqlite.Row
+            cur = await attribute_db.execute(
+                "SELECT telegram_gift_id FROM user_gifts WHERE serial_number=? AND owner_telegram_id=?",
+                (serial, uid),
+            )
+            attribute_row = await cur.fetchone()
+        if attribute_row is not None:
+            await _sync_gift_attribute_documents(
+                db_path(),
+                attribute_row["telegram_gift_id"],
+                mtproto_gift_provider() if mtproto_gift_provider else None,
+            )
         async with aiosqlite.connect(db_path()) as db:
             db.row_factory = aiosqlite.Row
             await db.execute("BEGIN IMMEDIATE")
@@ -6246,13 +6317,17 @@ def build_messenger_router(
             gift_key, gift_pool = _collectible_trait_pool(
                 gift["telegram_gift_id"], gift["gift_name"]
             )
-            if not gift_upgrades.is_current_traits(gift_upgrades.traits_of(attributes)):
-                # Models, patterns and backdrops are rolled once with the chances
-                # Telegram publishes for this gift, and stay with the collectible.
-                # Sets from the older hand-made WaysGram pools are replaced here.
-                attributes["collectible_traits"] = gift_upgrades.roll_traits(
-                    gift_pool, now
-                )
+            # Every upgrade rolls the three attributes again: a WaysGram gift can be
+            # upgraded more than once for the same 25 Stars, and each upgrade has to change
+            # the model, the pattern and the backdrop colours on the card. The previously
+            # rolled values are excluded from the candidates, so the change is guaranteed
+            # whenever the official pool of the gift has an alternative.
+            previous_traits = gift_upgrades.traits_of(attributes)
+            attributes["collectible_traits"] = gift_upgrades.roll_traits(
+                gift_pool,
+                now,
+                previous_traits if gift_upgrades.is_current_traits(previous_traits) else None,
+            )
             traits = gift_upgrades.traits_of(attributes) or {}
             # Telegram publishes every model and pattern as a sticker document. Its id is
             # stored with the traits (name, then chance, then position in the set), so the
