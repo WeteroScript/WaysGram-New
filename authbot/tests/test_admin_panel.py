@@ -21,7 +21,8 @@ def run(coro):
 class Msg:
     def __init__(self, text=None, user_id=ADMIN):
         self.text = text
-        self.from_user = SimpleNamespace(id=user_id)
+        self.from_user = SimpleNamespace(id=user_id, username=None)
+        self.chat = SimpleNamespace(id=user_id, type="private")
         self.sent: list[tuple[str, object]] = []
 
     async def answer(self, text, reply_markup=None):
@@ -458,3 +459,153 @@ def test_admin_bulk_gift_import_and_hide_preserve_inventory(panel, monkeypatch: 
     press("wgadm:dbgifthideall")
     assert query(path, "SELECT COUNT(*) FROM telegram_gift_prices WHERE price_stars=0 AND supply=0")[0][0] == 2
     assert query(path, "SELECT COUNT(*) FROM user_gifts WHERE serial_number='WG-KEEP'")[0][0] == 1
+
+
+def press_as(data: str, user_id: int, chat_type: str = "private") -> Msg:
+    message = Msg(user_id=user_id)
+    message.chat.type = chat_type
+    cb = Cb(data, message)
+    cb.from_user = SimpleNamespace(id=user_id)
+    run(bot_module.admin_callback(cb))
+    return message
+
+
+def type_as(text: str, user_id: int) -> Msg:
+    message = Msg(text, user_id=user_id)
+    run(bot_module.admin_text_input(message))
+    return message
+
+
+def test_admin_grant_username_confirmation_persistence_and_revoke(panel) -> None:
+    path, store = panel
+    run(store.upsert_user(77, 77, "Real_Admin"))
+    assert "Добавить админа" in str(bot_module.admin_home_keyboard(ADMIN))
+    assert "Добавить админа" not in str(bot_module.admin_home_keyboard(77))
+    assert not run(bot_module.is_authbot_admin(77))
+    press("wgadm:addadmin")
+    candidate = type_text("@REAL_ADMIN")
+    assert "Telegram ID 77" in candidate.sent[0][0]
+    assert not run(bot_module.is_authbot_admin(77))
+    press("wgadm:addadminconfirm:77")
+    assert query(path, "SELECT telegram_id,added_by FROM authbot_admins") == [(77, ADMIN)]
+    assert run(bot_module.is_authbot_admin(77))
+    run(bot_module.init_admin_storage())  # startup migration must keep delegated access
+    assert run(bot_module.is_authbot_admin(77))
+
+    panel_msg = Msg(user_id=77)
+    run(bot_module.admin_handler(panel_msg))
+    assert "Панель администратора" in panel_msg.sent[0][0]
+    assert "Добавить админа" not in str(panel_msg.sent[0][1])
+    assert "Только главный" in press_as("wgadm:addadmin", 77).sent[0][0]
+    assert "Только главный" in press_as("wgadm:addadminconfirm:88", 77).sent[0][0]
+    assert "Только главный" in press_as(f"wgadm:adminremove:{ADMIN}", 77).sent[0][0]
+
+    # Another admin's input state and audit identity are independent of the owner.
+    press("wgadm:labelnew")
+    press_as("wgadm:labelnew", 77)
+    type_as("Метка второго", 77)
+    type_as("#123456", 77)
+    assert bot_module.ADMIN_INPUT[ADMIN][0] == "label_text"
+    assert query(path, "SELECT admin_id FROM admin_logs WHERE action='label_create'") == [(77,)]
+
+    assert "77" in str(press("wgadm:admins").sent[0][1])
+    press("wgadm:adminremoveask:77")
+    press("wgadm:adminremove:77")
+    assert not run(bot_module.is_authbot_admin(77))
+    denied = Msg(user_id=77)
+    run(bot_module.admin_handler(denied))
+    assert "Доступ запрещён" in denied.sent[0][0]
+    assert query(path, "SELECT action,admin_id,target FROM admin_logs WHERE action IN ('admin_add','admin_remove') ORDER BY id") == [
+        ("admin_add", ADMIN, "77"), ("admin_remove", ADMIN, "77")]
+
+
+def test_admin_add_id_validation_cancellation_and_private_scope(panel) -> None:
+    path, store = panel
+    # The owner must have a current confirmation, and ordinary users cannot forge one.
+    press("wgadm:addadminconfirm:100")
+    assert not run(bot_module.is_authbot_admin(100))
+    press_as("wgadm:addadminconfirm:100", 100)
+    assert not run(bot_module.is_authbot_admin(100))
+    assert not press_as("wgadm:addadmin", ADMIN, chat_type="group").sent
+    press("wgadm:addadmin")
+    assert "Некорректный" in type_text("9" * 100).sent[0][0]
+    assert "username не найден" in type_text("@nobody_found").sent[0][0].lower()
+    type_text("100")
+    press("wgadm:admincancel")
+    press("wgadm:addadminconfirm:100")
+    assert not run(bot_module.is_authbot_admin(100))
+    press("wgadm:addadmin")
+    type_text("100")
+    press("wgadm:addadminconfirm:100")
+    assert run(bot_module.is_authbot_admin(100))
+    assert query(path, "SELECT COUNT(*) FROM authbot_admins WHERE telegram_id=100") == [(1,)]
+    press("wgadm:addadminconfirm:100")
+    assert query(path, "SELECT COUNT(*) FROM authbot_admins WHERE telegram_id=100") == [(1,)]
+    press(f"wgadm:adminremove:{ADMIN}")
+    assert run(bot_module.is_authbot_admin(ADMIN))
+
+
+def test_duplicate_telegram_usernames_require_explicit_id(panel) -> None:
+    path, store = panel
+    run(store.upsert_user(77, 77, "same_name"))
+    run(store.upsert_user(78, 78, "same_name"))
+    press("wgadm:addadmin")
+    assert "неоднозначен" in type_text("@same_name").sent[0][0]
+    assert query(path, "SELECT COUNT(*) FROM authbot_admins") == [(0,)]
+
+
+def test_bot_admin_grant_does_not_grant_waysgram_admin_status(panel) -> None:
+    from fastapi import FastAPI
+    from test_messenger_api import FakeBot, add_session, client_for
+
+    path, store = panel
+    run(store.upsert_user(77, 77, "apiadmin"))
+    run(store.set_verified(77, True))
+    number = run(store.allocate_number(77))
+    run(bot_module.ensure_account(77, number, "apiadmin", "API Admin"))
+    add_session(path, 77, "admin-session-token")
+    app = FastAPI()
+    app.include_router(messenger_api.build_messenger_router(
+        path, store, lambda: FakeBot(), bot_module.account_is_banned, admin_id=ADMIN,
+    ))
+
+    async def get_flag():
+        async with await client_for(app) as client:
+            response = await client.get("/api/me", headers={"Authorization": "Bearer admin-session-token"})
+            assert response.status_code == 200
+            return response.json()["is_admin"]
+
+    assert run(get_flag()) is False
+    press("wgadm:addadmin")
+    type_text("77")
+    press("wgadm:addadminconfirm:77")
+    assert run(bot_module.is_authbot_admin(77)) is True
+    assert run(get_flag()) is False
+    press("wgadm:adminremove:77")
+    assert run(get_flag()) is False
+
+
+def test_delegated_admin_created_account_is_owned_and_audited_by_actor(panel) -> None:
+    path, store = panel
+    press("wgadm:addadmin")
+    type_text("88")
+    press("wgadm:addadminconfirm:88")
+    press_as("wgadm:newacct", 88)
+    type_as("5552220000", 88)
+    type_as("15", 88)
+    type_as("2", 88)
+    row = query(path, "SELECT telegram_id,owner_telegram_id FROM numbers WHERE number=?", ("+15552220000",))[0]
+    assert row[1] == 88
+    assert run(store.resolve_number("+15552220000"))["chat_id"] == 88
+    assert query(path, "SELECT admin_id FROM admin_logs WHERE action='create_account'") == [(88,)]
+    assert query(path, "SELECT DISTINCT admin_id FROM economy_transactions WHERE reason='admin_create_account'") == [(88,)]
+
+
+def test_add_admin_confirmation_expires(panel, monkeypatch) -> None:
+    path, store = panel
+    press("wgadm:addadmin")
+    type_text("900")
+    monkeypatch.setattr(bot_module.time, "time", lambda: 2_000_000_000)
+    result = press("wgadm:addadminconfirm:900")
+    assert "устарело" in result.sent[0][0]
+    assert not run(bot_module.is_authbot_admin(900))
