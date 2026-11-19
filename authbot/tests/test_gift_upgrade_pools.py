@@ -94,3 +94,13 @@ def test_pools_file_is_valid_json():
     data = json.loads(Path(gift_upgrades.POOLS_FILE).read_text(encoding="utf-8"))
     assert data["version"] == gift_upgrades.TRAITS_VERSION
     assert data["gifts"]
+
+
+def test_repair_does_not_replace_an_existing_model_with_a_preview():
+    traits = {"model": {"name": "Existing", "document_id": 123},
+              "pattern": {"name": "Old pattern"}}
+    rows = {"model": [{"name": "Sample", "document_id": 456, "permille": 1, "position": 0}],
+            "pattern": [{"name": "Pattern sample", "document_id": 789, "permille": 1, "position": 0}]}
+    assert messenger_api._enrich_traits_documents(traits, {}, rows)
+    assert traits["model"] == {"name": "Existing", "document_id": 123}
+    assert traits["pattern"]["document_id"] == 789

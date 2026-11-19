@@ -474,15 +474,8 @@ async def _sync_gift_attribute_documents(
     if not key.isdigit() or provider is None:
         return
     try:
-        async with aiosqlite.connect(database_path) as db:
-            cur = await db.execute(
-                """SELECT 1 FROM telegram_mtproto_gift_attributes
-                   WHERE gift_id=? AND is_available=1 AND kind IN ('model','pattern')
-                   LIMIT 1""",
-                (key,),
-            )
-            if await cur.fetchone() is not None:
-                return
+        # The provider owns freshness checks. A single stale preview row must not prevent
+        # future attempts to fetch the full set (and hence different upgrade models).
         await provider.attributes(database_path, key)
     except Exception:  # noqa: BLE001 - a missing catalog must never block an upgrade
         LOGGER.warning("gift attribute sync skipped for %s", key, exc_info=True)
@@ -501,6 +494,10 @@ def _enrich_traits_documents(
     for kind, key in (("model", "models"), ("pattern", "patterns")):
         entry = traits.get(kind)
         if not isinstance(entry, dict):
+            continue
+        # Never replace a document already assigned to this collectible with a later
+        # preview sample or a heuristic match while repairing the other attribute.
+        if int(entry.get("document_id") or 0) > 0:
             continue
         rows = documents.get(kind) or []
         if not rows:
@@ -6474,6 +6471,21 @@ def build_messenger_router(
             attribute_rows = await _gift_attribute_rows(
                 db, str(gift["telegram_gift_id"] or "")
             )
+            playable_models = [
+                row for row in attribute_rows.get("model", [])
+                if int(row.get("document_id") or 0) > 0
+            ]
+            previous_model = (previous_traits or {}).get("model") or {}
+            # A single Telegram preview is not a pool: adopting it again would charge
+            # for an upgrade while displaying exactly the same model. Wait for a real
+            # alternative instead. WaysGram-only gifts retain their existing behaviour.
+            if (len(playable_models) == 1 and isinstance(previous_model, dict)
+                    and int(previous_model.get("document_id") or 0) == int(playable_models[0]["document_id"])):
+                await db.rollback()
+                raise HTTPException(
+                    status_code=503,
+                    detail="Модели подарка временно недоступны. Попробуйте улучшить позже; Stars не списаны.",
+                )
             attributes["collectible_traits"] = gift_upgrades.roll_traits(
                 gift_pool,
                 now,

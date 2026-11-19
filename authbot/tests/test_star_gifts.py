@@ -2365,6 +2365,17 @@ def test_sample_only_catalog_still_shows_the_attribute_telegram_published(env) -
             assert traits["model"]["name"].startswith("Локализованное model")
             assert traits["pattern"]["document_id"] == 8000
             assert traits["model"]["name"] and traits["pattern"]["name"]
+            with db_split.sqlite_connect(path) as db:
+                balance = db.execute("SELECT stars FROM accounts WHERE telegram_id=101").fetchone()[0]
+            repeated = await client.post(
+                f"/api/gifts/{serial}/upgrade",
+                headers={**headers(101), "Idempotency-Key": "wg-sample-only-0002"},
+            )
+            assert repeated.status_code == 503
+            assert "не списаны" in repeated.json()["detail"]
+            with db_split.sqlite_connect(path) as db:
+                assert db.execute("SELECT stars FROM accounts WHERE telegram_id=101").fetchone()[0] == balance
+                assert db.execute("SELECT upgrade_level FROM user_gifts WHERE serial_number=?", (serial,)).fetchone()[0] == 1
 
     run(scenario())
 
