@@ -477,6 +477,12 @@ def test_mtproto_upgrade_attributes_are_stored_and_downloaded(tmp_path: Path) ->
         assert len(client.downloads) == downloads
         assert (database.parent / "gift_assets" / "7002.bin").is_file()
 
+        # The sync state names the set as complete and counts the animations per kind.
+        state = await provider.attribute_sync_state(database, "123456789")
+        assert state["source"] == "full"
+        assert state["kinds"]["model"]["with_document"] == 2
+        assert state["kinds"]["pattern"]["with_document"] == 1
+
         # A second read is served from the database: Telegram is asked only once.
         attribute_requests = [
             request for request in client.requests
@@ -503,6 +509,10 @@ def test_mtproto_upgrade_attributes_fall_back_to_the_preview(tmp_path: Path) -> 
             "GetStarGiftUpgradeAttributesRequest",
             "GetStarGiftUpgradePreviewRequest",
         ]
+        # One sample of every kind is reported as such: that is what the client and the admin
+        # panel have to see to tell a degraded catalog from a gift with a single model.
+        state = await provider.attribute_sync_state(database, "123456789")
+        assert state["source"] == "sample"
 
     asyncio.run(scenario())
 
