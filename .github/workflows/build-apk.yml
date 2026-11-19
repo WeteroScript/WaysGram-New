@@ -8,10 +8,23 @@ on:
   push:
     branches:
       - main
+    # The AuthBot (authbot/) and docs have their own workflow; they must not trigger a
+    # multi-hour Android build.
+    paths-ignore:
+      - "authbot/**"
+      - "docs/**"
+      - "**.md"
+      - "bot.py"
+      - "requirements.txt"
+      - "Procfile"
+      - "runtime.txt"
   workflow_dispatch:
 
 permissions:
-  contents: read
+  # The release step below publishes the APK as an asset: artifacts cannot be resumed and a
+  # dropped download leaves a truncated zip ("invalid stored block lengths").
+  contents: write
+  pull-requests: write
 
 jobs:
   build:
@@ -46,33 +59,8 @@ jobs:
           test -f gradlew
           test -f settings.gradle
           test -f TMessagesProj_App/build.gradle
-
-      - name: Apply Java type compatibility fix
-        shell: bash
-        run: |
-          set -euo pipefail
-          python3 - <<'PY'
-          from pathlib import Path
-          path = Path("TMessagesProj/src/main/java/org/telegram/tgnet/WaysGramMapper.java")
-          source = path.read_text()
-          old = "message.id = id;"
-          new = "message.id = Math.toIntExact(id);"
-          if source.count(old) != 1:
-              raise SystemExit("Expected exactly one WaysGramMapper assignment to patch")
-          path.write_text(source.replace(old, new, 1))
-          PY
-          grep -Fq 'message.id = Math.toIntExact(id);' TMessagesProj/src/main/java/org/telegram/tgnet/WaysGramMapper.java
-
-      - name: Import WaysGram Android overlay and gift integration
-        shell: bash
-        run: |
-          set -euo pipefail
-          OVERLAY="$GITHUB_WORKSPACE/waysgram-android-overlay"
-          test -d "$OVERLAY/src/main/java/org/telegram/messenger/waysgram"
-          test -s "$OVERLAY/scripts/apply-android-patches.py"
-          test -s "$OVERLAY/scripts/prepare_android_dev_build.py"
-          rsync -a "$OVERLAY/src/main/java/" "$GITHUB_WORKSPACE/TMessagesProj/src/main/java/"
-          python3 "$OVERLAY/scripts/apply-android-patches.py" --android-root "$GITHUB_WORKSPACE"
+          test -f TMessagesProj/src/main/java/org/telegram/messenger/waysgram/WaysGramGiftSell.java
+          test -f TMessagesProj/src/main/java/org/telegram/messenger/waysgram/WaysGramProfileGiftsController.java
 
       - name: Fetch dependencies listed in the archive .gitmodules
         shell: bash
@@ -224,7 +212,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          python3 "$GITHUB_WORKSPACE/waysgram-android-overlay/scripts/prepare_android_dev_build.py" --android-root "$GITHUB_WORKSPACE"
+          python3 "$GITHUB_WORKSPACE/scripts/prepare_android_dev_build.py" --android-root "$GITHUB_WORKSPACE"
           grep -Fq "com.google.mlkit:language-id:17.0.6" TMessagesProj/build.gradle
           grep -Fq "com.google.mlkit:translate:17.0.3" TMessagesProj/build.gradle
           python3 - <<'PY'
@@ -243,12 +231,59 @@ jobs:
               assert path.is_file(), f"Missing generated Firebase config: {path}"
           PY
 
-      - name: Build release APK
+      - name: Compile WaysGram Java sources
         run: |
+          set -o pipefail
           chmod +x gradlew
           ./gradlew --no-daemon --stacktrace --max-workers=2 \
             -Dorg.gradle.jvmargs="-Xmx5g -XX:MaxMetaspaceSize=1g -Dfile.encoding=UTF-8" \
-            :TMessagesProj_App:assembleAfatRelease
+            :TMessagesProj_App:compileAfatReleaseJavaWithJavac 2>&1 | tee /tmp/javac.log
+
+      - name: Build release APK
+        run: |
+          set -o pipefail
+          chmod +x gradlew
+          ./gradlew --no-daemon --stacktrace --max-workers=2 \
+            -Dorg.gradle.jvmargs="-Xmx5g -XX:MaxMetaspaceSize=1g -Dfile.encoding=UTF-8" \
+            :TMessagesProj_App:assembleAfatRelease 2>&1 | tee /tmp/build.log
+
+      - name: Report compile errors on the pull request
+        if: failure()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -uo pipefail
+          file=/tmp/javac.log
+          if [ ! -s "$file" ]; then
+            file=/tmp/build.log
+          fi
+          {
+            echo "### Ошибки сборки: run ${{ github.run_number }}, commit ${GITHUB_SHA:0:7}"
+            echo '```'
+            if [ -s "$file" ]; then
+              grep -E "^e: |error: |FAILED|Execution failed|What went wrong|Caused by" "$file" | head -40
+              echo '...'
+              tail -n 60 "$file"
+            else
+              echo "no gradle output captured"
+            fi
+            echo '```'
+          } > /tmp/report.md
+          number="$(gh pr list --head "${GITHUB_REF_NAME}" --json number --jq '.[0].number' 2>/dev/null || true)"
+          if [ -n "${number:-}" ] && [ "$number" != "null" ]; then
+            gh pr comment "$number" --body-file /tmp/report.md || true
+          fi
+
+      - name: Upload build logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-logs-${{ github.run_number }}
+          path: |
+            /tmp/javac.log
+            /tmp/build.log
+          if-no-files-found: ignore
+          retention-days: 7
 
       - name: Verify APK
         shell: bash
@@ -267,6 +302,11 @@ jobs:
           fi
 
           "$BUILD_TOOLS/apksigner" verify --verbose --print-certs "$APK"
+          # An APK is a zip: a corrupted archive must fail here, not on the phone with
+          # "invalid stored block lengths".
+          unzip -tq "$APK"
+          sha256sum "$APK"
+          stat -c '%s bytes' "$APK"
           printf '%s\\n' "$BADGING" | grep -E "^(package:|application-label:|sdkVersion:|targetSdkVersion:)"
 
       - name: Upload APK artifact
@@ -276,5 +316,35 @@ jobs:
           path: TMessagesProj_App/build/outputs/apk/afat/release/app.apk
           if-no-files-found: error
           retention-days: 14
+
+      # A release asset is served with range requests, so a dropped download can be resumed,
+      # and the size and sha256 sit next to the APK. That is the link users should install from.
+      - name: Publish APK as a release asset
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          APK="TMessagesProj_App/build/outputs/apk/afat/release/app.apk"
+          TAG="apk-latest"
+          mkdir -p release
+          cp "$APK" release/WaysGram.apk
+          ( cd release && sha256sum WaysGram.apk > WaysGram.apk.sha256 )
+          SIZE="$(stat -c '%s' release/WaysGram.apk)"
+          SHA="$(cut -d' ' -f1 release/WaysGram.apk.sha256)"
+          gh release delete "$TAG" --repo "$GITHUB_REPOSITORY" --yes --cleanup-tag || true
+          gh release create "$TAG" release/WaysGram.apk release/WaysGram.apk.sha256 \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "WaysGram APK — build $GITHUB_RUN_NUMBER" \
+            --prerelease \
+            --notes "APK of build $GITHUB_RUN_NUMBER (commit $GITHUB_SHA).
+
+          Size: $SIZE bytes
+          SHA-256: $SHA
+
+          Download: https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG/WaysGram.apk
+
+          This link supports resuming. Check the size and run \`sha256sum WaysGram.apk\`:
+          a different size means a dropped download, not a broken APK."
 
 # Trigger a fresh build after Firebase configuration was added.

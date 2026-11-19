@@ -1,0 +1,153 @@
+name: AuthBot
+
+# The AuthBot lives in ./authbot inside the WaysGram-New monorepo, so every path filter here
+# is prefixed with that folder. The Android build has its own workflow (build-apk.yml) and
+# ignores authbot/**.
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "authbot/**"
+      - "bot.py"
+      - "requirements.txt"
+      - "Procfile"
+      - "runtime.txt"
+      - ".github/workflows/authbot.yml"
+  pull_request:
+    paths:
+      - "authbot/**"
+      - "bot.py"
+      - "requirements.txt"
+      - "Procfile"
+      - "runtime.txt"
+      - ".github/workflows/authbot.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Unit tests (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12"]
+    defaults:
+      run:
+        working-directory: authbot
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: authbot/requirements.txt
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt pytest
+      - name: Check Termux launcher syntax
+        run: bash -n scripts/run-termux.sh
+      - name: Compile Python files
+        run: python -m compileall -q bot.py messenger_api.py tests
+      - name: Run tests
+        run: python -m pytest -q
+
+  entrypoint:
+    name: Root entry point (authbot/ in this repository)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: authbot/requirements.txt
+      - name: Verify the entry point without installing anything
+        run: python bot.py --check > entry.json
+      - name: Check the reported path
+        run: |
+          python - <<'PY'
+          import json
+          import os
+
+          data = json.load(open("entry.json", encoding="utf-8"))
+          print(json.dumps(data, ensure_ascii=False, indent=2))
+          assert os.path.isfile(data["entry"]), data["entry"]
+          assert os.path.isfile(os.path.join(data["source"], "messenger_api.py"))
+          print("local entry point ok")
+          PY
+
+  launcher:
+    name: Launcher pulls authbot/ from this repository
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Pull authbot/ through the GitHub API
+        env:
+          WAYSGRAM_REF: ${{ github.head_ref || github.ref_name }}
+          WAYSGRAM_HOME: ${{ runner.temp }}/waysgram-cache
+          # Unauthenticated GitHub API calls are rate limited per runner IP, which made the
+          # "second start comes from the cache" check fail whenever the limit was hit.
+          AUTHBOT_GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: python deploy/authbot-bridge/bot.py --check > launcher.json
+      - name: Verify what the launcher unpacked
+        run: |
+          python - <<'PY'
+          import json
+          import os
+
+          data = json.load(open("launcher.json", encoding="utf-8"))
+          print(json.dumps(data, ensure_ascii=False, indent=2))
+          assert data["subdir"] == "authbot"
+          assert os.path.isfile(data["entry"]), data["entry"]
+          assert os.path.basename(os.path.dirname(data["entry"])) == "authbot"
+          assert os.path.isfile(os.path.join(os.path.dirname(data["entry"]), "messenger_api.py"))
+          print("launcher pull ok")
+          PY
+      - name: Second start must come from the cache
+        env:
+          WAYSGRAM_REF: ${{ github.head_ref || github.ref_name }}
+          WAYSGRAM_HOME: ${{ runner.temp }}/waysgram-cache
+          AUTHBOT_GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          python deploy/authbot-bridge/bot.py --check 2>&1 | tee second.json
+          grep -q "using cached commit" second.json
+
+  container:
+    name: Docker image
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Validate Compose configuration
+        working-directory: authbot
+        run: |
+          cp .env.example .env
+          docker compose config --quiet
+          rm .env
+      - name: Build AuthBot image
+        run: docker build --pull --tag waysgram-authbot:test authbot
+      - name: Compile server modules inside the image
+        run: |
+          docker run --rm --entrypoint python waysgram-authbot:test \
+            -m compileall -q bot.py messenger_api.py otp_webhook.py tests
+      - name: Verify healthcheck configuration
+        run: |
+          docker image inspect waysgram-authbot:test \
+            --format '{{json .Config.Healthcheck}}' |
+            grep -q '127.0.0.1'

@@ -5,17 +5,26 @@
 ## Структура
 
 - `WaysGram-Android.zip.part1` — `part5`: пять частей исходного Android-архива.
-- `waysgram-android-overlay/src/main/java/`: Android-классы WaysGram.
-- `waysgram-android-overlay/scripts/`: интеграционные патчи и конфигурация сборки.
+- `scripts/prepare_android_dev_build.py`: конфигурация сборки (package ID, API origin, Firebase, GIPHY).
+- `authbot/`: весь код AuthBot (Python, aiogram + FastAPI) — единственный источник правды.
+- `bot.py`, `requirements.txt`, `Procfile`, `runtime.txt`: точка входа и метаданные хостинга, если
+  панель смотрит прямо на этот репозиторий.
+- `deploy/authbot-bridge/bot.py`: лаунчер для репозитория
+  [WaysGram-AuthBot](https://github.com/WeteroScript/WaysGram-AuthBot) — он подтягивает только
+  `authbot/**` из этого репозитория и запускает бота, поэтому в панели BotHost репозиторий остаётся
+  маленьким, а код правится здесь.
 - `.github/workflows/build-apk.yml`: восстановление проекта, наложение WaysGram-кода и сборка APK.
+- `.github/workflows/authbot.yml`: тесты AuthBot и проверка загрузки кода бота.
 
-Исходный Gradle-проект не хранится распакованными файлами в корне Git. Workflow объединяет части архива в `WaysGram-Android.zip`, распаковывает каталог `WaysGram-Android/` во временную рабочую директорию, затем копирует туда локальный overlay из этого репозитория.
+Подробности — [`docs/authbot-hosting.md`](docs/authbot-hosting.md).
 
-## WaysGram Android overlay
+Исходный Gradle-проект не хранится распакованными файлами в корне Git. **Части архива — единственный источник правды:** WaysGram-код лежит прямо внутри `WaysGram-Android.zip.part1…part5`, поэтому правки вносятся в архив (распаковать → поправить → склеить части), а не наложением патчей поверх при сборке. Workflow только восстанавливает архив и запускает Gradle.
 
-Overlay перенесён из [WaysGram-source](https://github.com/WeteroScript/WaysGram-source), revision `ce8c1ce2db4832c6d1a29947ad64d9320927d53d`, и хранится в этом репозитории независимо от исходного.
+## WaysGram Android-код внутри архива
 
-Он содержит:
+WaysGram-код перенесён из [WaysGram-source](https://github.com/WeteroScript/WaysGram-source), revision `ce8c1ce2db4832c6d1a29947ad64d9320927d53d`, и теперь лежит внутри архива: пакет `org.telegram.messenger.waysgram`, а также правки нативных классов Telegram (`LaunchActivity`, `SettingsActivity`, `ProfileGiftsContainer`, `StarGiftSheet`, `GiftSheet` и других).
+
+Архив содержит:
 - отдельный WaysGram-вход, сессию и REST-клиент;
 - домашний экран и собственный инвентарь подарков;
 - публичные профили с карточками подарков, серийными номерами, уровнями и атрибутами;
@@ -51,7 +60,7 @@ Before sending a single video, WaysGram offers an optional trim dialog with star
 Workflow **Build Android APK** выполняет следующие действия:
 
 1. Восстанавливает Android-архив из пяти частей и проверяет его целостность.
-2. Копирует WaysGram overlay и применяет патчи входа в Settings и изоляции push/Firebase.
+2. Проверяет, что WaysGram-код уже присутствует в архиве, и настраивает окружение сборки.
 3. Получает Gradle-зависимости и устанавливает JDK 17, Android SDK 36, NDK 27.2.12479018 и CMake 3.22.1.
 4. Настраивает package ID `org.waysgram.messenger`, имя `WaysGram`, API origin и Firebase.
 5. Собирает ` :TMessagesProj_App:assembleAfatRelease ` и проверяет package ID и подпись APK.
@@ -63,4 +72,4 @@ Workflow **Build Android APK** выполняет следующие дейст�
 
 REST backend: [WaysGram-AuthBot](https://github.com/WeteroScript/WaysGram-AuthBot).
 
-Клиент использует Bearer-сессию WaysGram. Firebase-конфигурация и адрес API передаются через GitHub Actions secrets; секреты не хранятся в исходном Android overlay.
+Клиент использует Bearer-сессию WaysGram. Firebase-конфигурация и адрес API передаются через GitHub Actions secrets; секреты не хранятся в исходниках Android-клиента.
