@@ -5997,3 +5997,47 @@ def test_mtproto_sticker_proxy_serves_official_animation_for_a_stale_bot_row(api
         assert provider.animation_requests == ["5936013938331222567"]
 
     run(scenario())
+
+
+def test_labels_refresh_visibility_for_owner_and_viewer_after_edit_and_removal(api_env) -> None:
+    path, _auth_store, _fake_bot, app = api_env
+    add_account(api_env, 87901, "refresh_owner")
+    add_account(api_env, 87902, "refresh_viewer")
+    add_session(path, 87901, "refresh-owner-session")
+    add_session(path, 87902, "refresh-viewer-session")
+    with db_split.sqlite_connect(path) as db:
+        label_id = db.execute(
+            "INSERT INTO waysgram_labels(label_text,color,created_by,created_at) VALUES(?,?,?,?)",
+            ("Original", "#1769AA", 87901, 1_800_000_000),
+        ).lastrowid
+        db.execute(
+            "INSERT INTO waysgram_label_assignments(label_id,target_type,target_id,assigned_by,assigned_at) VALUES(?,?,?,?,?)",
+            (label_id, "account", 87901, 87901, 1_800_000_000),
+        )
+        db.commit()
+
+    async def scenario() -> None:
+        async with await client_for(app) as client:
+            async def check(expected):
+                for token in ("refresh-owner-session", "refresh-viewer-session"):
+                    headers = {"Authorization": f"Bearer {token}"}
+                    batch = await client.get("/api/labels?targets=account:87901", headers=headers)
+                    profile = await client.get("/api/users/87901", headers=headers)
+                    assert batch.status_code == profile.status_code == 200
+                    assert batch.json()["labels"]["account:87901"] == expected
+                    assert profile.json()["labels"] == expected
+                own = await client.get("/api/me", headers={"Authorization": "Bearer refresh-owner-session"})
+                assert own.status_code == 200
+                assert own.json()["labels"] == expected
+
+            await check([{"text": "Original", "color": "#1769AA"}])
+            with db_split.sqlite_connect(path) as db:
+                db.execute("UPDATE waysgram_labels SET label_text=?, color=? WHERE id=?", ("Changed", "#22C55E", label_id))
+                db.commit()
+            await check([{"text": "Changed", "color": "#22C55E"}])
+            with db_split.sqlite_connect(path) as db:
+                db.execute("DELETE FROM waysgram_label_assignments WHERE label_id=?", (label_id,))
+                db.commit()
+            await check([])
+
+    run(scenario())
