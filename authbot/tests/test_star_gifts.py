@@ -1996,8 +1996,8 @@ def test_upgrade_uses_the_official_telegram_pools(env) -> None:
     run(scenario())
 
 
-def test_upgrade_matches_telegram_models_by_position_when_names_are_localised(env) -> None:
-    """Telegram prints attribute names in its own language, the position is unambiguous."""
+def test_upgrade_rolls_inside_the_live_telegram_attribute_set(env) -> None:
+    """A complete set from Telegram is what the roll uses, so the animation travels with it."""
     path, app = env
     plush_pepe = "5936013938331222567"
 
@@ -2021,6 +2021,16 @@ def test_upgrade_matches_telegram_models_by_position_when_names_are_localised(en
                         (plush_pepe, kind, index, f"Локализованное имя {index}",
                          first_document + index),
                     )
+            for index, entry in enumerate(pool["backdrops"]):
+                db.execute(
+                    """INSERT INTO telegram_mtproto_gift_attributes
+                       (gift_id,kind,position,name,rarity,permille,document_id,dc_id,
+                        mime_type,size,center_color,edge_color,pattern_color,text_color,
+                        payload_json,is_available,fetched_at)
+                       VALUES(?,'backdrop',?,?,'',0,0,2,'',0,?,?,?,?,'{}',1,0)""",
+                    (plush_pepe, index, f"Фон {index}", int(entry[2]), int(entry[3]),
+                     int(entry[4]), int(entry[5])),
+                )
 
         await bot_module.set_telegram_gift_values(plush_pepe, price=25, supply=1)
         async with await client_for(app) as client:
@@ -2030,27 +2040,29 @@ def test_upgrade_matches_telegram_models_by_position_when_names_are_localised(en
             serial = bought.json()["gift"]["serial_number"]
             upgraded = await client.post(
                 f"/api/gifts/{serial}/upgrade",
-                headers={**headers(101), "Idempotency-Key": "wg-position-match-0001"},
+                headers={**headers(101), "Idempotency-Key": "wg-live-roll-0001"},
             )
             assert upgraded.status_code == 200
             payload = upgraded.json()
             traits = payload["traits"]
-            model_names = [entry[0] for entry in models]
-            pattern_names = [entry[0] for entry in patterns]
-            # The name is unknown to Telegram, so the document comes from the slot in the set.
-            assert traits["model"]["document_id"] == 7000 + model_names.index(traits["model"]["name"])
-            assert traits["pattern"]["document_id"] == 8000 + pattern_names.index(
-                traits["pattern"]["name"]
-            )
+            # Telegram localises attribute names: the roll happens inside its own set, so the
+            # name and the document always belong together.
+            assert traits["roll_source"] == "telegram"
+            assert traits["model"]["name"].startswith("Локализованное имя")
+            assert traits["model"]["document_id"] == 7000 + traits["model"]["position"]
+            assert traits["model"]["pool_size"] == len(models)
+            assert traits["pattern"]["name"].startswith("Локализованное имя")
+            assert traits["pattern"]["document_id"] == 8000 + traits["pattern"]["position"]
+            # Backdrops come from the same set: the card is painted with Telegram's colours.
+            assert traits["backdrop"]["name"].startswith("Фон ")
+            assert traits["backdrop"]["center_color"]
 
+            # The reels are built from the same set, so the winner is always among them.
             reveal = payload["roll_pool"]
             reveal_models = {entry[0]: entry for entry in reveal["models"]}
             rolled_model = reveal_models[traits["model"]["name"]]
             assert rolled_model[3] == traits["model"]["document_id"]
-            # Every reel slot is shaped [name, chance, rarity, document id].
             assert all(len(entry) == 4 for entry in reveal["models"])
-            assert all(len(entry) == 4 for entry in reveal["patterns"])
-            assert any(entry[3] for entry in reveal["models"])
             assert any(entry[3] for entry in reveal["patterns"])
 
             # The document survives in the stored traits, so the profile card can use it too.
@@ -2067,9 +2079,10 @@ def test_upgrade_matches_telegram_models_by_position_when_names_are_localised(en
 class AttributeRowsProvider:
     """Stands in for the MTProto catalog: writes Telegram's attribute rows on first use."""
 
-    def __init__(self, models: int, patterns: int) -> None:
+    def __init__(self, models: int, patterns: int, backdrops: int = 0) -> None:
         self.models = models
         self.patterns = patterns
+        self.backdrops = backdrops
         self.calls = 0
 
     async def attributes(self, database_path, gift_id, refresh: bool = False):
@@ -2096,6 +2109,24 @@ class AttributeRowsProvider:
                         "permille": 0,
                         "document_id": base + index,
                     })
+            for index in range(self.backdrops):
+                await db.execute(
+                    """INSERT INTO telegram_mtproto_gift_attributes
+                       (gift_id,kind,position,name,rarity,permille,document_id,dc_id,
+                        mime_type,size,center_color,edge_color,pattern_color,text_color,
+                        payload_json,is_available,fetched_at)
+                       VALUES(?,'backdrop',?,?,'',0,0,2,'',0,16777215,0,0,0,'{}',1,0)""",
+                    (gift_id, index, f"Локализованный фон {index}"),
+                )
+                rows.append({
+                    "kind": "backdrop",
+                    "position": index,
+                    "name": f"Локализованный фон {index}",
+                    "rarity": "",
+                    "permille": 0,
+                    "document_id": 0,
+                    "center_color": 16777215,
+                })
             await db.commit()
         return rows
 
@@ -2146,7 +2177,9 @@ def test_upgrade_fetches_telegram_attribute_documents_when_missing(env) -> None:
         import gift_upgrades
 
         _, pool = gift_upgrades.pool_for_gift(plush_pepe, None)
-        provider = AttributeRowsProvider(len(pool["models"]), len(pool["patterns"]))
+        provider = AttributeRowsProvider(
+            len(pool["models"]), len(pool["patterns"]), len(pool["backdrops"])
+        )
         provider_app = FastAPI()
         provider_app.include_router(
             build_messenger_router(
@@ -2171,12 +2204,12 @@ def test_upgrade_fetches_telegram_attribute_documents_when_missing(env) -> None:
             assert upgraded.status_code == 200
             traits = upgraded.json()["traits"]
             assert provider.calls >= 1
-            assert traits["model"]["document_id"] == (
-                9000 + [entry[0] for entry in pool["models"]].index(traits["model"]["name"])
-            )
-            assert traits["pattern"]["document_id"] == (
-                8000 + [entry[0] for entry in pool["patterns"]].index(traits["pattern"]["name"])
-            )
+            # The set is complete, so the roll happens inside Telegram's own rows and every
+            # winner carries the animation it was published with.
+            assert traits["roll_source"] == "telegram"
+            assert traits["model"]["name"].startswith("Локализованное model")
+            assert traits["model"]["document_id"] == 9000 + traits["model"]["position"]
+            assert traits["pattern"]["document_id"] == 8000 + traits["pattern"]["position"]
 
     run(scenario())
 
@@ -2234,6 +2267,104 @@ def test_inventory_restores_missing_attribute_documents(env) -> None:
             # The repair is stored, not recomputed on every read.
             again = (await client.get("/api/me/gifts", headers=headers(101))).json()["gifts"]
             assert again[0]["attributes"]["collectible_traits"] == repaired
+
+    run(scenario())
+
+
+def test_inventory_repairs_documents_by_position_when_names_are_localised(env) -> None:
+    """Old traits carry a pool name only: the slot inside Telegram's set restores the document."""
+    path, app = env
+    plush_pepe = "5936013938331222567"
+
+    async def scenario() -> None:
+        import gift_upgrades
+
+        _, pool = gift_upgrades.pool_for_gift(plush_pepe, None)
+        await bot_module.set_telegram_gift_values(plush_pepe, price=25, supply=1)
+        async with await client_for(app) as client:
+            bought = await client.post(
+                f"/api/telegram/gifts/{plush_pepe}/purchase", headers=headers(101), json={}
+            )
+            serial = bought.json()["gift"]["serial_number"]
+            upgraded = await client.post(
+                f"/api/gifts/{serial}/upgrade",
+                headers={**headers(101), "Idempotency-Key": "wg-position-repair-0001"},
+            )
+            assert upgraded.status_code == 200
+            rolled = upgraded.json()["traits"]
+            assert not int(rolled["model"].get("document_id") or 0)
+
+            # Telegram's rows arrive afterwards, in another language and in the same order.
+            with db_split.sqlite_connect(path) as db:
+                for kind, entries, base in (
+                    ("model", pool["models"], 4000),
+                    ("pattern", pool["patterns"], 5000),
+                ):
+                    for index, entry in enumerate(entries):
+                        db.execute(
+                            """INSERT INTO telegram_mtproto_gift_attributes
+                               (gift_id,kind,position,name,rarity,permille,document_id,dc_id,
+                                mime_type,size,payload_json,is_available,fetched_at)
+                               VALUES(?,?,?,?,'',0,?,2,'application/x-tgsticker',1024,'{}',1,0)""",
+                            (plush_pepe, kind, index, f"Имя {index}", base + index),
+                        )
+
+            inventory = (await client.get("/api/me/gifts", headers=headers(101))).json()["gifts"]
+            stored = next(item for item in inventory if item["serial_number"] == serial)
+            repaired = stored["attributes"]["collectible_traits"]
+            model_position = [entry[0] for entry in pool["models"]].index(repaired["model"]["name"])
+            pattern_position = [
+                entry[0] for entry in pool["patterns"]
+            ].index(repaired["pattern"]["name"])
+            assert repaired["model"]["document_id"] == 4000 + model_position
+            assert repaired["model"]["position"] == model_position
+            assert repaired["model"]["pool_size"] == len(pool["models"])
+            assert repaired["pattern"]["document_id"] == 5000 + pattern_position
+            # The name the gift was rolled with never changes during a repair.
+            assert repaired["model"]["name"] == rolled["model"]["name"]
+
+    run(scenario())
+
+
+def test_sample_only_catalog_still_shows_the_attribute_telegram_published(env) -> None:
+    """A sample of one model cannot be rolled, but its animation must not be lost either."""
+    path, app = env
+    plush_pepe = "5936013938331222567"
+
+    async def scenario() -> None:
+        import gift_upgrades
+
+        _, pool = gift_upgrades.pool_for_gift(plush_pepe, None)
+        provider = AttributeRowsProvider(1, 1)
+        provider_app = FastAPI()
+        provider_app.include_router(
+            build_messenger_router(
+                path,
+                bot_module.Store(path),
+                lambda: FakeBot(),
+                bot_module.account_is_banned,
+                mtproto_gift_provider=lambda: provider,
+                admin_id=ADMIN,
+            )
+        )
+        await bot_module.set_telegram_gift_values(plush_pepe, price=25, supply=1)
+        async with await client_for(provider_app) as client:
+            bought = await client.post(
+                f"/api/telegram/gifts/{plush_pepe}/purchase", headers=headers(101), json={}
+            )
+            serial = bought.json()["gift"]["serial_number"]
+            upgraded = await client.post(
+                f"/api/gifts/{serial}/upgrade",
+                headers={**headers(101), "Idempotency-Key": "wg-sample-only-0001"},
+            )
+            assert upgraded.status_code == 200
+            traits = upgraded.json()["traits"]
+            # One row per kind is not a set to roll inside, so the published pool still rolls.
+            assert traits["roll_source"] == "pool"
+            assert traits["model"]["document_id"] == 9000
+            assert traits["model"]["name"].startswith("Локализованное model")
+            assert traits["pattern"]["document_id"] == 8000
+            assert traits["model"]["name"] and traits["pattern"]["name"]
 
     run(scenario())
 

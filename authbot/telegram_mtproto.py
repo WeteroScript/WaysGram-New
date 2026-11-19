@@ -140,6 +140,16 @@ def _rarity_permille(attribute: Any) -> int:
     return max(0, value or 0)
 
 
+def _attribute_source(rows: list[dict[str, Any]], api: str) -> str:
+    """Whether the stored rows describe the whole set or only a sample of every kind."""
+    if not rows:
+        return "empty"
+    models = sum(1 for row in rows if row.get("kind") == "model")
+    patterns = sum(1 for row in rows if row.get("kind") == "pattern")
+    if api == "attributes" and (models > 1 or patterns > 1):
+        return "full"
+    return "sample"
+
 def _attribute_payloads(attributes: Any) -> list[dict[str, Any]]:
     """Flatten Telegram's upgrade attribute list into rows the API can store and serve."""
     rows: list[dict[str, Any]] = []
@@ -567,23 +577,32 @@ class TelegramMTProtoGiftCatalog:
 
     # ------------------------------------------------------- upgrade attributes
 
-    async def _request_upgrade_attributes(self, gift_id: int) -> list[Any]:
-        """Official upgrade attributes of one gift, with their real TGS/WebM documents."""
+    async def _request_upgrade_attributes(self, gift_id: int) -> tuple[list[Any], str]:
+        """Official upgrade attributes of one gift, with their real TGS/WebM documents.
+
+        The second value names the call that answered: ``attributes`` is the complete set,
+        ``preview`` is Telegram's sample of every kind (one model, one pattern, one
+        backdrop) and ``none`` means nothing came back.
+        """
         getter = getattr(functions.payments, "GetStarGiftUpgradeAttributesRequest", None)
         if getter is not None:
             try:
                 response = await self.client(getter(gift_id=gift_id))
                 attributes = _value(response, "attributes")
                 if attributes:
-                    return list(attributes)
+                    return list(attributes), "attributes"
             except Exception:
                 # Older Telegram layers do not expose the complete attribute set;
                 # the preview below still returns one sample of every kind.
                 pass
-        response = await self.client(
-            functions.payments.GetStarGiftUpgradePreviewRequest(gift_id=gift_id)
-        )
-        return list(_value(response, "sample_attributes") or [])
+        try:
+            response = await self.client(
+                functions.payments.GetStarGiftUpgradePreviewRequest(gift_id=gift_id)
+            )
+        except Exception:
+            return [], "none"
+        return list(_value(response, "sample_attributes") or []), "preview"
+
 
     def _keep_attribute_documents(self, gift_id: str, attributes: Any) -> None:
         documents: dict[int, Any] = {}
@@ -606,8 +625,9 @@ class TelegramMTProtoGiftCatalog:
             numeric_id = int(key)
         except (TypeError, ValueError):
             raise ValueError("Telegram gift id must be numeric") from None
-        attributes = await self._request_upgrade_attributes(numeric_id)
+        attributes, api = await self._request_upgrade_attributes(numeric_id)
         rows = _attribute_payloads(attributes)
+        source = _attribute_source(rows, api)
         now = int(time.time())
         columns = (
             "gift_id", "kind", "position", "name", "rarity", "permille", "document_id",
@@ -637,11 +657,12 @@ class TelegramMTProtoGiftCatalog:
                 )
             await db.execute(
                 """INSERT INTO telegram_mtproto_gift_attribute_sync
-                   (gift_id,attribute_count,fetched_at) VALUES(?,?,?)
+                   (gift_id,attribute_count,source,fetched_at) VALUES(?,?,?,?)
                    ON CONFLICT(gift_id) DO UPDATE SET
                        attribute_count=excluded.attribute_count,
+                       source=excluded.source,
                        fetched_at=excluded.fetched_at""",
-                (key, len(values), now),
+                (key, len(values), source, now),
             )
             await db.commit()
         self._keep_attribute_documents(key, attributes)
@@ -668,6 +689,46 @@ class TelegramMTProtoGiftCatalog:
             sync_row = await cur.fetchone()
         fetched_at = int(sync_row["fetched_at"] or 0) if sync_row is not None else 0
         return rows, fetched_at
+
+    async def attribute_sync_state(
+            self, database_path: Path | str | None, gift_id: str
+    ) -> dict[str, Any]:
+        """Diagnostics: how many attribute rows are stored and where they came from.
+
+        ``source`` is ``full`` only when Telegram published the whole model/pattern set;
+        ``sample`` means the catalog answered with one sample of every kind, which is the
+        reason behind a card that cannot show a model.
+        """
+        key = str(gift_id or "").strip()
+        database_path = database_path if database_path is not None else self._database_path
+        if not key or database_path is None:
+            return {}
+        try:
+            async with aiosqlite.connect(database_path) as db:
+                db.row_factory = aiosqlite.Row
+                cur = await db.execute(
+                    """SELECT attribute_count,source,fetched_at
+                       FROM telegram_mtproto_gift_attribute_sync WHERE gift_id=?""",
+                    (key,),
+                )
+                sync_row = await cur.fetchone()
+                cur = await db.execute(
+                    """SELECT kind,COUNT(*) AS total,
+                              SUM(CASE WHEN document_id>0 THEN 1 ELSE 0 END) AS with_document
+                       FROM telegram_mtproto_gift_attributes
+                       WHERE gift_id=? AND is_available=1 GROUP BY kind""",
+                    (key,),
+                )
+                kinds = {str(item["kind"]): dict(item) for item in await cur.fetchall()}
+        except Exception:  # noqa: BLE001 - diagnostics must never break a request
+            return {}
+        return {
+            "gift_id": key,
+            "source": str(sync_row["source"] or "") if sync_row is not None else "",
+            "attribute_count": int(sync_row["attribute_count"] or 0) if sync_row is not None else 0,
+            "fetched_at": int(sync_row["fetched_at"] or 0) if sync_row is not None else 0,
+            "kinds": kinds,
+        }
 
     async def attributes(
             self, database_path: Path | str | None, gift_id: str, refresh: bool = False

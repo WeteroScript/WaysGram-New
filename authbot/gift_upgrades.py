@@ -31,6 +31,11 @@ CLASS_WEIGHTS = {"uncommon": 10, "rare": 5, "epic": 2, "legendary": 1}
 #: From least to most rare; used to pick the rarity badge of the whole card.
 RARITY_ORDER = ("common", "uncommon", "rare", "epic", "legendary")
 
+#: A slot is rolled from Telegram's own attribute rows only when that set offers a real
+#: choice. ``payments.getStarGiftUpgradePreview`` answers with a single sample of every kind,
+#: which would make every upgrade of the same gift look identical.
+MIN_LIVE_ROWS = 2
+
 #: Used when a gift is not part of the official catalog (legacy WaysGram gifts).
 FALLBACK_POOL: dict[str, Any] = {
     "title": "",
@@ -87,9 +92,16 @@ def pool_for_gift(gift_id: Any, title: Any = None) -> tuple[str | None, dict[str
     return None, None
 
 
-def _slot_weights(entries: Iterable[list[Any]]) -> list[int]:
-    """Published permille values plus the leftover mass for class-only entries."""
+def _slot_weights(entries: Iterable[list[Any]], colored: bool = False) -> list[int]:
+    """Published permille values plus the leftover mass for class-only entries.
+
+    Backdrops are published as ``[name, chance, centre, edge, pattern, text]``: their chance
+    is a plain permille and must not be read as a rarity class, otherwise every backdrop of
+    the gift would be equally likely instead of following Telegram's own distribution.
+    """
     items = [entry for entry in entries if isinstance(entry, list) and entry]
+    if colored:
+        return [max(0, int(entry[1])) if len(entry) > 1 else 0 for entry in items]
     published = sum(int(entry[1]) for entry in items if len(entry) == 2)
     remaining = max(0, PERMILLE_TOTAL - published)
     flagged = [entry for entry in items if len(entry) > 2]
@@ -194,13 +206,95 @@ def _avoided_names(previous: Any) -> dict[str, str]:
     return result
 
 
+def _live_rows(live: Any, kind: str) -> list[dict[str, Any]]:
+    """Telegram's own rows of one slot, with a name and something to play."""
+    rows: list[dict[str, Any]] = []
+    source = live.get(kind) if isinstance(live, dict) else None
+    for row in source or []:
+        if not isinstance(row, dict):
+            continue
+        name = str(row.get("name") or "").strip()
+        if not name:
+            continue
+        # A model or a pattern without its animation cannot be drawn, so it is not a
+        # candidate; a backdrop only needs its colours.
+        if kind in ("model", "pattern") and not int(row.get("document_id") or 0):
+            continue
+        rows.append(row)
+    return rows
+
+
+def _live_weights(rows: list[dict[str, Any]]) -> list[int]:
+    """Published chances of Telegram's rows, with the leftover mass for class-only rows."""
+    published = sum(
+        int(row.get("permille") or 0) for row in rows if int(row.get("permille") or 0) > 0
+    )
+    remaining = max(0, PERMILLE_TOTAL - published)
+    flagged = [row for row in rows if int(row.get("permille") or 0) <= 0]
+    flagged_total = sum(CLASS_WEIGHTS.get(str(row.get("rarity") or ""), 1) for row in flagged)
+    weights: list[int] = []
+    for row in rows:
+        chance = int(row.get("permille") or 0)
+        if chance > 0:
+            weights.append(chance)
+        elif flagged_total > 0 and remaining > 0:
+            share = CLASS_WEIGHTS.get(str(row.get("rarity") or ""), 1)
+            weights.append(max(0, remaining * share // flagged_total))
+        else:
+            weights.append(0)
+    return weights
+
+
+def _pick_row(rows: list[dict[str, Any]], avoid: str = "") -> dict[str, Any]:
+    """Picks one of Telegram's rows, never repeating the ``avoid`` name."""
+    entries = [[str(row.get("name") or ""), int(row.get("permille") or 0)] for row in rows]
+    chosen = _pick(entries, _live_weights(rows), avoid)
+    return rows[entries.index(chosen)]
+
+
+def _live_traits(row: dict[str, Any], kind: str, pool_size: int) -> dict[str, Any]:
+    """Traits of one attribute taken from Telegram, including its animation."""
+    traits: dict[str, Any] = {
+        "name": str(row.get("name") or "").strip(),
+        "permille": int(row.get("permille") or 0),
+        "rarity": "common" if kind == "backdrop" else str(row.get("rarity") or "common"),
+    }
+    if kind == "backdrop":
+        for key in ("center_color", "edge_color", "pattern_color", "text_color"):
+            traits[key] = int(row.get(key) or 0)
+    document_id = int(row.get("document_id") or 0)
+    if document_id:
+        traits["document_id"] = document_id
+    position = row.get("position")
+    if position is not None:
+        traits["position"] = int(position)
+    traits["pool_size"] = int(pool_size)
+    return traits
+
+
+def _live_slot(live: Any, kind: str, avoid: str) -> dict[str, Any] | None:
+    """Rolls one slot from Telegram's own set, or ``None`` when that set is too small."""
+    rows = _live_rows(live, kind)
+    if len(rows) < MIN_LIVE_ROWS:
+        return None
+    return _live_traits(_pick_row(rows, avoid), kind, len(rows))
+
+
 def roll_traits(
-        pool: dict[str, Any], now: int, previous: dict[str, Any] | None = None
+        pool: dict[str, Any],
+        now: int,
+        previous: dict[str, Any] | None = None,
+        live: dict[str, list[dict[str, Any]]] | None = None,
 ) -> dict[str, Any]:
     """Rolls one trait set with the original Telegram chances.
 
     ``previous`` holds the traits the gift already had; every slot then avoids repeating
     them, so a repeated upgrade always changes model, pattern and backdrop colours.
+
+    ``live`` are Telegram's own attribute rows of the gift. When a slot has a real set there,
+    the roll happens inside it and the chosen row brings its animation document with it, so
+    the card can play the official model instead of depending on a name lookup later. The
+    static pool stays the source for gifts Telegram publishes only a sample for.
     """
     models = [entry for entry in pool.get("models") or [] if isinstance(entry, list) and entry]
     patterns = [entry for entry in pool.get("patterns") or [] if isinstance(entry, list) and entry]
@@ -213,17 +307,59 @@ def roll_traits(
         backdrops = FALLBACK_POOL["backdrops"]
 
     avoid = _avoided_names(previous)
-    model = _model_traits(_pick(models, _slot_weights(models), avoid["model"]))
-    pattern = _model_traits(_pick(patterns, _slot_weights(patterns), avoid["pattern"]))
-    backdrop = _backdrop_traits(_pick(backdrops, _slot_weights(backdrops), avoid["backdrop"]))
+    live_hits = {
+        "model": _live_slot(live, "model", avoid["model"]),
+        "pattern": _live_slot(live, "pattern", avoid["pattern"]),
+        "backdrop": _live_slot(live, "backdrop", avoid["backdrop"]),
+    }
+    model = live_hits["model"] or _model_traits(
+        _pick(models, _slot_weights(models), avoid["model"])
+    )
+    pattern = live_hits["pattern"] or _model_traits(
+        _pick(patterns, _slot_weights(patterns), avoid["pattern"])
+    )
+    backdrop = live_hits["backdrop"] or _backdrop_traits(
+        _pick(backdrops, _slot_weights(backdrops, colored=True), avoid["backdrop"])
+    )
+    used = sum(1 for hit in live_hits.values() if hit is not None)
     return {
         "version": TRAITS_VERSION,
         "rolled_at": int(now),
+        "roll_source": "telegram" if used == 3 else ("mixed" if used else "pool"),
         "model": model,
         "pattern": pattern,
         "backdrop": backdrop,
         "rarity": _rarest((model["rarity"], pattern["rarity"], backdrop["rarity"])),
     }
+
+
+def pool_from_rows(live: Any) -> dict[str, Any]:
+    """The pool shape used by the reveal, built from Telegram's own rows.
+
+    The reels must show the same names the roll produced: when the roll came from Telegram
+    the static JSON pool of the gift is not the set the winner belongs to.
+    """
+    def slot(kind: str, colored: bool) -> list[list[Any]]:
+        entries: list[list[Any]] = []
+        for row in _live_rows(live, kind):
+            entry: list[Any] = [str(row.get("name") or ""), int(row.get("permille") or 0)]
+            if colored:
+                entry += [
+                    int(row.get("center_color") or 0),
+                    int(row.get("edge_color") or 0),
+                    int(row.get("pattern_color") or 0),
+                    int(row.get("text_color") or 0),
+                ]
+            entries.append(entry)
+        return entries
+
+    result = {
+        "models": slot("model", False),
+        "patterns": slot("pattern", False),
+        "backdrops": slot("backdrop", True),
+    }
+    return {key: value for key, value in result.items() if value}
+
 
 
 def _reel(entries: list[list[Any]], winner: str, limit: int = 40) -> list[list[Any]]:

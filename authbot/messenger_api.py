@@ -12,6 +12,7 @@ import json
 import re
 import secrets
 import time
+import unicodedata
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from io import BytesIO
@@ -331,39 +332,118 @@ def _has_collectible_traits(attributes: Any) -> bool:
     return True
 
 
+#: Quotation marks Telegram and the catalog dump spell differently in attribute names.
+_APOSTROPHES = "\u2019\u2018\u02bc\u00b4`\u2032"
+_DASHES = "\u2010\u2011\u2012\u2013\u2014\u2015\u2212\u2043"
+
+
 def _normalise_attribute_name(value: Any) -> str:
-    """Attribute names are compared ignoring case and repeated spaces."""
-    return " ".join(str(value or "").split()).casefold()
+    """Attribute names are compared ignoring case, spacing and typographic variants.
+
+    Telegram publishes names like ``Eve’s Apple`` with a typographic apostrophe, while a
+    catalog dump may carry a plain one. Comparing the raw strings would drop the document of
+    the rolled model, so the name is folded before it is used as a key.
+    """
+    text = unicodedata.normalize("NFKC", str(value or ""))
+    for mark in _APOSTROPHES:
+        text = text.replace(mark, "'")
+    for mark in _DASHES:
+        text = text.replace(mark, "-")
+    text = text.replace("\u00a0", " ")
+    return " ".join(text.split()).casefold()
 
 
-async def _gift_attribute_documents(db: Any, gift_id: str) -> dict[str, list[dict[str, Any]]]:
-    """Telegram's model and pattern documents of one gift, in Telegram's own order."""
+async def _gift_attribute_rows(db: Any, gift_id: str) -> dict[str, list[dict[str, Any]]]:
+    """Telegram's attribute rows of one gift, grouped by kind and in Telegram's order."""
     gift_id = str(gift_id or "").strip()
     if not gift_id:
         return {}
     try:
         cur = await db.execute(
-            """SELECT kind,name,permille,position,document_id
+            """SELECT kind,position,name,rarity,permille,document_id,
+                      center_color,edge_color,pattern_color,text_color
                FROM telegram_mtproto_gift_attributes
-               WHERE gift_id=? AND is_available=1 AND kind IN ('model','pattern')
+               WHERE gift_id=? AND is_available=1
                ORDER BY kind,position""",
             (gift_id,),
         )
-        rows = await cur.fetchall()
+        stored = await cur.fetchall()
     except Exception:  # noqa: BLE001 - trimmed-down schemas have no attribute table
         return {}
-    grouped: dict[str, list[dict[str, Any]]] = {"model": [], "pattern": []}
-    for row in rows:
-        document_id = int(row[4] or 0)
-        if not document_id:
+    grouped: dict[str, list[dict[str, Any]]] = {"model": [], "pattern": [], "backdrop": []}
+    for row in stored:
+        kind = str(row[0] or "")
+        if kind not in grouped:
             continue
-        grouped.setdefault(str(row[0]), []).append({
-            "name": str(row[1] or ""),
-            "permille": int(row[2] or 0),
-            "position": int(row[3] or 0),
-            "document_id": document_id,
+        grouped[kind].append({
+            "kind": kind,
+            "position": int(row[1] or 0),
+            "name": str(row[2] or ""),
+            "rarity": str(row[3] or ""),
+            "permille": int(row[4] or 0),
+            "document_id": int(row[5] or 0),
+            "center_color": int(row[6] or 0),
+            "edge_color": int(row[7] or 0),
+            "pattern_color": int(row[8] or 0),
+            "text_color": int(row[9] or 0),
         })
-    return grouped
+    return {kind: rows for kind, rows in grouped.items() if rows}
+
+
+async def _gift_attribute_documents(db: Any, gift_id: str) -> dict[str, list[dict[str, Any]]]:
+    """Telegram's model and pattern rows of one gift that carry an animation document."""
+    rows = await _gift_attribute_rows(db, gift_id)
+    documents: dict[str, list[dict[str, Any]]] = {}
+    for kind in ("model", "pattern"):
+        playable = [row for row in rows.get(kind) or [] if int(row["document_id"] or 0)]
+        if playable:
+            documents[kind] = playable
+    return documents
+
+
+def _match_attribute_row(
+    rows: list[dict[str, Any]],
+    name: Any,
+    permille: Any,
+    position: Any,
+    pool_size: Any,
+    fallback_position: int | None = None,
+    allow_fallback_position: bool = False,
+) -> dict[str, Any] | None:
+    """Finds the Telegram attribute row behind one rolled trait.
+
+    Names are what Telegram prints, so they are tried first. Telegram localises attribute
+    names, so the published chance is the next key, and the position inside the gift's set is
+    the last resort — either the position stored with the trait, or (only when both lists
+    have the same length, which means they describe exactly the same set) the position the
+    name has in the pool.
+    """
+    if not rows:
+        return None
+    wanted = _normalise_attribute_name(name)
+    if wanted:
+        for row in rows:
+            if _normalise_attribute_name(row["name"]) == wanted:
+                return row
+    try:
+        chance = int(permille or 0)
+        stored_position = int(position) if position is not None else -1
+        stored_pool_size = int(pool_size or 0)
+    except (TypeError, ValueError):
+        chance, stored_position, stored_pool_size = 0, -1, 0
+    if chance > 0:
+        same_chance = [row for row in rows if int(row["permille"]) == chance]
+        if len(same_chance) == 1:
+            return same_chance[0]
+    if stored_position >= 0 and stored_pool_size > 0 and stored_pool_size == len(rows):
+        for row in rows:
+            if int(row["position"]) == stored_position:
+                return row
+    if allow_fallback_position and fallback_position is not None:
+        for row in rows:
+            if int(row["position"]) == int(fallback_position):
+                return row
+    return None
 
 
 def _match_attribute_document(
@@ -373,33 +453,11 @@ def _match_attribute_document(
     position: int | None,
     allow_position: bool,
 ) -> int:
-    """Finds the Telegram document of one attribute.
-
-    Names are what Telegram prints, so they are tried first. Telegram localises attribute
-    names, so the published chance is the next key, and the position inside the gift's set is
-    the last resort — it is only trusted when both lists have the same length, which means they
-    describe exactly the same set of attributes.
-    """
-    if not rows:
-        return 0
-    wanted = _normalise_attribute_name(name)
-    if wanted:
-        for row in rows:
-            if _normalise_attribute_name(row["name"]) == wanted:
-                return int(row["document_id"])
-    try:
-        chance = int(permille or 0)
-    except (TypeError, ValueError):
-        chance = 0
-    if chance > 0:
-        same_chance = [row for row in rows if int(row["permille"]) == chance]
-        if len(same_chance) == 1:
-            return int(same_chance[0]["document_id"])
-    if allow_position and position is not None:
-        for row in rows:
-            if int(row["position"]) == int(position):
-                return int(row["document_id"])
-    return 0
+    """Document id of one attribute row (kept for the reveal pool mapping)."""
+    row = _match_attribute_row(
+        rows, name, permille, None, None, position, allow_position
+    )
+    return int(row["document_id"]) if row is not None else 0
 
 
 async def _sync_gift_attribute_documents(
@@ -433,13 +491,16 @@ async def _sync_gift_attribute_documents(
 def _enrich_traits_documents(
     traits: dict[str, Any], pool: dict[str, Any], documents: dict[str, list[dict[str, Any]]]
 ) -> bool:
-    """Stores the Telegram document id inside the rolled traits of a collectible."""
+    """Stores Telegram's document id (and its slot) inside the rolled traits of a collectible.
+
+    The client needs more than the name to play the official animation: the document id is
+    what it downloads, and the position inside Telegram's set is the fallback it can use when
+    the catalog is only known by rows without ids.
+    """
     changed = False
     for kind, key in (("model", "models"), ("pattern", "patterns")):
         entry = traits.get(kind)
         if not isinstance(entry, dict):
-            continue
-        if int(entry.get("document_id") or 0):
             continue
         rows = documents.get(kind) or []
         if not rows:
@@ -451,15 +512,39 @@ def _enrich_traits_documents(
             if _normalise_attribute_name(item[0]) == wanted:
                 position = index
                 break
-        document_id = _match_attribute_document(
+        row = _match_attribute_row(
             rows,
             entry.get("name"),
             entry.get("permille"),
+            entry.get("position"),
+            entry.get("pool_size"),
             position,
-            allow_position=bool(entries) and len(entries) == len(rows),
+            allow_fallback_position=bool(entries) and len(entries) == len(rows),
         )
-        if document_id:
+        if row is None and len(rows) == 1:
+            # Telegram answered with a single sample of this kind, so the name that was rolled
+            # has no counterpart there. Adopting the sample keeps the card truthful — the name
+            # and the animation come from the same attribute — instead of drawing no model.
+            row = rows[0]
+            entry["name"] = str(row["name"] or "").strip() or entry.get("name")
+            entry["permille"] = int(row["permille"] or 0)
+        if row is None:
+            continue
+        document_id = int(row["document_id"] or 0)
+        if not document_id:
+            continue
+        if int(entry.get("document_id") or 0) != document_id:
             entry["document_id"] = document_id
+            changed = True
+        # The slot of the row inside Telegram's published set travels with the trait, so the
+        # client can fall back to it when only names were known at roll time.
+        if int(entry.get("position") if entry.get("position") is not None else -1) != int(
+            row["position"]
+        ):
+            entry["position"] = int(row["position"])
+            changed = True
+        if int(entry.get("pool_size") or 0) != len(rows):
+            entry["pool_size"] = len(rows)
             changed = True
     return changed
 
@@ -978,6 +1063,10 @@ async def init_messenger_storage(database_path: Path) -> None:
             CREATE TABLE IF NOT EXISTS telegram_mtproto_gift_attribute_sync (
                 gift_id TEXT PRIMARY KEY,
                 attribute_count INTEGER NOT NULL DEFAULT 0,
+                -- "full" when Telegram published the whole model/pattern/backdrop set,
+                -- "sample" when only one attribute of every kind was available, "empty"
+                -- when Telegram answered nothing at all.
+                source TEXT NOT NULL DEFAULT '',
                 fetched_at INTEGER NOT NULL
             );
             CREATE TABLE IF NOT EXISTS telegram_auction_gift_registry (
@@ -1234,6 +1323,20 @@ async def init_messenger_storage(database_path: Path) -> None:
                     "SET purchase_asset='grams',purchase_price=? WHERE id=?",
                     (price_grams, stored_gift_id),
                 )
+        # The attribute sync remembers whether Telegram published the whole attribute set or
+        # only a sample of every kind, so a degraded catalog is visible instead of silent.
+        try:
+            cur = await db.execute(
+                f"PRAGMA {db_split.SCHEMA}.table_info(telegram_mtproto_gift_attribute_sync)"
+            )
+            attribute_sync_columns = {str(row[1]) for row in await cur.fetchall()}
+            if attribute_sync_columns and "source" not in attribute_sync_columns:
+                await db.execute(
+                    f"ALTER TABLE {db_split.SCHEMA}.telegram_mtproto_gift_attribute_sync "
+                    "ADD COLUMN source TEXT NOT NULL DEFAULT ''"
+                )
+        except Exception:  # noqa: BLE001 - an older database may not have the table at all
+            pass
         cur = await db.execute(f"PRAGMA {db_split.SCHEMA}.table_info(telegram_gift_catalog)")
         telegram_gift_columns = {str(row[1]) for row in await cur.fetchall()}
         if "sticker_thumbnail_file_id" not in telegram_gift_columns:
@@ -1967,6 +2070,33 @@ def build_messenger_router(
     telegram_gift_sync_lock = asyncio.Lock()
     fcm_access_token_cache: dict[str, Any] = {}
     fcm_access_token_lock = asyncio.Lock()
+    pending_attribute_syncs: set[str] = set()
+
+    def schedule_attribute_sync(gift_id: str) -> None:
+        """Asks Telegram for a gift's attribute set without blocking the current request.
+
+        An inventory read must answer immediately, but a gift upgraded before its attribute
+        set was known has no model to draw. Fetching the set in the background fills the
+        document ids in, and the next read of the inventory repairs the stored traits.
+        """
+        key = str(gift_id or "").strip()
+        provider = mtproto_gift_provider() if mtproto_gift_provider else None
+        if provider is None or not key.isdigit() or key in pending_attribute_syncs:
+            return
+        pending_attribute_syncs.add(key)
+
+        async def run() -> None:
+            try:
+                await provider.attributes(db_path(), key)
+            except Exception:  # noqa: BLE001 - a degraded catalog must not break the inventory
+                LOGGER.warning("gift attribute sync failed for %s", key, exc_info=True)
+            finally:
+                pending_attribute_syncs.discard(key)
+
+        try:
+            asyncio.create_task(run())
+        except RuntimeError:
+            pending_attribute_syncs.discard(key)
 
     async def get_fcm_access_token(credentials: dict[str, Any]) -> tuple[str, str]:
         project_id = str(credentials["project_id"]).strip()
@@ -3619,23 +3749,26 @@ def build_messenger_router(
                     for key in ("model", "pattern")
                 ):
                     documents = await _gift_attribute_documents(gift_db, gift_id)
-                    if documents:
-                        _, pool = _collectible_trait_pool(
-                            gift_id,
-                            telegram_gift.get("title") if telegram_gift else item.get("gift_name"),
-                        )
-                        if _enrich_traits_documents(collectible, pool, documents):
-                            await gift_db.execute(
-                                "UPDATE user_gifts SET attributes_json=? WHERE id=?",
-                                (
-                                    json.dumps(
-                                        item["attributes"], ensure_ascii=False,
-                                        separators=(",", ":"),
-                                    ),
-                                    int(item.get("id") or 0),
+                    if not documents:
+                        # Telegram was never asked about this gift (it was upgraded before the
+                        # catalog reached this server): the answer is fetched for the next read.
+                        schedule_attribute_sync(gift_id)
+                    _, pool = _collectible_trait_pool(
+                        gift_id,
+                        telegram_gift.get("title") if telegram_gift else item.get("gift_name"),
+                    )
+                    if _enrich_traits_documents(collectible, pool, documents):
+                        await gift_db.execute(
+                            "UPDATE user_gifts SET attributes_json=? WHERE id=?",
+                            (
+                                json.dumps(
+                                    item["attributes"], ensure_ascii=False,
+                                    separators=(",", ":"),
                                 ),
-                            )
-                            await gift_db.commit()
+                                int(item.get("id") or 0),
+                            ),
+                        )
+                        await gift_db.commit()
                 if telegram_gift and str(telegram_gift.get("title") or "").strip():
                     item["gift_name"] = str(telegram_gift["title"]).strip()
                 item["gift_emoji"] = (
@@ -5186,13 +5319,23 @@ def build_messenger_router(
                 backdrops.append(item)
         if not models and not patterns and not backdrops:
             raise HTTPException(status_code=404, detail="У подарка нет атрибутов улучшения")
-        return {
+        payload: dict[str, Any] = {
             "gift_id": key,
             "models": models,
             "patterns": patterns,
             "backdrops": backdrops,
             "count": len(models) + len(patterns) + len(backdrops),
         }
+        # "full" means Telegram published the whole set, "sample" means one attribute of
+        # every kind: the client and the admin panel can tell a degraded catalog apart from
+        # a gift that really has a single model.
+        sync_state = getattr(provider, "attribute_sync_state", None)
+        if callable(sync_state):
+            try:
+                payload["sync"] = await sync_state(db_path(), key)
+            except Exception:  # noqa: BLE001 - diagnostics are optional
+                payload["sync"] = {}
+        return payload
 
     @router.get("/api/telegram/gifts/{gift_id}/attributes/{document_id}")
     async def telegram_gift_attribute_document(
@@ -6323,21 +6466,38 @@ def build_messenger_router(
             # rolled values are excluded from the candidates, so the change is guaranteed
             # whenever the official pool of the gift has an alternative.
             previous_traits = gift_upgrades.traits_of(attributes)
+            # Telegram publishes every model and pattern as its own sticker document, and the
+            # roll happens inside that set when it is complete: the winner then brings its
+            # animation with it, exactly like the official client receives it from the server.
+            # A sample of one attribute per kind, or a WaysGram-only gift, still rolls from the
+            # published JSON pools.
+            attribute_rows = await _gift_attribute_rows(
+                db, str(gift["telegram_gift_id"] or "")
+            )
             attributes["collectible_traits"] = gift_upgrades.roll_traits(
                 gift_pool,
                 now,
                 previous_traits if gift_upgrades.is_current_traits(previous_traits) else None,
+                live=attribute_rows or None,
             )
             traits = gift_upgrades.traits_of(attributes) or {}
-            # Telegram publishes every model and pattern as a sticker document. Its id is
-            # stored with the traits (name, then chance, then position in the set), so the
-            # client can play the official animation instead of matching by name at runtime.
-            # A WaysGram-only gift has no Telegram attribute set: the traits stay exactly as
-            # rolled from the fallback pool and the client draws its own artwork.
-            attribute_documents = await _gift_attribute_documents(
-                db, str(gift["telegram_gift_id"] or "")
-            )
+            # Whatever the roll could not resolve (older rows without ids, localised names)
+            # is matched once more against the stored set: name, then chance, then position.
+            # A WaysGram-only gift has no Telegram attribute set, so its traits stay as rolled
+            # from the fallback pool.
+            attribute_documents = {
+                kind: rows
+                for kind, rows in attribute_rows.items()
+                if kind in ("model", "pattern") and any(int(row["document_id"] or 0) for row in rows)
+            }
             _enrich_traits_documents(traits, gift_pool, attribute_documents)
+            # The reels of the reveal must name the same set the roll came from.
+            live_pool = gift_upgrades.pool_from_rows(attribute_rows)
+            reveal_base = (
+                live_pool
+                if traits.get("roll_source") == "telegram" and live_pool
+                else gift_pool
+            )
             unique_num = await _assign_unique_number(
                 db,
                 serial,
@@ -6408,9 +6568,9 @@ def build_messenger_router(
                 # Candidate names and colours the client scrolls through while the
                 # upgrade animation runs; its last frame is the rolled result.
                 "roll_pool": gift_upgrades.reveal_pool(
-                    gift_pool,
+                    reveal_base,
                     traits,
-                    _reveal_pool_documents(gift_pool, attribute_documents),
+                    _reveal_pool_documents(reveal_base, attribute_documents),
                 ),
             }
             await idempotency_store(db, uid, scope, descriptor, result, now)
