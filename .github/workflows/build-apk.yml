@@ -57,33 +57,8 @@ jobs:
           test -f gradlew
           test -f settings.gradle
           test -f TMessagesProj_App/build.gradle
-
-      - name: Apply Java type compatibility fix
-        shell: bash
-        run: |
-          set -euo pipefail
-          python3 - <<'PY'
-          from pathlib import Path
-          path = Path("TMessagesProj/src/main/java/org/telegram/tgnet/WaysGramMapper.java")
-          source = path.read_text()
-          old = "message.id = id;"
-          new = "message.id = Math.toIntExact(id);"
-          if source.count(old) != 1:
-              raise SystemExit("Expected exactly one WaysGramMapper assignment to patch")
-          path.write_text(source.replace(old, new, 1))
-          PY
-          grep -Fq 'message.id = Math.toIntExact(id);' TMessagesProj/src/main/java/org/telegram/tgnet/WaysGramMapper.java
-
-      - name: Import WaysGram Android overlay and gift integration
-        shell: bash
-        run: |
-          set -euo pipefail
-          OVERLAY="$GITHUB_WORKSPACE/waysgram-android-overlay"
-          test -d "$OVERLAY/src/main/java/org/telegram/messenger/waysgram"
-          test -s "$OVERLAY/scripts/apply-android-patches.py"
-          test -s "$OVERLAY/scripts/prepare_android_dev_build.py"
-          rsync -a "$OVERLAY/src/main/java/" "$GITHUB_WORKSPACE/TMessagesProj/src/main/java/"
-          python3 "$OVERLAY/scripts/apply-android-patches.py" --android-root "$GITHUB_WORKSPACE"
+          test -f TMessagesProj/src/main/java/org/telegram/messenger/waysgram/WaysGramGiftSell.java
+          test -f TMessagesProj/src/main/java/org/telegram/messenger/waysgram/WaysGramProfileGiftsController.java
 
       - name: Fetch dependencies listed in the archive .gitmodules
         shell: bash
@@ -235,7 +210,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          python3 "$GITHUB_WORKSPACE/waysgram-android-overlay/scripts/prepare_android_dev_build.py" --android-root "$GITHUB_WORKSPACE"
+          python3 "$GITHUB_WORKSPACE/scripts/prepare_android_dev_build.py" --android-root "$GITHUB_WORKSPACE"
           grep -Fq "com.google.mlkit:language-id:17.0.6" TMessagesProj/build.gradle
           grep -Fq "com.google.mlkit:translate:17.0.3" TMessagesProj/build.gradle
           python3 - <<'PY'

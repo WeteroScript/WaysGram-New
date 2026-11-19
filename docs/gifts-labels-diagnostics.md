@@ -3,8 +3,8 @@
 Разбор по жалобам со скриншотов (Buy a Gift · Algorithm Cup #9 · Algorithm Cup #6).
 Для каждого пункта: симптом → корневая причина (файл:строка) → что правим → уверенность.
 
-Файлы overlay: `waysgram-android-overlay/src/main/java/org/telegram/messenger/waysgram/`
-Патчи нативного Telegram: `waysgram-android-overlay/scripts/apply-android-patches.py`
+Файлы WaysGram: `org/telegram/messenger/waysgram/` внутри архива `WaysGram-Android.zip.part*`
+Правки нативных классов Telegram: там же, в архиве (накладываются при правке частей, без патч-скрипта)
 Сервер: `authbot/messenger_api.py`, `authbot/gift_upgrades.py`, `authbot/bot.py`
 
 ---
