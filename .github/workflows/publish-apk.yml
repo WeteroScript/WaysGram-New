@@ -1,0 +1,104 @@
+name: Publish APK release
+
+# Artifacts are served from Azure blob storage and cannot be resumed: a dropped connection
+# leaves a truncated zip, which then fails to open with "invalid stored block lengths".
+# A release asset is served by objects.githubusercontent.com, supports range requests
+# (resume) and keeps its size and sha256 next to it.
+on:
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: "Build run id to publish (empty = latest successful Build Android APK)"
+        required: false
+        default: ""
+      tag:
+        description: "Release tag (the download link uses it)"
+        required: false
+        default: "apk-latest"
+  workflow_run:
+    workflows: ["Build Android APK"]
+    types: [completed]
+
+permissions:
+  contents: write
+  actions: read
+
+concurrency:
+  group: waysgram-apk-release
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Resolve the build run and the release tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "workflow_run" ]; then
+            RUN_ID="${{ github.event.workflow_run.id }}"
+            TAG="apk-run-${RUN_ID}"
+          else
+            RUN_ID="${{ inputs.run_id }}"
+            TAG="${{ inputs.tag }}"
+            if [ -z "$RUN_ID" ]; then
+              RUN_ID="$(gh run list --repo "${{ github.repository }}" --workflow=build-apk.yml \
+                --status=success --limit=1 --json databaseId -q '.[0].databaseId')"
+            fi
+            if [ -z "$TAG" ]; then TAG="apk-latest"; fi
+          fi
+          echo "RUN_ID=$RUN_ID" >> "$GITHUB_ENV"
+          echo "TAG=$TAG" >> "$GITHUB_ENV"
+          echo "Publishing APK of run $RUN_ID as release '$TAG'"
+
+      - name: Download the APK artifact of that run
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh run download "$RUN_ID" --repo "${{ github.repository }}" \
+            --pattern 'WaysGram-New-APK-*' -D dist
+          find dist -type f -name '*.apk' -exec ls -l {} \;
+
+      - name: Check the APK archive is intact
+        run: |
+          set -euo pipefail
+          APK="$(find dist -type f -name '*.apk' | head -1)"
+          if [ -z "$APK" ]; then
+            echo "::error::No APK in the artifact"
+            exit 1
+          fi
+          # An APK is a zip: this fails loudly on a corrupted archive instead of on the device.
+          unzip -tq "$APK"
+          mkdir -p out
+          cp "$APK" out/WaysGram.apk
+          cd out
+          sha256sum WaysGram.apk > WaysGram.apk.sha256
+          cat WaysGram.apk.sha256
+          ls -l WaysGram.apk
+
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          SHA="$(cut -d' ' -f1 out/WaysGram.apk.sha256)"
+          SIZE="$(stat -c '%s' out/WaysGram.apk)"
+          # The previous asset is replaced, so the tag always points at one download.
+          gh release delete "$TAG" --repo "${{ github.repository }}" --yes --cleanup-tag || true
+          gh release create "$TAG" out/WaysGram.apk out/WaysGram.apk.sha256 \
+            --repo "${{ github.repository }}" \
+            --title "WaysGram APK — build $RUN_ID" \
+            --prerelease \
+            --notes "APK of build run $RUN_ID.
+
+          Size: $SIZE bytes
+          SHA-256: $SHA
+
+          Download: https://github.com/${{ github.repository }}/releases/download/$TAG/WaysGram.apk
+
+          This link supports resuming. Check the file size and the sha256 (\`sha256sum WaysGram.apk\`) before installing: a wrong size means a dropped download, not a broken APK."

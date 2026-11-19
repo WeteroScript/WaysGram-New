@@ -300,6 +300,11 @@ jobs:
           fi
 
           "$BUILD_TOOLS/apksigner" verify --verbose --print-certs "$APK"
+          # An APK is a zip: a corrupted archive must fail here, not on the phone with
+          # "invalid stored block lengths".
+          unzip -tq "$APK"
+          sha256sum "$APK"
+          stat -c '%s bytes' "$APK"
           printf '%s\\n' "$BADGING" | grep -E "^(package:|application-label:|sdkVersion:|targetSdkVersion:)"
 
       - name: Upload APK artifact
