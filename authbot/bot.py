@@ -478,6 +478,10 @@ class Store:
             await db.execute("DELETE FROM auth_codes WHERE number=?", (number,))
             await db.execute("DELETE FROM api_sessions WHERE telegram_id=?", (account_id,))
             await db.execute("DELETE FROM push_devices WHERE telegram_id=?", (account_id,))
+            # Do not deliver old pending notifications to a newly transferred account.
+            cur = await db.execute("SELECT 1 FROM messenger.sqlite_master WHERE type='table' AND name='push_outbox'")
+            if await cur.fetchone():
+                await db.execute("DELETE FROM push_outbox WHERE recipient_telegram_id=?", (account_id,))
             await db.commit()
             return account_id
 
@@ -1116,6 +1120,8 @@ async def init_admin_storage() -> None:
             to_telegram_id INTEGER NOT NULL,
             created_at INTEGER NOT NULL
         );
+        CREATE INDEX IF NOT EXISTS idx_gift_transactions_acquisition
+            ON gift_transactions(serial_number, to_telegram_id, id DESC);
         CREATE TABLE IF NOT EXISTS admin_logs (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             admin_id INTEGER NOT NULL,
@@ -1188,6 +1194,10 @@ async def init_admin_storage() -> None:
             await db.execute("ALTER TABLE accounts ADD COLUMN avatar_media_id TEXT NOT NULL DEFAULT ''")
         if "bio" not in account_columns:
             await db.execute("ALTER TABLE accounts ADD COLUMN bio TEXT NOT NULL DEFAULT ''")
+        cur = await db.execute("PRAGMA table_info(gift_transactions)")
+        gift_transaction_columns = {row[1] for row in await cur.fetchall()}
+        if "message_id" not in gift_transaction_columns:
+            await db.execute("ALTER TABLE gift_transactions ADD COLUMN message_id INTEGER")
         cur = await db.execute("PRAGMA table_info(user_gifts)")
         user_gift_columns = {str(row[1]) for row in await cur.fetchall()}
         if "telegram_gift_id" not in user_gift_columns:

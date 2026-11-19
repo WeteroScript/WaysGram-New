@@ -25,6 +25,7 @@ import db_split  # noqa: F401  # two-file database layout
 import gift_upgrades  # noqa: F401  # official Telegram upgrade pools
 import httpx
 from fastapi import APIRouter, Header, HTTPException, Query, Request, Response
+from fastapi.responses import FileResponse
 from PIL import Image, ImageOps, UnidentifiedImageError
 from pydantic import BaseModel, Field
 from cryptography.hazmat.primitives import hashes, serialization
@@ -483,7 +484,6 @@ async def _sync_gift_attribute_documents(
 
 def _enrich_traits_documents(
     traits: dict[str, Any], pool: dict[str, Any], documents: dict[str, list[dict[str, Any]]],
-    *, allow_sample_replacement: bool = False,
 ) -> bool:
     """Stores Telegram's document id (and its slot) inside the rolled traits of a collectible.
 
@@ -503,7 +503,7 @@ def _enrich_traits_documents(
         rows = documents.get(kind) or []
         if not rows:
             continue
-        if (len(rows) == 1 and not allow_sample_replacement
+        if (len(rows) == 1
                 and _normalise_attribute_name(entry.get("name"))
                 != _normalise_attribute_name(rows[0].get("name"))):
             # A sample cannot identify a different existing trait by chance or position.
@@ -524,12 +524,6 @@ def _enrich_traits_documents(
             position,
             allow_fallback_position=bool(entries) and len(entries) == len(rows),
         )
-        if row is None and len(rows) == 1 and allow_sample_replacement:
-            # Only a new roll may adopt the sample. Repairing an existing gift must not
-            # silently replace the model or pattern it already had.
-            row = rows[0]
-            entry["name"] = str(row["name"] or "").strip() or entry.get("name")
-            entry["permille"] = int(row["permille"] or 0)
         if row is None:
             continue
         document_id = int(row["document_id"] or 0)
@@ -643,6 +637,21 @@ async def init_messenger_storage(database_path: Path) -> None:
                 ON push_devices(telegram_id,updated_at DESC);
             CREATE INDEX IF NOT EXISTS idx_push_devices_session
                 ON push_devices(session_token_hash);
+            CREATE TABLE IF NOT EXISTS push_outbox (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                recipient_telegram_id INTEGER NOT NULL,
+                sender_telegram_id INTEGER NOT NULL,
+                title TEXT NOT NULL,
+                body TEXT NOT NULL,
+                data_json TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                next_attempt_at INTEGER NOT NULL,
+                attempts INTEGER NOT NULL DEFAULT 0,
+                lease_until INTEGER NOT NULL DEFAULT 0,
+                lease_token TEXT NOT NULL DEFAULT ''
+            );
+            CREATE INDEX IF NOT EXISTS idx_push_outbox_due
+                ON push_outbox(next_attempt_at,lease_until,id);
             CREATE TABLE IF NOT EXISTS media_assets (
                 id TEXT PRIMARY KEY,
                 owner_telegram_id INTEGER NOT NULL,
@@ -2073,6 +2082,8 @@ def build_messenger_router(
     fcm_access_token_cache: dict[str, Any] = {}
     fcm_access_token_lock = asyncio.Lock()
     pending_attribute_syncs: set[str] = set()
+    push_wakeup = asyncio.Event()
+    push_workers: list[asyncio.Task] = []
 
     def schedule_attribute_sync(gift_id: str) -> None:
         """Asks Telegram for a gift's attribute set without blocking the current request.
@@ -2139,14 +2150,14 @@ def build_messenger_router(
         title: str,
         body: str,
         data: dict[str, str],
-    ) -> None:
+    ) -> bool:
         """Send best-effort FCM notifications only to devices with a live WaysGram session."""
         credentials = _firebase_service_account()
         if not credentials:
-            return
+            return False
         recipients = sorted({int(value) for value in account_ids if int(value) > 0})
         if not recipients:
-            return
+            return True
         placeholders = ",".join("?" for _ in recipients)
         try:
             async with aiosqlite.connect(db_path()) as db:
@@ -2164,7 +2175,7 @@ def build_messenger_router(
                 )
                 devices = await cur.fetchall()
             if not devices:
-                return
+                return True
             project_id, access_token = await get_fcm_access_token(credentials)
             notification_data = {
                 "waysgram": "1",
@@ -2185,6 +2196,7 @@ def build_messenger_router(
                     "notification": {"channel_id": "waysgram_messages"},
                 },
             }
+            delivered = True
             async with httpx.AsyncClient(timeout=httpx.Timeout(8.0)) as client:
                 for token_hash, token_value in devices:
                     response = await client.post(
@@ -2200,10 +2212,100 @@ def build_messenger_router(
                             )
                             await db.commit()
                     elif response.status_code >= 400:
+                        delivered = False
+                        if response.status_code == 401:
+                            fcm_access_token_cache.clear()
                         LOGGER.warning("FCM delivery failed with HTTP %s", response.status_code)
+            return delivered
         except Exception as exc:
             LOGGER.warning("FCM delivery skipped after %s", type(exc).__name__)
+            return False
 
+
+    async def enqueue_push(db: Any, sender: int, recipient: int, title: str, body: str, data: dict[str, str], now: int) -> bool:
+        # Stored in the same transaction as the message, so a restart cannot lose it.
+        if not _firebase_service_account():
+            return False
+        await db.execute(
+            """INSERT INTO push_outbox(sender_telegram_id,recipient_telegram_id,title,body,data_json,created_at,next_attempt_at)
+               VALUES(?,?,?,?,?,?,?)""",
+            (sender, recipient, str(title)[:80], str(body)[:180],
+             json.dumps(data, ensure_ascii=False, separators=(",", ":")), now, now),
+        )
+        return True
+
+    async def push_worker() -> None:
+        while True:
+            try:
+                now = int(time.time())
+                lease = secrets.token_hex(16)
+                async with aiosqlite.connect(db_path()) as db:
+                    db.row_factory = aiosqlite.Row
+                    # A read-only idle check avoids taking a write lock every poll.
+                    cur = await db.execute(
+                        """SELECT id FROM push_outbox WHERE next_attempt_at<=? AND lease_until<=?
+                           ORDER BY id LIMIT 1""", (now, now),
+                    )
+                    candidate = await cur.fetchone()
+                    item = None
+                    if candidate is not None:
+                        await db.execute("BEGIN IMMEDIATE")
+                        cur = await db.execute(
+                            "SELECT * FROM push_outbox WHERE id=? AND next_attempt_at<=? AND lease_until<=?",
+                            (candidate["id"], now, now),
+                        )
+                        item = await cur.fetchone()
+                        if item is not None:
+                            await db.execute("UPDATE push_outbox SET lease_until=?,lease_token=? WHERE id=?",
+                                             (now + 60, lease, item["id"]))
+                        await db.commit()
+                if item is None:
+                    push_wakeup.clear()
+                    try:
+                        await asyncio.wait_for(push_wakeup.wait(), timeout=2.0)
+                    except asyncio.TimeoutError:
+                        pass
+                    continue
+                try:
+                    # Old pushes should not arrive days after the underlying message.
+                    if int(item["created_at"]) < int(time.time()) - 86400:
+                        success = True
+                    else:
+                        data = json.loads(item["data_json"])
+                        success = await asyncio.wait_for(deliver_push_notifications(
+                            [int(item["recipient_telegram_id"])], item["title"], item["body"], data
+                        ), timeout=45.0)
+                except Exception:
+                    success = False
+                async with aiosqlite.connect(db_path()) as db:
+                    if success:
+                        await db.execute("DELETE FROM push_outbox WHERE id=? AND lease_token=?", (item["id"], lease))
+                    else:
+                        attempts = int(item["attempts"]) + 1
+                        delay = min(300, 2 ** min(attempts, 8))
+                        await db.execute(
+                            """UPDATE push_outbox SET attempts=?,next_attempt_at=?,lease_until=0,lease_token=''
+                               WHERE id=? AND lease_token=?""",
+                            (attempts, int(time.time()) + delay, item["id"], lease),
+                        )
+                    await db.commit()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                LOGGER.warning("Push queue worker failed (%s)", type(exc).__name__)
+                await asyncio.sleep(2.0)
+
+    @router.on_event("startup")
+    async def start_push_workers() -> None:
+        if not push_workers:
+            push_workers.extend(asyncio.create_task(push_worker()) for _ in range(2))
+
+    @router.on_event("shutdown")
+    async def stop_push_workers() -> None:
+        for worker in push_workers:
+            worker.cancel()
+        await asyncio.gather(*push_workers, return_exceptions=True)
+        push_workers.clear()
 
     async def ensure_telegram_gifts_fresh() -> dict[str, Any]:
         now = int(time.time())
@@ -2583,6 +2685,9 @@ def build_messenger_router(
         storage_name = media_id + extension
         file_path = media_storage_dir() / storage_name
         try:
+            # File I/O can be slow; do it before acquiring SQLite's write lock.
+            # Quota checking and metadata insertion remain atomic inside the transaction.
+            await asyncio.to_thread(file_path.write_bytes, normalized)
             async with aiosqlite.connect(db_path()) as db:
                 db.row_factory = aiosqlite.Row
                 await db.execute("BEGIN IMMEDIATE")
@@ -2600,7 +2705,6 @@ def build_messenger_router(
                     await db.rollback()
                     raise HTTPException(status_code=429, detail="Слишком много загрузок. Повторите позже.")
 
-                await asyncio.to_thread(file_path.write_bytes, normalized)
                 await db.execute(
                     """INSERT INTO media_assets
                        (id,owner_telegram_id,storage_name,mime_type,size_bytes,created_at,original_name)
@@ -2685,6 +2789,9 @@ def build_messenger_router(
         storage_name = media_id + extension
         file_path = media_storage_dir() / storage_name
         try:
+            # File I/O can be slow; do it before acquiring SQLite's write lock.
+            # Quota checking and metadata insertion remain atomic inside the transaction.
+            await asyncio.to_thread(file_path.write_bytes, normalized)
             async with aiosqlite.connect(db_path()) as db:
                 db.row_factory = aiosqlite.Row
                 await db.execute("BEGIN IMMEDIATE")
@@ -2702,7 +2809,6 @@ def build_messenger_router(
                     await db.rollback()
                     raise HTTPException(status_code=429, detail="Слишком много загрузок. Повторите позже.")
 
-                await asyncio.to_thread(file_path.write_bytes, normalized)
                 await db.execute(
                     """INSERT INTO media_assets
                        (id,owner_telegram_id,storage_name,mime_type,size_bytes,created_at,original_name,media_kind)
@@ -3117,7 +3223,8 @@ def build_messenger_router(
 
         file_path = media_storage_dir() / str(media["storage_name"])
         try:
-            file_size = (await asyncio.to_thread(file_path.stat)).st_size
+            file_stat = await asyncio.to_thread(file_path.stat)
+            file_size = file_stat.st_size
         except FileNotFoundError as exc:
             raise HTTPException(status_code=404, detail="Файл изображения отсутствует на сервере") from exc
 
@@ -3188,14 +3295,9 @@ def build_messenger_router(
                 },
             )
 
-        try:
-            content = await asyncio.to_thread(file_path.read_bytes)
-        except FileNotFoundError as exc:
-            raise HTTPException(status_code=404, detail="Файл изображения отсутствует на сервере") from exc
-        return Response(
-            content=content,
-            media_type=mime_type,
-            headers=response_headers,
+        # Stream files rather than reading up to 25 MB into memory before the first byte.
+        return FileResponse(
+            file_path, media_type=mime_type, headers=response_headers, stat_result=file_stat,
         )
 
     def idempotency_descriptor(path: str, body: dict[str, Any], key: str | None):
@@ -3666,18 +3768,13 @@ def build_messenger_router(
             rows = await cur.fetchall()
         return {"transactions": [dict(row) for row in rows]}
 
-    @router.get("/api/me/gifts")
-    async def my_gifts(
-        authorization: str | None = Header(default=None),
-        limit: int | None = Query(default=None, ge=1, le=200),
-        offset: int = Query(default=0, ge=0),
-    ) -> dict[str, Any]:
-        user = await current_user(authorization)
+    async def gift_inventory(owner_id: int, limit: int | None, offset: int, *, public: bool) -> dict[str, Any]:
+        """The same paginated inventory for the owner and for a profile visitor."""
         async with aiosqlite.connect(db_path()) as db:
             db.row_factory = aiosqlite.Row
             cur = await db.execute(
                 "SELECT COUNT(*) FROM user_gifts WHERE owner_telegram_id=?",
-                (int(user["telegram_id"]),),
+                (owner_id,),
             )
             total = int((await cur.fetchone())[0] or 0)
             query = """SELECT id,serial_number,gift_id,telegram_gift_id,gift_name,gift_emoji,
@@ -3703,7 +3800,7 @@ def build_messenger_router(
                           (SELECT n.unique_num FROM gift_unique_numbers n
                             WHERE n.serial_number=user_gifts.serial_number) AS unique_num
                    FROM user_gifts WHERE owner_telegram_id=? ORDER BY id DESC"""
-            query_params: tuple[Any, ...] = (int(user["telegram_id"]),)
+            query_params: tuple[Any, ...] = (owner_id,)
             if limit is not None:
                 query += " LIMIT ? OFFSET ?"
                 query_params += (limit + 1, offset)
@@ -3721,6 +3818,38 @@ def build_messenger_router(
         metadata_by_id: dict[str, dict[str, Any] | None] = {}
         async with aiosqlite.connect(db_path()) as gift_db:
             gift_db.row_factory = aiosqlite.Row
+            # Batch provenance for the whole page instead of querying each gift and sender.
+            acquisitions: dict[str, Any] = {}
+            serials = [str(row["serial_number"]) for row in rows]
+            for start in range(0, len(serials), 400):
+                chunk = serials[start:start + 400]
+                placeholders = ",".join("?" for _ in chunk)
+                cur = await gift_db.execute(
+                    f"""SELECT t.serial_number,t.event_type,t.from_telegram_id,t.created_at,
+                               t.message_id,a.telegram_id AS sender_account_id,
+                               a.username,a.display_name,a.avatar_media_id,
+                               m.body,mg.attributes_json AS message_attributes
+                        FROM gift_transactions t
+                        JOIN (SELECT MAX(id) AS id FROM gift_transactions
+                              WHERE to_telegram_id=? AND serial_number IN ({placeholders})
+                                AND event_type IN ('purchase','transfer','chat_send','market_sale','auction_sale')
+                              GROUP BY serial_number) latest ON latest.id=t.id
+                        LEFT JOIN accounts a ON a.telegram_id=CASE WHEN t.event_type='purchase'
+                            THEN t.to_telegram_id ELSE t.from_telegram_id END AND a.is_banned=0
+                        LEFT JOIN message_gifts mg ON mg.serial_number=t.serial_number AND mg.message_id=COALESCE(
+                            t.message_id, CASE WHEN t.event_type IN ('purchase','chat_send') THEN
+                              (SELECT m2.id FROM message_gifts mg2 JOIN messages m2 ON m2.id=mg2.message_id
+                               WHERE mg2.serial_number=t.serial_number
+                                 AND m2.sender_telegram_id=CASE WHEN t.event_type='purchase'
+                                     THEN t.to_telegram_id ELSE t.from_telegram_id END
+                                 AND m2.recipient_telegram_id=t.to_telegram_id
+                                 AND m2.created_at=t.created_at ORDER BY m2.id DESC LIMIT 1)
+                            END)
+                        LEFT JOIN messages m ON m.id=mg.message_id""",
+                    (owner_id, *chunk),
+                )
+                acquisitions.update({str(row["serial_number"]): row for row in await cur.fetchall()})
+            documents_by_id: dict[str, dict[str, list[dict[str, Any]]]] = {}
             for row in rows:
                 item = dict(row)
                 raw_attributes = item.pop("attributes_json", "{}")
@@ -3750,7 +3879,9 @@ def build_messenger_router(
                     and not int((collectible.get(key) or {}).get("document_id") or 0)
                     for key in ("model", "pattern")
                 ):
-                    documents = await _gift_attribute_documents(gift_db, gift_id)
+                    if gift_id not in documents_by_id:
+                        documents_by_id[gift_id] = await _gift_attribute_documents(gift_db, gift_id)
+                    documents = documents_by_id[gift_id]
                     if not documents:
                         # Telegram was never asked about this gift (it was upgraded before the
                         # catalog reached this server): the answer is fetched for the next read.
@@ -3803,6 +3934,34 @@ def build_messenger_router(
                     if telegram_gift and item["sticker_available"]
                     else ""
                 )
+                item["owner_id"] = owner_id
+                # The current acquisition is authoritative even when an older chat message
+                # survived a subsequent transfer or resale. Never publish provenance on NFTs.
+                item["sender_id"] = None
+                item["gift_message"] = ""
+                if int(item.get("upgrade_level") or 0) == 0 and not collectible:
+                    acquisition = acquisitions.get(str(item["serial_number"]))
+                    sender = int(acquisition["from_telegram_id"] or 0) if acquisition else 0
+                    if acquisition and acquisition["event_type"] == "purchase":
+                        sender = owner_id
+                    if sender:
+                        try:
+                            message_attributes = json.loads(acquisition["message_attributes"] or "{}")
+                        except (TypeError, ValueError):
+                            message_attributes = {}
+                        hidden = isinstance(message_attributes, dict) and message_attributes.get("hide_name") is True
+                        if not hidden:
+                            item["sender_id"] = sender
+                            if acquisition["sender_account_id"]:
+                                item["sender"] = {
+                                    "id": int(acquisition["sender_account_id"]),
+                                    "username": acquisition["username"],
+                                    "display_name": acquisition["display_name"],
+                                    "avatar_media_id": acquisition["avatar_media_id"],
+                                }
+                        text = str(acquisition["body"] or "").strip()
+                        if text != "Подарок WaysGram":
+                            item["gift_message"] = text
                 purchase_asset = str(item.pop("purchase_asset", "") or "stars").strip()
                 if purchase_asset not in {"stars", "grams"}:
                     purchase_asset = "stars"
@@ -3820,6 +3979,10 @@ def build_messenger_router(
                     and not int(item.get("is_auctioned") or 0)
                     and int(time.time()) < sellable_until
                 )
+                if public:
+                    # Prices, refundable value and the sale window are owner-only data.
+                    for field in ("purchase_asset", "purchase_price", "sell_refund", "sell_refund_asset", "sellable_until", "sellable"):
+                        item.pop(field, None)
                 gifts.append(item)
         return {
             "gifts": gifts,
@@ -3829,6 +3992,29 @@ def build_messenger_router(
             "has_more": has_more,
             "next_offset": offset + len(gifts) if has_more else None,
         }
+
+    @router.get("/api/me/gifts")
+    async def my_gifts(
+        authorization: str | None = Header(default=None),
+        limit: int | None = Query(default=None, ge=1, le=200),
+        offset: int = Query(default=0, ge=0),
+    ) -> dict[str, Any]:
+        user = await current_user(authorization)
+        return await gift_inventory(int(user["telegram_id"]), limit, offset, public=False)
+
+    @router.get("/api/users/{user_id}/gifts")
+    async def user_gifts(
+        user_id: int,
+        authorization: str | None = Header(default=None),
+        limit: int | None = Query(default=None, ge=1, le=200),
+        offset: int = Query(default=0, ge=0),
+    ) -> dict[str, Any]:
+        viewer = await current_user(authorization)
+        async with aiosqlite.connect(db_path()) as db:
+            cur = await db.execute("SELECT 1 FROM accounts WHERE telegram_id=? AND is_banned=0", (user_id,))
+            if await cur.fetchone() is None:
+                raise HTTPException(status_code=404, detail="Пользователь не найден")
+        return await gift_inventory(user_id, limit, offset, public=user_id != int(viewer["telegram_id"]))
 
     @router.get("/api/me/gifts/transactions")
     async def my_gift_transactions(authorization: str | None = Header(default=None)) -> dict[str, Any]:
@@ -4090,25 +4276,6 @@ def build_messenger_router(
             if row is None:
                 raise HTTPException(status_code=404, detail="Пользователь не найден")
             cur = await db.execute(
-                """SELECT id,serial_number,gift_id,telegram_gift_id,gift_name,gift_emoji,
-                          telegram_gift_metadata_json,acquired_at,upgrade_level,attributes_json,
-                          EXISTS(SELECT 1 FROM gift_market_listings l
-                                 WHERE l.serial_number=user_gifts.serial_number
-                                   AND l.status='active') AS is_listed,
-                          EXISTS(SELECT 1 FROM gift_collectible_auctions a
-                                 WHERE a.serial_number=user_gifts.serial_number
-                                   AND a.status='active') AS is_auctioned,
-                          EXISTS(SELECT 1 FROM telegram_auction_gift_registry r
-                                 WHERE r.gift_id=user_gifts.telegram_gift_id) AS auction_eligible,
-                          (SELECT n.unique_num FROM gift_unique_numbers n
-                            WHERE n.serial_number=user_gifts.serial_number) AS unique_num
-                   FROM user_gifts
-                   WHERE owner_telegram_id=?
-                   ORDER BY id DESC""",
-                (user_id,),
-            )
-            gifts = [dict(item) for item in await cur.fetchall()]
-            cur = await db.execute(
                 """SELECT g.id,g.username,g.title,
                           (SELECT COUNT(*) FROM group_members count_members
                            WHERE count_members.group_id=g.id) AS member_count
@@ -4138,59 +4305,7 @@ def build_messenger_router(
         profile["labels"] = await entity_labels("account", user_id)
         for contact in common_contacts:
             contact["labels"] = await entity_labels("account", int(contact["id"]))
-        metadata_by_id: dict[str, dict[str, Any] | None] = {}
-        async with aiosqlite.connect(db_path()) as gift_db:
-            gift_db.row_factory = aiosqlite.Row
-            for gift in gifts:
-                try:
-                    gift["attributes"] = json.loads(gift.pop("attributes_json") or "{}")
-                except (TypeError, ValueError):
-                    gift["attributes"] = {}
-                raw_snapshot = gift.pop("telegram_gift_metadata_json", "{}")
-                try:
-                    snapshot = json.loads(raw_snapshot or "{}")
-                except (TypeError, ValueError):
-                    snapshot = {}
-                snapshot = snapshot if isinstance(snapshot, dict) else {}
-                gift_id = str(gift.get("telegram_gift_id") or "")
-                if gift_id not in metadata_by_id:
-                    metadata_by_id[gift_id] = await _telegram_gift_metadata(gift_db, gift_id)
-                telegram_gift = _merge_telegram_gift_metadata(metadata_by_id[gift_id], snapshot)
-                gift["telegram_gift"] = telegram_gift
-                if telegram_gift and str(telegram_gift.get("title") or "").strip():
-                    gift["gift_name"] = str(telegram_gift["title"]).strip()
-                gift["gift_emoji"] = (
-                    str(gift.get("gift_emoji") or "").strip()
-                    or (str(telegram_gift.get("emoji") or "").strip() if telegram_gift else "")
-                )
-                gift["sticker_available"] = bool(telegram_gift and telegram_gift.get("sticker_available"))
-                gift["sticker_url"] = (
-                    telegram_gift.get("sticker", {}).get("url", "")
-                    if telegram_gift and gift["sticker_available"]
-                    else ""
-                )
-                try:
-                    attributes_level = int(gift["attributes"].get("upgrade_level") or 0)
-                except (TypeError, ValueError):
-                    attributes_level = 0
-                try:
-                    stored_level = int(gift.get("upgrade_level") or 0)
-                except (TypeError, ValueError):
-                    stored_level = 0
-                gift["can_upgrade"] = bool(
-                    telegram_gift
-                    and telegram_gift["can_upgrade"]
-                    and max(attributes_level, stored_level) == 0
-                )
-                # WaysGram charges a fixed price for upgrades, so every screen shows the
-                # same amount instead of the Telegram catalog value.
-                gift["upgrade_star_count"] = UPGRADE_PRICE_STARS
-                if telegram_gift:
-                    gift["telegram_gift"] = {
-                        **telegram_gift,
-                        "upgrade_star_count": UPGRADE_PRICE_STARS,
-                    }
-        profile["gifts"] = gifts
+        profile["gifts"] = (await gift_inventory(user_id, None, 0, public=user_id != viewer_id))["gifts"]
         profile["common_groups"] = common_groups
         profile["common_contacts"] = common_contacts
         return profile
@@ -4419,6 +4534,13 @@ def build_messenger_router(
         recipient = payload.get("recipient_id")
         if recipient is not None and (isinstance(recipient, bool) or not isinstance(recipient, int) or recipient <= 0):
             raise HTTPException(status_code=400, detail="Некорректный получатель")
+        raw_message = payload.get("message", "")
+        if not isinstance(raw_message, str):
+            raise HTTPException(status_code=400, detail="Некорректное сообщение к подарку")
+        caption = _message_body(raw_message.strip()) if raw_message.strip() else ""
+        hide_name = payload.get("hide_name", False)
+        if not isinstance(hide_name, bool):
+            raise HTTPException(status_code=400, detail="Некорректная настройка анонимности")
         key = (idempotency_key or "").strip()
         if key and (len(key) > 128 or not re.fullmatch(r"[A-Za-z0-9._:-]{16,128}", key)):
             raise HTTPException(status_code=400, detail="Некорректный Idempotency-Key")
@@ -4523,7 +4645,7 @@ def build_messenger_router(
                 """INSERT INTO messages
                    (sender_telegram_id,recipient_telegram_id,body,created_at)
                    VALUES(?,?,?,?)""",
-                (uid, owner, "", now),
+                (uid, owner, caption, now),
             )
             receipt_message_id = int(cur.lastrowid)
             await db.execute(
@@ -4535,6 +4657,7 @@ def build_messenger_router(
                      "event_type": "purchase",
                      "native_action": "star_gift_purchase",
                      "price_stars": price,
+                     **({"hide_name": True} if hide_name else {}),
                  }, separators=(",", ":"))),
             )
             await record_event(
@@ -4543,10 +4666,12 @@ def build_messenger_router(
             )
             if owner != uid:
                 await db.execute(
-                    """INSERT INTO gift_transactions(event_type,serial_number,gift_name,from_telegram_id,to_telegram_id,created_at)
-                       VALUES('transfer',?,?,?,?,?)""",
-                    (serial, title, uid, owner, now),
+                    """INSERT INTO gift_transactions(event_type,serial_number,gift_name,from_telegram_id,to_telegram_id,created_at,message_id)
+                       VALUES('transfer',?,?,?,?,?,?)""",
+                    (serial, title, uid, owner, now, receipt_message_id),
                 )
+            else:
+                await db.execute("UPDATE gift_transactions SET message_id=? WHERE serial_number=? AND event_type='purchase'", (receipt_message_id, serial))
             result = {
                 "status": "purchased",
                 "gift": {
@@ -6462,35 +6587,11 @@ def build_messenger_router(
             gift_key, gift_pool = _collectible_trait_pool(
                 gift["telegram_gift_id"], gift["gift_name"]
             )
-            # Every upgrade rolls the three attributes again: a WaysGram gift can be
-            # upgraded more than once for the same 25 Stars, and each upgrade has to change
-            # the model, the pattern and the backdrop colours on the card. The previously
-            # rolled values are excluded from the candidates, so the change is guaranteed
-            # whenever the official pool of the gift has an alternative.
+            # Independent weighted draws preserve the displayed probability on re-upgrade.
             previous_traits = gift_upgrades.traits_of(attributes)
-            # Telegram publishes every model and pattern as its own sticker document, and the
-            # roll happens inside that set when it is complete: the winner then brings its
-            # animation with it, exactly like the official client receives it from the server.
-            # A sample of one attribute per kind, or a WaysGram-only gift, still rolls from the
-            # published JSON pools.
             attribute_rows = await _gift_attribute_rows(
                 db, str(gift["telegram_gift_id"] or "")
             )
-            playable_models = [
-                row for row in attribute_rows.get("model", [])
-                if int(row.get("document_id") or 0) > 0
-            ]
-            previous_model = (previous_traits or {}).get("model") or {}
-            # A single Telegram preview is not a pool: adopting it again would charge
-            # for an upgrade while displaying exactly the same model. Wait for a real
-            # alternative instead. WaysGram-only gifts retain their existing behaviour.
-            if (len(playable_models) == 1 and isinstance(previous_model, dict)
-                    and int(previous_model.get("document_id") or 0) == int(playable_models[0]["document_id"])):
-                await db.rollback()
-                raise HTTPException(
-                    status_code=503,
-                    detail="Модели подарка временно недоступны. Попробуйте улучшить позже; Stars не списаны.",
-                )
             attributes["collectible_traits"] = gift_upgrades.roll_traits(
                 gift_pool,
                 now,
@@ -6508,7 +6609,7 @@ def build_messenger_router(
                 if kind in ("model", "pattern") and any(int(row["document_id"] or 0) for row in rows)
             }
             _enrich_traits_documents(
-                traits, gift_pool, attribute_documents, allow_sample_replacement=True
+                traits, gift_pool, attribute_documents
             )
             # The reels of the reveal must name the same set the roll came from.
             live_pool = gift_upgrades.pool_from_rows(attribute_rows)
@@ -7825,14 +7926,15 @@ def build_messenger_router(
                 "created_at": now,
             }
             await idempotency_store(db, uid, "/api/messages", descriptor, result, now)
+            queued_push = False
+            if not silent and recipient_id != uid:
+                queued_push = await enqueue_push(
+                    db, uid, recipient_id, str(user.get("display_name") or user.get("username") or "Новое сообщение"),
+                    body, {"scope": "dm", "chat_id": str(uid), "message_id": str(message_id)}, now,
+                )
             await db.commit()
-        if not silent and recipient_id != uid:
-            await deliver_push_notifications(
-                [recipient_id],
-                str(user.get("display_name") or user.get("username") or "Новое сообщение"),
-                body,
-                {"scope": "dm", "chat_id": str(uid), "message_id": str(message_id)},
-            )
+        if queued_push:
+            push_wakeup.set()
         return result
 
 
@@ -8577,9 +8679,9 @@ def build_messenger_router(
             )
             await db.execute(
                 """INSERT INTO gift_transactions
-                   (event_type,serial_number,gift_name,from_telegram_id,to_telegram_id,created_at)
-                   VALUES('chat_send',?,?,?,?,?)""",
-                (serial, gift_name, uid, recipient_id, now),
+                   (event_type,serial_number,gift_name,from_telegram_id,to_telegram_id,created_at,message_id)
+                   VALUES('chat_send',?,?,?,?,?,?)""",
+                (serial, gift_name, uid, recipient_id, now, message_id),
             )
             await record_event(
                 db, "dm", message_id, "new_message", uid,
@@ -8600,13 +8702,14 @@ def build_messenger_router(
                 "created_at": now,
             }
             await idempotency_store(db, uid, scope, descriptor, result, now)
+            queued_push = await enqueue_push(
+                db, uid, recipient_id, str(user.get("display_name") or user.get("username") or "Новый подарок"),
+                f"Подарок WaysGram: {gift_name}",
+                {"scope": "dm", "chat_id": str(uid), "message_id": str(message_id), "type": "gift"}, now,
+            )
             await db.commit()
-        await deliver_push_notifications(
-            [recipient_id],
-            str(user.get("display_name") or user.get("username") or "Новый подарок"),
-            f"Подарок WaysGram: {gift_name}",
-            {"scope": "dm", "chat_id": str(uid), "message_id": str(message_id), "type": "gift"},
-        )
+        if queued_push:
+            push_wakeup.set()
         return result
 
     @router.post("/api/messages/{message_id}/forward", status_code=201)

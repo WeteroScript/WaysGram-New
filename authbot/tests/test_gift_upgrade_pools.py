@@ -112,3 +112,43 @@ def test_repair_does_not_match_single_sample_by_chance_or_position():
     assert not messenger_api._enrich_traits_documents(traits, {}, rows)
     assert traits["model"]["name"] == "Original"
     assert "document_id" not in traits["model"]
+
+
+def test_rare_backdrop_and_other_slots_use_weighted_draws(monkeypatch):
+    # Exercise exact random boundaries, not a flaky statistical assertion.
+    import gift_upgrades as upgrades
+    pool = {
+        "models": [["Rare", 1], ["Common", 9]],
+        "patterns": [["Rare", 2], ["Common", 8]],
+        "backdrops": [["Rare", 1, 1, 2, 3, 4], ["Common", 9, 1, 2, 3, 4]],
+    }
+    monkeypatch.setattr(upgrades.secrets, "randbelow", lambda n: 0)
+    rare = upgrades.roll_traits(pool, 0)
+    assert [rare[slot]["name"] for slot in ("model", "pattern", "backdrop")] == ["Rare"] * 3
+    assert [rare[slot]["permille"] for slot in ("model", "pattern", "backdrop")] == [100, 200, 100]
+    monkeypatch.setattr(upgrades.secrets, "randbelow", lambda n: n - 1)
+    common = upgrades.roll_traits(pool, 0)
+    assert [common[slot]["name"] for slot in ("model", "pattern", "backdrop")] == ["Common"] * 3
+    assert upgrades._slot_weights(pool["backdrops"], colored=True) == [1, 9]
+
+
+def test_reupgrade_is_independent_and_displays_effective_chances(monkeypatch):
+    pool = {"models": [["Rare", 1], ["Common", 999]],
+            "patterns": [["One", 1000]],
+            "backdrops": [["One", 1000, 1, 2, 3, 4]]}
+    monkeypatch.setattr(gift_upgrades.secrets, "randbelow", lambda n: 0)
+    first = gift_upgrades.roll_traits(pool, 1)
+    again = gift_upgrades.roll_traits(pool, 2, previous=first)
+    assert first["model"]["name"] == again["model"]["name"] == "Rare"
+    assert again["model"]["permille"] == 1
+
+
+def test_class_only_and_partial_pool_show_effective_chances(monkeypatch):
+    pool = {"models": [["Known", 10], ["Class only", 0, "rare"]],
+            "patterns": [["Only", 4]],
+            "backdrops": [["Only", 5, 1, 2, 3, 4]]}
+    monkeypatch.setattr(gift_upgrades.secrets, "randbelow", lambda n: n - 1)
+    traits = gift_upgrades.roll_traits(pool, 0)
+    assert traits["model"]["permille"] == 990
+    assert traits["pattern"]["permille"] == 1000
+    assert traits["backdrop"]["permille"] == 1000

@@ -6041,3 +6041,192 @@ def test_labels_refresh_visibility_for_owner_and_viewer_after_edit_and_removal(a
             await check([])
 
     run(scenario())
+
+
+def test_push_outbox_is_durable_idempotent_and_does_not_delay_message(api_env, monkeypatch) -> None:
+    path, _store, _bot, app = api_env
+    add_account(api_env, 98701, "queue_sender")
+    add_account(api_env, 98702, "queue_recipient")
+    add_session(path, 98701, "queue-sender-session")
+    add_session(path, 98702, "queue-recipient-session")
+    monkeypatch.setattr(messenger_api, "_firebase_service_account", lambda: {
+        "project_id": "test", "token_uri": "https://oauth.test/token",
+    })
+    monkeypatch.setattr(messenger_api, "_firebase_assertion", lambda credentials, now: "fake")
+    with db_split.sqlite_connect(path) as db:
+        db.execute(
+            "INSERT INTO push_devices(token_hash,token_value,telegram_id,session_token_hash,created_at,updated_at) VALUES(?,?,?,?,?,?)",
+            ("device-test", "token-test", 98702, hashlib.sha256(b"queue-recipient-session").hexdigest(), 1, 1),
+        )
+        db.commit()
+    original_post = httpx.AsyncClient.post
+
+    async def scenario() -> None:
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        async def fake_post(self, url, *args, **kwargs):
+            if str(url) == "https://oauth.test/token":
+                return httpx.Response(200, json={"access_token": "fake", "expires_in": 3600},
+                                      request=httpx.Request("POST", str(url)))
+            if str(url).startswith("https://fcm.googleapis.com/"):
+                started.set()
+                await release.wait()
+                return httpx.Response(200, json={}, request=httpx.Request("POST", str(url)))
+            return await original_post(self, url, *args, **kwargs)
+
+        monkeypatch.setattr(httpx.AsyncClient, "post", fake_post)
+        # Persist while no worker runs, simulating a process restart after committing.
+        async with await client_for(app) as client:
+            headers = {"Authorization": "Bearer queue-sender-session", "Idempotency-Key": "queue-test-key-0001"}
+            sent = await client.post("/api/messages", headers=headers, json={"recipient_id": 98702, "body": "hello"})
+            retry = await client.post("/api/messages", headers=headers, json={"recipient_id": 98702, "body": "hello"})
+            assert sent.status_code == retry.status_code == 201
+            assert retry.json() == sent.json()
+            with db_split.sqlite_connect(path) as db:
+                assert db.execute("SELECT COUNT(*) FROM push_outbox").fetchone()[0] == 1
+            async with app.router.lifespan_context(app):
+                await asyncio.wait_for(started.wait(), timeout=5)
+                # While Firebase is blocked, a different send must still return.
+                sent2 = await asyncio.wait_for(client.post(
+                    "/api/messages", headers={"Authorization": "Bearer queue-sender-session"},
+                    json={"recipient_id": 98702, "body": "second"},
+                ), timeout=2)
+                assert sent2.status_code == 201
+                release.set()
+                for _ in range(100):
+                    with db_split.sqlite_connect(path) as db:
+                        pending = db.execute("SELECT COUNT(*) FROM push_outbox").fetchone()[0]
+                    if not pending:
+                        break
+                    await asyncio.sleep(0.05)
+                assert pending == 0
+    run(scenario())
+
+
+def test_upload_does_not_hold_sqlite_write_lock_during_file_write(api_env, monkeypatch) -> None:
+    import threading
+    path, _store, _bot, app = api_env
+    add_account(api_env, 98711, "upload_owner")
+    add_account(api_env, 98712, "upload_recipient")
+    add_session(path, 98711, "upload-owner-session")
+    add_session(path, 98712, "upload-recipient-session")
+    started, release = threading.Event(), threading.Event()
+    original_write = Path.write_bytes
+
+    def delayed_write(file, data):
+        if file.parent.name == "waysgram_media":
+            started.set()
+            if not release.wait(8):
+                raise RuntimeError("test timed out")
+        return original_write(file, data)
+
+    monkeypatch.setattr(Path, "write_bytes", delayed_write)
+    async def scenario() -> None:
+        async with await client_for(app) as client:
+            owner = {"Authorization": "Bearer upload-owner-session"}
+            image = BytesIO()
+            Image.new("RGB", (4, 4)).save(image, format="PNG")
+            upload = asyncio.create_task(client.post(
+                "/api/media/images", headers={**owner, "Content-Type": "image/png"}, content=image.getvalue(),
+            ))
+            try:
+                assert await asyncio.to_thread(started.wait, 3)
+                message = await asyncio.wait_for(client.post(
+                    "/api/messages", headers=owner, json={"recipient_id": 98712, "body": "not blocked"},
+                ), timeout=3)
+                assert message.status_code == 201
+            finally:
+                release.set()
+            assert (await upload).status_code == 201
+    run(scenario())
+
+
+def test_quota_rejection_removes_file_written_before_transaction(api_env, monkeypatch) -> None:
+    path, _store, _bot, app = api_env
+    add_account(api_env, 98721, "quota_owner")
+    add_session(path, 98721, "quota-owner-session")
+    monkeypatch.setattr(messenger_api, "MAX_USER_MEDIA_BYTES", 1)
+    async def scenario() -> None:
+        image = BytesIO()
+        Image.new("RGB", (4, 4)).save(image, format="PNG")
+        async with await client_for(app) as client:
+            response = await client.post(
+                "/api/media/images", headers={"Authorization": "Bearer quota-owner-session", "Content-Type": "image/png"},
+                content=image.getvalue(),
+            )
+            assert response.status_code == 413
+        assert list((path.parent / "waysgram_media").iterdir()) == []
+        with db_split.sqlite_connect(path) as db:
+            assert db.execute("SELECT COUNT(*) FROM media_assets").fetchone()[0] == 0
+    run(scenario())
+
+
+def test_push_outbox_retries_firebase_failure(api_env, monkeypatch) -> None:
+    path, _store, _bot, app = api_env
+    add_account(api_env, 98731, "retry_sender")
+    add_account(api_env, 98732, "retry_recipient")
+    add_session(path, 98731, "retry-sender-session")
+    add_session(path, 98732, "retry-recipient-session")
+    monkeypatch.setattr(messenger_api, "_firebase_service_account", lambda: {"project_id": "test", "token_uri": "https://oauth.test/token"})
+    monkeypatch.setattr(messenger_api, "_firebase_assertion", lambda credentials, now: "fake")
+    with db_split.sqlite_connect(path) as db:
+        db.execute("INSERT INTO push_devices(token_hash,token_value,telegram_id,session_token_hash,created_at,updated_at) VALUES(?,?,?,?,?,?)",
+                   ("retry-device", "token-test", 98732, hashlib.sha256(b"retry-recipient-session").hexdigest(), 1, 1))
+        db.commit()
+    original_post = httpx.AsyncClient.post
+
+    async def scenario() -> None:
+        attempts = 0
+        async def fake_post(self, url, *args, **kwargs):
+            nonlocal attempts
+            if str(url) == "https://oauth.test/token":
+                return httpx.Response(200, json={"access_token": "fake", "expires_in": 3600}, request=httpx.Request("POST", str(url)))
+            if str(url).startswith("https://fcm.googleapis.com/"):
+                attempts += 1
+                return httpx.Response(503 if attempts == 1 else 200, request=httpx.Request("POST", str(url)))
+            return await original_post(self, url, *args, **kwargs)
+        monkeypatch.setattr(httpx.AsyncClient, "post", fake_post)
+        async with await client_for(app) as client:
+            sent = await client.post("/api/messages", headers={"Authorization": "Bearer retry-sender-session"},
+                                     json={"recipient_id": 98732, "body": "retry"})
+            assert sent.status_code == 201
+            async with app.router.lifespan_context(app):
+                for _ in range(100):
+                    with db_split.sqlite_connect(path) as db:
+                        row = db.execute("SELECT attempts FROM push_outbox").fetchone()
+                    if row and row[0] == 1:
+                        break
+                    await asyncio.sleep(0.05)
+                assert row and row[0] == 1
+                with db_split.sqlite_connect(path) as db:
+                    db.execute("UPDATE push_outbox SET next_attempt_at=0")
+                    db.commit()
+                for _ in range(100):
+                    with db_split.sqlite_connect(path) as db:
+                        remaining = db.execute("SELECT COUNT(*) FROM push_outbox").fetchone()[0]
+                    if remaining == 0:
+                        break
+                    await asyncio.sleep(0.05)
+                assert remaining == 0 and attempts == 2
+    run(scenario())
+
+
+def test_media_full_download_streams_without_path_read_bytes(api_env, monkeypatch) -> None:
+    path, _store, _bot, app = api_env
+    add_account(api_env, 98741, "stream_owner")
+    add_session(path, 98741, "stream-owner-session")
+    async def scenario() -> None:
+        async with await client_for(app) as client:
+            headers = {"Authorization": "Bearer stream-owner-session", "Content-Type": "application/octet-stream", "X-Filename": "notes.txt"}
+            uploaded = await client.post("/api/media/documents", headers=headers, content=b"streaming test")
+            assert uploaded.status_code == 201
+            original = Path.read_bytes
+            def reject_media_read(file):
+                if file.parent.name == "waysgram_media":
+                    raise AssertionError("file should be streamed")
+                return original(file)
+            monkeypatch.setattr(Path, "read_bytes", reject_media_read)
+            downloaded = await client.get(uploaded.json()["url"], headers={"Authorization": "Bearer stream-owner-session"})
+            assert downloaded.status_code == 200 and downloaded.content == b"streaming test"
+    run(scenario())

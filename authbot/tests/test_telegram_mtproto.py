@@ -745,3 +745,47 @@ def test_upgrade_attributes_and_files_use_user_not_bot_session(tmp_path: Path) -
         assert [doc.id for doc in user.downloads] == [7001]
 
     asyncio.run(scenario())
+
+
+def test_sold_out_artwork_used_when_existing_catalog_sticker_download_fails(tmp_path: Path) -> None:
+    class BrokenClient(FakeMTProtoClient):
+        async def download_media(self, document, file=bytes):
+            raise RuntimeError("expired sticker reference")
+
+    async def scenario() -> None:
+        provider = TelegramMTProtoGiftCatalog(BrokenClient(), tmp_path / "gifts.db")
+        provider._gifts["123456789"] = provider.client.gift
+        async def fallback(db_path, gift_id):
+            assert gift_id == "123456789"
+            return b"official model artwork", "application/x-tgsticker"
+        provider.sold_out_artwork = fallback
+        assert await provider.download_sticker("123456789") == (b"official model artwork", "application/x-tgsticker")
+        assert await provider.download_sticker_preview("123456789") == (b"official model artwork", "application/x-tgsticker")
+
+    asyncio.run(scenario())
+
+
+def test_concurrent_attribute_requests_share_one_telegram_download(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        database = tmp_path / "waysgram.sqlite3"
+        await _prepare_database(database)
+        client = FakeAttributeClient()
+        provider = TelegramMTProtoGiftCatalog(client, database)
+        await provider.attributes(database, "123456789")
+        started = asyncio.Event()
+        release = asyncio.Event()
+        original = client.download_media
+
+        async def delayed(document, file=bytes):
+            started.set()
+            await release.wait()
+            return await original(document, file=file)
+
+        client.download_media = delayed
+        tasks = [asyncio.create_task(provider.download_attribute(database, "123456789", 7001)) for _ in range(8)]
+        await asyncio.wait_for(started.wait(), 2)
+        release.set()
+        results = await asyncio.gather(*tasks)
+        assert len(client.downloads) == 1
+        assert len({result[0] for result in results}) == 1
+    asyncio.run(scenario())

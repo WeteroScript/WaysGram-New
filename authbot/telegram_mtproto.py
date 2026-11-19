@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import time
+import weakref
 from collections import OrderedDict
 from pathlib import Path
 from typing import Any
@@ -363,6 +364,7 @@ class TelegramMTProtoGiftCatalog:
         # (id and access_hash do not survive a serialisation round trip).
         self._attribute_documents: dict[str, dict[int, Any]] = {}
         self._attribute_locks: dict[str, asyncio.Lock] = {}
+        self._document_locks: weakref.WeakValueDictionary[int, asyncio.Lock] = weakref.WeakValueDictionary()
         self._prefetch_task: asyncio.Task | None = None
         self._prefetch_state: dict[str, Any] = {
             "enabled": PREFETCH_ENABLED,
@@ -835,18 +837,25 @@ class TelegramMTProtoGiftCatalog:
         cached = self._read_asset(numeric_id, database_path)
         if cached:
             return cached, _sniff_media_type(cached)
-        document = await self._attribute_document(database_path, gift_id, numeric_id)
-        if document is None:
-            raise LookupError("Telegram attribute document is unavailable")
-        try:
-            return await self._download_document(document, numeric_id)
-        except Exception:
-            # A stored Telegram file reference can expire; refresh it once before failing.
-            await self.attributes(database_path, str(gift_id), refresh=True)
-            fresh = (self._attribute_documents.get(str(gift_id)) or {}).get(numeric_id)
-            if fresh is None or fresh is document:
-                raise
-            return await self._download_document(fresh, numeric_id)
+        # Prefetch and many clients can request the same document concurrently. Share one
+        # Telegram download and one cache write; independent documents stay parallel.
+        lock = self._document_locks.setdefault(numeric_id, asyncio.Lock())
+        async with lock:
+            cached = self._read_asset(numeric_id, database_path)
+            if cached:
+                return cached, _sniff_media_type(cached)
+            document = await self._attribute_document(database_path, gift_id, numeric_id)
+            if document is None:
+                raise LookupError("Telegram attribute document is unavailable")
+            try:
+                return await self._download_document(document, numeric_id)
+            except Exception:
+                # A stored Telegram file reference can expire; refresh it once before failing.
+                await self.attributes(database_path, str(gift_id), refresh=True)
+                fresh = (self._attribute_documents.get(str(gift_id)) or {}).get(numeric_id)
+                if fresh is None or fresh is document:
+                    raise
+                return await self._download_document(fresh, numeric_id)
 
     # -------------------------------------------------------------- prefetching
 
@@ -1140,11 +1149,21 @@ class TelegramMTProtoGiftCatalog:
         if size is not None and size > MAX_STICKER_BYTES:
             raise ValueError("Telegram sticker file exceeds the supported size")
 
-        payload = await self.client.download_media(document, file=bytes)
-        if hasattr(payload, "getvalue"):
-            payload = payload.getvalue()
-        if not isinstance(payload, (bytes, bytearray)) or not payload:
-            raise RuntimeError("MTProto did not return sticker bytes")
+        try:
+            payload = await self.client.download_media(document, file=bytes)
+            if hasattr(payload, "getvalue"):
+                payload = payload.getvalue()
+            if not isinstance(payload, (bytes, bytearray)) or not payload:
+                raise RuntimeError("MTProto did not return sticker bytes")
+        except Exception:
+            # A sold-out item can still be present in the catalogue with an expired or
+            # inaccessible document. A usable model from the user attribute session is
+            # preferable to leaving both the shop and the inventory blank.
+            fallback = await self.sold_out_artwork(database_path, key)
+            if fallback is not None:
+                self._media_cache[key] = fallback
+                return fallback
+            raise
         content = bytes(payload)
         if len(content) > MAX_STICKER_BYTES:
             raise ValueError("Telegram sticker file exceeds the supported size")
