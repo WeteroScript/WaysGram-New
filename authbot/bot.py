@@ -657,6 +657,7 @@ class Store:
 store = Store(DATABASE_PATH)
 bot: Bot | None = None
 mtproto_client: Any | None = None
+mtproto_gift_user_client: Any | None = None
 mtproto_gift_catalog: TelegramMTProtoGiftCatalog | None = None
 router = Router()
 app = FastAPI(title="WaysGram AuthBot internal API", docs_url=None, redoc_url=None)
@@ -3918,8 +3919,40 @@ async def verify_auth_code(
     return {"valid": await store.verify_code(payload.number, payload.code)}
 
 
+async def connect_gift_user_client(api_id: int, api_hash: str, session_string: str) -> Any | None:
+    """Connect a pre-authorized, operator-provided user session without interactive login.
+
+    This identity can access the whole Telegram account: never log its session or identity.
+    A failed optional connection must not take the bot and the rest of the API offline.
+    """
+    if not session_string:
+        return None
+    client = None
+    try:
+        from telethon import TelegramClient
+        from telethon.sessions import StringSession
+
+        client = TelegramClient(StringSession(session_string), api_id, api_hash)
+        await client.connect()
+        if not await client.is_user_authorized():
+            raise RuntimeError("Gift user session is not authorized")
+        identity = await client.get_me()
+        if identity is None or getattr(identity, "bot", False):
+            raise RuntimeError("Gift attribute session is not a user account")
+        log.info("Gift attribute user session connected")
+        return client
+    except Exception as exc:
+        log.warning("Gift attribute user session unavailable (%s)", type(exc).__name__)
+        if client is not None:
+            try:
+                await client.disconnect()
+            except Exception:
+                pass
+        return None
+
+
 async def main() -> None:
-    global bot, mtproto_client, mtproto_gift_catalog
+    global bot, mtproto_client, mtproto_gift_user_client, mtproto_gift_catalog
     if not BOT_TOKEN:
         raise RuntimeError("BOT_TOKEN environment variable is required")
     if not OTP_FERNET_KEY:
@@ -3953,8 +3986,17 @@ async def main() -> None:
             session_file = Path(str(session_base) + ".session")
             if session_file.exists():
                 os.chmod(session_file, 0o600)
+            mtproto_gift_user_client = await connect_gift_user_client(
+                TELEGRAM_API_ID, TELEGRAM_API_HASH,
+                os.getenv("WAYSGRAM_GIFT_USER_SESSION", "").strip(),
+            )
+            if mtproto_gift_user_client is None:
+                log.warning(
+                    "Gift upgrade models need an authorized user session; "
+                    "Telegram rejects upgrade attribute requests from bots"
+                )
             mtproto_gift_catalog = TelegramMTProtoGiftCatalog(
-                mtproto_client, DATABASE_PATH
+                mtproto_client, DATABASE_PATH, attribute_client=mtproto_gift_user_client
             )
             sync_result = await mtproto_gift_catalog.sync(DATABASE_PATH)
             log.info(
@@ -3973,6 +4015,12 @@ async def main() -> None:
                 except Exception:
                     pass
                 mtproto_client = None
+            if mtproto_gift_user_client is not None:
+                try:
+                    await mtproto_gift_user_client.disconnect()
+                except Exception:
+                    pass
+                mtproto_gift_user_client = None
     elif TELEGRAM_API_ID or TELEGRAM_API_HASH:
         log.warning("Both TELEGRAM_API_ID and TELEGRAM_API_HASH are required for MTProto; using Bot API fallback")
     else:
@@ -4001,6 +4049,11 @@ async def main() -> None:
     try:
         await asyncio.gather(dispatcher.start_polling(bot), server.serve())
     finally:
+        if mtproto_gift_user_client is not None:
+            try:
+                await mtproto_gift_user_client.disconnect()
+            except Exception as exc:
+                log.warning("Could not disconnect gift attribute client (%s)", type(exc).__name__)
         if mtproto_client is not None:
             try:
                 await mtproto_client.disconnect()

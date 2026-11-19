@@ -405,3 +405,47 @@ def test_new_account_receives_one_time_welcome_balances(
 
     assert (stars, grams) == (4900, 14)
     assert grant_count == 2
+
+
+def test_gift_user_client_requires_authorized_non_bot_session(monkeypatch, caplog) -> None:
+    import telethon
+    import telethon.sessions
+
+    class FakeClient:
+        instances = []
+        authorized = True
+        bot = False
+
+        def __init__(self, session, api_id, api_hash):
+            self.disconnected = False
+            self.instances.append(self)
+
+        async def connect(self):
+            pass
+
+        async def is_user_authorized(self):
+            return self.authorized
+
+        async def get_me(self):
+            return SimpleNamespace(bot=self.bot)
+
+        async def disconnect(self):
+            self.disconnected = True
+
+    monkeypatch.setattr(telethon, "TelegramClient", FakeClient)
+    monkeypatch.setattr(telethon.sessions, "StringSession", lambda value: value)
+
+    async def scenario():
+        assert await bot_module.connect_gift_user_client(1, "hash", "") is None
+        accepted = await bot_module.connect_gift_user_client(1, "hash", "sensitive-session")
+        assert accepted is FakeClient.instances[-1] and not accepted.disconnected
+        FakeClient.bot = True
+        assert await bot_module.connect_gift_user_client(1, "hash", "sensitive-session") is None
+        assert FakeClient.instances[-1].disconnected
+        FakeClient.bot = False
+        FakeClient.authorized = False
+        assert await bot_module.connect_gift_user_client(1, "hash", "sensitive-session") is None
+        assert FakeClient.instances[-1].disconnected
+        assert "sensitive-session" not in caplog.text
+
+    run(scenario())

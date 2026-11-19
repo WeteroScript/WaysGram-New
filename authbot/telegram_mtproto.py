@@ -349,10 +349,12 @@ def _gift_payload(gift: Any, position: int, synced_at: int) -> dict[str, Any]:
 
 
 class TelegramMTProtoGiftCatalog:
-    """Bot-authenticated MTProto reader for Telegram's complete available gift list."""
+    """MTProto reader; the optional user client is used only for upgrade attributes."""
 
-    def __init__(self, client: Any, database_path: Path | str | None = None):
+    def __init__(self, client: Any, database_path: Path | str | None = None,
+                 attribute_client: Any | None = None):
         self.client = client
+        self.attribute_client = attribute_client if attribute_client is not None else client
         self._sync_lock = asyncio.Lock()
         self._media_load_lock = asyncio.Lock()
         self._gifts: dict[str, Any] = {}
@@ -583,7 +585,7 @@ class TelegramMTProtoGiftCatalog:
         size = _int_value(document, "size")
         if size is not None and size > MAX_STICKER_BYTES:
             raise ValueError("Telegram sticker file exceeds the supported size")
-        payload = await self.client.download_media(document, file=bytes)
+        payload = await self.attribute_client.download_media(document, file=bytes)
         if hasattr(payload, "getvalue"):
             payload = payload.getvalue()
         if not isinstance(payload, (bytes, bytearray)) or not payload:
@@ -607,7 +609,7 @@ class TelegramMTProtoGiftCatalog:
         getter = getattr(functions.payments, "GetStarGiftUpgradeAttributesRequest", None)
         if getter is not None:
             try:
-                response = await self.client(getter(gift_id=gift_id))
+                response = await self.attribute_client(getter(gift_id=gift_id))
                 attributes = _value(response, "attributes")
                 if attributes:
                     return list(attributes), "attributes"
@@ -615,7 +617,7 @@ class TelegramMTProtoGiftCatalog:
                 # A preview is useful as a last resort, but it is not a complete set.
                 LOGGER.warning("Gift %s full attribute request failed: %s", gift_id, type(error).__name__)
         try:
-            response = await self.client(
+            response = await self.attribute_client(
                 functions.payments.GetStarGiftUpgradePreviewRequest(gift_id=gift_id)
             )
         except Exception as error:

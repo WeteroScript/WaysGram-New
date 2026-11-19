@@ -101,6 +101,14 @@ def test_repair_does_not_replace_an_existing_model_with_a_preview():
               "pattern": {"name": "Old pattern"}}
     rows = {"model": [{"name": "Sample", "document_id": 456, "permille": 1, "position": 0}],
             "pattern": [{"name": "Pattern sample", "document_id": 789, "permille": 1, "position": 0}]}
-    assert messenger_api._enrich_traits_documents(traits, {}, rows)
+    assert not messenger_api._enrich_traits_documents(traits, {}, rows)
     assert traits["model"] == {"name": "Existing", "document_id": 123}
-    assert traits["pattern"]["document_id"] == 789
+    assert traits["pattern"] == {"name": "Old pattern"}
+
+
+def test_repair_does_not_match_single_sample_by_chance_or_position():
+    traits = {"model": {"name": "Original", "permille": 1, "position": 0, "pool_size": 1}}
+    rows = {"model": [{"name": "Different", "document_id": 456, "permille": 1, "position": 0}]}
+    assert not messenger_api._enrich_traits_documents(traits, {}, rows)
+    assert traits["model"]["name"] == "Original"
+    assert "document_id" not in traits["model"]

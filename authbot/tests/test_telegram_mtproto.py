@@ -711,3 +711,37 @@ def test_preview_set_is_retried_before_full_set_ttl(tmp_path: Path) -> None:
         assert (await provider.attribute_sync_state(database, "123456789"))["source"] == "full"
 
     asyncio.run(scenario())
+
+
+def test_upgrade_attributes_and_files_use_user_not_bot_session(tmp_path: Path) -> None:
+    """Telegram rejects both upgrade methods for bots, even when its catalog works."""
+    class BotCatalog(FakeMTProtoClient):
+        async def __call__(self, request):
+            assert type(request).__name__ == "GetStarGiftsRequest", "attribute request sent to bot"
+            return await super().__call__(request)
+
+    async def scenario() -> None:
+        database = tmp_path / "waysgram.sqlite3"
+        await _prepare_database(database)
+        bot = BotCatalog()
+        user = FakeAttributeClient()
+        provider = TelegramMTProtoGiftCatalog(bot, database, attribute_client=user)
+
+        await provider.sync(database)
+        assert len(bot.requests) == 1
+        rows = await provider.attributes(database, "123456789")
+        assert len(rows) == 4
+        assert [type(request).__name__ for request in user.requests] == [
+            "GetStarGiftUpgradeAttributesRequest"
+        ]
+        content, _ = await provider.download_attribute(database, "123456789", 7001)
+        assert content.startswith(b"\x1f\x8b")
+        assert [doc.id for doc in user.downloads] == [7001]
+        assert not bot.download_calls
+
+        # Ordinary gift artwork is still fetched by the bot, not the user session.
+        await provider.download_sticker("123456789", database)
+        assert len(bot.download_calls) == 1
+        assert [doc.id for doc in user.downloads] == [7001]
+
+    asyncio.run(scenario())

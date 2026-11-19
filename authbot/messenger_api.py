@@ -482,7 +482,8 @@ async def _sync_gift_attribute_documents(
 
 
 def _enrich_traits_documents(
-    traits: dict[str, Any], pool: dict[str, Any], documents: dict[str, list[dict[str, Any]]]
+    traits: dict[str, Any], pool: dict[str, Any], documents: dict[str, list[dict[str, Any]]],
+    *, allow_sample_replacement: bool = False,
 ) -> bool:
     """Stores Telegram's document id (and its slot) inside the rolled traits of a collectible.
 
@@ -502,6 +503,11 @@ def _enrich_traits_documents(
         rows = documents.get(kind) or []
         if not rows:
             continue
+        if (len(rows) == 1 and not allow_sample_replacement
+                and _normalise_attribute_name(entry.get("name"))
+                != _normalise_attribute_name(rows[0].get("name"))):
+            # A sample cannot identify a different existing trait by chance or position.
+            continue
         entries = [item for item in (pool.get(key) or []) if isinstance(item, list) and item]
         position = None
         wanted = _normalise_attribute_name(entry.get("name"))
@@ -518,10 +524,9 @@ def _enrich_traits_documents(
             position,
             allow_fallback_position=bool(entries) and len(entries) == len(rows),
         )
-        if row is None and len(rows) == 1:
-            # Telegram answered with a single sample of this kind, so the name that was rolled
-            # has no counterpart there. Adopting the sample keeps the card truthful — the name
-            # and the animation come from the same attribute — instead of drawing no model.
+        if row is None and len(rows) == 1 and allow_sample_replacement:
+            # Only a new roll may adopt the sample. Repairing an existing gift must not
+            # silently replace the model or pattern it already had.
             row = rows[0]
             entry["name"] = str(row["name"] or "").strip() or entry.get("name")
             entry["permille"] = int(row["permille"] or 0)
@@ -6502,7 +6507,9 @@ def build_messenger_router(
                 for kind, rows in attribute_rows.items()
                 if kind in ("model", "pattern") and any(int(row["document_id"] or 0) for row in rows)
             }
-            _enrich_traits_documents(traits, gift_pool, attribute_documents)
+            _enrich_traits_documents(
+                traits, gift_pool, attribute_documents, allow_sample_replacement=True
+            )
             # The reels of the reveal must name the same set the roll came from.
             live_pool = gift_upgrades.pool_from_rows(attribute_rows)
             reveal_base = (
