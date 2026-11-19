@@ -31,8 +31,9 @@ public final class WaysGramProfileGiftsController {
     private final WaysGramSessionStore sessionStore;
     private final WaysGramApiClient imageClient;
     private boolean loading;
-    private boolean giftViewRefreshScheduled;
     private boolean inventoryRebuildScheduled;
+    /** Share of the paid price WaysGram refunds on a sale, in per cent. */
+    private static final int SELL_REFUND_PERCENT = 50;
     private final WaysGramGiftAttributes.Listener attributesListener;
     private JSONArray lastInventory;
     private int lastGiftAccount = UserConfig.selectedAccount;
@@ -86,7 +87,6 @@ public final class WaysGramProfileGiftsController {
                             fragment == null ? UserConfig.selectedAccount : fragment.getCurrentAccount(),
                             false);
                     container.setWaysGramInventory(nativeGifts);
-                    downloadGiftStickers(inventory);
                     downloadGiftAnimations(inventory);
                 });
             }
@@ -192,6 +192,12 @@ public final class WaysGramProfileGiftsController {
             // Keep paid, chance-based trait upgrades out of the profile detail flow.
             boolean canUpgrade = false;
             boolean isCollectible = upgradeLevel > 0 || (traits != null && traits.length() > 0);
+            int sellRefund = Math.max(0, item.optInt("sell_refund", 0));
+            // The WaysGram API refunds a share of the paid price, so the price itself is the
+            // refund scaled back up; the native card shows it in its value row.
+            int paidPrice = sellRefund > 0
+                    ? (int) Math.min(Integer.MAX_VALUE, (long) sellRefund * 100L / Math.max(1, SELL_REFUND_PERCENT))
+                    : 0;
             boolean isListed = optBooleanLike(item, "is_listed");
             boolean isAuctioned = optBooleanLike(item, "is_auctioned");
 
@@ -268,6 +274,12 @@ public final class WaysGramProfileGiftsController {
                 regularGift.can_upgrade = canUpgrade;
                 regularGift.upgrade_stars = telegramUpgradePrice;
                 regularGift.upgrade_variants = telegramUpgradeVariants;
+                // Telegram's own gift cells draw the sticker of the gift. Handing them the
+                // WaysGram artwork document is what makes the grid, the chat card and the saved
+                // gift sheet look exactly like the official client, animation included.
+                regularGift.sticker = WaysGramGiftDocuments.documentFor(telegramGiftIdText, giftEmoji);
+                regularGift.stars = paidPrice;
+                regularGift.convert_stars = sellRefund;
                 nativeGift = regularGift;
             }
 
@@ -282,6 +294,7 @@ public final class WaysGramProfileGiftsController {
             savedGift.from_id = senderPeer;
             savedGift.flags |= 2; // from_id is present; Telegram uses it to identify the owner profile.
             savedGift.can_upgrade = canUpgrade;
+            savedGift.convert_stars = sellRefund;
             result.add(savedGift);
         }
         return result;
@@ -562,66 +575,6 @@ public final class WaysGramProfileGiftsController {
         return common;
     }
 
-    private void downloadGiftStickers(JSONArray inventory) {
-        Set<String> started = new HashSet<>();
-        for (int i = 0; i < inventory.length(); i++) {
-            JSONObject item = inventory.optJSONObject(i);
-            if (item == null || !item.optBoolean("sticker_available", false)) {
-                continue;
-            }
-            String serial = item.optString("serial_number", "").trim();
-            String telegramGiftId = item.optString("telegram_gift_id", "").trim();
-            if (telegramGiftId.isEmpty()) {
-                JSONObject telegramGift = item.optJSONObject("telegram_gift");
-                telegramGiftId = optText(telegramGift, "id");
-            }
-            if (serial.isEmpty() || telegramGiftId.isEmpty() || !started.add(serial)) {
-                continue;
-            }
-            final String cacheKey = serial;
-            final String giftId = telegramGiftId;
-            imageClient.downloadTelegramGiftSticker(giftId, new WaysGramApiClient.ImageCallback() {
-                @Override
-                public void onSuccess(Bitmap bitmap) {
-                    if (bitmap == null || bitmap.isRecycled()) {
-                        return;
-                    }
-                    WaysGramGiftMediaStore.put(cacheKey, bitmap);
-                    scheduleGiftViewRefresh();
-                }
-
-                @Override
-                public void onError(String message, int statusCode) {
-                    // An animated-only sticker has no preview frame to decode. The grid can still
-                    // play its animation, so the card keeps its artwork instead of going blank.
-                    String emoji = "";
-                    JSONObject entry = findInventoryItem(cacheKey);
-                    if (entry != null) {
-                        emoji = optText(entry, "gift_emoji");
-                        if (emoji.isEmpty()) {
-                            emoji = optText(entry.optJSONObject("telegram_gift"), "emoji");
-                        }
-                    }
-                    downloadGiftAnimation(cacheKey, giftId, emoji);
-                }
-            });
-        }
-    }
-
-    /** @return the inventory entry of a serial, or {@code null} when it is gone. */
-    private JSONObject findInventoryItem(String serial) {
-        if (lastInventory == null || serial == null) {
-            return null;
-        }
-        for (int i = 0; i < lastInventory.length(); i++) {
-            JSONObject item = lastInventory.optJSONObject(i);
-            if (item != null && serial.equals(item.optString("serial_number", "").trim())) {
-                return item;
-            }
-        }
-        return null;
-    }
-
     /** Downloads the animated artwork of one gift; the still frame stays as its placeholder. */
     private void downloadGiftAnimation(String serial, String telegramGiftId, String emoji) {
         if (serial == null || serial.isEmpty() || telegramGiftId == null || telegramGiftId.isEmpty()) {
@@ -653,7 +606,8 @@ public final class WaysGramProfileGiftsController {
 
                     @Override
                     public void onError(String message, int statusCode) {
-                        // Nothing else to try: the emoji overlay of the cell stays visible.
+                        // Without the artwork file the gift keeps the emoji Telegram draws for a
+                        // gift whose sticker is still loading.
                     }
                 }
         );
@@ -662,10 +616,9 @@ public final class WaysGramProfileGiftsController {
     /**
      * Makes animated (TGS/WebM) gift artwork playable in the native gift grid.
      *
-     * <p>The original animation is stored in the shared WaysGram sticker folder
-     * and exposed to Telegram as a sticker document; the still frame from
-     * {@link #downloadGiftStickers(JSONArray)} stays as a placeholder while the
-     * animation is being prepared.</p>
+     * <p>The original animation is stored in the shared WaysGram sticker folder and exposed to
+     * Telegram as a sticker document, so the native GiftCell decodes and loops it exactly as it
+     * does for a Telegram gift. Nothing draws the cells by hand any more.</p>
      */
     private void downloadGiftAnimations(JSONArray inventory) {
         Set<String> started = new HashSet<>();
@@ -700,7 +653,9 @@ public final class WaysGramProfileGiftsController {
             return;
         }
         WaysGramGiftMediaStore.putAnimationDocument(serial, document);
-        scheduleGiftViewRefresh();
+        // The document is now on disk, so the native card can play it: rebuild the inventory
+        // once (debounced) instead of rebinding a cell by hand.
+        scheduleInventoryRebuild();
     }
 
     /**
@@ -726,23 +681,6 @@ public final class WaysGramProfileGiftsController {
         }
         ArrayList<TL_stars.SavedStarGift> nativeGifts = toNativeGifts(lastInventory, lastGiftAccount, false);
         container.replaceWaysGramInventory(nativeGifts);
-    }
-
-    /**
-     * Sticker downloads finish one by one; a single collapsed refresh keeps the cells from
-     * being rebound (and their animations restarted) again and again.
-     */
-    private void scheduleGiftViewRefresh() {
-        if (giftViewRefreshScheduled) {
-            return;
-        }
-        giftViewRefreshScheduled = true;
-        AndroidUtilities.runOnUIThread(() -> {
-            giftViewRefreshScheduled = false;
-            if (container != null) {
-                container.refreshWaysGramGiftViews();
-            }
-        }, 350L);
     }
 
     private void showError(String message) {

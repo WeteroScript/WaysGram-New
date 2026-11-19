@@ -99,6 +99,37 @@ public final class WaysGramGiftDocuments {
         return target;
     }
 
+    /**
+     * The artwork document of a gift, or {@code null} while its file is not on disk yet.
+     *
+     * <p>The same instance is returned for the same document id: Telegram's gift cells skip the
+     * rebind when the document object is unchanged, which is what keeps a playing animation
+     * running across inventory refreshes instead of restarting it.</p>
+     */
+    public static synchronized TLRPC.TL_document documentFor(String telegramGiftId, String emoji) {
+        long documentId = documentId(telegramGiftId);
+        if (documentId == 0L) {
+            return null;
+        }
+        TLRPC.TL_document cached = CACHE.get(documentId);
+        if (cached != null) {
+            return cached;
+        }
+        TLRPC.TL_document document = buildDocument(documentId, stickerFile(documentId), emoji);
+        if (document != null) {
+            CACHE.put(documentId, document);
+        }
+        return document;
+    }
+
+    /** Forgets one cached document, e.g. when its file was replaced. */
+    public static synchronized void forget(long documentId) {
+        CACHE.remove(documentId);
+    }
+
+    private static final java.util.Map<Long, TLRPC.TL_document> CACHE =
+            new java.util.HashMap<>();
+
     /** Builds the sticker document Telegram's media stack expects for gift artwork. */
     public static TLRPC.TL_document buildDocument(long documentId, File file, String emoji) {
         if (documentId == 0L || file == null || !file.isFile() || file.length() == 0) {

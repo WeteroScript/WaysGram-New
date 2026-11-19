@@ -837,24 +837,6 @@ def patch_profile_gifts_container_source(original: str) -> str:
         "        updateButton();\n"
         "    }\n"
         "\n"
-        "    public void refreshWaysGramGiftViews() {\n"
-        "        if (!waysGramInventory) return;\n"
-        "        Page page = getCurrentPage();\n"
-        "        if (page != null) {\n"
-        "            // Artwork arrives gift by gift: repaint the visible cells instead of\n"
-        "            // rebuilding the list, which restarted every animation and swallowed\n"
-        "            // the scroll gestures of a long inventory.\n"
-        "            for (int i = 0; i < page.listView.getChildCount(); i++) {\n"
-        "                android.view.View child = page.listView.getChildAt(i);\n"
-        "                if (!(child instanceof GiftSheet.GiftCell)) continue;\n"
-        "                GiftSheet.GiftCell cell = (GiftSheet.GiftCell) child;\n"
-        "                TL_stars.SavedStarGift savedGift = cell.getSavedGift();\n"
-        "                if (savedGift == null || savedGift.gift == null || savedGift.gift.slug == null || !savedGift.gift.slug.startsWith(\"waysgram://\")) continue;\n"
-        "                String serial = savedGift.gift.slug.substring(\"waysgram://\".length()).trim();\n"
-        "                org.telegram.messenger.waysgram.WaysGramGiftArtwork.apply(cell.imageView, serial);\n"
-        "            }\n"
-        "        }\n"
-        "    }\n\n"
     )
     insert_at = updated.rfind("\n}")
     if insert_at < 0:
@@ -865,38 +847,13 @@ def patch_profile_gifts_container_source(original: str) -> str:
 
 
 
-def patch_gift_sheet_profile_art_source(original: str) -> str:
-    """Bind cached WaysGram artwork to the SavedStarGift overload used by profile cards."""
-    marker = "// WaysGram saved profile gift artwork binding"
-    if marker in original:
-        required = (
-            'userGift.gift.slug.startsWith("waysgram://")',
-            "WaysGramGiftArtwork.apply(imageView, waysGramSerial);",
-        )
-        if not all(value in original for value in required):
-            raise ValueError("GiftSheet contains an incomplete SavedStarGift artwork binding")
-        return original
-
-    needle = "            setSticker(userGift.gift.getDocument(), userGift);\n"
-    replacement = (
-        needle
-        + "            " + marker + "\n"
-        + "            if (userGift.gift != null && userGift.gift.slug != null && userGift.gift.slug.startsWith(\"waysgram://\")) {\n"
-        + "                String waysGramSerial = userGift.gift.slug.substring(\"waysgram://\".length()).trim();\n"
-        + "                org.telegram.messenger.waysgram.WaysGramGiftArtwork.apply(imageView, waysGramSerial);\n"
-        + "            }\n"
-    )
-    return replace_exactly_once(
-        original,
-        needle,
-        replacement,
-        "native SavedStarGift profile bitmap binding"
-    )
-
-
-
 def patch_star_gift_sheet_display_source(original: str) -> str:
-    """Render WaysGram-owned gifts in Telegram's native detail sheet without Telegram ownership actions."""
+    """Let the native saved-gift card draw a WaysGram gift exactly like a Telegram one.
+
+    The card keeps Telegram's own artwork, backdrop and attribute rendering: the inventory gives
+    the gift a real sticker document, so nothing here has to paint over it. Only the WaysGram
+    owned actions (a fixed-price upgrade and the sell row) are added.
+    """
     marker = "private boolean isWaysGramGift()"
     if marker in original:
         required = (
@@ -934,41 +891,18 @@ def patch_star_gift_sheet_display_source(original: str) -> str:
 
     waysgram_detail_ui = (
         "        if (isWaysGramGift()) {\n"
+        "            // Telegram hides the actions it would take on its own server; the artwork, the\n"
+        "            // backdrop and the attributes stay the native ones.\n"
         "            topView.setShowOptions(false);\n"
         "            topView.buttonsLayout.setVisibility(View.GONE);\n"
         "            String waysGramSerial = waysGramGiftSerial();\n"
-        "            org.telegram.messenger.waysgram.WaysGramGiftMediaStore.GiftMetadata waysGramMetadata = org.telegram.messenger.waysgram.WaysGramGiftMediaStore.getMetadata(waysGramSerial);\n"
-        "            View waysGramEmojiExisting = topView.imageLayout.findViewWithTag(\"waysgramGiftDetailEmoji\");\n"
-        "            android.widget.TextView waysGramEmojiView;\n"
-        "            if (waysGramEmojiExisting instanceof android.widget.TextView) {\n"
-        "                waysGramEmojiView = (android.widget.TextView) waysGramEmojiExisting;\n"
-        "            } else {\n"
-        "                waysGramEmojiView = new android.widget.TextView(getContext());\n"
-        "                waysGramEmojiView.setTag(\"waysgramGiftDetailEmoji\");\n"
-        "                waysGramEmojiView.setTextSize(TypedValue.COMPLEX_UNIT_DIP, 52);\n"
-        "                waysGramEmojiView.setGravity(Gravity.CENTER);\n"
-        "                topView.imageLayout.addView(waysGramEmojiView, new FrameLayout.LayoutParams(dp(112), dp(112), Gravity.CENTER));\n"
-        "            }\n"
-        "            waysGramEmojiView.setText(waysGramMetadata == null || TextUtils.isEmpty(waysGramMetadata.emoji) ? \"🎁\" : waysGramMetadata.emoji);\n"
-        "            if (topView.imageView[0] != null) {\n"
-        "                // Still frame or the animated sticker: whatever the grid shows is\n"
-        "                // shown here too, so the card never comes up without artwork.\n"
-        "                org.telegram.messenger.waysgram.WaysGramGiftArtwork.apply(topView.imageView[0], waysGramSerial);\n"
-        "            }\n"
-        "            if (org.telegram.messenger.waysgram.WaysGramGiftArtwork.hasArtwork(waysGramSerial)) {\n"
-        "                waysGramEmojiView.setVisibility(View.GONE);\n"
-        "            } else {\n"
-        "                waysGramEmojiView.setVisibility(View.VISIBLE);\n"
-        "            }\n"
         "            // WaysGram upgrade: a fixed 25 Stars through the WaysGram backend,\n"
         "            // never through the native Telegram Stars payment flow.\n"
-        "            // Only the owner can upgrade: the WaysGram backend upgrades the gift of the\n"
-        "            // signed-in account, and collectibles are upgradable level by level as well.\n"
         "            if (myProfile && button != null\n"
         "                    && (savedStarGift.gift instanceof TL_stars.TL_starGift\n"
         "                        || savedStarGift.gift instanceof TL_stars.TL_starGiftUnique)) {\n"
         "                button.setFilled(true);\n"
-        "                button.setText(\"Улучшить за \" + org.telegram.messenger.waysgram.WaysGramGiftUpgrade.DEFAULT_PRICE_STARS + \" \u2b50\", !firstSet);\n"
+        "                button.setText(\"Улучшить за \" + org.telegram.messenger.waysgram.WaysGramGiftUpgrade.DEFAULT_PRICE_STARS + \" \\u2b50\", !firstSet);\n"
         "                button.setSubText(null, !firstSet);\n"
         "                button.setOnClickListener(v -> org.telegram.messenger.waysgram.WaysGramGiftUpgrade.upgrade(\n"
         "                        getContext(), currentAccount, waysGramSerial,\n"
@@ -980,7 +914,7 @@ def patch_star_gift_sheet_display_source(original: str) -> str:
         original,
         "        if (savedStarGift.refunded) {\n",
         waysgram_detail_ui + "        if (savedStarGift.refunded) {\n",
-        "native WaysGram detail artwork and action isolation"
+        "native WaysGram detail action isolation"
     )
     original = replace_exactly_once(
         original,
@@ -1005,120 +939,10 @@ def patch_star_gift_sheet_display_source(original: str) -> str:
     )
     return original
 
-def patch_gift_sheet_source(original: str) -> str:
-    """Keep Telegram's GiftCell renderer, injecting WaysGram stickers, emoji and metadata."""
-    updated = original
 
-    sticker_marker = "WaysGramGiftArtwork.apply("
-    if sticker_marker not in updated:
-        sticker_target = "            setSticker(userGift.gift.getDocument(), userGift);\n"
-        sticker_replacement = (
-            sticker_target
-            + "            if (userGift.gift.slug != null && userGift.gift.slug.startsWith(\"waysgram://\")) {\n"
-            + "                android.graphics.Bitmap waysGramBitmap = org.telegram.messenger.waysgram.WaysGramGiftMediaStore.get(userGift.gift.slug.substring(\"waysgram://\".length()));\n"
-            + "                if (waysGramBitmap != null) imageView.setImageBitmap(waysGramBitmap);\n"
-            + "            }\n"
-        )
-        updated = replace_exactly_once(updated, sticker_target, sticker_replacement, "native GiftCell WaysGram sticker binding")
-
-    emoji_reset_marker = "waysGramEmojiOverlay"
-    if emoji_reset_marker not in updated:
-        sticker_target = "            setSticker(userGift.gift.getDocument(), userGift);\n"
-        sticker_replacement = (
-            sticker_target
-            + "            View waysGramEmojiOverlay = card.findViewWithTag(\"waysgramGiftEmoji\");\n"
-            + "            if (waysGramEmojiOverlay != null) waysGramEmojiOverlay.setVisibility(View.GONE);\n"
-        )
-        updated = replace_exactly_once(
-            updated, sticker_target, sticker_replacement,
-            "reset recycled WaysGram gift emoji overlay"
-        )
-
-    metadata_marker = "WaysGramGiftMediaStore.getMetadata("
-    if metadata_marker not in updated:
-        metadata_target = (
-            "            cardBackground.setStrokeColors(null);\n"
-            "            titleView.setVisibility(View.GONE);\n"
-            "            subtitleView.setVisibility(View.GONE);\n"
-        )
-        metadata_replacement = (
-            metadata_target
-            + "            if (userGift.gift.slug != null && userGift.gift.slug.startsWith(\"waysgram://\")) {\n"
-            + "                String waysGramSerial = userGift.gift.slug.substring(\"waysgram://\".length());\n"
-            + "                org.telegram.messenger.waysgram.WaysGramGiftMediaStore.GiftMetadata waysGramMetadata = org.telegram.messenger.waysgram.WaysGramGiftMediaStore.getMetadata(waysGramSerial);\n"
-            + "                // Inventory cards show artwork only: no serials, levels or captions.\n"
-            + "                titleView.setText(\"\");\n"
-            + "                titleView.setVisibility(View.GONE);\n"
-            + "                subtitleView.setText(\"\");\n"
-            + "                subtitleView.setVisibility(View.GONE);\n"
-            + "                if (waysGramMetadata != null) {\n"
-            + "                    priceLayout.setVisibility(View.GONE);\n"
-            + "                    View waysGramEmojiExisting = card.findViewWithTag(\"waysgramGiftEmoji\");\n"
-            + "                    android.widget.TextView waysGramEmojiView;\n"
-            + "                    if (waysGramEmojiExisting instanceof android.widget.TextView) {\n"
-            + "                        waysGramEmojiView = (android.widget.TextView) waysGramEmojiExisting;\n"
-            + "                    } else {\n"
-            + "                        waysGramEmojiView = new android.widget.TextView(getContext());\n"
-            + "                        waysGramEmojiView.setTag(\"waysgramGiftEmoji\");\n"
-            + "                        waysGramEmojiView.setTextSize(TypedValue.COMPLEX_UNIT_DIP, 30);\n"
-            + "                        waysGramEmojiView.setGravity(android.view.Gravity.CENTER);\n"
-            + "                        waysGramEmojiView.setTextColor(Theme.getColor(Theme.key_windowBackgroundWhiteBlackText, resourcesProvider));\n"
-            + "                        card.addView(waysGramEmojiView, new FrameLayout.LayoutParams(AndroidUtilities.dp(80), AndroidUtilities.dp(80), android.view.Gravity.CENTER));\n"
-            + "                    }\n"
-            + "                    waysGramEmojiView.setText(waysGramMetadata.emoji == null || waysGramMetadata.emoji.isEmpty() ? \"🎁\" : waysGramMetadata.emoji);\n"
-            + "                    org.telegram.messenger.waysgram.WaysGramGiftArtwork.apply(imageView, waysGramSerial);\n"
-            + "                    if (org.telegram.messenger.waysgram.WaysGramGiftArtwork.hasArtwork(waysGramSerial)) {\n"
-            + "                        waysGramEmojiView.setVisibility(View.GONE);\n"
-            + "                    } else {\n"
-            + "                        waysGramEmojiView.setVisibility(View.VISIBLE);\n"
-            + "                    }\n"
-            + "                }\n"
-            + "            }\n"
-        )
-        updated = replace_exactly_once(updated, metadata_target, metadata_replacement, "native GiftCell WaysGram metadata and emoji binding")
-
-    inventory_text_marker = "// WaysGram inventory serial and level display"
-    if inventory_text_marker not in updated:
-        draw_target = (
-            "            if (gift != null) {\n"
-            "                if (title == null) {\n"
-            "                    title = new Text(gift.title, 20, AndroidUtilities.bold());\n"
-            "                }\n"
-            "                if (subtitle == null) {\n"
-            "                    subtitle = new Text(LocaleController.formatPluralStringComma(\"Gift2CollectionNumber\", gift.num), 13);\n"
-            "                }\n"
-        )
-        draw_replacement = (
-            "            " + inventory_text_marker + "\n"
-            "            org.telegram.messenger.waysgram.WaysGramGiftMediaStore.GiftMetadata waysGramGiftMetadata = null;\n"
-            "            if (userGift != null && userGift.gift != null && userGift.gift.slug != null && userGift.gift.slug.startsWith(\"waysgram://\")) {\n"
-            "                String waysGramInventorySerial = userGift.gift.slug.substring(\"waysgram://\".length());\n"
-            "                waysGramGiftMetadata = org.telegram.messenger.waysgram.WaysGramGiftMediaStore.getMetadata(waysGramInventorySerial);\n"
-            "            }\n"
-            "            // WaysGram inventory cards carry no captions at all.\n"
-            "            boolean waysGramInventoryCard = userGift != null && userGift.gift != null\n"
-            "                    && userGift.gift.slug != null && userGift.gift.slug.startsWith(\"waysgram://\");\n"
-            "            if (waysGramInventoryCard) {\n"
-            "                title = null;\n"
-            "                subtitle = null;\n"
-            "            }\n"
-            "            if (gift != null && !waysGramInventoryCard) {\n"
-            "                if (title == null) {\n"
-            "                    title = new Text(gift.title, 20, AndroidUtilities.bold());\n"
-            "                }\n"
-            "                if (subtitle == null) {\n"
-            "                    subtitle = new Text(LocaleController.formatPluralStringComma(\"Gift2CollectionNumber\", gift.num), 13);\n"
-            "                }\n"
-        )
-        updated = replace_exactly_once(
-            updated, draw_target, draw_replacement,
-            "native GiftCell WaysGram inventory serial and level labels"
-        )
-
-    return updated
 
 def patch_star_gift_sheet_sell_row(original: str) -> str:
-    """Offer "Продать подарок" in the saved-gift card of a WaysGram gift.
+    """Offer a sell row in the saved-gift card of a WaysGram gift.
 
     Telegram's own conversion row stays empty for WaysGram gifts, so the row sits between the
     acquisition date and the value. Only a gift that was never upgraded is sold.
@@ -1127,7 +951,7 @@ def patch_star_gift_sheet_sell_row(original: str) -> str:
     if marker in original:
         return original
     match = re.search(
-        r"(?m)^[ \t]*tableView\.addRow\(\)?getString\(R\.string\.Gift2Value\), "
+        r"(?m)^[ \t]*tableView\.addRow\(getString\(R\.string\.Gift2Value\), "
         r"replaceStarsWithPlain\(TextUtils\.concat\(\"\u2b50\ufe0f \" \+ "
         r"LocaleController\.formatNumber\(savedStarGift\.gift\.stars",
         original,
@@ -1136,7 +960,7 @@ def patch_star_gift_sheet_sell_row(original: str) -> str:
         raise ValueError("Could not locate the saved gift value row of the native gift sheet")
     indent = re.match(r"[ \t]*", original[match.start():]).group(0)
     row = (
-        indent + "// " + marker + "." + "\n"
+        indent + "// " + marker + ".\n"
         + indent + "if (isWaysGramGift() && savedStarGift.gift instanceof TL_stars.TL_starGift) {\n"
         + indent + "    tableView.addRow(\"Продать подарок\", \"Вернём половину цены в Stars\", \"Продать\",\n"
         + indent + "            () -> org.telegram.messenger.waysgram.WaysGramGiftSell.confirm(\n"
@@ -2332,18 +2156,8 @@ def verify_source(android_root: Path) -> None:
         if not path.is_file():
             raise FileNotFoundError(f"Required upstream source file not found: {path}")
 
-    gift_sheet_source = gift_sheet.read_text(encoding="utf-8")
-    patched_gift_sheet_source = patch_gift_sheet_profile_art_source(gift_sheet_source)
-    if patched_gift_sheet_source != gift_sheet_source:
-        gift_sheet.write_text(patched_gift_sheet_source, encoding="utf-8")
-    final_gift_sheet_source = gift_sheet.read_text(encoding="utf-8")
-    for marker in (
-        "// WaysGram saved profile gift artwork binding",
-        'userGift.gift.slug.startsWith("waysgram://")',
-        "WaysGramGiftArtwork.apply(imageView, waysGramSerial);",
-    ):
-        if marker not in final_gift_sheet_source:
-            raise ValueError("Native GiftCell WaysGram artwork binding was not applied completely")
+    # GiftSheet keeps Telegram's own sticker binding: each WaysGram gift carries a real
+    # TL_document, so the native cell decodes and animates the artwork itself.
 
     profile_layout = android_root / "TMessagesProj/src/main/java/org/telegram/ui/Components/SharedMediaLayout.java"
     if not profile_layout.is_file():
@@ -2414,10 +2228,8 @@ def verify_source(android_root: Path) -> None:
         "setWaysGramGiftUpdatedListener(Runnable listener)" not in final_gifts_container
         or "parent.waysGramGiftUpdatedListener.run();" not in final_gifts_container
         or "if (parent.waysGramInventory || list == null) return;" in final_gifts_container
-        or "page.listView.getChildCount()" not in final_gifts_container
         or "replaceWaysGramInventory(ArrayList<TL_stars.SavedStarGift> gifts)" not in final_gifts_container
         or "scrollToPositionWithOffset(waysGramFirst, waysGramOffset)" not in final_gifts_container
-        or "WaysGramGiftArtwork.apply(cell.imageView, serial);" not in final_gifts_container
         or "waysGramInventoryBottomSpace" not in final_gifts_container
     ):
         raise ValueError("WaysGram profile gift cards must open native details and refresh inventory")
@@ -2478,27 +2290,10 @@ def verify_source(android_root: Path) -> None:
     if "String slug = savedGift.gift.slug;" not in inventory_sheet_source:
         raise ValueError("WaysGram ordinary gift cards are not selectable")
 
-    gift_content = gift_sheet.read_text(encoding="utf-8")
-    patched_gift_content = patch_gift_sheet_source(gift_content)
-    if patched_gift_content != gift_content:
-        gift_sheet.write_text(patched_gift_content, encoding="utf-8")
-        gift_content = patched_gift_content
-
+    # GiftSheet.GiftCell is left exactly as Telegram wrote it: a WaysGram gift now carries a real
+    # sticker document, so the native cell draws the artwork, the backdrop and the pattern.
     gift_content = gift_sheet.read_text(encoding="utf-8")
     launch_content = launch_activity.read_text(encoding="utf-8")
-
-    for marker in (
-        "WaysGramGiftArtwork.apply(imageView, waysGramSerial);",
-        "WaysGramGiftArtwork.hasArtwork(waysGramSerial)",
-        "WaysGramGiftMediaStore.getMetadata(",
-        "waysgramGiftEmoji",
-        "waysGramEmojiView.setText",
-        "// WaysGram inventory serial and level display",
-        "// WaysGram inventory cards carry no captions at all.",
-        "// Inventory cards show artwork only: no serials, levels or captions.",
-    ):
-        if marker not in gift_content:
-            raise ValueError("WaysGram native GiftCell artwork, emoji or metadata binding is missing")
 
     gift_hits = [marker for marker in FORBIDDEN_GIFT_MARKERS if marker in gift_content]
     launch_hits = [marker for marker in FORBIDDEN_LAUNCH_MARKERS if marker in launch_content]
