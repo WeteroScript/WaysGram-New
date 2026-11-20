@@ -10445,6 +10445,18 @@ def build_messenger_router(
             await asyncio.gather(scheduled_worker_task, return_exceptions=True)
             scheduled_worker_task = None
 
+    def edited_content(payload: dict[str, Any]) -> tuple[str, list[dict[str, Any]]]:
+        # Empty text clears a media caption; the message type is verified
+        # within the same transaction that performs the update.
+        value = payload.get("body")
+        if isinstance(value, str) and not value.strip():
+            if "entities" in payload and payload["entities"] != []:
+                raise HTTPException(status_code=400, detail="Пустая подпись не может содержать форматирование")
+            return "", []
+        if "entities" in payload:
+            return _message_body_and_entities(payload)
+        return edited_body(payload), []
+
     def edited_body(payload: dict[str, Any]) -> str:
         value = payload.get("body")
         if not isinstance(value, str) or not value.strip():
@@ -11165,15 +11177,12 @@ def build_messenger_router(
     ) -> dict[str, Any]:
         user = await current_user(authorization)
         uid = int(user["telegram_id"])
-        if "entities" in payload:
-            body, entities = _message_body_and_entities(payload)
-        else:
-            body, entities = edited_body(payload), []
+        body, entities = edited_content(payload)
         now = int(time.time())
         async with aiosqlite.connect(db_path()) as db:
             await db.execute("BEGIN IMMEDIATE")
             cur = await db.execute(
-                "SELECT sender_telegram_id,recipient_telegram_id FROM messages WHERE id=?", (message_id,)
+                "SELECT sender_telegram_id,recipient_telegram_id,media_id FROM messages WHERE id=?", (message_id,)
             )
             row = await cur.fetchone()
             if row is None:
@@ -11182,6 +11191,8 @@ def build_messenger_router(
             if int(row[0]) != uid:
                 await db.rollback()
                 raise HTTPException(status_code=403, detail="Изменять можно только свои сообщения")
+            if not body and not row[2]:
+                raise HTTPException(status_code=400, detail="Текст сообщения не может быть пустым")
             if "entities" not in payload:
                 cur = await db.execute("SELECT entities_json FROM messages WHERE id=?", (message_id,))
                 if (await cur.fetchone())[0] != "[]":
@@ -11255,16 +11266,13 @@ def build_messenger_router(
     ) -> dict[str, Any]:
         user = await current_user(authorization)
         uid = int(user["telegram_id"])
-        if "entities" in payload:
-            body, entities = _message_body_and_entities(payload)
-        else:
-            body, entities = edited_body(payload), []
+        body, entities = edited_content(payload)
         now = int(time.time())
         async with aiosqlite.connect(db_path()) as db:
             await db.execute("BEGIN IMMEDIATE")
             await require_group_member(db, group_id, uid)
             cur = await db.execute(
-                "SELECT sender_telegram_id FROM group_messages WHERE id=? AND group_id=?", (message_id, group_id)
+                "SELECT sender_telegram_id,media_id FROM group_messages WHERE id=? AND group_id=?", (message_id, group_id)
             )
             row = await cur.fetchone()
             if row is None:
@@ -11273,6 +11281,8 @@ def build_messenger_router(
             if int(row[0]) != uid:
                 await db.rollback()
                 raise HTTPException(status_code=403, detail="Изменять можно только свои сообщения")
+            if not body and not row[1]:
+                raise HTTPException(status_code=400, detail="Текст сообщения не может быть пустым")
             if "entities" not in payload:
                 cur = await db.execute("SELECT entities_json FROM group_messages WHERE id=?", (message_id,))
                 if (await cur.fetchone())[0] != "[]":
@@ -11340,19 +11350,19 @@ def build_messenger_router(
         uid = int(user["telegram_id"])
         if not await can_manage_channel(channel_id, uid):
             raise HTTPException(status_code=403, detail="Менять публикации может только владелец или администратор")
-        if "entities" in payload:
-            body, entities = _message_body_and_entities(payload)
-        else:
-            body, entities = edited_body(payload), []
+        body, entities = edited_content(payload)
         now = int(time.time())
         async with aiosqlite.connect(db_path()) as db:
             await db.execute("BEGIN IMMEDIATE")
             cur = await db.execute(
-                "SELECT 1 FROM channel_messages WHERE id=? AND channel_id=?", (message_id, channel_id)
+                "SELECT media_id FROM channel_messages WHERE id=? AND channel_id=?", (message_id, channel_id)
             )
-            if await cur.fetchone() is None:
+            row = await cur.fetchone()
+            if row is None:
                 await db.rollback()
                 raise HTTPException(status_code=404, detail="Сообщение не найдено")
+            if not body and not row[0]:
+                raise HTTPException(status_code=400, detail="Текст сообщения не может быть пустым")
             if "entities" not in payload:
                 cur = await db.execute("SELECT entities_json FROM channel_messages WHERE id=?", (message_id,))
                 if (await cur.fetchone())[0] != "[]":
