@@ -49,6 +49,7 @@ MESSENGER_TABLES = frozenset(
         "scheduled_messages",
         "online_scheduled_messages",
         "read_markers",
+        "read_receipts",
         "media_assets",
         "media_transcriptions",
         "media_transcription_requests",

@@ -830,6 +830,16 @@ async def init_messenger_storage(database_path: Path) -> None:
                 updated_at INTEGER NOT NULL,
                 PRIMARY KEY(telegram_id, scope, peer_id)
             );
+            CREATE TABLE IF NOT EXISTS read_receipts (
+                scope TEXT NOT NULL,
+                peer_id INTEGER NOT NULL,
+                message_id INTEGER NOT NULL,
+                reader_id INTEGER NOT NULL,
+                read_at INTEGER NOT NULL,
+                PRIMARY KEY(scope, peer_id, message_id, reader_id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_read_receipts_lookup
+                ON read_receipts(scope,peer_id,message_id,reader_id);
             CREATE TABLE IF NOT EXISTS typing_indicators (
                 scope TEXT NOT NULL CHECK(scope IN ('dm','group')),
                 chat_id INTEGER NOT NULL,
@@ -1596,6 +1606,7 @@ async def init_messenger_storage(database_path: Path) -> None:
         # Keep all registrations while changing the key to device + account.
         primary_key = [str(row[1]) for row in sorted(push_columns, key=lambda row: int(row[5])) if int(row[5])]
         if primary_key == ["token_hash"]:
+            await db.execute("SAVEPOINT migrate_push_devices")
             await db.execute("""CREATE TABLE main.push_devices_v2 (
                 token_hash TEXT NOT NULL, token_value TEXT NOT NULL,
                 telegram_id INTEGER NOT NULL, session_token_hash TEXT NOT NULL,
@@ -1610,6 +1621,7 @@ async def init_messenger_storage(database_path: Path) -> None:
             await db.execute("ALTER TABLE main.push_devices_v2 RENAME TO push_devices")
             await db.execute("CREATE INDEX main.idx_push_devices_user ON push_devices(telegram_id,updated_at DESC)")
             await db.execute("CREATE INDEX main.idx_push_devices_session ON push_devices(session_token_hash)")
+            await db.execute("RELEASE SAVEPOINT migrate_push_devices")
         for table_name in ("messages", "group_messages", "channel_messages"):
             cur = await db.execute(f"PRAGMA {db_split.SCHEMA}.table_info({table_name})")
             columns = {str(row[1]) for row in await cur.fetchall()}
@@ -11636,7 +11648,27 @@ def build_messenger_router(
             )
             row = await cur.fetchone()
             current = int(row[0]) if row else 0
-            value = max(current, int(last_read_id))  # the marker never moves back
+            if scope == "dm":
+                cur = await db.execute("""SELECT COALESCE(MAX(id),0) FROM messages WHERE id<=? AND
+                    ((sender_telegram_id=? AND recipient_telegram_id=?) OR
+                     (sender_telegram_id=? AND recipient_telegram_id=?))""",
+                    (last_read_id, uid, peer_id, peer_id, uid))
+            elif scope == "group":
+                cur = await db.execute("SELECT COALESCE(MAX(id),0) FROM group_messages WHERE group_id=? AND id<=?", (peer_id, last_read_id))
+            else:
+                cur = await db.execute("SELECT COALESCE(MAX(id),0) FROM channel_messages WHERE channel_id=? AND id<=?", (peer_id, last_read_id))
+            value = max(current, int((await cur.fetchone())[0]))
+            if value > current and scope == "dm" and int(peer_id) != uid:
+                await db.execute("""INSERT OR IGNORE INTO read_receipts(scope,peer_id,message_id,reader_id,read_at)
+                    SELECT 'dm',sender_telegram_id,id,?,? FROM messages
+                    WHERE sender_telegram_id=? AND recipient_telegram_id=? AND id>? AND id<=?
+                      AND NOT EXISTS(SELECT 1 FROM message_hidden_for h WHERE h.message_id=messages.id AND h.telegram_id=?)""",
+                    (uid, now, peer_id, uid, current, value, uid))
+            elif value > current and scope == "group":
+                await db.execute("""INSERT OR IGNORE INTO read_receipts(scope,peer_id,message_id,reader_id,read_at)
+                    SELECT 'group',group_id,id,?,? FROM group_messages
+                    WHERE group_id=? AND sender_telegram_id<>? AND id>? AND id<=?""",
+                    (uid, now, peer_id, uid, current, value))
             await db.execute(
                 """INSERT INTO read_markers(telegram_id,scope,peer_id,last_read_id,updated_at) VALUES(?,?,?,?,?)
                    ON CONFLICT(telegram_id,scope,peer_id) DO UPDATE SET last_read_id=excluded.last_read_id,
@@ -11647,6 +11679,36 @@ def build_messenger_router(
                 await record_event(db, "dm", value, "read", uid, user_a=uid, user_b=int(peer_id))
             await db.commit()
         return {"last_read_id": value}
+
+    @router.get("/api/read/receipts")
+    async def get_message_read_receipts(scope: str = Query(...), peer_id: int = Query(..., gt=0),
+                                        message_id: int = Query(..., gt=0),
+                                        authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        user = await current_user(authorization)
+        uid = int(user["telegram_id"])
+        async with aiosqlite.connect(db_path()) as db:
+            if scope == "dm":
+                cur = await db.execute("""SELECT 1 FROM messages WHERE id=? AND sender_telegram_id=? AND recipient_telegram_id=?
+                    AND NOT EXISTS(SELECT 1 FROM message_hidden_for h WHERE h.message_id=messages.id AND h.telegram_id=?)""",
+                    (message_id, uid, peer_id, uid))
+                if await cur.fetchone() is None:
+                    raise HTTPException(status_code=404, detail="Сообщение не найдено")
+                cur = await db.execute("""SELECT reader_id,read_at FROM read_receipts
+                    WHERE scope='dm' AND peer_id=? AND message_id=? AND reader_id=?""", (uid, message_id, peer_id))
+            elif scope == "group":
+                await require_group_member(db, peer_id, uid)
+                cur = await db.execute("SELECT 1 FROM group_messages WHERE id=? AND group_id=? AND sender_telegram_id=?",
+                                       (message_id, peer_id, uid))
+                if await cur.fetchone() is None:
+                    raise HTTPException(status_code=404, detail="Сообщение не найдено")
+                cur = await db.execute("""SELECT r.reader_id,r.read_at FROM read_receipts r
+                    JOIN group_members m ON m.group_id=r.peer_id AND m.telegram_id=r.reader_id
+                    WHERE r.scope='group' AND r.peer_id=? AND r.message_id=? ORDER BY r.read_at,r.reader_id LIMIT 1000""",
+                    (peer_id, message_id))
+            else:
+                raise HTTPException(status_code=400, detail="Информация о прочтении доступна в личных чатах и группах")
+            rows = await cur.fetchall()
+        return {"readers": [{"user_id": int(row[0]), "read_at": int(row[1])} for row in rows]}
 
     @router.get("/api/drafts/v2")
     @router.get("/api/drafts")
