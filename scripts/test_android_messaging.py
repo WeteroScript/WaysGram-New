@@ -180,6 +180,28 @@ class NativeMessagingSourceChecks(unittest.TestCase):
         self.assertIn('"&before_id=" + ((long) id + 1)', messages)
         self.assertIn('"/messages?limit=1&before_id=" + ((long) serverId + 1)', messages)
 
+    def test_reaction_write_replaces_set_and_restores_after_error(self):
+        transport = self.source('tgnet/WaysGramTransport.java')
+        bridge = self.source('tgnet/WaysGramMessages.java')
+        mapper = self.source('tgnet/WaysGramMapper.java')
+        helper = self.source('messenger/SendMessagesHelper.java')
+        for value in ('TL_messages_sendReaction', 'TL_messages_getMessagesReactions',
+                      'WaysGramMessages.setReactions', 'WaysGramMessages.refreshReactions',
+                      'newSingleThreadExecutor', 'reactionToken', 'TextUtils.equals(reactionToken'):
+            self.assertIn(value, transport)
+        for value in ('WaysGramChats.serverGroupId(id)', 'WaysGramChats.channelServer(req.peer.channel_id)',
+                      'body.put("peer_id", peer.user_id)', 'body.put("reactions", selected)',
+                      'WaysGramApi.put(account, path, body)', 'REACTION_NOT_SUPPORTED',
+                      'new TLRPC.TL_messageReactions()', 'REACTIONS_BATCH_NOT_SUPPORTED'):
+            self.assertIn(value, bridge)
+        self.assertIn('json.optJSONArray("reactions")', mapper)
+        start = helper.index('    public void sendReaction(')
+        end = helper.index('    public void requestUrlAuth(', start)
+        for value in ('TL_messages_getMessagesReactions', 'refresh.id.add(req.msg_id)',
+                      'getMessagesController().processUpdates((TLRPC.Updates) state, false)',
+                      'AlertsCreator.showSimpleAlert(parentFragment', 'callback.run()'):
+            self.assertIn(value, helper[start:end])
+
     def test_uncompressed_image_documents_stay_documents(self):
         media = self.source('tgnet/WaysGramMedia.java')
         self.assertIn('!forceDocument && !"document".equals(kind)', media)

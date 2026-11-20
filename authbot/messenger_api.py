@@ -9838,9 +9838,10 @@ def build_messenger_router(
             event_user_b = 0
             if scope == "dm":
                 cur = await db.execute(
-                    """SELECT sender_telegram_id,recipient_telegram_id
-                       FROM messages WHERE id=?""",
-                    (message_id,),
+                    """SELECT sender_telegram_id,recipient_telegram_id FROM messages WHERE id=?
+                       AND NOT EXISTS (SELECT 1 FROM message_hidden_for h
+                                       WHERE h.message_id=messages.id AND h.telegram_id=?)""",
+                    (message_id, user_id),
                 )
                 message = await cur.fetchone()
                 if message is None or user_id not in (int(message[0]), int(message[1])):
@@ -9858,6 +9859,17 @@ def build_messenger_router(
                     await db.rollback()
                     raise HTTPException(status_code=404, detail="Сообщение не найдено")
             elif scope == "channel":
+                cur = await db.execute(
+                    """SELECT (c.is_public=1 OR c.owner_telegram_id=?
+                           OR EXISTS(SELECT 1 FROM channel_admins ca WHERE ca.channel_id=c.id AND ca.telegram_id=?)
+                           OR EXISTS(SELECT 1 FROM channel_members cm WHERE cm.channel_id=c.id AND cm.telegram_id=?))
+                       FROM channels c WHERE c.id=?""", (user_id, user_id, user_id, chat_id),
+                )
+                channel = await cur.fetchone()
+                if channel is None:
+                    raise HTTPException(status_code=404, detail="Канал не найден")
+                if not channel[0]:
+                    raise HTTPException(status_code=403, detail="Нет доступа к приватному каналу")
                 cur = await db.execute(
                     "SELECT 1 FROM channel_messages WHERE id=? AND channel_id=?",
                     (message_id, chat_id),
@@ -9929,6 +9941,88 @@ def build_messenger_router(
             "reactions": summary,
             "my_reactions": mine,
         }
+
+    async def set_message_reactions(
+        scope: str, chat_id: int, message_id: int, user_id: int,
+        requested: Any, peer_id: Any = None,
+    ) -> dict[str, Any]:
+        """Atomically replace this account's emoji set, never toggle on retry."""
+        allowed = {"👍", "❤️", "😂", "😮", "😢", "🎉", "🙏"}
+        if not isinstance(requested, list) or len(requested) > 3:
+            raise HTTPException(status_code=400, detail="Можно выбрать не более трёх реакций")
+        if any(not isinstance(value, str) or value not in allowed for value in requested) or len(set(requested)) != len(requested):
+            raise HTTPException(status_code=400, detail="Недопустимый набор реакций")
+        if not 0 < message_id <= 9223372036854775807 or (
+            scope == "dm" and (isinstance(peer_id, bool) or not isinstance(peer_id, int)
+                               or not 0 < peer_id <= 9223372036854775807)
+        ) or (scope != "dm" and not 0 < chat_id <= 9223372036854775807):
+            raise HTTPException(status_code=400, detail="Некорректные параметры сообщения")
+        async with aiosqlite.connect(db_path()) as db:
+            await db.execute("BEGIN IMMEDIATE")
+            event_a = event_b = 0
+            if scope == "dm":
+                cur = await db.execute(
+                    """SELECT sender_telegram_id,recipient_telegram_id FROM messages
+                       WHERE id=? AND ((sender_telegram_id=? AND recipient_telegram_id=?)
+                                      OR (sender_telegram_id=? AND recipient_telegram_id=?))
+                       AND NOT EXISTS (SELECT 1 FROM message_hidden_for h
+                                       WHERE h.message_id=messages.id AND h.telegram_id=?)""",
+                    (message_id, user_id, peer_id, peer_id, user_id, user_id),
+                )
+                message = await cur.fetchone()
+                if message is None:
+                    raise HTTPException(status_code=404, detail="Сообщение не найдено")
+                event_a, event_b = int(message[0]), int(message[1])
+            elif scope == "group":
+                await require_group_member(db, chat_id, user_id)
+                cur = await db.execute("SELECT 1 FROM group_messages WHERE group_id=? AND id=?", (chat_id, message_id))
+                if await cur.fetchone() is None:
+                    raise HTTPException(status_code=404, detail="Сообщение не найдено")
+            elif scope == "channel":
+                cur = await db.execute(
+                    """SELECT (c.is_public=1 OR c.owner_telegram_id=?
+                           OR EXISTS(SELECT 1 FROM channel_admins ca WHERE ca.channel_id=c.id AND ca.telegram_id=?)
+                           OR EXISTS(SELECT 1 FROM channel_members cm WHERE cm.channel_id=c.id AND cm.telegram_id=?))
+                       FROM channels c WHERE c.id=?""", (user_id, user_id, user_id, chat_id),
+                )
+                channel = await cur.fetchone()
+                if channel is None:
+                    raise HTTPException(status_code=404, detail="Канал не найден")
+                if not channel[0]:
+                    raise HTTPException(status_code=403, detail="Нет доступа к приватному каналу")
+                cur = await db.execute("SELECT 1 FROM channel_messages WHERE channel_id=? AND id=?", (chat_id, message_id))
+                if await cur.fetchone() is None:
+                    raise HTTPException(status_code=404, detail="Публикация не найдена")
+            else:
+                raise HTTPException(status_code=400, detail="Недопустимый тип чата")
+            cur = await db.execute(
+                """SELECT reaction FROM message_reactions WHERE scope=? AND chat_id=? AND message_id=?
+                   AND user_telegram_id=? ORDER BY created_at,reaction""", (scope, chat_id, message_id, user_id),
+            )
+            previous = {str(row[0]) for row in await cur.fetchall()}
+            desired = set(requested)
+            changed = previous != desired
+            if changed:
+                for value in previous - desired:
+                    await db.execute("""DELETE FROM message_reactions WHERE scope=? AND chat_id=? AND message_id=?
+                                        AND user_telegram_id=? AND reaction=?""", (scope, chat_id, message_id, user_id, value))
+                now = int(time.time())
+                for value in requested:
+                    if value not in previous:
+                        await db.execute("""INSERT INTO message_reactions(scope,chat_id,message_id,user_telegram_id,reaction,created_at)
+                                            VALUES(?,?,?,?,?,?)""", (scope, chat_id, message_id, user_id, value, now))
+                await record_event(db, scope, message_id, "reaction", user_id, chat_id=chat_id,
+                                   user_a=event_a, user_b=event_b)
+            cur = await db.execute("""SELECT reaction,COUNT(*) FROM message_reactions
+                    WHERE scope=? AND chat_id=? AND message_id=? GROUP BY reaction ORDER BY MIN(created_at),reaction""",
+                    (scope, chat_id, message_id))
+            summary = [{"reaction": str(row[0]), "count": int(row[1])} for row in await cur.fetchall()]
+            cur = await db.execute("""SELECT reaction FROM message_reactions WHERE scope=? AND chat_id=? AND message_id=?
+                    AND user_telegram_id=? ORDER BY created_at,reaction""", (scope, chat_id, message_id, user_id))
+            mine = [str(row[0]) for row in await cur.fetchall()]
+            await db.commit()
+        return {"status": "updated" if changed else "unchanged", "scope": scope, "chat_id": chat_id,
+                "message_id": message_id, "reactions": summary, "my_reactions": mine}
 
     async def change_pinned_message(
         scope: str, chat_id: int, message_id: int, user_id: int, pin: bool
@@ -10131,6 +10225,25 @@ def build_messenger_router(
         return await toggle_message_reaction(
             "channel", channel_id, message_id, int(user["telegram_id"]), str(payload.get("reaction") or "")
         )
+
+    @router.put("/api/messages/{message_id}/reactions")
+    async def set_direct_reactions(message_id: int, payload: dict[str, Any],
+                                   authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        user = await current_user(authorization)
+        return await set_message_reactions("dm", 0, message_id, int(user["telegram_id"]),
+                                           payload.get("reactions"), payload.get("peer_id"))
+
+    @router.put("/api/groups/{group_id}/messages/{message_id}/reactions")
+    async def set_group_reactions(group_id: int, message_id: int, payload: dict[str, Any],
+                                  authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        user = await current_user(authorization)
+        return await set_message_reactions("group", group_id, message_id, int(user["telegram_id"]), payload.get("reactions"))
+
+    @router.put("/api/channels/{channel_id}/messages/{message_id}/reactions")
+    async def set_channel_reactions(channel_id: int, message_id: int, payload: dict[str, Any],
+                                    authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        user = await current_user(authorization)
+        return await set_message_reactions("channel", channel_id, message_id, int(user["telegram_id"]), payload.get("reactions"))
 
     @router.delete("/api/conversations/{peer_id}/messages")
     async def clear_direct_message_history(

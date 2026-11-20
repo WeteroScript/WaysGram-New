@@ -4306,6 +4306,79 @@ def test_reaction_events_reach_all_account_sessions_and_preserve_visibility(api_
     run(scenario())
 
 
+def test_atomic_reaction_sets_are_retry_safe_private_and_scoped(api_env) -> None:
+    path, _, _, app = api_env
+    for uid in (97001, 97002, 97003):
+        add_account(api_env, uid, f"reaction_set_{uid}")
+        add_session(path, uid, f"reaction-set-{uid}")
+    add_session(path, 97002, "reaction-set-second")
+
+    async def scenario() -> None:
+        h = lambda uid: {"Authorization": f"Bearer reaction-set-{uid}"}
+        second = {"Authorization": "Bearer reaction-set-second"}
+        async with await client_for(app) as client:
+            group = await client.post("/api/groups", headers=h(97001), json={"title": "Set group"})
+            gid = group.json()["id"]
+            assert (await client.post(f"/api/groups/{gid}/members", headers=h(97001), json={"telegram_id": 97002})).status_code == 201
+            channel = await client.post("/api/channels", headers=h(97001), json={"title": "Set channel", "is_public": False})
+            cid = channel.json()["id"]
+            assert (await client.post("/api/channels/join", headers=h(97002), json={"invite_link": channel.json()["invite_link"]})).status_code == 200
+            cases = [("dm", 0, "/api/messages", {"recipient_id": 97002}),
+                     ("group", gid, f"/api/groups/{gid}/messages", {}),
+                     ("channel", cid, f"/api/channels/{cid}/messages", {})]
+            refs = {}
+            for scope, chat_id, url, payload in cases:
+                msg = await client.post(url, headers=h(97001), json={**payload, "body": "set reactions", "silent": True})
+                assert msg.status_code == 201
+                mid = msg.json()["id"]
+                endpoint = f"/api/messages/{mid}/reactions" if scope == "dm" else f"/api/{scope}s/{chat_id}/messages/{mid}/reactions"
+                refs[scope] = (endpoint, mid)
+                key = {"peer_id": 97001} if scope == "dm" else {}
+                before = (await client.get("/api/events", headers=h(97001))).json()["latest_id"]
+                # Two sessions performing the same operation concurrently produce
+                # one change, not a second toggle or a duplicate event.
+                one, two = await asyncio.gather(
+                    client.put(endpoint, headers=h(97002), json={**key, "reactions": ["👍", "❤️"]}),
+                    client.put(endpoint, headers=second, json={**key, "reactions": ["👍", "❤️"]}),
+                )
+                assert one.status_code == two.status_code == 200
+                assert sorted([one.json()["status"], two.json()["status"]]) == ["unchanged", "updated"]
+                assert set(two.json()["my_reactions"]) == {"👍", "❤️"}
+                events = (await client.get("/api/events", headers=h(97001), params={"after_id": before})).json()["events"]
+                assert len([e for e in events if e["kind"] == "reaction" and e["scope"] == scope and e["message_id"] == mid]) == 1
+                # Another person's reaction survives replacement and clear.
+                owner_key = {"peer_id": 97002} if scope == "dm" else {}
+                assert (await client.put(endpoint, headers=h(97001), json={**owner_key, "reactions": ["👍"]})).status_code == 200
+                replaced = await client.put(endpoint, headers=second, json={**key, "reactions": ["🎉"]})
+                assert replaced.status_code == 200 and replaced.json()["my_reactions"] == ["🎉"]
+                assert {r["reaction"]: r["count"] for r in replaced.json()["reactions"]} == {"👍": 1, "🎉": 1}
+                removed = await client.put(endpoint, headers=second, json={**key, "reactions": []})
+                assert removed.status_code == 200 and removed.json()["my_reactions"] == []
+                assert removed.json()["reactions"] == [{"reaction": "👍", "count": 1}]
+                for invalid in (None, "👍", ["🔥"], ["👍", "👍"], ["👍", "❤️", "😂", "😮"], [True], [{}]):
+                    assert (await client.put(endpoint, headers=second, json={**key, "reactions": invalid})).status_code == 400
+                denied = await client.put(endpoint, headers=h(97003), json={**key, "reactions": ["👍"]})
+                assert denied.status_code in (403, 404)
+                after = await client.put(endpoint, headers=second, json={**key, "reactions": []})
+                assert after.json()["status"] == "unchanged" and after.json()["reactions"] == [{"reaction": "👍", "count": 1}]
+            dm_url, dm_id = refs["dm"]
+            for bad in (None, True, 0, 97003, 2**63):
+                bad_response = await client.put(dm_url, headers=h(97002), json={"peer_id": bad, "reactions": ["🎉"]})
+                assert bad_response.status_code in (400, 404)
+            # A locally hidden message cannot be modified by its owner session.
+            assert (await client.delete(f"/api/messages/{dm_id}?for=me", headers=h(97002))).status_code == 200
+            assert (await client.put(dm_url, headers=h(97002), json={"peer_id": 97001, "reactions": ["🎉"]})).status_code == 404
+            assert (await client.post(dm_url, headers=h(97002), json={"reaction": "🎉"})).status_code == 404
+            # Membership and channel access are rechecked at the moment of the write.
+            with db_split.sqlite_connect(path) as db:
+                db.execute("DELETE FROM group_members WHERE group_id=? AND telegram_id=97002", (gid,))
+                db.execute("DELETE FROM channel_members WHERE channel_id=? AND telegram_id=97002", (cid,))
+                db.commit()
+            for scope in ("group", "channel"):
+                assert (await client.put(refs[scope][0], headers=h(97002), json={"reactions": ["🎉"]})).status_code == 403
+    run(scenario())
+
+
 def test_cloud_drafts_sync_and_enforce_chat_access(api_env) -> None:
     path, _auth_store, _fake_bot, app = api_env
     add_account(api_env, 95101, "draft_owner")
