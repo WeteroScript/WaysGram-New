@@ -3108,6 +3108,22 @@ def build_messenger_router(
     ) -> dict[str, Any]:
         user = await current_user(authorization)
         uid = int(user["telegram_id"])
+        metadata: dict[str, Any] = {}
+        metadata_header = request.headers.get("x-media-metadata", "")
+        if metadata_header:
+            try:
+                if len(metadata_header) > 4096:
+                    raise ValueError("metadata too large")
+                raw_metadata = json.loads(base64.b64decode(metadata_header, validate=True).decode("utf-8"))
+                if not isinstance(raw_metadata, dict) or set(raw_metadata) - {"spoiler"}:
+                    raise ValueError("invalid image metadata")
+                spoiler = raw_metadata.get("spoiler", False)
+                if not isinstance(spoiler, bool):
+                    raise ValueError("invalid spoiler flag")
+                if spoiler:
+                    metadata["spoiler"] = True
+            except (ValueError, TypeError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+                raise HTTPException(status_code=400, detail="Некорректные параметры изображения") from exc
         declared_type = str(request.headers.get("content-type", "")).split(";", 1)[0].strip().lower()
         if not declared_type.startswith("image/") and declared_type != "application/octet-stream":
             raise HTTPException(status_code=415, detail="Загрузите файл изображения JPEG, PNG или WebP")
@@ -3161,9 +3177,10 @@ def build_messenger_router(
 
                 await db.execute(
                     """INSERT INTO media_assets
-                       (id,owner_telegram_id,storage_name,mime_type,size_bytes,created_at,original_name)
-                       VALUES(?,?,?,?,?,?,?)""",
-                    (media_id, uid, storage_name, mime_type, len(normalized), now, "image" + extension),
+                       (id,owner_telegram_id,storage_name,mime_type,size_bytes,created_at,original_name,media_metadata)
+                       VALUES(?,?,?,?,?,?,?,?)""",
+                    (media_id, uid, storage_name, mime_type, len(normalized), now, "image" + extension,
+                     json.dumps(metadata, ensure_ascii=False, separators=(",", ":"))),
                 )
                 await db.commit()
         except Exception:
@@ -3173,6 +3190,7 @@ def build_messenger_router(
             "id": media_id,
             "mime_type": mime_type,
             "size_bytes": len(normalized),
+            "media_metadata": json.dumps(metadata, ensure_ascii=False, separators=(",", ":")),
             "url": f"/api/media/{media_id}",
         }
 
@@ -3198,8 +3216,24 @@ def build_messenger_router(
                 if len(metadata_header) > 4096:
                     raise ValueError("metadata too large")
                 raw_metadata = json.loads(base64.b64decode(metadata_header, validate=True).decode("utf-8"))
-                if not isinstance(raw_metadata, dict) or set(raw_metadata) - {"duration", "width", "height", "waveform", "title", "performer"}:
+                if not isinstance(raw_metadata, dict) or set(raw_metadata) - {
+                    "duration", "width", "height", "waveform", "title", "performer",
+                    "spoiler", "video_cover_media_id",
+                }:
                     raise ValueError("invalid metadata")
+                spoiler = raw_metadata.get("spoiler", False)
+                if not isinstance(spoiler, bool):
+                    raise ValueError("invalid spoiler flag")
+                if spoiler:
+                    metadata["spoiler"] = True
+                cover_media_id = raw_metadata.get("video_cover_media_id")
+                if cover_media_id is not None:
+                    if (
+                        not isinstance(cover_media_id, str)
+                        or not re.fullmatch(r"[a-f0-9]{32}", cover_media_id)
+                    ):
+                        raise ValueError("invalid video cover id")
+                    metadata["video_cover_media_id"] = cover_media_id
                 for key, maximum in (("duration", 86400), ("width", 8192), ("height", 8192)):
                     value = raw_metadata.get(key)
                     if value is not None:
@@ -3294,6 +3328,20 @@ def build_messenger_router(
                 status_code=415,
                 detail="Голосовые сообщения должны быть аудиофайлами",
             )
+        cover_media_id = metadata.get("video_cover_media_id")
+        if cover_media_id:
+            if media_kind != "video" or not mime_type.startswith("video/"):
+                raise HTTPException(status_code=400, detail="Обложка доступна только для обычного видео")
+            async with aiosqlite.connect(db_path()) as cover_db:
+                cur = await cover_db.execute(
+                    """SELECT 1 FROM media_assets
+                       WHERE id=? AND owner_telegram_id=?
+                         AND lower(mime_type) LIKE 'image/%'
+                         AND COALESCE(media_kind,'')<>'document'""",
+                    (cover_media_id, uid),
+                )
+                if await cur.fetchone() is None:
+                    raise HTTPException(status_code=404, detail="Обложка не найдена или недоступна")
         # Image documents retain their original bytes and their document identity
         # in histories, forwards and other clients. Legacy rows are ambiguous and
         # must not be guessed from their filenames.
@@ -3929,6 +3977,51 @@ def build_messenger_router(
                     """SELECT 1 FROM channel_messages cm
                        JOIN channels c ON c.id=cm.channel_id
                        WHERE cm.media_id=? AND (c.is_public=1 OR c.owner_telegram_id=?
+                           OR EXISTS(SELECT 1 FROM channel_admins ca
+                                     WHERE ca.channel_id=c.id AND ca.telegram_id=?)
+                           OR EXISTS(SELECT 1 FROM channel_members member
+                                     WHERE member.channel_id=c.id AND member.telegram_id=?))
+                       LIMIT 1""",
+                    (media_id, uid, uid, uid),
+                )
+                allowed = await cur.fetchone() is not None
+            if not allowed:
+                # A video cover is a separately stored image, not the message's
+                # primary attachment. Grant access only while a visible parent
+                # video remains visible in the same conversation scope.
+                cur = await db.execute(
+                    """SELECT 1 FROM messages m
+                       JOIN media_assets video ON video.id=m.media_id
+                       WHERE json_valid(video.media_metadata)
+                         AND json_extract(video.media_metadata,'$.video_cover_media_id')=?
+                         AND (m.sender_telegram_id=? OR m.recipient_telegram_id=?)
+                         AND NOT EXISTS (
+                             SELECT 1 FROM message_hidden_for hidden
+                             WHERE hidden.message_id=m.id AND hidden.telegram_id=?
+                         )
+                       LIMIT 1""",
+                    (media_id, uid, uid, uid),
+                )
+                allowed = await cur.fetchone() is not None
+            if not allowed:
+                cur = await db.execute(
+                    """SELECT 1 FROM group_messages gm
+                       JOIN media_assets video ON video.id=gm.media_id
+                       JOIN group_members member ON member.group_id=gm.group_id
+                       WHERE json_valid(video.media_metadata)
+                         AND json_extract(video.media_metadata,'$.video_cover_media_id')=?
+                         AND member.telegram_id=? LIMIT 1""",
+                    (media_id, uid),
+                )
+                allowed = await cur.fetchone() is not None
+            if not allowed:
+                cur = await db.execute(
+                    """SELECT 1 FROM channel_messages cm
+                       JOIN media_assets video ON video.id=cm.media_id
+                       JOIN channels c ON c.id=cm.channel_id
+                       WHERE json_valid(video.media_metadata)
+                         AND json_extract(video.media_metadata,'$.video_cover_media_id')=?
+                         AND (c.is_public=1 OR c.owner_telegram_id=?
                            OR EXISTS(SELECT 1 FROM channel_admins ca
                                      WHERE ca.channel_id=c.id AND ca.telegram_id=?)
                            OR EXISTS(SELECT 1 FROM channel_members member
