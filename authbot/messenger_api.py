@@ -751,7 +751,8 @@ async def init_messenger_storage(database_path: Path) -> None:
                 message_id INTEGER PRIMARY KEY REFERENCES messages(id) ON DELETE CASCADE,
                 latitude REAL NOT NULL CHECK(latitude >= -90 AND latitude <= 90),
                 longitude REAL NOT NULL CHECK(longitude >= -180 AND longitude <= 180),
-                label TEXT NOT NULL DEFAULT ''
+                label TEXT NOT NULL DEFAULT '',
+                venue_json TEXT NOT NULL DEFAULT ''
             );
             CREATE TABLE IF NOT EXISTS live_locations (
                 id TEXT PRIMARY KEY,
@@ -833,6 +834,7 @@ async def init_messenger_storage(database_path: Path) -> None:
                 latitude REAL NOT NULL CHECK(latitude >= -90 AND latitude <= 90),
                 longitude REAL NOT NULL CHECK(longitude >= -180 AND longitude <= 180),
                 label TEXT NOT NULL DEFAULT '',
+                venue_json TEXT NOT NULL DEFAULT '',
                 PRIMARY KEY(scope,message_id)
             );
             CREATE TABLE IF NOT EXISTS message_reactions (
@@ -1360,6 +1362,13 @@ async def init_messenger_storage(database_path: Path) -> None:
                 await db.execute(
                     f"ALTER TABLE {db_split.SCHEMA}.message_contacts ADD COLUMN {column} TEXT NOT NULL DEFAULT ''"
                 )
+
+        # Preserve existing coordinates and labels while adding optional venue details.
+        for table_name in ("message_locations", "message_forward_locations"):
+            cur = await db.execute(f"PRAGMA {db_split.SCHEMA}.table_info({table_name})")
+            columns = {str(row[1]) for row in await cur.fetchall()}
+            if "venue_json" not in columns:
+                await db.execute(f"ALTER TABLE {db_split.SCHEMA}.{table_name} ADD COLUMN venue_json TEXT NOT NULL DEFAULT ''")
 
         cur = await db.execute(f"PRAGMA {db_split.SCHEMA}.table_info(user_gifts)")
         user_gift_columns = {str(row[1]) for row in await cur.fetchall()}
@@ -2217,7 +2226,7 @@ def _parse_message_contact(contact_value: Any) -> dict[str, str] | None:
     return contact_payload
 
 
-def _parse_message_location(value: Any) -> dict[str, float | str] | None:
+def _parse_message_location(value: Any) -> dict[str, Any] | None:
     """Validate a static location consistently across personal, group and channel messages."""
     if value is None:
         return None
@@ -2237,7 +2246,26 @@ def _parse_message_location(value: Any) -> dict[str, float | str] | None:
     label = str(value.get("label") or "").strip()
     if len(label) > 120:
         raise HTTPException(status_code=400, detail="Название места не должно превышать 120 символов")
-    return {"latitude": latitude, "longitude": longitude, "label": label}
+    result = {"latitude": latitude, "longitude": longitude, "label": label}
+    if "venue" in value:
+        venue = value["venue"]
+        if not isinstance(venue, dict) or not label or "\x00" in label:
+            raise HTTPException(status_code=400, detail="Укажите название и данные места")
+        fields = {"address": 512, "provider": 128, "venue_id": 256, "venue_type": 128}
+        if any(key not in fields for key in venue):
+            raise HTTPException(status_code=400, detail="Некорректные данные места")
+        snapshot = {}
+        for key, maximum in fields.items():
+            field = venue.get(key, "")
+            if not isinstance(field, str) or len(field) > maximum or "\x00" in field:
+                raise HTTPException(status_code=400, detail="Некорректные данные места")
+            snapshot[key] = field
+        result["venue"] = snapshot
+    return result
+
+
+def _location_venue_json(location: dict[str, Any]) -> str:
+    return json.dumps(location["venue"], ensure_ascii=False, separators=(",", ":")) if "venue" in location else ""
 
 
 def _next_recurring_scheduled_timestamp(
@@ -7501,10 +7529,10 @@ def build_messenger_router(
             contacts = {}
             if scope in ("group", "channel"):
                 cur = await db.execute(
-                    f"SELECT message_id,latitude,longitude,label FROM message_forward_locations WHERE scope=? AND message_id IN ({placeholders})",
+                    f"SELECT message_id,latitude,longitude,label,venue_json FROM message_forward_locations WHERE scope=? AND message_id IN ({placeholders})",
                     (scope, *message_ids),
                 )
-                locations = {int(row[0]): (row[1], row[2], row[3]) for row in await cur.fetchall()}
+                locations = {int(row[0]): tuple(row[1:]) for row in await cur.fetchall()}
                 cur = await db.execute(
                     f"SELECT message_id,contact_name,contact_phone,contact_email,contact_first_name,contact_last_name,contact_vcard FROM message_scoped_contacts WHERE scope=? AND message_id IN ({placeholders})",
                     (scope, *message_ids),
@@ -7521,7 +7549,7 @@ def build_messenger_router(
                 item["forwarded_from_date"] = source[1]
             location = locations.get(int(item["id"]))
             if location:
-                item.update(location_latitude=location[0], location_longitude=location[1], location_label=location[2])
+                item.update(location_latitude=location[0], location_longitude=location[1], location_label=location[2], location_venue_json=location[3])
             contact = contacts.get(int(item["id"]))
             if contact:
                 item.update(zip(("contact_name", "contact_phone", "contact_email", "contact_first_name", "contact_last_name", "contact_vcard"), contact))
@@ -7729,10 +7757,10 @@ def build_messenger_router(
                 )
             if location_payload:
                 await db.execute(
-                    """INSERT INTO message_forward_locations(scope,message_id,latitude,longitude,label)
-                       VALUES(?,?,?,?,?)""",
+                    """INSERT INTO message_forward_locations(scope,message_id,latitude,longitude,label,venue_json)
+                       VALUES(?,?,?,?,?,?)""",
                     ("channel", message_id, location_payload["latitude"],
-                     location_payload["longitude"], location_payload["label"]),
+                     location_payload["longitude"], location_payload["label"], _location_venue_json(location_payload)),
                 )
             await record_event(
                 db, "channel", message_id, "new_message", uid, chat_id=channel_id,
@@ -8011,6 +8039,7 @@ def build_messenger_router(
                    (SELECT latitude FROM message_locations WHERE message_id=messages.id) AS location_latitude,
                    (SELECT longitude FROM message_locations WHERE message_id=messages.id) AS location_longitude,
                    (SELECT label FROM message_locations WHERE message_id=messages.id) AS location_label,
+                   (SELECT venue_json FROM message_locations WHERE message_id=messages.id) AS location_venue_json,
                    gift_attachment.serial_number AS gift_serial_number,
                    gift_attachment.gift_name AS gift_name,
                    gift_attachment.telegram_gift_id AS gift_telegram_gift_id,
@@ -8248,7 +8277,8 @@ def build_messenger_router(
                    (SELECT contact_vcard FROM message_contacts WHERE message_id=messages.id) AS contact_vcard,
                           (SELECT latitude FROM message_locations WHERE message_id=messages.id) AS location_latitude,
                           (SELECT longitude FROM message_locations WHERE message_id=messages.id) AS location_longitude,
-                          (SELECT label FROM message_locations WHERE message_id=messages.id) AS location_label
+                          (SELECT label FROM message_locations WHERE message_id=messages.id) AS location_label,
+                          (SELECT venue_json FROM message_locations WHERE message_id=messages.id) AS location_venue_json
                    FROM messages
                    WHERE ((sender_telegram_id=? AND recipient_telegram_id=?) OR
                           (sender_telegram_id=? AND recipient_telegram_id=?))
@@ -8373,13 +8403,14 @@ def build_messenger_router(
             if location_payload:
                 await db.execute(
                     """INSERT INTO message_locations
-                       (message_id,latitude,longitude,label)
-                       VALUES(?,?,?,?)""",
+                       (message_id,latitude,longitude,label,venue_json)
+                       VALUES(?,?,?,?,?)""",
                     (
                         message_id,
                         location_payload["latitude"],
                         location_payload["longitude"],
                         location_payload["label"],
+                        _location_venue_json(location_payload),
                     ),
                 )
             await record_event(
@@ -9345,9 +9376,9 @@ def build_messenger_router(
                     cur = await db.execute("SELECT 1 FROM message_gifts WHERE message_id=?", (mid,))
                     if await cur.fetchone():
                         raise HTTPException(status_code=400, detail="Этот тип вложения пока нельзя переслать")
-                    cur = await db.execute("SELECT latitude,longitude,label FROM message_locations WHERE message_id=?", (mid,))
+                    cur = await db.execute("SELECT latitude,longitude,label,venue_json FROM message_locations WHERE message_id=?", (mid,))
                 else:
-                    cur = await db.execute("SELECT latitude,longitude,label FROM message_forward_locations WHERE scope=? AND message_id=?", (source_scope, mid))
+                    cur = await db.execute("SELECT latitude,longitude,label,venue_json FROM message_forward_locations WHERE scope=? AND message_id=?", (source_scope, mid))
                 location = await cur.fetchone()
                 item["forward_location"] = tuple(location) if location else None
                 contact_columns = "contact_name,contact_phone,contact_email,contact_first_name,contact_last_name,contact_vcard"
@@ -9410,9 +9441,9 @@ def build_messenger_router(
                 location = item["forward_location"]
                 if location:
                     if target_scope == "dm":
-                        await db.execute("INSERT INTO message_locations(message_id,latitude,longitude,label) VALUES(?,?,?,?)", (mid, *location))
+                        await db.execute("INSERT INTO message_locations(message_id,latitude,longitude,label,venue_json) VALUES(?,?,?,?,?)", (mid, *location))
                     else:
-                        await db.execute("INSERT INTO message_forward_locations(scope,message_id,latitude,longitude,label) VALUES(?,?,?,?,?)", (target_scope, mid, *location))
+                        await db.execute("INSERT INTO message_forward_locations(scope,message_id,latitude,longitude,label,venue_json) VALUES(?,?,?,?,?,?)", (target_scope, mid, *location))
                 contact = item["forward_contact"]
                 if contact:
                     if target_scope == "dm":
@@ -9432,7 +9463,7 @@ def build_messenger_router(
                     "media_album_id": album_id, "media_album_index": album_index, "media_album_count": album_count,
                     **item["media_fields"]}
                 if location:
-                    result_item.update(location_latitude=location[0], location_longitude=location[1], location_label=location[2])
+                    result_item.update(location_latitude=location[0], location_longitude=location[1], location_label=location[2], location_venue_json=location[3])
                 if contact:
                     result_item.update(zip(("contact_name", "contact_phone", "contact_email", "contact_first_name", "contact_last_name", "contact_vcard"), contact))
                 if target_scope == "dm":
@@ -11797,10 +11828,10 @@ def build_messenger_router(
                 )
             if location_payload:
                 await db.execute(
-                    """INSERT INTO message_forward_locations(scope,message_id,latitude,longitude,label)
-                       VALUES(?,?,?,?,?)""",
+                    """INSERT INTO message_forward_locations(scope,message_id,latitude,longitude,label,venue_json)
+                       VALUES(?,?,?,?,?,?)""",
                     ("group", message_id, location_payload["latitude"],
-                     location_payload["longitude"], location_payload["label"]),
+                     location_payload["longitude"], location_payload["label"], _location_venue_json(location_payload)),
                 )
             await record_event(
                 db, "group", message_id, "new_message", uid, chat_id=group_id,

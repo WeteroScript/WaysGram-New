@@ -93,6 +93,22 @@ class NativeMessagingSourceChecks(unittest.TestCase):
         self.assertIn('new TLRPC.TL_messageMediaGeo()', media)
         self.assertIn('new TLRPC.TL_messageMediaVenue()', media)
 
+    def test_venue_send_receive_and_metadata(self):
+        transport = self.source('tgnet/WaysGramTransport.java')
+        media = self.source('tgnet/WaysGramMedia.java')
+        utils = self.source('messenger/utils/tlutils/TlUtils.java')
+        for value in ('send.media instanceof TLRPC.TL_inputMediaVenue', 'location.put("label", place.title',
+                      'venue.put("address", place.address', 'venue.put("provider", place.provider',
+                      'venue.put("venue_id", place.venue_id', 'venue.put("venue_type", place.venue_type',
+                      'location.put("venue", venue)'):
+            self.assertIn(value, transport)
+        for value in ('location.optJSONObject("venue")', 'json.optString("location_venue_json"',
+                      'details.optString("address"', 'details.optString("provider"',
+                      'details.optString("venue_id"', 'details.optString("venue_type"'):
+            self.assertIn(value, media)
+        self.assertIn('WaysGramTransport.ENABLED && location.venue_type != null ? location.venue_type', utils)
+        self.assertIn('TlUtils.toInputMediaGeo(location)', self.source('messenger/SendMessagesHelper.java'))
+
     def test_native_text_edit_uses_supported_put_and_shows_actual_error(self):
         api = self.source('tgnet/WaysGramApi.java')
         bridge = self.source('tgnet/WaysGramMessages.java')

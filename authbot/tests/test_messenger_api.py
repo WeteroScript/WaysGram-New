@@ -7749,3 +7749,90 @@ def test_forward_idempotency_rechecks_revoked_access_and_hidden_sources(api_env)
             assert (await client.delete(f'/api/messages/{dm.json()["id"]}?for=me', headers=h(86802))).status_code == 200
             assert (await client.post('/api/forward', headers=key, json=req)).status_code == 404
     run(scenario())
+
+
+def test_venue_round_trip_in_all_chats_and_forwarding(api_env, monkeypatch) -> None:
+    path, _, _, app = api_env
+    for uid in (86701, 86702, 86703):
+        add_account(api_env, uid, f'venue_{uid}')
+        add_session(path, uid, f'venue-{uid}')
+    monkeypatch.setattr(messenger_api, '_firebase_service_account', lambda: None)
+    async def scenario():
+        h = lambda uid: {'Authorization': f'Bearer venue-{uid}'}
+        venue = {'address': 'Straat 5, Naaldwijk', 'provider': 'example', 'venue_id': 'abc:123', 'venue_type': 'cafe'}
+        location = {'latitude': 52.0, 'longitude': 4.2, 'label': 'Café 🌷', 'venue': venue}
+        async with await client_for(app) as client:
+            group = (await client.post('/api/groups', headers=h(86701), json={'title': 'Places'})).json()['id']
+            assert (await client.post(f'/api/groups/{group}/members', headers=h(86701), json={'telegram_id': 86702})).status_code == 201
+            channel_data = (await client.post('/api/channels', headers=h(86701), json={'title': 'Places', 'is_public': False})).json()
+            channel = channel_data['id']
+            assert (await client.post('/api/channels/join', headers=h(86702), json={'invite_link': channel_data['invite_link']})).status_code == 200
+            sources = []
+            for scope, peer, url, extra in (
+                ('dm', 86702, '/api/messages', {'recipient_id': 86702}),
+                ('group', group, f'/api/groups/{group}/messages', {}),
+                ('channel', channel, f'/api/channels/{channel}/messages', {}),
+            ):
+                payload = {**extra, 'location': location, 'silent': True}
+                key = {**h(86701), 'Idempotency-Key': f'venue-idempotency-{scope}-001'}
+                first = await client.post(url, headers=key, json=payload)
+                assert first.status_code == 201, first.text
+                assert (await client.post(url, headers=key, json=payload)).json() == first.json()
+                assert first.json()['location'] == location
+                changed = {**payload, 'location': {**location, 'venue': {**venue, 'address': 'Changed'}}}
+                assert (await client.post(url, headers=key, json=changed)).status_code == 409
+                mid = first.json()['id']
+                sources.append((scope, peer, mid))
+                history_url = '/api/messages?with=86701' if scope == 'dm' else url
+                rows = (await client.get(history_url, headers=h(86702))).json()['messages']
+                found = next(row for row in rows if row['id'] == mid)
+                assert found['location_label'] == location['label']
+                assert json.loads(found['location_venue_json']) == venue
+                if scope != 'dm':
+                    assert (await client.get(url, headers=h(86703))).status_code == 403
+            for scope, peer, mid in sources:
+                for dest, target in (('dm', 86701), ('dm', 86703), ('group', group), ('channel', channel)):
+                    request = {'source_scope': scope, 'source_peer_id': peer, 'target_scope': dest,
+                               'target_peer_id': target, 'message_ids': [mid], 'silent': True}
+                    forwarded = await client.post('/api/forward', headers=h(86701), json=request)
+                    assert forwarded.status_code == 201, forwarded.text
+                    item = forwarded.json()['messages'][0]
+                    assert json.loads(item['location_venue_json']) == venue
+                    history_url = f'/api/messages?with={target}' if dest == 'dm' else f'/api/{dest}s/{target}/messages'
+                    history = (await client.get(history_url, headers=h(86701))).json()['messages']
+                    saved = next(row for row in history if row['id'] == item['id'])
+                    assert saved['location_label'] == location['label']
+                    assert json.loads(saved['location_venue_json']) == venue
+            search = (await client.get('/api/messages/search?with=86702&q=Café', headers=h(86701))).json()['messages']
+            assert json.loads(search[0]['location_venue_json']) == venue
+            for bad in (None, True, [], {'address': 42}, {'address': 'x' * 513},
+                        {'venue_id': 'bad\x00id'}, {'unexpected': 'value'}):
+                response = await client.post('/api/messages', headers=h(86701), json={
+                    'recipient_id': 86702, 'location': {**location, 'venue': bad}})
+                assert response.status_code == 400, (bad, response.text)
+            empty_title = await client.post('/api/messages', headers=h(86701), json={
+                'recipient_id': 86702, 'location': {**location, 'label': ''}})
+            assert empty_title.status_code == 400
+    run(scenario())
+
+
+def test_venue_schema_migrates_existing_location_rows(api_env) -> None:
+    path, _, _, app = api_env
+    for uid in (86601, 86602):
+        add_account(api_env, uid, f'old_geo_{uid}')
+        add_session(path, uid, f'old-geo-{uid}')
+    with db_split.sqlite_connect(path) as db:
+        for table in ('message_locations', 'message_forward_locations'):
+            db.execute(f'ALTER TABLE messenger.{table} DROP COLUMN venue_json')
+        mid = db.execute('INSERT INTO messages(sender_telegram_id,recipient_telegram_id,body,created_at) VALUES(?,?,?,?)',
+                         (86601, 86602, 'Old place', int(time.time()))).lastrowid
+        db.execute('INSERT INTO message_locations(message_id,latitude,longitude,label) VALUES(?,?,?,?)',
+                   (mid, 52.0, 4.0, 'Old place'))
+    run(init_messenger_storage(path))
+    run(init_messenger_storage(path))
+    async def scenario():
+        async with await client_for(app) as client:
+            response = await client.get('/api/messages?with=86601', headers={'Authorization': 'Bearer old-geo-86602'})
+            row = next(row for row in response.json()['messages'] if row['id'] == mid)
+            assert (row['location_latitude'], row['location_longitude'], row['location_label'], row['location_venue_json']) == (52.0, 4.0, 'Old place', '')
+    run(scenario())
