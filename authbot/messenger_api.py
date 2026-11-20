@@ -11168,6 +11168,85 @@ def build_messenger_router(
             "max_id": int(latest_message_id),
         }
 
+    async def replace_message_media(scope: str, chat_id: int, message_id: int,
+                                    payload: dict[str, Any], authorization: str | None) -> dict[str, Any]:
+        user = await current_user(authorization)
+        uid = int(user["telegram_id"])
+        requested_id = payload.get("media_id")
+        if not isinstance(requested_id, str) or not requested_id:
+            raise HTTPException(status_code=400, detail="Не указан новый файл")
+        if "body" in payload:
+            body, entities = edited_content(payload)
+            entity_json = _message_entities_json(entities)
+        else:
+            if "entities" in payload:
+                raise HTTPException(status_code=400, detail="Форматирование требует текста подписи")
+            body, entity_json = None, None
+        now = int(time.time())
+        async with aiosqlite.connect(db_path()) as db:
+            await db.execute("BEGIN IMMEDIATE")
+            if scope == "dm":
+                table = "messages"
+                cur = await db.execute(
+                    "SELECT sender_telegram_id,recipient_telegram_id,media_id,body,entities_json,media_album_id FROM messages WHERE id=?", (message_id,))
+            elif scope == "group":
+                table = "group_messages"
+                await require_group_member(db, chat_id, uid)
+                cur = await db.execute(
+                    "SELECT sender_telegram_id,0,media_id,body,entities_json,media_album_id FROM group_messages WHERE id=? AND group_id=?", (message_id, chat_id))
+            else:
+                table = "channel_messages"
+                cur = await db.execute("""SELECT 1 FROM channels c WHERE c.id=? AND
+                    (c.owner_telegram_id=? OR EXISTS(SELECT 1 FROM channel_admins a
+                    WHERE a.channel_id=c.id AND a.telegram_id=?))""", (chat_id, uid, uid))
+                if await cur.fetchone() is None:
+                    raise HTTPException(status_code=403, detail="Менять публикации может только владелец или администратор")
+                cur = await db.execute(
+                    "SELECT author_telegram_id,0,media_id,body,entities_json,media_album_id FROM channel_messages WHERE id=? AND channel_id=?", (message_id, chat_id))
+            row = await cur.fetchone()
+            if row is None:
+                raise HTTPException(status_code=404, detail="Сообщение не найдено")
+            if scope != "channel" and int(row[0]) != uid:
+                raise HTTPException(status_code=403, detail="Изменять можно только свои сообщения")
+            old_media = row[2]
+            if not old_media:
+                raise HTTPException(status_code=400, detail="В сообщении нет файла для замены")
+            new_media = await require_owned_media(db, requested_id, uid)
+            if row[5]:
+                old_class = album_media_class(await media_message_fields(db, old_media))
+                new_class = album_media_class(await media_message_fields(db, new_media))
+                if new_class != old_class or new_class == "unsupported":
+                    raise HTTPException(status_code=400, detail="В альбоме заменяйте файл на медиа того же типа")
+            if body is None:
+                body, entity_json = str(row[3] or ""), str(row[4] or "[]")
+                # Old captionless uploads used synthetic display labels.
+                if entity_json == "[]" and (body == await default_media_message_body(db, old_media)
+                        or row[5] and body == "Медиаальбом"):
+                    body = ""
+            await db.execute(f"UPDATE {table} SET media_id=?,body=?,entities_json=?,edited_at=? WHERE id=?",
+                             (new_media, body, entity_json, now, message_id))
+            if scope == "dm":
+                await record_event(db, "dm", message_id, "edit", uid, user_a=int(row[0]), user_b=int(row[1]))
+            else:
+                await record_event(db, scope, message_id, "edit", uid, chat_id=chat_id)
+            await db.commit()
+        return {"id": message_id, "media_id": new_media, "edited_at": now}
+
+    @router.put("/api/messages/{message_id}/media/v2")
+    async def replace_dm_media(message_id: int, payload: dict[str, Any],
+                               authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        return await replace_message_media("dm", 0, message_id, payload, authorization)
+
+    @router.put("/api/groups/{group_id}/messages/{message_id}/media/v2")
+    async def replace_group_media(group_id: int, message_id: int, payload: dict[str, Any],
+                                  authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        return await replace_message_media("group", group_id, message_id, payload, authorization)
+
+    @router.put("/api/channels/{channel_id}/messages/{message_id}/media/v2")
+    async def replace_channel_media(channel_id: int, message_id: int, payload: dict[str, Any],
+                                    authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        return await replace_message_media("channel", channel_id, message_id, payload, authorization)
+
     @router.put("/api/messages/{message_id}")
     @router.patch("/api/messages/{message_id}")
     async def edit_message(
