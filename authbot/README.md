@@ -294,5 +294,7 @@ python authbot/scripts/create_gift_user_session.py --output /private/path/gift-u
 
 ### Voice transcription
 
+Manual message translation is optional and uses `OPENAI_API_KEY` and `WAYSGRAM_TRANSLATION_MODEL` (default `gpt-6.1-terra`), with confirmation for each translation window in the native client. The server does not persist translation texts; OpenAI receives the selected text. See `docs/messaging-implementation-plan.md` for limits and privacy details.
+
 Voice transcription is optional. Configure `OPENAI_API_KEY` in the AuthBot host environment to enable it. The WaysGram client asks for explicit confirmation before sending an audio attachment to OpenAI. The resulting transcript is cached in the messenger database for that media item; removing an unused media item also removes its cached transcript.
 
