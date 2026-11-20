@@ -536,10 +536,16 @@ class NativeMessagingSourceChecks(unittest.TestCase):
                        'payload.put("target_peer_id", recipientId)',
                        'payload.put("message_ids", messageIds)',
                        'apiClient.post("/api/forward", payload, idempotencyKey',
-                       'forwardIdempotencyKeys.computeIfAbsent',
-                       'forwardIdempotencyKeys.remove(keyScope)'):
+                       'pendingForwardIdempotencyKey(keyScope)',
+                       'clearPendingForwardIdempotencyKey(keyScope)'):
             self.assertIn(marker, forward)
         self.assertNotIn('/api/messages/" + messageId + "/forward', forward)
+        for marker in ('import android.content.SharedPreferences;',
+                       'forwardRetryPreferences()', 'preferences.getString(keyScope, null)',
+                       'preferences.edit().putString(keyScope, key).putLong(keyScope + "_created", now).apply()',
+                       'now - createdAt > 7L * 24 * 60 * 60 * 1000',
+                       'preferences.edit().remove(keyScope).remove(keyScope + "_created").apply()'):
+            self.assertIn(marker, chat)
 
     def test_media_spoilers_and_custom_video_covers_round_trip(self):
         media = self.source('tgnet/WaysGramMedia.java')
