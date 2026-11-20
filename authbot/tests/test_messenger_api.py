@@ -6708,3 +6708,59 @@ def test_voice_video_metadata_upload_and_history(api_env) -> None:
             assert [json.loads(m["media_metadata"]) for m in messages] == [item[3] for item in clips]
 
     run(scenario())
+
+
+def test_silent_single_group_and_channel_messages_persist_without_push(api_env, monkeypatch) -> None:
+    path, _, _, app = api_env
+    for uid in (88601, 88602, 88603):
+        add_account(api_env, uid, f'quiet_scope_{uid}')
+        add_session(path, uid, f'quiet-scope-{uid}')
+    checks = []
+    def capture_push_setup():
+        checks.append(True)
+        return None
+    monkeypatch.setattr(messenger_api, '_firebase_service_account', capture_push_setup)
+
+    async def scenario():
+        h = lambda n: {'Authorization': f'Bearer quiet-scope-{n}'}
+        async with await client_for(app) as client:
+            group_result = await client.post('/api/groups', headers=h(88601), json={'title': 'Quiet group'})
+            assert group_result.status_code == 201, group_result.text
+            gid = group_result.json()['id']
+            assert (await client.post(f'/api/groups/{gid}/members', headers=h(88601), json={'telegram_id': 88602})).status_code == 201
+            channel = await client.post('/api/channels', headers=h(88601), json={'title': 'Quiet channel', 'is_public': False})
+            assert channel.status_code == 201, channel.text
+            cid = channel.json()['id']
+            assert (await client.post('/api/channels/join', headers=h(88602), json={'invite_link': channel.json()['invite_link']})).status_code == 200
+            upload = await client.post('/api/media/images', headers={**h(88601), 'Content-Type': 'image/png'}, content=test_preview_png())
+            assert upload.status_code == 201, upload.text
+            checks.clear()
+
+            for path in (f'/api/groups/{gid}/messages', f'/api/channels/{cid}/messages'):
+                baseline_checks = len(checks)
+                for payload in ({'body': 'quiet text', 'silent': True},
+                                {'body': 'quiet media', 'media_id': upload.json()['id'], 'silent': True}):
+                    response = await client.post(path, headers=h(88601), json=payload)
+                    assert response.status_code == 201, response.text
+                    assert response.json()['body'] == payload['body']
+                    assert len(checks) == baseline_checks
+                history = await client.get(path, headers=h(88602))
+                assert history.status_code == 200, history.text
+                assert [m['body'] for m in history.json()['messages']] == ['quiet text', 'quiet media']
+                bad = await client.post(path, headers=h(88601), json={'body': 'bad flag', 'silent': 'true'})
+                assert bad.status_code == 400
+                unauthorized = await client.post(path, headers=h(88603), json={'body': 'no access', 'silent': True})
+                assert unauthorized.status_code == 403
+                before = len(checks)
+                normal = await client.post(path, headers=h(88601), json={'body': 'normal'})
+                assert normal.status_code == 201, normal.text
+                assert len(checks) == before + 1
+            channel_path = f'/api/channels/{cid}/messages'
+            headers = {**h(88601), 'Idempotency-Key': 'quiet-channel-retry-001'}
+            data = {'body': 'retry', 'silent': True}
+            first = await client.post(channel_path, headers=headers, json=data)
+            retry = await client.post(channel_path, headers=headers, json=data)
+            assert first.status_code == retry.status_code == 201
+            assert first.json()['id'] == retry.json()['id']
+            assert (await client.post(channel_path, headers=headers, json={**data, 'silent': False})).status_code == 409
+    run(scenario())

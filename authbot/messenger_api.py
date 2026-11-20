@@ -7494,6 +7494,9 @@ def build_messenger_router(
     ) -> dict[str, Any]:
         user = await current_user(authorization)
         uid = int(user["telegram_id"])
+        silent = payload.get("silent", False)
+        if not isinstance(silent, bool):
+            raise HTTPException(status_code=400, detail="silent должен быть логическим значением")
         media_id = str(payload.get("media_id") or "").strip() or None
         body_value = str(payload.get("body") or "")
         body = _message_body(body_value) if body_value.strip() or not media_id else ""
@@ -7537,18 +7540,19 @@ def build_messenger_router(
             result = {"id": message_id, "status": "published", "channel_id": channel_id, "author_id": uid, "body": body, "media_id": media_id, "reply_to_id": reply_to_id, **media_fields, "created_at": now}
             await idempotency_store(db, uid, scope, descriptor, result, now)
             await db.commit()
-        async with aiosqlite.connect(db_path()) as db:
-            cur = await db.execute(
-                "SELECT telegram_id FROM channel_members WHERE channel_id=? AND telegram_id<>?",
-                (channel_id, uid),
+        if not silent:
+            async with aiosqlite.connect(db_path()) as db:
+                cur = await db.execute(
+                    "SELECT telegram_id FROM channel_members WHERE channel_id=? AND telegram_id<>?",
+                    (channel_id, uid),
+                )
+                channel_recipients = [int(row[0]) for row in await cur.fetchall()]
+            await deliver_push_notifications(
+                channel_recipients,
+                str(user.get("display_name") or user.get("username") or "Новая публикация"),
+                body,
+                {"scope": "channel", "chat_id": str(channel_id), "message_id": str(message_id)},
             )
-            channel_recipients = [int(row[0]) for row in await cur.fetchall()]
-        await deliver_push_notifications(
-            channel_recipients,
-            str(user.get("display_name") or user.get("username") or "Новая публикация"),
-            body,
-            {"scope": "channel", "chat_id": str(channel_id), "message_id": str(message_id)},
-        )
         return result
 
     @router.post("/api/channels/{channel_id}/messages/album", status_code=201)
@@ -11174,6 +11178,9 @@ def build_messenger_router(
     ) -> dict[str, Any]:
         user = await current_user(authorization)
         uid = int(user["telegram_id"])
+        silent = payload.get("silent", False)
+        if not isinstance(silent, bool):
+            raise HTTPException(status_code=400, detail="silent должен быть логическим значением")
         media_id = str(payload.get("media_id") or "").strip() or None
         body_value = str(payload.get("body") or "")
         body = _message_body(body_value) if body_value.strip() or not media_id else ""
@@ -11232,18 +11239,19 @@ def build_messenger_router(
                 db, "group", message_id, "new_message", uid, chat_id=group_id,
             )
             await db.commit()
-        async with aiosqlite.connect(db_path()) as db:
-            cur = await db.execute(
-                "SELECT telegram_id FROM group_members WHERE group_id=? AND telegram_id<>?",
-                (group_id, uid),
+        if not silent:
+            async with aiosqlite.connect(db_path()) as db:
+                cur = await db.execute(
+                    "SELECT telegram_id FROM group_members WHERE group_id=? AND telegram_id<>?",
+                    (group_id, uid),
+                )
+                group_recipients = [int(row[0]) for row in await cur.fetchall()]
+            await deliver_push_notifications(
+                group_recipients,
+                str(user.get("display_name") or user.get("username") or "Новое сообщение"),
+                body,
+                {"scope": "group", "chat_id": str(group_id), "message_id": str(message_id)},
             )
-            group_recipients = [int(row[0]) for row in await cur.fetchall()]
-        await deliver_push_notifications(
-            group_recipients,
-            str(user.get("display_name") or user.get("username") or "Новое сообщение"),
-            body,
-            {"scope": "group", "chat_id": str(group_id), "message_id": str(message_id)},
-        )
         return {
             "id": message_id,
             "group_id": group_id,

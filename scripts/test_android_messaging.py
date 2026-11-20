@@ -99,6 +99,26 @@ class NativeMessagingSourceChecks(unittest.TestCase):
         self.assertIn('forwarded_from_telegram_id', self.source('tgnet/WaysGramMapper.java'))
 
 
+    def test_single_sends_keep_silent_and_reject_unsupported_schedule(self):
+        transport = self.source('tgnet/WaysGramTransport.java')
+        chats = self.source('tgnet/WaysGramChats.java')
+        text = transport[transport.index('request instanceof TLRPC.TL_messages_sendMessage'):transport.index('request instanceof TLRPC.TL_messages_sendMedia')]
+        media = transport[transport.index('request instanceof TLRPC.TL_messages_sendMedia'):transport.index('request instanceof TLRPC.TL_messages_sendMultiMedia')]
+        for section in (text, media):
+            self.assertIn('send.schedule_date != 0 || send.schedule_repeat_period != 0', section)
+            self.assertIn('SCHEDULE_NOT_SUPPORTED', section)
+            self.assertIn('send.silent', section)
+        self.assertLess(media.index('SCHEDULE_NOT_SUPPORTED'), media.index('WaysGramMedia.uploadFor'))
+        direct = transport[transport.index('private static TLObject sendTo('):transport.index('private static TLRPC.TL_error mapError')]
+        self.assertIn('nextPts(account), silent)', direct)
+        self.assertIn('body.put("silent", silent)', direct)
+        self.assertGreater(direct.index('body.put("silent", silent)'), direct.index('body.put("location", location)'))
+        group = chats[chats.index('public static TLObject send('):chats.index('// ----------------------------------------------------------------', chats.index('public static TLObject send('))]
+        self.assertIn('boolean silent', group)
+        self.assertIn('body.put("silent", silent)', group)
+        album = self.source('tgnet/WaysGramMessages.java')
+        self.assertIn('body.put("silent", req.silent)', album)
+
     def test_native_recordings_and_album_bridges(self):
         transport = self.source('tgnet/WaysGramTransport.java')
         media = self.source('tgnet/WaysGramMedia.java')
