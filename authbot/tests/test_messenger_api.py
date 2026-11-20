@@ -4402,6 +4402,35 @@ def test_atomic_reaction_sets_are_retry_safe_private_and_scoped(api_env) -> None
                 removed = await client.put(endpoint, headers=second, json={**key, "reactions": []})
                 assert removed.status_code == 200 and removed.json()["my_reactions"] == []
                 assert removed.json()["reactions"] == [{"reaction": "👍", "count": 1}]
+
+                # A big single reaction is returned as a one-shot unread animation
+                # event, not persisted into ordinary history summaries.
+                big_endpoint = endpoint + "/v2"
+                big_payload = {**key, "reactions": ["🔥"], "big": True}
+                big = await client.put(big_endpoint, headers=second, json=big_payload)
+                assert big.status_code == 200, big.text
+                assert big.json()["recent_reactions"] == [{
+                    "user_id": 97002, "reaction": "🔥", "big": True, "unread": True,
+                    "date": big.json()["recent_reactions"][0]["date"],
+                }]
+                assert big.json()["reactions"] == [
+                    {"reaction": "👍", "count": 1},
+                    {"reaction": "🔥", "count": 1},
+                ]
+                repeated_big = await client.put(big_endpoint, headers=second, json=big_payload)
+                assert repeated_big.status_code == 200
+                assert repeated_big.json()["status"] == "unchanged"
+                assert repeated_big.json()["recent_reactions"] == []
+                assert (await client.put(
+                    big_endpoint, headers=second, json={**key, "reactions": [], "big": False}
+                )).status_code == 200
+                assert (await client.put(
+                    big_endpoint, headers=second, json={**key, "reactions": ["👍"], "big": "true"}
+                )).status_code == 400
+                assert (await client.put(
+                    big_endpoint, headers=second, json={**key, "reactions": ["👍", "❤️"], "big": True}
+                )).status_code == 400
+
                 for invalid in (None, "👍", ["🔥"], ["👍", "👍"], ["👍", "❤️", "😂", "😮"], [True], [{}]):
                     assert (await client.put(endpoint, headers=second, json={**key, "reactions": invalid})).status_code == 400
                 denied = await client.put(endpoint, headers=h(97003), json={**key, "reactions": ["👍"]})
