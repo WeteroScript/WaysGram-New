@@ -525,6 +525,22 @@ class NativeMessagingSourceChecks(unittest.TestCase):
         self.assertIn('body.put("remove_media", true)', edit)
         self.assertIn('replacingMedia ? "/media/v2" : ""', edit)
 
+    def test_private_chat_forward_uses_atomic_message_api(self):
+        chat = self.source('messenger/waysgram/WaysGramChatFragment.java')
+        start = chat.index('private void forwardMessage(')
+        end = chat.index('private void editMessage(', start)
+        forward = chat[start:end]
+        for marker in ('payload.put("source_scope", "dm")',
+                       'payload.put("source_peer_id", peerId)',
+                       'payload.put("target_scope", "dm")',
+                       'payload.put("target_peer_id", recipientId)',
+                       'payload.put("message_ids", messageIds)',
+                       'apiClient.post("/api/forward", payload, idempotencyKey',
+                       'forwardIdempotencyKeys.computeIfAbsent',
+                       'forwardIdempotencyKeys.remove(keyScope)'):
+            self.assertIn(marker, forward)
+        self.assertNotIn('/api/messages/" + messageId + "/forward', forward)
+
     def test_media_spoilers_and_custom_video_covers_round_trip(self):
         media = self.source('tgnet/WaysGramMedia.java')
         messages = self.source('tgnet/WaysGramMessages.java')
