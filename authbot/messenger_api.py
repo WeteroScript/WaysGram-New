@@ -1589,8 +1589,27 @@ async def init_messenger_storage(database_path: Path) -> None:
                 "ADD COLUMN time_zone TEXT NOT NULL DEFAULT 'UTC'"
             )
         cur = await db.execute("PRAGMA main.table_info(push_devices)")
-        if "quiet_push" not in {str(row[1]) for row in await cur.fetchall()}:
+        push_columns = await cur.fetchall()
+        if "quiet_push" not in {str(row[1]) for row in push_columns}:
             await db.execute("ALTER TABLE main.push_devices ADD COLUMN quiet_push INTEGER NOT NULL DEFAULT 0")
+        # Older installations allowed a token to belong to only one account.
+        # Keep all registrations while changing the key to device + account.
+        primary_key = [str(row[1]) for row in sorted(push_columns, key=lambda row: int(row[5])) if int(row[5])]
+        if primary_key == ["token_hash"]:
+            await db.execute("""CREATE TABLE main.push_devices_v2 (
+                token_hash TEXT NOT NULL, token_value TEXT NOT NULL,
+                telegram_id INTEGER NOT NULL, session_token_hash TEXT NOT NULL,
+                platform TEXT NOT NULL DEFAULT 'android', created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL, quiet_push INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY(token_hash,telegram_id))""")
+            await db.execute("""INSERT INTO main.push_devices_v2
+                (token_hash,token_value,telegram_id,session_token_hash,platform,created_at,updated_at,quiet_push)
+                SELECT token_hash,token_value,telegram_id,session_token_hash,platform,created_at,updated_at,quiet_push
+                FROM main.push_devices""")
+            await db.execute("DROP TABLE main.push_devices")
+            await db.execute("ALTER TABLE main.push_devices_v2 RENAME TO push_devices")
+            await db.execute("CREATE INDEX main.idx_push_devices_user ON push_devices(telegram_id,updated_at DESC)")
+            await db.execute("CREATE INDEX main.idx_push_devices_session ON push_devices(session_token_hash)")
         for table_name in ("messages", "group_messages", "channel_messages"):
             cur = await db.execute(f"PRAGMA {db_split.SCHEMA}.table_info({table_name})")
             columns = {str(row[1]) for row in await cur.fetchall()}
@@ -2539,7 +2558,7 @@ def build_messenger_router(
         try:
             async with aiosqlite.connect(db_path()) as db:
                 cur = await db.execute(
-                    f"""SELECT DISTINCT d.token_hash,d.token_value,d.quiet_push
+                    f"""SELECT d.token_hash,d.token_value,MAX(d.quiet_push)
                         FROM push_devices d
                         JOIN api_sessions s
                           ON s.token_hash=d.session_token_hash
@@ -2547,7 +2566,8 @@ def build_messenger_router(
                          AND s.expires_at>?
                         JOIN accounts a ON a.telegram_id=d.telegram_id AND a.is_banned=0
                         WHERE d.telegram_id IN ({placeholders})
-                        ORDER BY d.updated_at DESC LIMIT 500""",
+                        GROUP BY d.token_hash,d.token_value
+                        ORDER BY MAX(d.updated_at) DESC LIMIT 500""",
                     (int(time.time()), *recipients),
                 )
                 devices = await cur.fetchall()
@@ -2889,9 +2909,8 @@ def build_messenger_router(
                        token_hash,token_value,telegram_id,session_token_hash,
                        platform,created_at,updated_at,quiet_push
                    ) VALUES(?,?,?,?,?,?,?,?)
-                   ON CONFLICT(token_hash) DO UPDATE SET
+                   ON CONFLICT(token_hash,telegram_id) DO UPDATE SET
                        token_value=excluded.token_value,
-                       telegram_id=excluded.telegram_id,
                        session_token_hash=excluded.session_token_hash,
                        platform=excluded.platform,
                        updated_at=excluded.updated_at,
