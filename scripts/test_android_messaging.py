@@ -99,5 +99,25 @@ class NativeMessagingSourceChecks(unittest.TestCase):
         self.assertIn('forwarded_from_telegram_id', self.source('tgnet/WaysGramMapper.java'))
 
 
+    def test_native_recordings_and_album_bridges(self):
+        transport = self.source('tgnet/WaysGramTransport.java')
+        media = self.source('tgnet/WaysGramMedia.java')
+        messages = self.source('tgnet/WaysGramMessages.java')
+        api = self.source('tgnet/WaysGramApi.java')
+        for value in ('TL_messages_uploadMedia', 'TL_messages_sendMultiMedia', 'WaysGramMessages.sendAlbum'):
+            self.assertIn(value, transport)
+        for value in ('TL_documentAttributeAudio', 'TL_documentAttributeVideo', 'attr.round_message',
+                      'attr.voice', 'audio.waveform', 'video.round_message', 'MediaMetadataRetriever',
+                      'media_metadata', 'existingMediaId', 'removeParts(media.file.id)'):
+            self.assertIn(value, media)
+        self.assertIn('X-Media-Kind', api)
+        self.assertIn('X-Media-Metadata', api)
+        album = messages[messages.index('public static TLObject sendAlbum'):messages.index('// ---------------------------------------------------------------- editing')]
+        for value in ('/api/messages/album', '/messages/album', 'postIdempotent', '"captions"',
+                      'TL_updateMessageID', 'TL_updateNewMessage', 'TL_updateNewChannelMessage',
+                      'clientGroupId', 'markDelivered', 'existingMediaId'):
+            self.assertIn(value, album)
+
+
 if __name__ == '__main__':
     unittest.main()

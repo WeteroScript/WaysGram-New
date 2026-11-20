@@ -277,10 +277,15 @@ def _normalize_uploaded_document(raw: bytes, filename: str) -> tuple[bytes, str,
             raise ValueError("Файл не является корректным M4A")
         return raw, "audio/mp4", extension, safe_name
 
-    if extension == ".ogg":
+    if extension in {".ogg", ".opus"}:
         if len(raw) < 4 or not raw.startswith(b"OggS"):
             raise ValueError("Файл не является корректным OGG")
         return raw, "audio/ogg", extension, safe_name
+
+    if extension == ".flac":
+        if len(raw) < 4 or not raw.startswith(b"fLaC"):
+            raise ValueError("Файл не является корректным FLAC")
+        return raw, "audio/flac", extension, safe_name
 
     if extension == ".wav":
         if len(raw) < 12 or raw[:4] != b"RIFF" or raw[8:12] != b"WAVE":
@@ -675,7 +680,8 @@ async def init_messenger_storage(database_path: Path) -> None:
                 size_bytes INTEGER NOT NULL CHECK(size_bytes > 0),
                 created_at INTEGER NOT NULL,
                 original_name TEXT,
-                media_kind TEXT NOT NULL DEFAULT ''
+                media_kind TEXT NOT NULL DEFAULT '',
+                media_metadata TEXT NOT NULL DEFAULT '{}'
             );
             CREATE INDEX IF NOT EXISTS idx_media_assets_owner_time
                 ON media_assets(owner_telegram_id,created_at);
@@ -1432,6 +1438,11 @@ async def init_messenger_storage(database_path: Path) -> None:
             await db.execute(
                 f"ALTER TABLE {db_split.SCHEMA}.media_assets "
                 "ADD COLUMN media_kind TEXT NOT NULL DEFAULT ''"
+            )
+        if "media_metadata" not in media_columns:
+            await db.execute(
+                f"ALTER TABLE {db_split.SCHEMA}.media_assets "
+                "ADD COLUMN media_metadata TEXT NOT NULL DEFAULT '{}'"
             )
         cur = await db.execute(f"PRAGMA {db_split.SCHEMA}.table_info(scheduled_messages)")
         scheduled_columns = {str(row[1]) for row in await cur.fetchall()}
@@ -2659,9 +2670,9 @@ def build_messenger_router(
 
     async def media_message_fields(db: Any, media_id: str | None) -> dict[str, str | None]:
         if not media_id:
-            return {"media_type": None, "media_name": None, "media_kind": None}
+            return {"media_type": None, "media_name": None, "media_kind": None, "media_metadata": None}
         cur = await db.execute(
-            "SELECT mime_type,original_name,media_kind FROM media_assets WHERE id=?",
+            "SELECT mime_type,original_name,media_kind,media_metadata FROM media_assets WHERE id=?",
             (media_id,),
         )
         media = await cur.fetchone()
@@ -2671,6 +2682,7 @@ def build_messenger_router(
             "media_type": str(media[0]),
             "media_name": str(media[1] or "document"),
             "media_kind": str(media[2] or ""),
+            "media_metadata": str(media[3] or "{}"),
         }
 
     async def default_media_message_body(db: Any, media_id: str) -> str:
@@ -2768,15 +2780,43 @@ def build_messenger_router(
         uid = int(user["telegram_id"])
         declared_type = str(request.headers.get("content-type", "")).split(";", 1)[0].strip().lower()
         media_kind = str(request.headers.get("x-media-kind", "")).strip().lower()
-        if media_kind not in {"", "video_note", "voice"}:
+        if media_kind not in {"", "video_note", "voice", "video", "audio"}:
             raise HTTPException(status_code=400, detail="Неизвестный тип медиафайла")
+        metadata_header = request.headers.get("x-media-metadata", "")
+        metadata: dict[str, Any] = {}
+        if metadata_header:
+            try:
+                if len(metadata_header) > 4096:
+                    raise ValueError("metadata too large")
+                raw_metadata = json.loads(base64.b64decode(metadata_header, validate=True).decode("utf-8"))
+                if not isinstance(raw_metadata, dict) or set(raw_metadata) - {"duration", "width", "height", "waveform", "title", "performer"}:
+                    raise ValueError("invalid metadata")
+                for key, maximum in (("duration", 86400), ("width", 8192), ("height", 8192)):
+                    value = raw_metadata.get(key)
+                    if value is not None:
+                        if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or not 0 <= value <= maximum:
+                            raise ValueError("invalid media dimension")
+                        metadata[key] = value
+                for key in ("title", "performer"):
+                    value = raw_metadata.get(key)
+                    if value is not None:
+                        if not isinstance(value, str) or len(value) > 160 or any(ord(c) < 32 for c in value):
+                            raise ValueError("invalid media text")
+                        metadata[key] = value
+                waveform = raw_metadata.get("waveform")
+                if waveform is not None:
+                    if not isinstance(waveform, str) or len(waveform) > 1024 or len(base64.b64decode(waveform, validate=True)) > 768:
+                        raise ValueError("invalid waveform")
+                    metadata["waveform"] = waveform
+            except (ValueError, TypeError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+                raise HTTPException(status_code=400, detail="Некорректные параметры медиа") from exc
         allowed_types = {
             "image/jpeg", "image/png", "image/webp",
             "application/pdf", "text/plain", "text/csv", "application/zip",
             "application/vnd.rar", "application/x-7z-compressed", "application/x-tar",
             "application/gzip", "application/x-bzip2", "application/x-xz",
             "video/mp4", "video/webm", "video/quicktime", "video/x-matroska",
-            "audio/mpeg", "audio/mp4", "audio/ogg", "audio/wav",
+            "audio/mpeg", "audio/mp4", "audio/ogg", "audio/wav", "audio/flac",
             "application/octet-stream",
         }
         if declared_type not in allowed_types:
@@ -2815,6 +2855,10 @@ def build_messenger_router(
                 status_code=415,
                 detail="Видеосообщения-кружочки должны быть в формате MP4",
             )
+        if media_kind == "video" and not mime_type.startswith("video/"):
+            raise HTTPException(status_code=415, detail="Видео должно быть видеофайлом")
+        if media_kind == "audio" and not mime_type.startswith("audio/"):
+            raise HTTPException(status_code=415, detail="Аудио должно быть аудиофайлом")
         if media_kind == "voice" and not mime_type.startswith("audio/"):
             raise HTTPException(
                 status_code=415,
@@ -2848,9 +2892,10 @@ def build_messenger_router(
 
                 await db.execute(
                     """INSERT INTO media_assets
-                       (id,owner_telegram_id,storage_name,mime_type,size_bytes,created_at,original_name,media_kind)
-                       VALUES(?,?,?,?,?,?,?,?)""",
-                    (media_id, uid, storage_name, mime_type, len(normalized), now, safe_name, media_kind),
+                       (id,owner_telegram_id,storage_name,mime_type,size_bytes,created_at,original_name,media_kind,media_metadata)
+                       VALUES(?,?,?,?,?,?,?,?,?)""",
+                    (media_id, uid, storage_name, mime_type, len(normalized), now, safe_name, media_kind,
+                     json.dumps(metadata, ensure_ascii=False, separators=(",", ":"))),
                 )
                 await db.commit()
         except Exception:
@@ -2861,6 +2906,7 @@ def build_messenger_router(
             "mime_type": mime_type,
             "name": safe_name,
             "media_kind": media_kind,
+            "media_metadata": json.dumps(metadata, ensure_ascii=False, separators=(",", ":")),
             "size_bytes": len(normalized),
             "url": f"/api/media/{media_id}",
         }
@@ -7341,7 +7387,9 @@ def build_messenger_router(
                                            WHERE scope='channel' AND chat_id=channel_messages.channel_id
                                              AND message_id=channel_messages.id GROUP BY reaction)) AS reaction_summary,
                                   (SELECT mime_type FROM media_assets WHERE id=channel_messages.media_id) AS media_type,
-                                  (SELECT original_name FROM media_assets WHERE id=channel_messages.media_id) AS media_name
+                                  (SELECT original_name FROM media_assets WHERE id=channel_messages.media_id) AS media_name,
+                                  (SELECT media_kind FROM media_assets WHERE id=channel_messages.media_id) AS media_kind,
+                                  (SELECT media_metadata FROM media_assets WHERE id=channel_messages.media_id) AS media_metadata
                            FROM channel_messages WHERE channel_id=? AND id>?
                            ORDER BY id ASC LIMIT ?""",
                         (channel_id, after_id, limit),
@@ -7356,7 +7404,9 @@ def build_messenger_router(
                                            WHERE scope='channel' AND chat_id=channel_messages.channel_id
                                              AND message_id=channel_messages.id GROUP BY reaction)) AS reaction_summary,
                                   (SELECT mime_type FROM media_assets WHERE id=channel_messages.media_id) AS media_type,
-                                  (SELECT original_name FROM media_assets WHERE id=channel_messages.media_id) AS media_name
+                                  (SELECT original_name FROM media_assets WHERE id=channel_messages.media_id) AS media_name,
+                                  (SELECT media_kind FROM media_assets WHERE id=channel_messages.media_id) AS media_kind,
+                                  (SELECT media_metadata FROM media_assets WHERE id=channel_messages.media_id) AS media_metadata
                            FROM channel_messages WHERE channel_id=? AND (?=0 OR id<?)
                            ORDER BY id DESC LIMIT ?""",
                         (channel_id, before_id, before_id, limit),
@@ -7378,6 +7428,19 @@ def build_messenger_router(
         if isinstance(value, bool) or not isinstance(value, int) or value < 0:
             raise HTTPException(status_code=400, detail="Некорректный reply_to_id")
         return value
+
+    def album_captions(payload: dict[str, Any], count: int) -> tuple[list[str], str]:
+        captions = payload.get("captions")
+        if captions is None:
+            text = str(payload.get("body") or "")
+            first = _message_body(text) if text.strip() else "Медиаальбом"
+            return [first] + [""] * (count - 1), first
+        if not isinstance(captions, list) or len(captions) != count or any(not isinstance(v, str) for v in captions):
+            raise HTTPException(status_code=400, detail="Некорректные подписи альбома")
+        checked = [_message_body(v) if v.strip() else "" for v in captions]
+        if not any(checked):
+            checked[0] = "Медиаальбом"
+        return checked, next((caption for caption in checked if caption), "Медиаальбом")
 
     async def require_reply_target(db: Any, sql: str, params: tuple[Any, ...]) -> None:
         cur = await db.execute(sql, params)
@@ -7408,7 +7471,9 @@ def build_messenger_router(
                                            WHERE scope='channel' AND chat_id=channel_messages.channel_id
                                              AND message_id=channel_messages.id GROUP BY reaction)) AS reaction_summary,
                                   (SELECT mime_type FROM media_assets WHERE id=channel_messages.media_id) AS media_type,
-                          (SELECT original_name FROM media_assets WHERE id=channel_messages.media_id) AS media_name
+                          (SELECT original_name FROM media_assets WHERE id=channel_messages.media_id) AS media_name,
+                                  (SELECT media_kind FROM media_assets WHERE id=channel_messages.media_id) AS media_kind,
+                                  (SELECT media_metadata FROM media_assets WHERE id=channel_messages.media_id) AS media_metadata
                    FROM channel_messages
                    WHERE channel_id=? AND body LIKE ? COLLATE NOCASE
                    ORDER BY id DESC LIMIT 100""",
@@ -7510,8 +7575,7 @@ def build_messenger_router(
         if len(set(media_ids)) != len(media_ids):
             raise HTTPException(status_code=400, detail="Альбом не должен содержать повторяющиеся файлы")
 
-        body_value = str(payload.get("body") or "")
-        body = _message_body(body_value) if body_value.strip() else "Медиаальбом"
+        captions, body = album_captions(payload, len(media_ids))
         silent = payload.get("silent", False)
         if not isinstance(silent, bool):
             raise HTTPException(status_code=400, detail="silent должен быть логическим значением")
@@ -7561,7 +7625,7 @@ def build_messenger_router(
                 raise HTTPException(status_code=429, detail="Превышен лимит публикаций для медиаальбома")
 
             for index, (media_id, media_fields) in enumerate(checked_media):
-                item_body = body if index == 0 else ""
+                item_body = captions[index]
                 cur = await db.execute(
                     """INSERT INTO channel_messages
                        (channel_id,author_telegram_id,body,media_id,reply_to_id,
@@ -7729,6 +7793,7 @@ def build_messenger_router(
                    (SELECT mime_type FROM media_assets WHERE id=messages.media_id) AS media_type,
                    (SELECT original_name FROM media_assets WHERE id=messages.media_id) AS media_name,
                    (SELECT media_kind FROM media_assets WHERE id=messages.media_id) AS media_kind,
+                   (SELECT media_metadata FROM media_assets WHERE id=messages.media_id) AS media_metadata,
                    (SELECT contact_name FROM message_contacts WHERE message_id=messages.id) AS contact_name,
                    (SELECT contact_phone FROM message_contacts WHERE message_id=messages.id) AS contact_phone,
                    (SELECT contact_email FROM message_contacts WHERE message_id=messages.id) AS contact_email,
@@ -7963,6 +8028,7 @@ def build_messenger_router(
                           (SELECT mime_type FROM media_assets WHERE id=messages.media_id) AS media_type,
                           (SELECT original_name FROM media_assets WHERE id=messages.media_id) AS media_name,
                           (SELECT media_kind FROM media_assets WHERE id=messages.media_id) AS media_kind,
+                   (SELECT media_metadata FROM media_assets WHERE id=messages.media_id) AS media_metadata,
                           (SELECT contact_name FROM message_contacts WHERE message_id=messages.id) AS contact_name,
                           (SELECT contact_phone FROM message_contacts WHERE message_id=messages.id) AS contact_phone,
                           (SELECT contact_email FROM message_contacts WHERE message_id=messages.id) AS contact_email,
@@ -8394,8 +8460,7 @@ def build_messenger_router(
         if len(set(media_ids)) != len(media_ids):
             raise HTTPException(status_code=400, detail="Альбом не должен содержать повторяющиеся файлы")
 
-        body_value = str(payload.get("body") or "")
-        body = _message_body(body_value) if body_value.strip() else "Медиаальбом"
+        captions, body = album_captions(payload, len(media_ids))
         silent = payload.get("silent", False)
         if not isinstance(silent, bool):
             raise HTTPException(status_code=400, detail="silent должен быть логическим значением")
@@ -8475,7 +8540,7 @@ def build_messenger_router(
                 )
 
             for index, (media_id, media_fields) in enumerate(checked_media):
-                item_body = body if index == 0 else ""
+                item_body = captions[index]
                 cur = await db.execute(
                     """INSERT INTO messages
                        (sender_telegram_id,recipient_telegram_id,body,media_id,reply_to_id,
@@ -11033,7 +11098,9 @@ def build_messenger_router(
                                            WHERE scope='group' AND chat_id=group_messages.group_id
                                              AND message_id=group_messages.id GROUP BY reaction)) AS reaction_summary,
                                   (SELECT mime_type FROM media_assets WHERE id=group_messages.media_id) AS media_type,
-                                  (SELECT original_name FROM media_assets WHERE id=group_messages.media_id) AS media_name
+                                  (SELECT original_name FROM media_assets WHERE id=group_messages.media_id) AS media_name,
+                                  (SELECT media_kind FROM media_assets WHERE id=group_messages.media_id) AS media_kind,
+                                  (SELECT media_metadata FROM media_assets WHERE id=group_messages.media_id) AS media_metadata
                            FROM group_messages WHERE group_id=? AND id>? ORDER BY id ASC LIMIT ?""",
                         (group_id, after_id, limit),
                     )
@@ -11047,7 +11114,9 @@ def build_messenger_router(
                                            WHERE scope='group' AND chat_id=group_messages.group_id
                                              AND message_id=group_messages.id GROUP BY reaction)) AS reaction_summary,
                                   (SELECT mime_type FROM media_assets WHERE id=group_messages.media_id) AS media_type,
-                                  (SELECT original_name FROM media_assets WHERE id=group_messages.media_id) AS media_name
+                                  (SELECT original_name FROM media_assets WHERE id=group_messages.media_id) AS media_name,
+                                  (SELECT media_kind FROM media_assets WHERE id=group_messages.media_id) AS media_kind,
+                                  (SELECT media_metadata FROM media_assets WHERE id=group_messages.media_id) AS media_metadata
                            FROM group_messages WHERE group_id=? AND (?=0 OR id<?) ORDER BY id DESC LIMIT ?""",
                         (group_id, before_id, before_id, limit),
                     )
@@ -11083,7 +11152,9 @@ def build_messenger_router(
                                            WHERE scope='group' AND chat_id=group_messages.group_id
                                              AND message_id=group_messages.id GROUP BY reaction)) AS reaction_summary,
                                   (SELECT mime_type FROM media_assets WHERE id=group_messages.media_id) AS media_type,
-                          (SELECT original_name FROM media_assets WHERE id=group_messages.media_id) AS media_name
+                          (SELECT original_name FROM media_assets WHERE id=group_messages.media_id) AS media_name,
+                                  (SELECT media_kind FROM media_assets WHERE id=group_messages.media_id) AS media_kind,
+                                  (SELECT media_metadata FROM media_assets WHERE id=group_messages.media_id) AS media_metadata
                    FROM group_messages
                    WHERE group_id=? AND body LIKE ? COLLATE NOCASE
                    ORDER BY id DESC LIMIT 100""",
@@ -11205,8 +11276,7 @@ def build_messenger_router(
         if len(set(media_ids)) != len(media_ids):
             raise HTTPException(status_code=400, detail="Альбом не должен содержать повторяющиеся файлы")
 
-        body_value = str(payload.get("body") or "")
-        body = _message_body(body_value) if body_value.strip() else "Медиаальбом"
+        captions, body = album_captions(payload, len(media_ids))
         silent = payload.get("silent", False)
         if not isinstance(silent, bool):
             raise HTTPException(status_code=400, detail="silent должен быть логическим значением")
@@ -11279,7 +11349,7 @@ def build_messenger_router(
                 raise HTTPException(status_code=429, detail="Превышен лимит отправки сообщений для медиаальбома")
 
             for index, (media_id, media_fields) in enumerate(checked_media):
-                item_body = body if index == 0 else ""
+                item_body = captions[index]
                 cur = await db.execute(
                     """INSERT INTO group_messages
                        (group_id,sender_telegram_id,body,media_id,reply_to_id,

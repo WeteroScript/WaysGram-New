@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import json
 from io import BytesIO
 import hashlib
 import sqlite3
@@ -2404,7 +2406,7 @@ def test_group_and_channel_photo_video_albums_are_atomic_and_idempotent(api_env)
             assert joined.status_code == 201
 
             group_headers = {**owner, "Idempotency-Key": "group-album-test-0001"}
-            group_payload = {"media_ids": uploaded_ids, "body": "Group album caption"}
+            group_payload = {"media_ids": uploaded_ids, "captions": ["Group album caption", "Second caption"]}
             group_album = await client.post(
                 f"/api/groups/{group_id}/messages/album",
                 headers=group_headers,
@@ -2427,7 +2429,7 @@ def test_group_and_channel_photo_video_albums_are_atomic_and_idempotent(api_env)
             assert all(item["media_album_count"] == 2 for item in group_items)
             assert group_items[0]["media_album_id"] == group_items[1]["media_album_id"]
             assert group_items[0]["body"] == "Group album caption"
-            assert group_items[1]["body"] == ""
+            assert group_items[1]["body"] == "Second caption"
 
             group_history = await client.get(
                 f"/api/groups/{group_id}/messages",
@@ -2435,6 +2437,7 @@ def test_group_and_channel_photo_video_albums_are_atomic_and_idempotent(api_env)
             )
             assert group_history.status_code == 200
             assert [item["media_album_index"] for item in group_history.json()["messages"]] == [0, 1]
+            assert [item["body"] for item in group_history.json()["messages"]] == ["Group album caption", "Second caption"]
             member_download = await client.get(uploaded_urls[0], headers=member)
             assert member_download.status_code == 200
             member_video_range = await client.get(
@@ -2468,7 +2471,7 @@ def test_group_and_channel_photo_video_albums_are_atomic_and_idempotent(api_env)
             channel_id = channel.json()["id"]
 
             channel_headers = {**owner, "Idempotency-Key": "channel-album-test-0001"}
-            channel_payload = {"media_ids": uploaded_ids, "body": "Channel album caption"}
+            channel_payload = {"media_ids": uploaded_ids, "captions": ["Channel album caption", "Second caption"]}
             channel_album = await client.post(
                 f"/api/channels/{channel_id}/messages/album",
                 headers=channel_headers,
@@ -2489,7 +2492,7 @@ def test_group_and_channel_photo_video_albums_are_atomic_and_idempotent(api_env)
             assert all(item["media_album_count"] == 2 for item in channel_items)
             assert channel_items[0]["media_album_id"] == channel_items[1]["media_album_id"]
             assert channel_items[0]["body"] == "Channel album caption"
-            assert channel_items[1]["body"] == ""
+            assert channel_items[1]["body"] == "Second caption"
 
             forbidden_channel_post = await client.post(
                 f"/api/channels/{channel_id}/messages/album",
@@ -6650,4 +6653,58 @@ def test_static_location_forward_cross_chat_is_a_private_snapshot(api_env) -> No
                 db.execute('DELETE FROM group_messages WHERE id=?', (group_msg['id'],))
                 assert db.execute("SELECT COUNT(*) FROM message_forward_locations WHERE scope='group' AND message_id=?", (group_msg['id'],)).fetchone()[0] == 0
             assert (await client.get('/api/messages?with=87101', headers=h(87103))).json()['messages'][0]['location_latitude'] == 52.0
+    run(scenario())
+
+
+def test_voice_video_metadata_upload_and_history(api_env) -> None:
+    path, _auth_store, _fake_bot, app = api_env
+    add_account(api_env, 89601, "media_sender")
+    add_account(api_env, 89602, "media_receiver")
+    add_session(path, 89601, "media-sender-session")
+    add_session(path, 89602, "media-receiver-session")
+    def encoded(value):
+        return base64.b64encode(json.dumps(value).encode()).decode()
+
+    async def scenario():
+        async with await client_for(app) as client:
+            sender = {"Authorization": "Bearer media-sender-session"}
+            receiver = {"Authorization": "Bearer media-receiver-session"}
+            clips = [
+                ("voice", "voice.opus", b"OggS" + b"\0" * 32, {"duration": 12, "waveform": "AQID"}),
+                ("video_note", "round.mp4", b"\x00\x00\x00\x18ftypisom" + b"\0" * 8,
+                 {"duration": 4.5, "width": 384, "height": 384}),
+            ]
+            for kind, name, data, metadata in clips:
+                headers = {**sender, "Content-Type": "application/octet-stream", "X-Filename": name,
+                           "X-Media-Kind": kind, "X-Media-Metadata": encoded(metadata)}
+                upload = await client.post("/api/media/documents", headers=headers, content=data)
+                assert upload.status_code == 201, upload.text
+                asset = upload.json()
+                assert asset["media_kind"] == kind
+                assert json.loads(asset["media_metadata"]) == metadata
+                sent = await client.post("/api/messages", headers=sender,
+                                         json={"recipient_id": 89602, "media_id": asset["id"]})
+                assert sent.status_code == 201, sent.text
+                assert sent.json()["media_kind"] == kind
+                bad = await client.post("/api/media/documents", headers={**headers, "X-Media-Metadata": encoded({"duration": -1})}, content=data)
+                assert bad.status_code == 400
+                bad = await client.post("/api/media/documents", headers={**headers, "X-Media-Metadata": "!!!"}, content=data)
+                assert bad.status_code == 400
+            group = await client.post("/api/groups", headers=sender, json={"title": "Media group", "username": "media_group"})
+            channel = await client.post("/api/channels", headers=sender, json={"title": "Media channel", "username": "media_channel"})
+            assert group.status_code == channel.status_code == 201
+            for scope, peer in (("groups", group.json()["id"]), ("channels", channel.json()["id"])):
+                sent = await client.post(f"/api/{scope}/{peer}/messages", headers=sender, json={"media_id": asset["id"]})
+                assert sent.status_code == 201, sent.text
+                history = await client.get(f"/api/{scope}/{peer}/messages", headers=sender)
+                assert history.status_code == 200
+                item = history.json()["messages"][0]
+                assert item["media_kind"] == "video_note"
+                assert json.loads(item["media_metadata"]) == clips[-1][3]
+            history = await client.get("/api/messages?with=89601", headers=receiver)
+            assert history.status_code == 200
+            messages = history.json()["messages"]
+            assert [m["media_kind"] for m in messages] == ["voice", "video_note"]
+            assert [json.loads(m["media_metadata"]) for m in messages] == [item[3] for item in clips]
+
     run(scenario())
