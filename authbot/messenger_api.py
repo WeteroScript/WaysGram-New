@@ -2098,6 +2098,29 @@ def _message_body(value: str) -> str:
     return body
 
 
+def _parse_message_location(value: Any) -> dict[str, float | str] | None:
+    """Validate a static location consistently across personal, group and channel messages."""
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise HTTPException(status_code=400, detail="Геолокация должна быть объектом")
+    raw_latitude = value.get("latitude")
+    raw_longitude = value.get("longitude")
+    if isinstance(raw_latitude, bool) or isinstance(raw_longitude, bool):
+        raise HTTPException(status_code=400, detail="Координаты должны быть числовыми значениями")
+    try:
+        latitude = float(raw_latitude)
+        longitude = float(raw_longitude)
+    except (TypeError, ValueError, OverflowError):
+        raise HTTPException(status_code=400, detail="Укажите корректные координаты")
+    if not (-90.0 <= latitude <= 90.0) or not (-180.0 <= longitude <= 180.0):
+        raise HTTPException(status_code=400, detail="Координаты выходят за допустимый диапазон")
+    label = str(value.get("label") or "").strip()
+    if len(label) > 120:
+        raise HTTPException(status_code=400, detail="Название места не должно превышать 120 символов")
+    return {"latitude": latitude, "longitude": longitude, "label": label}
+
+
 def _next_recurring_scheduled_timestamp(
     scheduled_at: int,
     now: int,
@@ -7498,7 +7521,12 @@ def build_messenger_router(
         if not isinstance(silent, bool):
             raise HTTPException(status_code=400, detail="silent должен быть логическим значением")
         media_id = str(payload.get("media_id") or "").strip() or None
+        location_payload = _parse_message_location(payload.get("location"))
+        if location_payload and media_id:
+            raise HTTPException(status_code=400, detail="Нельзя отправлять геолокацию вместе с файлом")
         body_value = str(payload.get("body") or "")
+        if location_payload and not body_value.strip():
+            body_value = str(location_payload["label"] or "Местоположение")
         body = _message_body(body_value) if body_value.strip() or not media_id else ""
         if not await can_manage_channel(channel_id, uid):
             raise HTTPException(status_code=403, detail="Публиковать в канале может только владелец или администратор")
@@ -7534,10 +7562,19 @@ def build_messenger_router(
                 (channel_id, uid, body, media_id, reply_to_id, now),
             )
             message_id = int(cur.lastrowid)
+            if location_payload:
+                await db.execute(
+                    """INSERT INTO message_forward_locations(scope,message_id,latitude,longitude,label)
+                       VALUES(?,?,?,?,?)""",
+                    ("channel", message_id, location_payload["latitude"],
+                     location_payload["longitude"], location_payload["label"]),
+                )
             await record_event(
                 db, "channel", message_id, "new_message", uid, chat_id=channel_id,
             )
             result = {"id": message_id, "status": "published", "channel_id": channel_id, "author_id": uid, "body": body, "media_id": media_id, "reply_to_id": reply_to_id, **media_fields, "created_at": now}
+            if location_payload:
+                result["location"] = location_payload
             await idempotency_store(db, uid, scope, descriptor, result, now)
             await db.commit()
         if not silent:
@@ -8073,30 +8110,7 @@ def build_messenger_router(
         media_id = str(payload.get("media_id") or "").strip() or None
         contact_value = payload.get("contact")
         contact_payload: dict[str, str] | None = None
-        location_value = payload.get("location")
-        location_payload: dict[str, float | str] | None = None
-        if location_value is not None:
-            if not isinstance(location_value, dict):
-                raise HTTPException(status_code=400, detail="Геолокация должна быть объектом")
-            raw_latitude = location_value.get("latitude")
-            raw_longitude = location_value.get("longitude")
-            if isinstance(raw_latitude, bool) or isinstance(raw_longitude, bool):
-                raise HTTPException(status_code=400, detail="Координаты должны быть числовыми значениями")
-            try:
-                latitude = float(raw_latitude)
-                longitude = float(raw_longitude)
-            except (TypeError, ValueError):
-                raise HTTPException(status_code=400, detail="Укажите корректные координаты")
-            if not (-90.0 <= latitude <= 90.0) or not (-180.0 <= longitude <= 180.0):
-                raise HTTPException(status_code=400, detail="Координаты выходят за допустимый диапазон")
-            location_label = str(location_value.get("label") or "").strip()
-            if len(location_label) > 120:
-                raise HTTPException(status_code=400, detail="Название места не должно превышать 120 символов")
-            location_payload = {
-                "latitude": latitude,
-                "longitude": longitude,
-                "label": location_label,
-            }
+        location_payload = _parse_message_location(payload.get("location"))
         if contact_value is not None:
             if not isinstance(contact_value, dict):
                 raise HTTPException(status_code=400, detail="Контакт должен быть объектом")
@@ -11210,6 +11224,7 @@ def build_messenger_router(
         group_id: int,
         payload: dict[str, Any],
         authorization: str | None = Header(default=None),
+        idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
     ) -> dict[str, Any]:
         user = await current_user(authorization)
         uid = int(user["telegram_id"])
@@ -11217,12 +11232,23 @@ def build_messenger_router(
         if not isinstance(silent, bool):
             raise HTTPException(status_code=400, detail="silent должен быть логическим значением")
         media_id = str(payload.get("media_id") or "").strip() or None
+        location_payload = _parse_message_location(payload.get("location"))
+        if location_payload and media_id:
+            raise HTTPException(status_code=400, detail="Нельзя отправлять геолокацию вместе с файлом")
         body_value = str(payload.get("body") or "")
+        if location_payload and not body_value.strip():
+            body_value = str(location_payload["label"] or "Местоположение")
         body = _message_body(body_value) if body_value.strip() or not media_id else ""
         now = int(time.time())
+        scope = f"/api/groups/{group_id}/messages"
+        descriptor = idempotency_descriptor(scope, payload, idempotency_key)
         async with aiosqlite.connect(db_path()) as db:
             await db.execute("BEGIN IMMEDIATE")
             membership = await require_group_member(db, group_id, uid)
+            previous = await idempotency_lookup(db, uid, scope, descriptor, now)
+            if previous is not None:
+                await db.rollback()
+                return previous
             cur = await db.execute(
                 "SELECT slow_mode_seconds FROM chat_groups WHERE id=?",
                 (group_id,),
@@ -11270,9 +11296,24 @@ def build_messenger_router(
                 (group_id, uid, body, media_id, reply_to_id, now),
             )
             message_id = int(cur.lastrowid)
+            if location_payload:
+                await db.execute(
+                    """INSERT INTO message_forward_locations(scope,message_id,latitude,longitude,label)
+                       VALUES(?,?,?,?,?)""",
+                    ("group", message_id, location_payload["latitude"],
+                     location_payload["longitude"], location_payload["label"]),
+                )
             await record_event(
                 db, "group", message_id, "new_message", uid, chat_id=group_id,
             )
+            result = {
+                "id": message_id, "group_id": group_id, "sender_id": uid,
+                "body": body, "media_id": media_id, "reply_to_id": reply_to_id,
+                **media_fields, "created_at": now,
+            }
+            if location_payload:
+                result["location"] = location_payload
+            await idempotency_store(db, uid, scope, descriptor, result, now)
             await db.commit()
         if not silent:
             async with aiosqlite.connect(db_path()) as db:
@@ -11287,16 +11328,7 @@ def build_messenger_router(
                 body,
                 {"scope": "group", "chat_id": str(group_id), "message_id": str(message_id)},
             )
-        return {
-            "id": message_id,
-            "group_id": group_id,
-            "sender_id": uid,
-            "body": body,
-            "media_id": media_id,
-            "reply_to_id": reply_to_id,
-            **media_fields,
-            "created_at": now,
-        }
+        return result
 
     @router.post("/api/groups/{group_id}/messages/album", status_code=201)
     async def send_group_message_album(

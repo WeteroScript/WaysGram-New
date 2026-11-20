@@ -148,7 +148,7 @@ python -c "import secrets; print(secrets.token_urlsafe(48))"
 - `POST /api/groups/{id}/members` — добавить участника по `telegram_id` или `username`; требуется роль владельца или администратора.
 - `DELETE /api/groups/{id}/members/{telegram_id}` — покинуть группу или удалить участника с проверкой роли.
 - `POST /api/groups/{id}/admins` / `DELETE /api/groups/{id}/admins/{telegram_id}` — назначение и снятие администраторов владельцем.
-- `GET /api/groups/{id}/messages` и `POST /api/groups/{id}/messages` — история и отправка текста. История поддерживает `before_id` для старых и `after_id` для новых сообщений (не одновременно), а также `limit` от 1 до 100, по умолчанию 100.
+- `GET /api/groups/{id}/messages` и `POST /api/groups/{id}/messages` — история и отправка текста. История поддерживает `before_id` для старых и `after_id` для новых сообщений (не одновременно), а также `limit` от 1 до 100, по умолчанию 100. Одиночная отправка поддерживает `Idempotency-Key`: повтор идентичного запроса в течение 7 дней возвращает прежний результат без второго сообщения; смена тела с тем же ключом даёт 409, а доступ повторно проверяется.
 - `POST /api/groups/{id}/messages/album` — атомарно отправить участникам альбом из 2–10 фотографий и/или видео; проверяет членство, slow mode и reply target, поддерживает `Idempotency-Key` и `silent`.
   Для открытого экрана группы чтение с `after_id` поддерживает `wait_seconds=20`.
 
@@ -161,6 +161,7 @@ python -c "import secrets; print(secrets.token_urlsafe(48))"
 - `GET /api/media/{media_id}` — получить вложение после проверки сессии и доступа к соответствующему сообщению/чату.
 - `GET /api/media/shared?scope=dm|group|channel&peer_id=...` — получить общие вложения чата с необязательными фильтрами `kind=image|video|audio|document`, `before_id` и `limit`.
 - `POST /api/messages`, `POST /api/groups/{id}/messages`, `POST /api/channels/{id}/messages` — прикрепить загруженный файл через поле `media_id`. При пустом тексте сервер подставляет подпись по типу и имени вложения. Поле `silent: true` для одиночного сообщения не отправляет push (в том числе тихий); сообщение и событие остаются в истории. По умолчанию `silent: false`; допускается только boolean. Android-мост передаёт флаг для текста и файла; полноценные тихие уведомления и проверка на устройстве пока не завершены.
+- Статическую геопозицию можно отправить через `location: {"latitude": 52.0, "longitude": 4.3, "label": "Место"}` в `POST /api/messages`, `/api/groups/{id}/messages` и `/api/channels/{id}/messages`; `label` необязателен. Координаты и доступ проверяются, совмещать позицию и файл нельзя. Позиция сохраняется в истории и поддерживает пересылку как снимок; live-трансляция — отдельная функция. Нативный мост подключён для одиночной отправки, но на устройстве не проверен.
 - `POST /api/messages/album` — атомарно отправить в личный чат альбом из 2–10 принадлежащих отправителю фотографий и/или видео через массив `media_ids`.
 - `POST /api/groups/{id}/messages/album` и `POST /api/channels/{id}/messages/album` — тот же формат альбома для групп и каналов. Все элементы получают общий `media_album_id`, `media_album_index` и `media_album_count`; подпись и reply context сохраняются у элементов альбома. Создание выполняется одной транзакцией, поддерживается `Idempotency-Key`, push-уведомление отправляется один раз на альбом.
 

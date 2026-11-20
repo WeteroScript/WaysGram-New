@@ -44,11 +44,16 @@ class NativeMessagingSourceChecks(unittest.TestCase):
         self.assertIn('"/api/groups/" + id + "/messages" + paging', chats)
         self.assertIn('"/api/channels/" + serverId + "/messages" + paging', chats)
 
-    def test_static_direct_location_has_native_send_and_receive_bridge(self):
+    def test_static_location_has_native_send_and_receive_bridge(self):
         transport = self.source('tgnet/WaysGramTransport.java')
         media = self.source('tgnet/WaysGramMedia.java')
         self.assertIn('send.media instanceof TLRPC.TL_inputMediaGeoPoint', transport)
         self.assertIn('body.put("location", location)', transport)
+        chats = self.source('tgnet/WaysGramChats.java')
+        self.assertIn('body.put("location", location)', chats)
+        self.assertIn('TLRPC.TL_inputPeerChat || send.peer instanceof TLRPC.TL_inputPeerChannel', transport)
+        self.assertIn('WaysGramApi.postIdempotent(account, "/api/groups/"', chats)
+        self.assertIn('Long.toString(randomId).getBytes(java.nio.charset.StandardCharsets.UTF_8)', chats)
         self.assertIn('send.schedule_date != 0', transport)
         self.assertIn('TLRPC.TL_inputPeerSelf', transport)
         self.assertIn('json.optDouble("location_latitude"', media)
@@ -110,7 +115,7 @@ class NativeMessagingSourceChecks(unittest.TestCase):
             self.assertIn('send.silent', section)
         self.assertLess(media.index('SCHEDULE_NOT_SUPPORTED'), media.index('WaysGramMedia.uploadFor'))
         direct = transport[transport.index('private static TLObject sendTo('):transport.index('private static TLRPC.TL_error mapError')]
-        self.assertIn('nextPts(account), silent)', direct)
+        self.assertIn('nextPts(account), silent, location)', direct)
         self.assertIn('body.put("silent", silent)', direct)
         self.assertGreater(direct.index('body.put("silent", silent)'), direct.index('body.put("location", location)'))
         group = chats[chats.index('public static TLObject send('):chats.index('// ----------------------------------------------------------------', chats.index('public static TLObject send('))]

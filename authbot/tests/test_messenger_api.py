@@ -6893,3 +6893,101 @@ def test_clear_for_both_revokes_media_access_for_recipient(api_env) -> None:
             assert (await client.get(url, headers=h(88202))).status_code == 404
             assert (await client.get(url, headers=h(88201))).status_code == 200  # owned file is retained
     run(scenario())
+
+
+def test_static_group_and_channel_locations_are_scoped_forwardable_and_validated(api_env, monkeypatch) -> None:
+    path, _, _, app = api_env
+    for uid in (88101, 88102, 88103):
+        add_account(api_env, uid, f'group_geo_{uid}')
+        add_session(path, uid, f'group-geo-{uid}')
+    push_checks = []
+    def observe_push():
+        push_checks.append(True)
+        return None
+    monkeypatch.setattr(messenger_api, '_firebase_service_account', observe_push)
+    async def scenario():
+        h = lambda uid: {'Authorization': f'Bearer group-geo-{uid}'}
+        async with await client_for(app) as client:
+            group = (await client.post('/api/groups', headers=h(88101), json={'title': 'Geo group'})).json()['id']
+            assert (await client.post(f'/api/groups/{group}/members', headers=h(88101), json={'telegram_id': 88102})).status_code == 201
+            channel_result = await client.post('/api/channels', headers=h(88101), json={'title': 'Geo channel', 'is_public': False})
+            assert channel_result.status_code == 201
+            channel = channel_result.json()['id']
+            assert (await client.post('/api/channels/join', headers=h(88102), json={'invite_link': channel_result.json()['invite_link']})).status_code == 200
+            image = await client.post('/api/media/images', headers={**h(88101), 'Content-Type': 'image/png'}, content=test_preview_png())
+            assert image.status_code == 201
+            push_checks.clear()
+            for scope, peer in (('group', group), ('channel', channel)):
+                url = f'/api/{scope}s/{peer}/messages'
+                payload = {'location': {'latitude': 52.0, 'longitude': 4.3, 'label': 'Place'}, 'silent': True}
+                key = {**h(88101), 'Idempotency-Key': f'geo-{scope}-retry-key-001'}
+                first = await client.post(url, headers=key, json=payload)
+                retry = await client.post(url, headers=key, json=payload)
+                assert first.status_code == retry.status_code == 201, first.text
+                assert first.json() == retry.json()
+                assert first.json()['body'] == 'Place'
+                assert first.json()['location'] == {'latitude': 52.0, 'longitude': 4.3, 'label': 'Place'}
+                assert push_checks == []
+                changed = await client.post(url, headers=key, json={**payload, 'body': 'other'})
+                assert changed.status_code == 409
+                history = await client.get(url, headers=h(88102))
+                assert history.status_code == 200
+                msg = history.json()['messages'][0]
+                assert (msg['location_latitude'], msg['location_longitude'], msg['location_label']) == (52.0, 4.3, 'Place')
+                assert (await client.get(url, headers=h(88103))).status_code == 403
+                assert (await client.post(url, headers=h(88103), json=payload)).status_code == 403
+                if scope == 'channel':
+                    assert (await client.post(url, headers=h(88102), json=payload)).status_code == 403
+                forward = await client.post('/api/forward', headers=h(88101), json={
+                    'source_scope': scope, 'source_peer_id': peer, 'target_scope': 'dm',
+                    'target_peer_id': 88103, 'message_ids': [msg['id']], 'silent': True})
+                assert forward.status_code == 201, forward.text
+                copy = forward.json()['messages'][0]
+                assert (copy['location_latitude'], copy['location_longitude'], copy['location_label']) == (52.0, 4.3, 'Place')
+                for bad in (True, {'latitude': True, 'longitude': 0}, {'latitude': 91, 'longitude': 0},
+                            {'latitude': 'NaN', 'longitude': 0}, {'latitude': 0, 'longitude': 181},
+                            {'latitude': 1, 'longitude': 2, 'label': 'x' * 121}):
+                    assert (await client.post(url, headers=h(88101), json={'location': bad})).status_code == 400
+                assert (await client.post(url, headers=h(88101), json={'location': payload['location'], 'media_id': image.json()['id']})).status_code == 400
+                empty_label = await client.post(url, headers=h(88101), json={
+                    'location': {'latitude': 0, 'longitude': 0}, 'silent': True, 'reply_to_id': msg['id']})
+                assert empty_label.status_code == 201 and empty_label.json()['body'] == 'Местоположение'
+                assert empty_label.json()['reply_to_id'] == msg['id']
+                delete_url = f'/api/group-messages/{msg["id"]}' if scope == 'group' else f'/api/channels/{peer}/messages/{msg["id"]}'
+                assert (await client.delete(delete_url, headers=h(88101))).status_code == 200
+                with db_split.sqlite_connect(path) as db:
+                    assert db.execute('SELECT COUNT(*) FROM message_forward_locations WHERE scope=? AND message_id=?', (scope, msg['id'])).fetchone()[0] == 0
+                copied = (await client.get('/api/messages?with=88101', headers=h(88103))).json()['messages']
+                assert any(m['id'] == copy['id'] and m['location_latitude'] == 52.0 for m in copied)
+    run(scenario())
+
+
+def test_single_group_idempotency_and_slow_mode(api_env, monkeypatch) -> None:
+    path, _, _, app = api_env
+    for uid in (88001, 88002, 88003):
+        add_account(api_env, uid, f'group_retry_{uid}')
+        add_session(path, uid, f'group-retry-{uid}')
+    checks = []
+    monkeypatch.setattr(messenger_api, '_firebase_service_account', lambda: checks.append(True) or None)
+    async def scenario():
+        h = lambda uid: {'Authorization': f'Bearer group-retry-{uid}'}
+        async with await client_for(app) as client:
+            group = (await client.post('/api/groups', headers=h(88001), json={'title': 'Safe retries'})).json()['id']
+            assert (await client.post(f'/api/groups/{group}/members', headers=h(88001), json={'telegram_id': 88002})).status_code == 201
+            assert (await client.put(f'/api/groups/{group}/slow-mode', headers=h(88001), json={'seconds': 10})).status_code == 200
+            checks.clear()
+            headers = {**h(88002), 'Idempotency-Key': 'single-group-retry-key-001'}
+            url = f'/api/groups/{group}/messages'
+            data = {'body': 'retry this'}
+            first, second = await asyncio.gather(client.post(url, headers=headers, json=data), client.post(url, headers=headers, json=data))
+            assert first.status_code == second.status_code == 201
+            assert first.json() == second.json()
+            assert len(checks) == 1
+            assert (await client.post(url, headers=headers, json={'body': 'different'})).status_code == 409
+            assert (await client.post(url, headers={**h(88002), 'Idempotency-Key': 'another-group-key-001'}, json=data)).status_code == 429
+            assert (await client.post(url, headers={**h(88003), 'Idempotency-Key': 'single-group-retry-key-001'}, json=data)).status_code == 403
+            history = (await client.get(url, headers=h(88001))).json()['messages']
+            assert len(history) == 1 and history[0]['body'] == 'retry this'
+            assert (await client.delete(f'/api/groups/{group}/members/88002', headers=h(88001))).status_code == 200
+            assert (await client.post(url, headers=headers, json=data)).status_code == 403
+    run(scenario())
