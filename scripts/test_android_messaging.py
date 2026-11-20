@@ -525,6 +525,25 @@ class NativeMessagingSourceChecks(unittest.TestCase):
         self.assertIn('body.put("remove_media", true)', edit)
         self.assertIn('replacingMedia ? "/media/v2" : ""', edit)
 
+    def test_media_spoilers_and_custom_video_covers_round_trip(self):
+        media = self.source('tgnet/WaysGramMedia.java')
+        messages = self.source('tgnet/WaysGramMessages.java')
+        transport = self.source('tgnet/WaysGramTransport.java')
+        self.assertIn('info.put("spoiler", media.spoiler)', media)
+        self.assertIn('info.put("video_cover_media_id", coverMediaId)', media)
+        self.assertIn('media.spoiler = info.optBoolean("spoiler", false)', media)
+        self.assertIn('media.video_cover = videoCoverPhoto', media)
+        self.assertIn('media.flags |= TLObject.FLAG_9', media)
+        self.assertIn('videoCoverThumbnail(account, coverMediaId, mediaId)', media)
+        self.assertIn('video_cover_media_id', media)
+        self.assertIn('metadataForInput(req.media)', messages)
+        self.assertIn('body.put("media_metadata"', messages)
+        self.assertNotIn('requireVisibleMedia', messages)
+        self.assertNotIn('requireVisibleMedia', transport)
+        album = messages[messages.index('public static TLObject sendAlbum'):
+                         messages.index('// ---------------------------------------------------------------- editing')]
+        self.assertNotIn('item.media.spoiler', album)
+
 
 if __name__ == '__main__':
     unittest.main()
