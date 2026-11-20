@@ -4239,6 +4239,80 @@ def test_cloud_drafts_sync_and_enforce_chat_access(api_env) -> None:
     run(scenario())
 
 
+def test_cloud_draft_list_pagination_privacy_and_revoked_access(api_env) -> None:
+    path, _store, _bot, app = api_env
+    for uid, name in ((96001, "list_owner"), (96002, "list_peer"), (96003, "list_member")):
+        add_account(api_env, uid, name)
+        add_session(path, uid, f"list-session-{uid}")
+
+    async def scenario() -> None:
+        async with await client_for(app) as client:
+            owner = {"Authorization": "Bearer list-session-96001"}
+            member = {"Authorization": "Bearer list-session-96003"}
+            assert (await client.get("/api/drafts/list")).status_code == 401
+            for params in ({"after_scope": "dm"}, {"after_peer_id": 1},
+                           {"after_scope": "invalid", "after_peer_id": 1}):
+                assert (await client.get("/api/drafts/list", headers=owner, params=params)).status_code == 400
+            for limit in (0, 201):
+                assert (await client.get("/api/drafts/list", headers=owner, params={"limit": limit})).status_code == 422
+
+            group = await client.post("/api/groups", headers=owner, json={
+                "title": "Draft list group", "username": "draftlistgroup", "description": ""})
+            assert group.status_code == 201
+            gid = group.json()["id"]
+            assert (await client.post(f"/api/groups/{gid}/members", headers=owner,
+                                      json={"username": "list_member"})).status_code == 201
+            channel = await client.post("/api/channels", headers=owner, json={
+                "title": "Draft list channel", "is_public": False})
+            assert channel.status_code == 201
+            cid = channel.json()["id"]
+            assert (await client.post("/api/channels/join", headers=member,
+                                      json={"invite_link": channel.json()["invite_link"]})).status_code == 200
+            cases = [(owner, "dm", 96001, "saved messages"),
+                     (owner, "dm", 96002, "private"),
+                     (owner, "group", gid, "group"),
+                     (owner, "channel", cid, "channel"),
+                     (member, "group", gid, "member group"),
+                     (member, "channel", cid, "member channel")]
+            for headers, scope, peer, body in cases:
+                result = await client.put("/api/drafts", headers=headers,
+                                          json={"scope": scope, "peer_id": peer, "body": body})
+                assert result.status_code == 200, result.text
+
+            # Traverse every page and check stable order, exclusivity and isolation.
+            seen = []
+            cursor = {}
+            while True:
+                page = await client.get("/api/drafts/list", headers=owner, params={"limit": 1, **cursor})
+                assert page.status_code == 200, page.text
+                data = page.json()
+                seen.extend(data["drafts"])
+                cursor = data["next_cursor"]
+                if cursor is None:
+                    break
+            assert [(d["scope"], d["peer_id"], d["body"]) for d in seen] == [
+                ("channel", cid, "channel"), ("dm", 96001, "saved messages"),
+                ("dm", 96002, "private"), ("group", gid, "group")]
+            assert all(isinstance(d["updated_at"], int) for d in seen)
+            assert {d["body"] for d in (await client.get("/api/drafts/list", headers=member)).json()["drafts"]} == {"member group", "member channel"}
+            # Access revoked after saving: omit stale rows without leaking or deleting them.
+            with db_split.sqlite_connect(path) as db:
+                db.execute("INSERT INTO blocked_users(owner_telegram_id,blocked_telegram_id,created_at) VALUES(?,?,?)", (96002, 96001, 1))
+                db.execute("DELETE FROM group_members WHERE group_id=? AND telegram_id=?", (gid, 96003))
+                db.execute("DELETE FROM channel_members WHERE channel_id=? AND telegram_id=?", (cid, 96003))
+                db.commit()
+            assert {d["body"] for d in (await client.get("/api/drafts/list", headers=owner)).json()["drafts"]} == {"saved messages", "group", "channel"}
+            assert (await client.get("/api/drafts/list", headers=member)).json() == {"drafts": [], "next_cursor": None}
+            with db_split.sqlite_connect(path) as db:
+                assert db.execute("SELECT count(*) FROM cloud_drafts").fetchone()[0] == 6
+                db.execute("DELETE FROM blocked_users")
+                db.execute("UPDATE accounts SET is_banned=1 WHERE telegram_id=96002")
+                db.commit()
+            assert "private" not in {d["body"] for d in (await client.get("/api/drafts/list", headers=owner)).json()["drafts"]}
+
+    run(scenario())
+
+
 def test_contact_notes_are_private_and_removed_with_contact(api_env) -> None:
     path, _auth_store, _fake_bot, app = api_env
     add_account(api_env, 95201, "note_owner")

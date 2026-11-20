@@ -10425,6 +10425,65 @@ def build_messenger_router(
             row = await cur.fetchone()
         return {"draft": dict(row) if row is not None else None}
 
+    @router.get("/api/drafts/list")
+    async def list_cloud_drafts(
+        limit: int = Query(default=100, ge=1, le=200),
+        after_scope: str | None = Query(default=None),
+        after_peer_id: int | None = Query(default=None, gt=0),
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        """List currently accessible drafts owned by this account, in key order.
+
+        Pagination is not a cross-request snapshot: concurrent writes or access
+        changes can affect subsequent pages. A missing row is not a deletion event.
+        """
+        user = await current_user(authorization)
+        if (after_scope is None) != (after_peer_id is None) or (
+            after_scope is not None and after_scope not in ("dm", "group", "channel")
+        ):
+            raise HTTPException(status_code=400, detail="Некорректный курсор черновиков")
+        uid = int(user["telegram_id"])
+        async with aiosqlite.connect(db_path()) as db:
+            db.row_factory = aiosqlite.Row
+            # Filtering and page selection use the same SQLite read snapshot.
+            cur = await db.execute(
+                """SELECT d.scope,d.peer_id,d.body,d.updated_at FROM cloud_drafts d
+                   WHERE d.owner_telegram_id=?
+                     AND (? IS NULL OR d.scope>? OR (d.scope=? AND d.peer_id>?))
+                     AND (
+                       (d.scope='dm' AND EXISTS (
+                          SELECT 1 FROM accounts a WHERE a.telegram_id=d.peer_id AND a.is_banned=0
+                       ) AND (d.peer_id=? OR NOT EXISTS (
+                          SELECT 1 FROM blocked_users b
+                          WHERE (b.owner_telegram_id=? AND b.blocked_telegram_id=d.peer_id)
+                             OR (b.owner_telegram_id=d.peer_id AND b.blocked_telegram_id=?)
+                       )))
+                       OR (d.scope='group' AND EXISTS (
+                          SELECT 1 FROM group_members gm JOIN chat_groups g ON g.id=gm.group_id
+                          WHERE gm.group_id=d.peer_id AND gm.telegram_id=?
+                       ))
+                       OR (d.scope='channel' AND EXISTS (
+                          SELECT 1 FROM channels c WHERE c.id=d.peer_id AND (
+                             c.is_public=1 OR c.owner_telegram_id=?
+                             OR EXISTS (SELECT 1 FROM channel_admins ca
+                                        WHERE ca.channel_id=c.id AND ca.telegram_id=?)
+                             OR EXISTS (SELECT 1 FROM channel_members cm
+                                        WHERE cm.channel_id=c.id AND cm.telegram_id=?)
+                          )
+                       ))
+                     )
+                   ORDER BY d.scope,d.peer_id LIMIT ?""",
+                (uid, after_scope, after_scope, after_scope, after_peer_id,
+                 uid, uid, uid, uid, uid, uid, uid, limit + 1),
+            )
+            rows = await cur.fetchall()
+        drafts = [dict(row) for row in rows[:limit]]
+        next_cursor = None
+        if len(rows) > limit:
+            last = drafts[-1]
+            next_cursor = {"after_scope": last["scope"], "after_peer_id": last["peer_id"]}
+        return {"drafts": drafts, "next_cursor": next_cursor}
+
     @router.put("/api/drafts")
     async def save_cloud_draft(
         payload: dict[str, Any],
