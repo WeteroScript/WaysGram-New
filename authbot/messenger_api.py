@@ -7811,18 +7811,43 @@ def build_messenger_router(
             raise HTTPException(status_code=400, detail="Некорректный reply_to_id")
         return value
 
-    def album_captions(payload: dict[str, Any], count: int) -> tuple[list[str], str]:
+    def album_allow_documents(payload: dict[str, Any], request: Request) -> bool:
+        # A distinct route makes old servers reject the operation rather than
+        # silently ignore a new field and misinterpret document albums.
+        enabled = request.url.path.endswith("/files")
+        if "allow_documents" in payload:
+            raise HTTPException(status_code=400, detail="Неизвестный параметр альбома")
+        return enabled
+
+    def album_media_class(fields: dict[str, str | None]) -> str:
+        mime = str(fields.get("media_type") or "").lower()
+        kind = str(fields.get("media_kind") or "").lower()
+        name = str(fields.get("media_name") or "").lower()
+        if kind in ("voice", "video_note") or (not kind and (
+            (mime.startswith("video/") and name.startswith("round_video_")) or
+            (mime.startswith("audio/") and name.startswith("audio_recording_voice_"))
+        )):
+            return "unsupported"
+        if (mime.startswith("image/") and kind != "document") or (mime.startswith("video/") and kind == "video"):
+            return "visual"
+        return "document"
+
+    def album_captions(payload: dict[str, Any], count: int, allow_documents: bool = False) -> tuple[list[str], str]:
         if "entities" in payload:
             raise HTTPException(status_code=400, detail="Форматирование альбомов пока не поддерживается")
         captions = payload.get("captions")
         if captions is None:
             text = str(payload.get("body") or "")
+            if not text.strip() and count == 1 and allow_documents:
+                return [""], "Файл"
             first = _message_body(text) if text.strip() else "Медиаальбом"
             return [first] + [""] * (count - 1), first
         if not isinstance(captions, list) or len(captions) != count or any(not isinstance(v, str) for v in captions):
             raise HTTPException(status_code=400, detail="Некорректные подписи альбома")
         checked = [_message_body(v) if v.strip() else "" for v in captions]
         if not any(checked):
+            if count == 1 and allow_documents:
+                return checked, "Файл"
             checked[0] = "Медиаальбом"
         return checked, next((caption for caption in checked if caption), "Медиаальбом")
 
@@ -7985,37 +8010,40 @@ def build_messenger_router(
             )
         return result
 
+    @router.post("/api/channels/{channel_id}/messages/album/files", status_code=201)
     @router.post("/api/channels/{channel_id}/messages/album", status_code=201)
     async def create_channel_message_album(
         channel_id: int,
         payload: dict[str, Any],
+        request: Request,
         authorization: str | None = Header(default=None),
         idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
     ) -> dict[str, Any]:
         user = await current_user(authorization)
         uid = int(user["telegram_id"])
-        if not await can_manage_channel(channel_id, uid):
-            raise HTTPException(status_code=403, detail="Публиковать в канале может только владелец или администратор")
-
+        allow_documents = album_allow_documents(payload, request)
         raw_media_ids = payload.get("media_ids")
-        if not isinstance(raw_media_ids, list) or not 2 <= len(raw_media_ids) <= 10:
-            raise HTTPException(status_code=400, detail="Альбом должен содержать от 2 до 10 файлов")
+        minimum = 1 if allow_documents else 2
+        if not isinstance(raw_media_ids, list) or not minimum <= len(raw_media_ids) <= 10:
+            raise HTTPException(status_code=400, detail="Выберите не более 10 файлов")
         media_ids: list[str] = []
         for raw_id in raw_media_ids:
             media_id = str(raw_id or "").strip()
             if not re.fullmatch(r"[a-f0-9]{32}", media_id):
                 raise HTTPException(status_code=400, detail="Некорректный ID вложения в альбоме")
             media_ids.append(media_id)
-        if len(set(media_ids)) != len(media_ids):
+        if not allow_documents and len(set(media_ids)) != len(media_ids):
             raise HTTPException(status_code=400, detail="Альбом не должен содержать повторяющиеся файлы")
 
-        captions, body = album_captions(payload, len(media_ids))
+        captions, body = album_captions(payload, len(media_ids), allow_documents)
         silent = payload.get("silent", False)
         if not isinstance(silent, bool):
             raise HTTPException(status_code=400, detail="silent должен быть логическим значением")
 
         now = int(time.time())
         scope = f"/api/channels/{channel_id}/messages/album"
+        if allow_documents:
+            scope += "/files"
         descriptor = idempotency_descriptor(scope, payload, idempotency_key)
         album_id = secrets.token_hex(16)
         created_messages: list[dict[str, Any]] = []
@@ -8023,23 +8051,39 @@ def build_messenger_router(
         async with aiosqlite.connect(db_path()) as db:
             db.row_factory = aiosqlite.Row
             await db.execute("BEGIN IMMEDIATE")
+            # Check publishing rights in the same transaction as insertion.
+            cur = await db.execute(
+                """SELECT 1 FROM channels c WHERE c.id=? AND
+                   (c.owner_telegram_id=? OR EXISTS(
+                       SELECT 1 FROM channel_admins a WHERE a.channel_id=c.id AND a.telegram_id=?))""",
+                (channel_id, uid, uid),
+            )
+            if await cur.fetchone() is None:
+                raise HTTPException(status_code=403, detail="Публиковать в канале может только владелец или администратор")
             previous = await idempotency_lookup(db, uid, scope, descriptor, now)
             if previous is not None:
                 await db.rollback()
                 return previous
 
             checked_media: list[tuple[str, dict[str, str | None]]] = []
+            batch_classes: set[str] = set()
             for media_id in media_ids:
                 owned_id = await require_owned_media(db, media_id, uid)
                 fields = await media_message_fields(db, owned_id)
                 media_type = str(fields.get("media_type") or "").lower()
-                if not (media_type.startswith("image/") or media_type.startswith("video/")):
-                    await db.rollback()
-                    raise HTTPException(
-                        status_code=415,
-                        detail="В медиаальбом можно добавлять только фотографии и видео",
-                    )
+                if not allow_documents:
+                    if not (media_type.startswith("image/") or media_type.startswith("video/")):
+                        raise HTTPException(status_code=415, detail="В медиаальбом можно добавлять только фотографии и видео")
+                else:
+                    media_class = album_media_class(fields)
+                    if media_class == "unsupported":
+                        raise HTTPException(status_code=415, detail="Голосовые и видеосообщения нельзя включать в набор файлов")
+                    batch_classes.add(media_class)
                 checked_media.append((media_id, fields))
+            # Native clients render document and visual groups differently. Never
+            # create a group that would be rendered as the wrong kind of media.
+            if len(batch_classes) > 1:
+                raise HTTPException(status_code=415, detail="Файлы и фотографии/видео нужно отправить отдельными группами")
 
             reply_to_id = parse_reply_id(payload)
             if reply_to_id:
@@ -8108,7 +8152,7 @@ def build_messenger_router(
             await deliver_push_notifications(
                 recipients,
                 str(user.get("display_name") or user.get("username") or "Новая публикация"),
-                f"Медиаальбом · {len(created_messages)} вложений",
+                f"{'Файлы' if batch_classes == {'document'} else 'Медиаальбом'} · {len(created_messages)} вложений",
                 {
                     "scope": "channel",
                     "chat_id": str(channel_id),
@@ -8868,9 +8912,11 @@ def build_messenger_router(
             await db.commit()
         return {"status": "stopped", "id": live_location_id, "stopped_at": stopped_at}
 
+    @router.post("/api/messages/album/files", status_code=201)
     @router.post("/api/messages/album", status_code=201)
     async def send_message_album(
         payload: dict[str, Any],
+        request: Request,
         authorization: str | None = Header(default=None),
         idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
     ) -> dict[str, Any]:
@@ -8884,24 +8930,28 @@ def build_messenger_router(
         if recipient_id <= 0:
             raise HTTPException(status_code=400, detail="Укажите корректного получателя")
 
+        allow_documents = album_allow_documents(payload, request)
         raw_media_ids = payload.get("media_ids")
-        if not isinstance(raw_media_ids, list) or not 2 <= len(raw_media_ids) <= 10:
-            raise HTTPException(status_code=400, detail="Альбом должен содержать от 2 до 10 файлов")
+        minimum = 1 if allow_documents else 2
+        if not isinstance(raw_media_ids, list) or not minimum <= len(raw_media_ids) <= 10:
+            raise HTTPException(status_code=400, detail="Выберите не более 10 файлов")
         media_ids: list[str] = []
         for raw_id in raw_media_ids:
             media_id = str(raw_id or "").strip()
             if not re.fullmatch(r"[a-f0-9]{32}", media_id):
                 raise HTTPException(status_code=400, detail="Некорректный ID вложения в альбоме")
             media_ids.append(media_id)
-        if len(set(media_ids)) != len(media_ids):
+        if not allow_documents and len(set(media_ids)) != len(media_ids):
             raise HTTPException(status_code=400, detail="Альбом не должен содержать повторяющиеся файлы")
 
-        captions, body = album_captions(payload, len(media_ids))
+        captions, body = album_captions(payload, len(media_ids), allow_documents)
         silent = payload.get("silent", False)
         if not isinstance(silent, bool):
             raise HTTPException(status_code=400, detail="silent должен быть логическим значением")
         now = int(time.time())
         scope = "/api/messages/album"
+        if allow_documents:
+            scope += "/files"
         descriptor = idempotency_descriptor(scope, payload, idempotency_key)
         album_id = secrets.token_hex(16)
         created_messages: list[dict[str, Any]] = []
@@ -8951,17 +9001,24 @@ def build_messenger_router(
                 )
 
             checked_media: list[tuple[str, dict[str, str | None]]] = []
+            batch_classes: set[str] = set()
             for media_id in media_ids:
                 owned_id = await require_owned_media(db, media_id, uid)
                 fields = await media_message_fields(db, owned_id)
                 media_type = str(fields.get("media_type") or "").lower()
-                if not (media_type.startswith("image/") or media_type.startswith("video/")):
-                    await db.rollback()
-                    raise HTTPException(
-                        status_code=415,
-                        detail="В медиаальбом можно добавлять только фотографии и видео",
-                    )
+                if not allow_documents:
+                    if not (media_type.startswith("image/") or media_type.startswith("video/")):
+                        raise HTTPException(status_code=415, detail="В медиаальбом можно добавлять только фотографии и видео")
+                else:
+                    media_class = album_media_class(fields)
+                    if media_class == "unsupported":
+                        raise HTTPException(status_code=415, detail="Голосовые и видеосообщения нельзя включать в набор файлов")
+                    batch_classes.add(media_class)
                 checked_media.append((media_id, fields))
+            # Native clients render document and visual groups differently. Never
+            # create a group that would be rendered as the wrong kind of media.
+            if len(batch_classes) > 1:
+                raise HTTPException(status_code=415, detail="Файлы и фотографии/видео нужно отправить отдельными группами")
 
             rate_cur = await db.execute(
                 "SELECT COUNT(*) FROM messages WHERE sender_telegram_id=? AND created_at>?",
@@ -9021,7 +9078,7 @@ def build_messenger_router(
             await deliver_push_notifications(
                 [recipient_id],
                 str(user.get("display_name") or user.get("username") or "Новое сообщение"),
-                f"Медиаальбом · {len(created_messages)} вложения",
+                f"{'Файлы' if batch_classes == {'document'} else 'Медиаальбом'} · {len(created_messages)} вложений",
                 {
                     "scope": "dm",
                     "chat_id": str(uid),
@@ -12444,34 +12501,40 @@ def build_messenger_router(
             )
         return result
 
+    @router.post("/api/groups/{group_id}/messages/album/files", status_code=201)
     @router.post("/api/groups/{group_id}/messages/album", status_code=201)
     async def send_group_message_album(
         group_id: int,
         payload: dict[str, Any],
+        request: Request,
         authorization: str | None = Header(default=None),
         idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
     ) -> dict[str, Any]:
         user = await current_user(authorization)
         uid = int(user["telegram_id"])
+        allow_documents = album_allow_documents(payload, request)
         raw_media_ids = payload.get("media_ids")
-        if not isinstance(raw_media_ids, list) or not 2 <= len(raw_media_ids) <= 10:
-            raise HTTPException(status_code=400, detail="Альбом должен содержать от 2 до 10 файлов")
+        minimum = 1 if allow_documents else 2
+        if not isinstance(raw_media_ids, list) or not minimum <= len(raw_media_ids) <= 10:
+            raise HTTPException(status_code=400, detail="Выберите не более 10 файлов")
         media_ids: list[str] = []
         for raw_id in raw_media_ids:
             media_id = str(raw_id or "").strip()
             if not re.fullmatch(r"[a-f0-9]{32}", media_id):
                 raise HTTPException(status_code=400, detail="Некорректный ID вложения в альбоме")
             media_ids.append(media_id)
-        if len(set(media_ids)) != len(media_ids):
+        if not allow_documents and len(set(media_ids)) != len(media_ids):
             raise HTTPException(status_code=400, detail="Альбом не должен содержать повторяющиеся файлы")
 
-        captions, body = album_captions(payload, len(media_ids))
+        captions, body = album_captions(payload, len(media_ids), allow_documents)
         silent = payload.get("silent", False)
         if not isinstance(silent, bool):
             raise HTTPException(status_code=400, detail="silent должен быть логическим значением")
 
         now = int(time.time())
         scope = f"/api/groups/{group_id}/messages/album"
+        if allow_documents:
+            scope += "/files"
         descriptor = idempotency_descriptor(scope, payload, idempotency_key)
         album_id = secrets.token_hex(16)
         created_messages: list[dict[str, Any]] = []
@@ -12508,17 +12571,24 @@ def build_messenger_router(
                         )
 
             checked_media: list[tuple[str, dict[str, str | None]]] = []
+            batch_classes: set[str] = set()
             for media_id in media_ids:
                 owned_id = await require_owned_media(db, media_id, uid)
                 fields = await media_message_fields(db, owned_id)
                 media_type = str(fields.get("media_type") or "").lower()
-                if not (media_type.startswith("image/") or media_type.startswith("video/")):
-                    await db.rollback()
-                    raise HTTPException(
-                        status_code=415,
-                        detail="В медиаальбом можно добавлять только фотографии и видео",
-                    )
+                if not allow_documents:
+                    if not (media_type.startswith("image/") or media_type.startswith("video/")):
+                        raise HTTPException(status_code=415, detail="В медиаальбом можно добавлять только фотографии и видео")
+                else:
+                    media_class = album_media_class(fields)
+                    if media_class == "unsupported":
+                        raise HTTPException(status_code=415, detail="Голосовые и видеосообщения нельзя включать в набор файлов")
+                    batch_classes.add(media_class)
                 checked_media.append((media_id, fields))
+            # Native clients render document and visual groups differently. Never
+            # create a group that would be rendered as the wrong kind of media.
+            if len(batch_classes) > 1:
+                raise HTTPException(status_code=415, detail="Файлы и фотографии/видео нужно отправить отдельными группами")
 
             reply_to_id = parse_reply_id(payload)
             if reply_to_id:
@@ -12587,7 +12657,7 @@ def build_messenger_router(
             await deliver_push_notifications(
                 recipients,
                 str(user.get("display_name") or user.get("username") or "Новое сообщение"),
-                f"Медиаальбом · {len(created_messages)} вложений",
+                f"{'Файлы' if batch_classes == {'document'} else 'Медиаальбом'} · {len(created_messages)} вложений",
                 {
                     "scope": "group",
                     "chat_id": str(group_id),
