@@ -1544,6 +1544,8 @@ async def init_messenger_storage(database_path: Path) -> None:
         for table_name in ("messages", "group_messages", "channel_messages"):
             cur = await db.execute(f"PRAGMA {db_split.SCHEMA}.table_info({table_name})")
             columns = {str(row[1]) for row in await cur.fetchall()}
+            if "entities_json" not in columns:
+                await db.execute(f"ALTER TABLE {db_split.SCHEMA}.{table_name} ADD COLUMN entities_json TEXT NOT NULL DEFAULT '[]'")
             if "media_id" not in columns:
                 await db.execute(f"ALTER TABLE {db_split.SCHEMA}.{table_name} ADD COLUMN media_id TEXT")
             if "edited_at" not in columns:
@@ -2187,6 +2189,87 @@ def _message_body(value: str) -> str:
     if not body or len(body) > MAX_MESSAGE_LENGTH:
         raise HTTPException(status_code=400, detail="Текст сообщения должен содержать 1–4000 символов")
     return body
+
+
+def _message_body_and_entities(payload: dict[str, Any]) -> tuple[str, list[dict[str, Any]]]:
+    """Validate opt-in text entities in UTF-16 units, without altering offsets.
+
+    Old clients without the entities field keep the historical whitespace behaviour.
+    This first version accepts text-only messages, not media captions or albums.
+    """
+    if "entities" not in payload:
+        return _message_body(payload.get("body") or ""), []
+    body = payload.get("body")
+    if not isinstance(body, str) or not body.strip() or len(body) > MAX_MESSAGE_LENGTH:
+        raise HTTPException(status_code=400, detail="Текст сообщения должен содержать 1–4000 символов")
+    entities = payload["entities"]
+    if not isinstance(entities, list) or len(entities) > 100:
+        raise HTTPException(status_code=400, detail="Некорректное форматирование")
+    boundaries = {0}
+    units = 0
+    for char in body:
+        codepoint = ord(char)
+        if 0xD800 <= codepoint <= 0xDFFF:
+            raise HTTPException(status_code=400, detail="Некорректный Unicode в тексте")
+        units += 2 if codepoint > 0xFFFF else 1
+        boundaries.add(units)
+    allowed = {"bold", "italic", "underline", "strike", "spoiler", "code", "pre", "text_url"}
+    validated = []
+    seen = set()
+    for entity in entities:
+        if not isinstance(entity, dict):
+            raise HTTPException(status_code=400, detail="Некорректное форматирование")
+        kind, offset, length = entity.get("type"), entity.get("offset"), entity.get("length")
+        if not isinstance(kind, str) or kind not in allowed:
+            raise HTTPException(status_code=400, detail="Тип форматирования не поддерживается")
+        extra = {"language"} if kind == "pre" else {"url"} if kind == "text_url" else set()
+        if set(entity) - ({"type", "offset", "length"} | extra):
+            raise HTTPException(status_code=400, detail="Некорректные поля форматирования")
+        if (isinstance(offset, bool) or not isinstance(offset, int) or isinstance(length, bool)
+                or not isinstance(length, int) or length <= 0 or offset not in boundaries
+                or offset + length not in boundaries):
+            raise HTTPException(status_code=400, detail="Некорректный диапазон форматирования")
+        item = {"type": kind, "offset": offset, "length": length}
+        if kind == "pre":
+            language = entity.get("language", "")
+            if not isinstance(language, str) or len(language) > 64 or any(ord(c) < 32 or 0xD800 <= ord(c) <= 0xDFFF for c in language):
+                raise HTTPException(status_code=400, detail="Некорректный язык блока кода")
+            item["language"] = language
+        elif kind == "text_url":
+            url = entity.get("url")
+            if not isinstance(url, str) or len(url) > 2048 or any(ord(c) < 32 or 0xD800 <= ord(c) <= 0xDFFF for c in url):
+                raise HTTPException(status_code=400, detail="Некорректная ссылка")
+            try:
+                parsed = urlsplit(url)
+                valid_url = (parsed.scheme.lower() in ("http", "https") and parsed.hostname
+                             and parsed.username is None and parsed.password is None
+                             and not any(c.isspace() for c in url))
+                _ = parsed.port
+            except ValueError:
+                valid_url = False
+            if not valid_url:
+                raise HTTPException(status_code=400, detail="Поддерживаются только ссылки HTTP(S)")
+            item["url"] = url
+        identity = json.dumps(item, ensure_ascii=True, sort_keys=True)
+        if identity in seen:
+            raise HTTPException(status_code=400, detail="Повторяющееся форматирование")
+        seen.add(identity)
+        validated.append(item)
+    return body, validated
+
+
+def _message_entities_json(entities: list[dict[str, Any]]) -> str:
+    return json.dumps(entities, ensure_ascii=True, separators=(",", ":"))
+
+
+def _add_message_entities(item: dict[str, Any]) -> None:
+    raw = item.pop("entities_json", "[]")
+    try:
+        entities = json.loads(raw or "[]")
+        if isinstance(entities, list) and entities:
+            item["entities"] = entities
+    except (ValueError, TypeError):
+        pass
 
 
 def _parse_message_contact(contact_value: Any) -> dict[str, str] | None:
@@ -7542,6 +7625,7 @@ def build_messenger_router(
         for message_id, reaction in rows:
             mine.setdefault(int(message_id), []).append(str(reaction))
         for item in items:
+            _add_message_entities(item)
             item["my_reactions"] = mine.get(int(item["id"]), [])
             source = sources.get(int(item["id"]))
             if source:
@@ -7575,7 +7659,7 @@ def build_messenger_router(
                 db.row_factory = aiosqlite.Row
                 if after_id:
                     cur = await db.execute(
-                        """SELECT id,channel_id,author_telegram_id AS author_id,body,media_id,media_album_id,media_album_index,media_album_count,edited_at,reply_to_id,created_at,
+                        """SELECT id,channel_id,author_telegram_id AS author_id,body,entities_json,media_id,media_album_id,media_album_index,media_album_count,edited_at,reply_to_id,created_at,
                                   (SELECT body FROM channel_messages AS replied WHERE replied.id=channel_messages.reply_to_id) AS reply_to_body,
                                   (SELECT author_telegram_id FROM channel_messages AS replied WHERE replied.id=channel_messages.reply_to_id) AS reply_to_sender_id,
                                   (SELECT group_concat(reaction || ':' || reaction_count, ',')
@@ -7592,7 +7676,7 @@ def build_messenger_router(
                     )
                 else:
                     cur = await db.execute(
-                        """SELECT id,channel_id,author_telegram_id AS author_id,body,media_id,media_album_id,media_album_index,media_album_count,edited_at,reply_to_id,created_at,
+                        """SELECT id,channel_id,author_telegram_id AS author_id,body,entities_json,media_id,media_album_id,media_album_index,media_album_count,edited_at,reply_to_id,created_at,
                                   (SELECT body FROM channel_messages AS replied WHERE replied.id=channel_messages.reply_to_id) AS reply_to_body,
                                   (SELECT author_telegram_id FROM channel_messages AS replied WHERE replied.id=channel_messages.reply_to_id) AS reply_to_sender_id,
                                   (SELECT group_concat(reaction || ':' || reaction_count, ',')
@@ -7626,6 +7710,8 @@ def build_messenger_router(
         return value
 
     def album_captions(payload: dict[str, Any], count: int) -> tuple[list[str], str]:
+        if "entities" in payload:
+            raise HTTPException(status_code=400, detail="Форматирование альбомов пока не поддерживается")
         captions = payload.get("captions")
         if captions is None:
             text = str(payload.get("body") or "")
@@ -7659,7 +7745,7 @@ def build_messenger_router(
             db.row_factory = aiosqlite.Row
             await channel_row(channel_id)
             cur = await db.execute(
-                """SELECT id,channel_id,author_telegram_id AS author_id,body,media_id,media_album_id,media_album_index,media_album_count,edited_at,reply_to_id,created_at,
+                """SELECT id,channel_id,author_telegram_id AS author_id,body,entities_json,media_id,media_album_id,media_album_index,media_album_count,edited_at,reply_to_id,created_at,
                           (SELECT body FROM channel_messages AS replied WHERE replied.id=channel_messages.reply_to_id) AS reply_to_body,
                                   (SELECT author_telegram_id FROM channel_messages AS replied WHERE replied.id=channel_messages.reply_to_id) AS reply_to_sender_id,
                                   (SELECT group_concat(reaction || ':' || reaction_count, ',')
@@ -7705,7 +7791,13 @@ def build_messenger_router(
             body_value = "Контакт: " + contact_payload["name"]
         elif location_payload and not body_value.strip():
             body_value = str(location_payload["label"] or "Местоположение")
-        body = _message_body(body_value) if body_value.strip() or not media_id else ""
+        if "entities" in payload:
+            if media_id or contact_payload or location_payload:
+                raise HTTPException(status_code=400, detail="Форматирование вложений пока не поддерживается")
+            body, entities = _message_body_and_entities(payload)
+        else:
+            body = _message_body(body_value) if body_value.strip() or not media_id else ""
+            entities = []
         if not await can_manage_channel(channel_id, uid):
             raise HTTPException(status_code=403, detail="Публиковать в канале может только владелец или администратор")
         now = int(time.time())
@@ -7747,6 +7839,8 @@ def build_messenger_router(
                 (channel_id, uid, body, media_id, reply_to_id, now),
             )
             message_id = int(cur.lastrowid)
+            if entities:
+                await db.execute("UPDATE channel_messages SET entities_json=? WHERE id=?", (_message_entities_json(entities), message_id))
             if contact_payload:
                 await db.execute(
                     """INSERT INTO message_scoped_contacts(scope,message_id,contact_name,contact_phone,contact_email,
@@ -7770,6 +7864,8 @@ def build_messenger_router(
                 result["location"] = location_payload
             if contact_payload:
                 result["contact"] = contact_payload
+            if entities:
+                result["entities"] = entities
             await idempotency_store(db, uid, scope, descriptor, result, now)
             await db.commit()
         if not silent:
@@ -8017,7 +8113,7 @@ def build_messenger_router(
         params: tuple[Any, ...] = (uid, peer, peer, uid, uid)
         base = """
             SELECT id,sender_telegram_id AS sender_id,
-                   recipient_telegram_id AS recipient_id,body,media_id,edited_at,reply_to_id,created_at,
+                   recipient_telegram_id AS recipient_id,body,entities_json,media_id,edited_at,reply_to_id,created_at,
                    media_album_id,media_album_index,media_album_count,
                    forwarded_from_telegram_id,forwarded_from_message_id,
                    (SELECT display_name FROM accounts WHERE telegram_id=messages.forwarded_from_telegram_id) AS forwarded_from_display_name,
@@ -8257,7 +8353,7 @@ def build_messenger_router(
                 raise HTTPException(status_code=404, detail="Собеседник не найден")
             cur = await db.execute(
                 """SELECT id,sender_telegram_id AS sender_id,
-                          recipient_telegram_id AS recipient_id,body,media_id,edited_at,reply_to_id,created_at,
+                          recipient_telegram_id AS recipient_id,body,entities_json,media_id,edited_at,reply_to_id,created_at,
                           forwarded_from_telegram_id,forwarded_from_message_id,
                           (SELECT display_name FROM accounts WHERE telegram_id=messages.forwarded_from_telegram_id) AS forwarded_from_display_name,
                    (SELECT body FROM messages AS replied WHERE replied.id=messages.reply_to_id) AS reply_to_body,
@@ -8324,7 +8420,13 @@ def build_messenger_router(
             body_value = "Контакт: " + contact_payload["name"]
         elif location_payload and not body_value.strip():
             body_value = location_payload["label"] or "Местоположение"
-        body = _message_body(body_value) if body_value.strip() or not media_id else ""
+        if "entities" in payload:
+            if media_id or contact_payload or location_payload:
+                raise HTTPException(status_code=400, detail="Форматирование вложений пока не поддерживается")
+            body, entities = _message_body_and_entities(payload)
+        else:
+            body = _message_body(body_value) if body_value.strip() or not media_id else ""
+            entities = []
         silent = payload.get("silent", False)
         if not isinstance(silent, bool):
             raise HTTPException(status_code=400, detail="silent должен быть логическим значением")
@@ -8384,6 +8486,8 @@ def build_messenger_router(
                 (uid, recipient_id, body, media_id, reply_to_id, now),
             )
             message_id = int(cur.lastrowid)
+            if entities:
+                await db.execute("UPDATE messages SET entities_json=? WHERE id=?", (_message_entities_json(entities), message_id))
             if contact_payload:
                 await db.execute(
                     """INSERT INTO message_contacts
@@ -8430,6 +8534,8 @@ def build_messenger_router(
                 **media_fields,
                 "created_at": now,
             }
+            if entities:
+                result["entities"] = entities
             await idempotency_store(db, uid, "/api/messages", descriptor, result, now)
             queued_push = False
             if not silent and recipient_id != uid:
@@ -8812,6 +8918,8 @@ def build_messenger_router(
     ) -> dict[str, Any]:
         user = await current_user(authorization)
         uid = int(user["telegram_id"])
+        if "entities" in payload:
+            raise HTTPException(status_code=400, detail="Форматирование отложенных сообщений пока не поддерживается")
         try:
             recipient_id = int(payload.get("recipient_id", 0))
         except (TypeError, ValueError):
@@ -8913,6 +9021,8 @@ def build_messenger_router(
     ) -> dict[str, Any]:
         user = await current_user(authorization)
         uid = int(user["telegram_id"])
+        if "entities" in payload:
+            raise HTTPException(status_code=400, detail="Форматирование отложенных сообщений пока не поддерживается")
         try:
             recipient_id = int(payload.get("recipient_id", 0))
         except (TypeError, ValueError):
@@ -9438,6 +9548,12 @@ def build_messenger_router(
                         media_album_id,media_album_index,media_album_count,created_at) VALUES(?,?,?,?,?,?,?,?)""",
                         (target_peer, uid, body, media_id, album_id, album_index, album_count, now))
                 mid = int(cur.lastrowid)
+                entity_json = item.get("entities_json") or "[]"
+                if drop_captions and media_id:
+                    entity_json = "[]"
+                target_table = {"dm": "messages", "group": "group_messages", "channel": "channel_messages"}[target_scope]
+                if entity_json != "[]":
+                    await db.execute(f"UPDATE {target_table} SET entities_json=? WHERE id=?", (entity_json, mid))
                 location = item["forward_location"]
                 if location:
                     if target_scope == "dm":
@@ -9461,7 +9577,8 @@ def build_messenger_router(
                                    user_b=target_peer if target_scope == "dm" else 0)
                 result_item = {"id": mid, "body": body, "media_id": media_id, "created_at": now,
                     "media_album_id": album_id, "media_album_index": album_index, "media_album_count": album_count,
-                    **item["media_fields"]}
+                    **item["media_fields"], "entities_json": entity_json}
+                _add_message_entities(result_item)
                 if location:
                     result_item.update(location_latitude=location[0], location_longitude=location[1], location_label=location[2], location_venue_json=location[3])
                 if contact:
@@ -9521,7 +9638,7 @@ def build_messenger_router(
                 await db.rollback()
                 return previous
             cur = await db.execute(
-                """SELECT m.id,m.sender_telegram_id,m.recipient_telegram_id,m.body,m.media_id,
+                """SELECT m.id,m.sender_telegram_id,m.recipient_telegram_id,m.body,m.media_id,m.entities_json,
                           m.forwarded_from_telegram_id,m.forwarded_from_message_id,
                           COALESCE(a.display_name,a.username,'Пользователь') AS original_sender_name
                    FROM messages m
@@ -9595,6 +9712,8 @@ def build_messenger_router(
                 ),
             )
             new_message_id = int(cur.lastrowid)
+            if source["entities_json"] != "[]":
+                await db.execute("UPDATE messages SET entities_json=? WHERE id=?", (source["entities_json"], new_message_id))
             await record_event(
                 db, "dm", new_message_id, "new_message", uid,
                 user_a=uid, user_b=recipient_id,
@@ -9610,9 +9729,11 @@ def build_messenger_router(
                 "forwarded_from_telegram_id": forwarded_from_id,
                 "forwarded_from_message_id": forwarded_from_message_id,
                 "forwarded_from_display_name": str(source["original_sender_name"] or "Пользователь"),
+                "entities_json": source["entities_json"],
                 **media_fields,
                 "created_at": now,
             }
+            _add_message_entities(result)
             await idempotency_store(db, uid, scope, descriptor, result, now)
             await db.commit()
         await deliver_push_notifications(
@@ -10371,7 +10492,10 @@ def build_messenger_router(
     ) -> dict[str, Any]:
         user = await current_user(authorization)
         uid = int(user["telegram_id"])
-        body = edited_body(payload)
+        if "entities" in payload:
+            body, entities = _message_body_and_entities(payload)
+        else:
+            body, entities = edited_body(payload), []
         now = int(time.time())
         async with aiosqlite.connect(db_path()) as db:
             await db.execute("BEGIN IMMEDIATE")
@@ -10385,10 +10509,21 @@ def build_messenger_router(
             if int(row[0]) != uid:
                 await db.rollback()
                 raise HTTPException(status_code=403, detail="Изменять можно только свои сообщения")
-            await db.execute("UPDATE messages SET body=?,edited_at=? WHERE id=?", (body, now, message_id))
+            if "entities" not in payload:
+                cur = await db.execute("SELECT entities_json FROM messages WHERE id=?", (message_id,))
+                if (await cur.fetchone())[0] != "[]":
+                    raise HTTPException(status_code=409, detail="Укажите entities, чтобы не потерять форматирование")
+            if "entities" in payload:
+                cur = await db.execute("SELECT media_id IS NOT NULL OR EXISTS(SELECT 1 FROM message_contacts WHERE message_id=?) OR EXISTS(SELECT 1 FROM message_locations WHERE message_id=?) OR EXISTS(SELECT 1 FROM message_gifts WHERE message_id=?) FROM messages WHERE id=?", (message_id, message_id, message_id, message_id))
+                if (await cur.fetchone())[0]:
+                    raise HTTPException(status_code=400, detail="Форматирование вложений пока не поддерживается")
+            await db.execute("UPDATE messages SET body=?,edited_at=?,entities_json=? WHERE id=?", (body, now, _message_entities_json(entities), message_id))
             await record_event(db, "dm", message_id, "edit", uid, user_a=int(row[0]), user_b=int(row[1]))
             await db.commit()
-        return {"id": message_id, "body": body, "edited_at": now}
+        result = {"id": message_id, "body": body, "edited_at": now}
+        if entities:
+            result["entities"] = entities
+        return result
 
     @router.delete("/api/messages/{message_id}")
     async def delete_message(
@@ -10445,7 +10580,10 @@ def build_messenger_router(
     ) -> dict[str, Any]:
         user = await current_user(authorization)
         uid = int(user["telegram_id"])
-        body = edited_body(payload)
+        if "entities" in payload:
+            body, entities = _message_body_and_entities(payload)
+        else:
+            body, entities = edited_body(payload), []
         now = int(time.time())
         async with aiosqlite.connect(db_path()) as db:
             await db.execute("BEGIN IMMEDIATE")
@@ -10460,10 +10598,21 @@ def build_messenger_router(
             if int(row[0]) != uid:
                 await db.rollback()
                 raise HTTPException(status_code=403, detail="Изменять можно только свои сообщения")
-            await db.execute("UPDATE group_messages SET body=?,edited_at=? WHERE id=?", (body, now, message_id))
+            if "entities" not in payload:
+                cur = await db.execute("SELECT entities_json FROM group_messages WHERE id=?", (message_id,))
+                if (await cur.fetchone())[0] != "[]":
+                    raise HTTPException(status_code=409, detail="Укажите entities, чтобы не потерять форматирование")
+            if "entities" in payload:
+                cur = await db.execute("SELECT media_id IS NOT NULL OR EXISTS(SELECT 1 FROM message_scoped_contacts WHERE scope='group' AND message_id=?) OR EXISTS(SELECT 1 FROM message_forward_locations WHERE scope='group' AND message_id=?) FROM group_messages WHERE id=?", (message_id, message_id, message_id))
+                if (await cur.fetchone())[0]:
+                    raise HTTPException(status_code=400, detail="Форматирование вложений пока не поддерживается")
+            await db.execute("UPDATE group_messages SET body=?,edited_at=?,entities_json=? WHERE id=?", (body, now, _message_entities_json(entities), message_id))
             await record_event(db, "group", message_id, "edit", uid, chat_id=group_id)
             await db.commit()
-        return {"id": message_id, "body": body, "edited_at": now}
+        result = {"id": message_id, "body": body, "edited_at": now}
+        if entities:
+            result["entities"] = entities
+        return result
 
     @router.delete("/api/groups/{group_id}/messages/{message_id}")
     async def delete_group_message(
@@ -10516,7 +10665,10 @@ def build_messenger_router(
         uid = int(user["telegram_id"])
         if not await can_manage_channel(channel_id, uid):
             raise HTTPException(status_code=403, detail="Менять публикации может только владелец или администратор")
-        body = edited_body(payload)
+        if "entities" in payload:
+            body, entities = _message_body_and_entities(payload)
+        else:
+            body, entities = edited_body(payload), []
         now = int(time.time())
         async with aiosqlite.connect(db_path()) as db:
             await db.execute("BEGIN IMMEDIATE")
@@ -10526,10 +10678,21 @@ def build_messenger_router(
             if await cur.fetchone() is None:
                 await db.rollback()
                 raise HTTPException(status_code=404, detail="Сообщение не найдено")
-            await db.execute("UPDATE channel_messages SET body=?,edited_at=? WHERE id=?", (body, now, message_id))
+            if "entities" not in payload:
+                cur = await db.execute("SELECT entities_json FROM channel_messages WHERE id=?", (message_id,))
+                if (await cur.fetchone())[0] != "[]":
+                    raise HTTPException(status_code=409, detail="Укажите entities, чтобы не потерять форматирование")
+            if "entities" in payload:
+                cur = await db.execute("SELECT media_id IS NOT NULL OR EXISTS(SELECT 1 FROM message_scoped_contacts WHERE scope='channel' AND message_id=?) OR EXISTS(SELECT 1 FROM message_forward_locations WHERE scope='channel' AND message_id=?) FROM channel_messages WHERE id=?", (message_id, message_id, message_id))
+                if (await cur.fetchone())[0]:
+                    raise HTTPException(status_code=400, detail="Форматирование вложений пока не поддерживается")
+            await db.execute("UPDATE channel_messages SET body=?,edited_at=?,entities_json=? WHERE id=?", (body, now, _message_entities_json(entities), message_id))
             await record_event(db, "channel", message_id, "edit", uid, chat_id=channel_id)
             await db.commit()
-        return {"id": message_id, "body": body, "edited_at": now}
+        result = {"id": message_id, "body": body, "edited_at": now}
+        if entities:
+            result["entities"] = entities
+        return result
 
     @router.delete("/api/channels/{channel_id}/messages/{message_id}")
     async def delete_channel_message(
@@ -11660,7 +11823,7 @@ def build_messenger_router(
                 db.row_factory = aiosqlite.Row
                 if after_id:
                     cur = await db.execute(
-                        """SELECT id,group_id,sender_telegram_id AS sender_id,body,media_id,media_album_id,media_album_index,media_album_count,edited_at,reply_to_id,created_at,
+                        """SELECT id,group_id,sender_telegram_id AS sender_id,body,entities_json,media_id,media_album_id,media_album_index,media_album_count,edited_at,reply_to_id,created_at,
                                   (SELECT body FROM group_messages AS replied WHERE replied.id=group_messages.reply_to_id) AS reply_to_body,
                                   (SELECT sender_telegram_id FROM group_messages AS replied WHERE replied.id=group_messages.reply_to_id) AS reply_to_sender_id,
                                   (SELECT group_concat(reaction || ':' || reaction_count, ',')
@@ -11676,7 +11839,7 @@ def build_messenger_router(
                     )
                 else:
                     cur = await db.execute(
-                        """SELECT id,group_id,sender_telegram_id AS sender_id,body,media_id,media_album_id,media_album_index,media_album_count,edited_at,reply_to_id,created_at,
+                        """SELECT id,group_id,sender_telegram_id AS sender_id,body,entities_json,media_id,media_album_id,media_album_index,media_album_count,edited_at,reply_to_id,created_at,
                                   (SELECT body FROM group_messages AS replied WHERE replied.id=group_messages.reply_to_id) AS reply_to_body,
                                   (SELECT sender_telegram_id FROM group_messages AS replied WHERE replied.id=group_messages.reply_to_id) AS reply_to_sender_id,
                                   (SELECT group_concat(reaction || ':' || reaction_count, ',')
@@ -11714,7 +11877,7 @@ def build_messenger_router(
             await require_group_member(db, group_id, int(user["telegram_id"]))
             db.row_factory = aiosqlite.Row
             cur = await db.execute(
-                """SELECT id,group_id,sender_telegram_id AS sender_id,body,media_id,media_album_id,media_album_index,media_album_count,edited_at,reply_to_id,created_at,
+                """SELECT id,group_id,sender_telegram_id AS sender_id,body,entities_json,media_id,media_album_id,media_album_index,media_album_count,edited_at,reply_to_id,created_at,
                           (SELECT body FROM group_messages AS replied WHERE replied.id=group_messages.reply_to_id) AS reply_to_body,
                                   (SELECT sender_telegram_id FROM group_messages AS replied WHERE replied.id=group_messages.reply_to_id) AS reply_to_sender_id,
                                   (SELECT group_concat(reaction || ':' || reaction_count, ',')
@@ -11760,7 +11923,13 @@ def build_messenger_router(
             body_value = "Контакт: " + contact_payload["name"]
         elif location_payload and not body_value.strip():
             body_value = str(location_payload["label"] or "Местоположение")
-        body = _message_body(body_value) if body_value.strip() or not media_id else ""
+        if "entities" in payload:
+            if media_id or contact_payload or location_payload:
+                raise HTTPException(status_code=400, detail="Форматирование вложений пока не поддерживается")
+            body, entities = _message_body_and_entities(payload)
+        else:
+            body = _message_body(body_value) if body_value.strip() or not media_id else ""
+            entities = []
         now = int(time.time())
         scope = f"/api/groups/{group_id}/messages"
         descriptor = idempotency_descriptor(scope, payload, idempotency_key)
@@ -11818,6 +11987,8 @@ def build_messenger_router(
                 (group_id, uid, body, media_id, reply_to_id, now),
             )
             message_id = int(cur.lastrowid)
+            if entities:
+                await db.execute("UPDATE group_messages SET entities_json=? WHERE id=?", (_message_entities_json(entities), message_id))
             if contact_payload:
                 await db.execute(
                     """INSERT INTO message_scoped_contacts(scope,message_id,contact_name,contact_phone,contact_email,
@@ -11845,6 +12016,8 @@ def build_messenger_router(
                 result["location"] = location_payload
             if contact_payload:
                 result["contact"] = contact_payload
+            if entities:
+                result["entities"] = entities
             await idempotency_store(db, uid, scope, descriptor, result, now)
             await db.commit()
         if not silent:

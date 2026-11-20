@@ -7836,3 +7836,131 @@ def test_venue_schema_migrates_existing_location_rows(api_env) -> None:
             row = next(row for row in response.json()['messages'] if row['id'] == mid)
             assert (row['location_latitude'], row['location_longitude'], row['location_label'], row['location_venue_json']) == (52.0, 4.0, 'Old place', '')
     run(scenario())
+
+
+def test_text_entities_round_trip_all_scopes_and_forward(api_env, monkeypatch) -> None:
+    path, _, _, app = api_env
+    for uid in (86901, 86902, 86903):
+        add_account(api_env, uid, f'entity_{uid}')
+        add_session(path, uid, f'entity-{uid}')
+    monkeypatch.setattr(messenger_api, '_firebase_service_account', lambda: None)
+
+    async def scenario():
+        h = lambda uid: {'Authorization': f'Bearer entity-{uid}'}
+        body = '  A🌷bc  '
+        entities = [{'type': 'bold', 'offset': 3, 'length': 2},
+                    {'type': 'italic', 'offset': 3, 'length': 4},
+                    {'type': 'text_url', 'offset': 5, 'length': 2, 'url': 'https://example.org/a'},
+                    {'type': 'pre', 'offset': 0, 'length': 2, 'language': 'python'}]
+        async with await client_for(app) as client:
+            group = (await client.post('/api/groups', headers=h(86901), json={'title': 'Entities'})).json()['id']
+            assert (await client.post(f'/api/groups/{group}/members', headers=h(86901), json={'telegram_id': 86902})).status_code == 201
+            channel_data = (await client.post('/api/channels', headers=h(86901), json={'title': 'Entities', 'is_public': False})).json()
+            channel = channel_data['id']
+            assert (await client.post('/api/channels/join', headers=h(86902), json={'invite_link': channel_data['invite_link']})).status_code == 200
+            sources = []
+            for scope, peer, url, extra in (('dm', 86902, '/api/messages', {'recipient_id': 86902}),
+                                             ('group', group, f'/api/groups/{group}/messages', {}),
+                                             ('channel', channel, f'/api/channels/{channel}/messages', {})):
+                payload = {**extra, 'body': body, 'entities': entities, 'silent': True}
+                key = {**h(86901), 'Idempotency-Key': f'entities-{scope}-0001'}
+                first = await client.post(url, headers=key, json=payload)
+                assert first.status_code == 201, first.text
+                assert first.json()['entities'] == entities
+                assert (await client.post(url, headers=key, json=payload)).json() == first.json()
+                assert (await client.post(url, headers=key, json={**payload, 'entities': []})).status_code == 409
+                mid = first.json()['id']
+                sources.append((scope, peer, mid, url))
+                history_url = '/api/messages?with=86901' if scope == 'dm' else url
+                rows = (await client.get(history_url, headers=h(86902))).json()['messages']
+                found = next(row for row in rows if row['id'] == mid)
+                assert found['body'] == body and found['entities'] == entities
+                search_url = '/api/messages/search?with=86902&q=bc' if scope == 'dm' else f'/api/{scope}s/{peer}/messages/search?q=bc'
+                found = next(row for row in (await client.get(search_url, headers=h(86901))).json()['messages'] if row['id'] == mid)
+                assert found['entities'] == entities
+                if scope != 'dm':
+                    assert (await client.get(url, headers=h(86903))).status_code == 403
+            for scope, peer, mid, url in sources:
+                for dest, target in (('dm', 86903), ('group', group), ('channel', channel)):
+                    req = {'source_scope': scope, 'source_peer_id': peer, 'target_scope': dest,
+                           'target_peer_id': target, 'message_ids': [mid], 'silent': True}
+                    response = await client.post('/api/forward', headers=h(86901), json=req)
+                    assert response.status_code == 201, response.text
+                    item = response.json()['messages'][0]
+                    assert item['body'] == body and item['entities'] == entities
+                    history = f'/api/messages?with={target}' if dest == 'dm' else f'/api/{dest}s/{target}/messages'
+                    saved = next(row for row in (await client.get(history, headers=h(86901))).json()['messages'] if row['id'] == item['id'])
+                    assert saved['entities'] == entities
+                edit_url = f'/api/messages/{mid}' if scope == 'dm' else f'{url}/{mid}'
+                edited = await client.patch(edit_url, headers=h(86901), json={'body': '🌷X ', 'entities': [{'type': 'underline', 'offset': 0, 'length': 2}]})
+                assert edited.status_code == 200 and edited.json()['entities'][0]['length'] == 2
+                history = '/api/messages?with=86902' if scope == 'dm' else url
+                found = next(row for row in (await client.get(history, headers=h(86901))).json()['messages'] if row['id'] == mid)
+                assert found['body'] == '🌷X ' and found['entities'] == edited.json()['entities']
+                rejected = await client.patch(edit_url, headers=h(86901), json={'body': ' legacy '})
+                assert rejected.status_code == 409
+                unchanged = next(row for row in (await client.get(history, headers=h(86901))).json()['messages'] if row['id'] == mid)
+                assert unchanged['entities'] == edited.json()['entities']
+                cleared = await client.patch(edit_url, headers=h(86901), json={'body': ' legacy ', 'entities': []})
+                assert cleared.status_code == 200 and cleared.json()['body'] == ' legacy '
+                found = next(row for row in (await client.get(history, headers=h(86901))).json()['messages'] if row['id'] == mid)
+                assert 'entities' not in found
+            src = await client.post('/api/messages', headers=h(86901), json={'recipient_id': 86902, 'body': body, 'entities': entities, 'silent': True})
+            legacy = await client.post(f"/api/messages/{src.json()['id']}/forward", headers=h(86901), json={'recipient_id': 86903})
+            assert legacy.status_code == 201 and legacy.json()['entities'] == entities
+    run(scenario())
+
+
+def test_text_entities_validation_and_legacy_compatibility(api_env, monkeypatch) -> None:
+    path, _, _, app = api_env
+    for uid in (86911, 86912):
+        add_account(api_env, uid, f'entity_{uid}')
+        add_session(path, uid, f'entity-{uid}')
+    monkeypatch.setattr(messenger_api, '_firebase_service_account', lambda: None)
+    async def scenario():
+        headers = {'Authorization': 'Bearer entity-86911'}
+        async with await client_for(app) as client:
+            base = {'recipient_id': 86912, 'body': '🌷ab', 'silent': True}
+            bad_entities = [None, {}, [None], [{'type': 'unknown', 'offset': 0, 'length': 2}],
+                [{'type': 'bold', 'offset': 1, 'length': 1}], [{'type': 'bold', 'offset': 0, 'length': 1}],
+                [{'type': 'bold', 'offset': 0, 'length': 5}], [{'type': 'bold', 'offset': True, 'length': 2}],
+                [{'type': 'bold', 'offset': 0, 'length': 0}], [{'type': 'bold', 'offset': 0, 'length': 2, 'other': 1}],
+                [{'type': 'text_url', 'offset': 0, 'length': 2, 'url': 'https://[invalid'}],
+                [{'type': 'text_url', 'offset': 0, 'length': 2, 'url': 'javascript:alert(1)'}],
+                [{'type': 'text_url', 'offset': 0, 'length': 2, 'url': 'https://a:bad'}],
+                [{'type': 'pre', 'offset': 0, 'length': 2, 'language': 'x\n'}],
+                [{'type': 'bold', 'offset': 0, 'length': 2}] * 101,
+                [{'type': 'bold', 'offset': 0, 'length': 2}] * 2]
+            for entities in bad_entities:
+                r = await client.post('/api/messages', headers=headers, json={**base, 'entities': entities})
+                assert r.status_code == 400, (entities, r.text)
+            r = await client.post('/api/messages', headers=headers, json={**base, 'contact': {'name': 'A', 'phone': '+31612345678'}, 'entities': []})
+            assert r.status_code == 400
+            r = await client.post('/api/messages', headers=headers, json={**base, 'body': '  old  '})
+            assert r.status_code == 201 and r.json()['body'] == 'old' and 'entities' not in r.json()
+            contact = await client.post('/api/messages', headers=headers, json={**base, 'contact': {'name': 'A', 'phone': '+31612345678'}})
+            assert contact.status_code == 201, contact.text
+            edit = await client.patch(f"/api/messages/{contact.json()['id']}", headers=headers, json={'body': 'X', 'entities': []})
+            assert edit.status_code == 400
+            for endpoint in ('/api/messages/schedule', '/api/messages/when-online', '/api/messages/album'):
+                r = await client.post(endpoint, headers=headers, json={**base, 'media_ids': ['a' * 32, 'b' * 32], 'entities': []})
+                assert r.status_code == 400, (endpoint, r.text)
+            for bad in ('\ud800', '\udfff'):
+                with pytest.raises(messenger_api.HTTPException):
+                    messenger_api._message_body_and_entities({'body': bad + 'a', 'entities': []})
+    run(scenario())
+
+
+def test_text_entities_schema_upgrade_is_repeatable(api_env) -> None:
+    path, _, _, _ = api_env
+    with db_split.sqlite_connect(path) as db:
+        mid = db.execute("INSERT INTO messages(sender_telegram_id,recipient_telegram_id,body,created_at) VALUES(1,2,'Old text',100)").lastrowid
+        for table in ('messages', 'group_messages', 'channel_messages'):
+            db.execute(f'ALTER TABLE messenger.{table} DROP COLUMN entities_json')
+    run(init_messenger_storage(path))
+    run(init_messenger_storage(path))
+    with db_split.sqlite_connect(path) as db:
+        for table in ('messages', 'group_messages', 'channel_messages'):
+            columns = {row[1] for row in db.execute(f'PRAGMA messenger.table_info({table})')}
+            assert 'entities_json' in columns
+        assert db.execute('SELECT body, entities_json FROM messages WHERE id=?', (mid,)).fetchone() == ('Old text', '[]')
