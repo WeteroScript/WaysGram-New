@@ -6991,3 +6991,81 @@ def test_single_group_idempotency_and_slow_mode(api_env, monkeypatch) -> None:
             assert (await client.delete(f'/api/groups/{group}/members/88002', headers=h(88001))).status_code == 200
             assert (await client.post(url, headers=headers, json=data)).status_code == 403
     run(scenario())
+
+
+def test_native_contact_fields_are_private_persistent_and_idempotent(api_env) -> None:
+    path, _, _, app = api_env
+    for uid in (87901, 87902, 87903):
+        add_account(api_env, uid, f'native_contact_{uid}')
+        add_session(path, uid, f'native-contact-{uid}')
+    async def scenario():
+        h = lambda uid: {'Authorization': f'Bearer native-contact-{uid}'}
+        async with await client_for(app) as client:
+            vcard = 'BEGIN:VCARD\r\nVERSION:3.0\r\nFN:Анна Example\r\nEMAIL:a@example.com\r\nEND:VCARD\r\n'
+            contact = {'first_name': 'Анна', 'last_name': 'Example', 'phone': '+31 6 12345678', 'vcard': vcard}
+            request = {'recipient_id': 87902, 'contact': contact, 'silent': True}
+            headers = {**h(87901), 'Idempotency-Key': 'native-contact-retry-001'}
+            first = await client.post('/api/messages', headers=headers, json=request)
+            retry = await client.post('/api/messages', headers=headers, json=request)
+            assert first.status_code == retry.status_code == 201
+            assert first.json() == retry.json()
+            assert first.json()['body'] == 'Контакт: Анна Example'
+            assert first.json()['contact'] == {**contact, 'name': 'Анна Example', 'email': ''}
+            changed = await client.post('/api/messages', headers=headers, json={**request, 'contact': {**contact, 'vcard': 'different'}})
+            assert changed.status_code == 409
+            for actor, peer in ((87901, 87902), (87902, 87901)):
+                history = (await client.get(f'/api/messages?with={peer}', headers=h(actor))).json()['messages']
+                assert len(history) == 1
+                row = history[0]
+                assert (row['contact_name'], row['contact_first_name'], row['contact_last_name'], row['contact_phone'], row['contact_vcard']) == ('Анна Example', 'Анна', 'Example', '+31 6 12345678', vcard)
+                search = (await client.get(f'/api/messages/search?with={peer}&q=Example', headers=h(actor))).json()['messages']
+                assert search[0]['contact_vcard'] == vcard
+            assert (await client.get('/api/messages?with=87901', headers=h(87903))).json()['messages'] == []
+            for bad in ({**contact, 'vcard': 'x' * 16385}, {**contact, 'vcard': 'BEGIN\x00END'},
+                        {**contact, 'vcard': 123}, {**contact, 'first_name': True},
+                        {**contact, 'name': 'different'}, {**contact, 'phone': 'bad'}):
+                response = await client.post('/api/messages', headers=h(87901), json={**request, 'contact': bad})
+                assert response.status_code == 400, response.text
+            forward = await client.post('/api/forward', headers=h(87902), json={'source_scope':'dm', 'source_peer_id':87901,
+                'target_scope':'dm', 'target_peer_id':87903, 'message_ids':[first.json()['id']]})
+            assert forward.status_code == 400
+            assert (await client.get('/api/messages?with=87902', headers=h(87903))).json()['messages'] == []
+            saved = await client.post('/api/messages', headers=h(87901), json={**request, 'recipient_id': 87901})
+            assert saved.status_code == 201
+            saved_history = (await client.get('/api/messages?with=87901', headers=h(87901))).json()['messages']
+            assert saved_history[0]['contact_vcard'] == vcard
+            cleared = await client.delete('/api/conversations/87901/messages?for=all', headers=h(87902))
+            assert cleared.status_code == 200 and cleared.json()['deleted_count'] == 1
+            with db_split.sqlite_connect(path) as db:
+                assert db.execute('SELECT COUNT(*) FROM message_contacts WHERE message_id=?', (first.json()['id'],)).fetchone()[0] == 0
+    run(scenario())
+
+
+def test_contact_schema_migrates_old_rows_and_rejects_unsupported_group_cards(api_env) -> None:
+    path, _, _, app = api_env
+    for uid in (87801, 87802):
+        add_account(api_env, uid, f'old_contact_{uid}')
+        add_session(path, uid, f'old-contact-{uid}')
+    # Simulate the pre-vCard database and retain a legacy card through two startups.
+    with db_split.sqlite_connect(path) as db:
+        for col in ('contact_first_name', 'contact_last_name', 'contact_vcard'):
+            db.execute(f'ALTER TABLE messenger.message_contacts DROP COLUMN {col}')
+        now = int(time.time())
+        cur = db.execute('INSERT INTO messages(sender_telegram_id,recipient_telegram_id,body,created_at) VALUES(?,?,?,?)', (87801, 87802, 'Контакт: Old User', now))
+        mid = cur.lastrowid
+        db.execute('INSERT INTO message_contacts(message_id,contact_name,contact_phone,contact_email) VALUES(?,?,?,?)', (mid, 'Old User', '+31 6 12345678', 'old@example.com'))
+    run(init_messenger_storage(path))
+    run(init_messenger_storage(path))
+    async def scenario():
+        h = lambda uid: {'Authorization': f'Bearer old-contact-{uid}'}
+        async with await client_for(app) as client:
+            messages = (await client.get('/api/messages?with=87801', headers=h(87802))).json()['messages']
+            old = next(row for row in messages if row['id'] == mid)
+            assert (old['contact_name'], old['contact_email'], old['contact_first_name'], old['contact_last_name'], old['contact_vcard']) == ('Old User', 'old@example.com', '', '', '')
+            group = (await client.post('/api/groups', headers=h(87801), json={'title': 'Contacts'})).json()['id']
+            channel = (await client.post('/api/channels', headers=h(87801), json={'title': 'Contacts', 'is_public': False})).json()['id']
+            for url in (f'/api/groups/{group}/messages', f'/api/channels/{channel}/messages'):
+                response = await client.post(url, headers=h(87801), json={'body': 'should not degrade to text', 'contact': {'name':'Example','phone':'+31 6 12345678'}})
+                assert response.status_code == 400
+                assert (await client.get(url, headers=h(87801))).json()['messages'] == []
+    run(scenario())

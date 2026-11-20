@@ -140,6 +140,23 @@ class NativeMessagingSourceChecks(unittest.TestCase):
         self.assertIn('kind.equals("delete_for_me")', poller)
         self.assertIn('u.messages.add(messageId)', poller)
 
+    def test_native_private_contact_round_trip_and_scope_guards(self):
+        transport = self.source('tgnet/WaysGramTransport.java')
+        media = self.source('tgnet/WaysGramMedia.java')
+        self.assertIn('send.media instanceof TLRPC.TL_inputMediaContact', transport)
+        self.assertIn('media.first_name', transport)
+        self.assertIn('media.last_name', transport)
+        self.assertIn('media.phone_number', transport)
+        self.assertIn('media.vcard', transport)
+        self.assertIn('CONTACT_NOT_SUPPORTED', transport)
+        self.assertIn('body.put("contact", contact)', transport)
+        self.assertIn('location != null || contact != null', transport)
+        self.assertIn('new TLRPC.TL_messageMediaContact()', media)
+        for name in ('contact_name', 'contact_first_name', 'contact_last_name', 'contact_phone', 'contact_vcard'):
+            self.assertIn(name, media)
+        self.assertIn('media.user_id = 0', media)
+        self.assertIn('message.flags |= TLObject.FLAG_9', media)
+
     def test_native_recordings_and_album_bridges(self):
         transport = self.source('tgnet/WaysGramTransport.java')
         media = self.source('tgnet/WaysGramMedia.java')

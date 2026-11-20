@@ -730,7 +730,10 @@ async def init_messenger_storage(database_path: Path) -> None:
                 message_id INTEGER PRIMARY KEY REFERENCES messages(id) ON DELETE CASCADE,
                 contact_name TEXT NOT NULL,
                 contact_phone TEXT NOT NULL,
-                contact_email TEXT NOT NULL DEFAULT ''
+                contact_email TEXT NOT NULL DEFAULT '',
+                contact_first_name TEXT NOT NULL DEFAULT '',
+                contact_last_name TEXT NOT NULL DEFAULT '',
+                contact_vcard TEXT NOT NULL DEFAULT ''
             );
             CREATE TABLE IF NOT EXISTS message_locations (
                 message_id INTEGER PRIMARY KEY REFERENCES messages(id) ON DELETE CASCADE,
@@ -1315,6 +1318,16 @@ async def init_messenger_storage(database_path: Path) -> None:
                  AND COALESCE(gifts_per_round,0)>0""",
             (int(time.time()),)
         )
+        # Older databases contain the original name/phone/email contact snapshot.
+        # Keep those rows and add native name parts and vCard losslessly.
+        cur = await db.execute(f"PRAGMA {db_split.SCHEMA}.table_info(message_contacts)")
+        contact_columns = {str(row[1]) for row in await cur.fetchall()}
+        for column in ("contact_first_name", "contact_last_name", "contact_vcard"):
+            if column not in contact_columns:
+                await db.execute(
+                    f"ALTER TABLE {db_split.SCHEMA}.message_contacts ADD COLUMN {column} TEXT NOT NULL DEFAULT ''"
+                )
+
         cur = await db.execute(f"PRAGMA {db_split.SCHEMA}.table_info(user_gifts)")
         user_gift_columns = {str(row[1]) for row in await cur.fetchall()}
         if "upgrade_level" not in user_gift_columns:
@@ -7521,6 +7534,8 @@ def build_messenger_router(
         if not isinstance(silent, bool):
             raise HTTPException(status_code=400, detail="silent должен быть логическим значением")
         media_id = str(payload.get("media_id") or "").strip() or None
+        if payload.get("contact") is not None:
+            raise HTTPException(status_code=400, detail="Контакты в группах и каналах пока не поддерживаются")
         location_payload = _parse_message_location(payload.get("location"))
         if location_payload and media_id:
             raise HTTPException(status_code=400, detail="Нельзя отправлять геолокацию вместе с файлом")
@@ -7838,6 +7853,9 @@ def build_messenger_router(
                    (SELECT contact_name FROM message_contacts WHERE message_id=messages.id) AS contact_name,
                    (SELECT contact_phone FROM message_contacts WHERE message_id=messages.id) AS contact_phone,
                    (SELECT contact_email FROM message_contacts WHERE message_id=messages.id) AS contact_email,
+                   (SELECT contact_first_name FROM message_contacts WHERE message_id=messages.id) AS contact_first_name,
+                   (SELECT contact_last_name FROM message_contacts WHERE message_id=messages.id) AS contact_last_name,
+                   (SELECT contact_vcard FROM message_contacts WHERE message_id=messages.id) AS contact_vcard,
                    (SELECT latitude FROM message_locations WHERE message_id=messages.id) AS location_latitude,
                    (SELECT longitude FROM message_locations WHERE message_id=messages.id) AS location_longitude,
                    (SELECT label FROM message_locations WHERE message_id=messages.id) AS location_label,
@@ -8073,6 +8091,9 @@ def build_messenger_router(
                           (SELECT contact_name FROM message_contacts WHERE message_id=messages.id) AS contact_name,
                           (SELECT contact_phone FROM message_contacts WHERE message_id=messages.id) AS contact_phone,
                           (SELECT contact_email FROM message_contacts WHERE message_id=messages.id) AS contact_email,
+                   (SELECT contact_first_name FROM message_contacts WHERE message_id=messages.id) AS contact_first_name,
+                   (SELECT contact_last_name FROM message_contacts WHERE message_id=messages.id) AS contact_last_name,
+                   (SELECT contact_vcard FROM message_contacts WHERE message_id=messages.id) AS contact_vcard,
                           (SELECT latitude FROM message_locations WHERE message_id=messages.id) AS location_latitude,
                           (SELECT longitude FROM message_locations WHERE message_id=messages.id) AS location_longitude,
                           (SELECT label FROM message_locations WHERE message_id=messages.id) AS location_label
@@ -8114,11 +8135,25 @@ def build_messenger_router(
         if contact_value is not None:
             if not isinstance(contact_value, dict):
                 raise HTTPException(status_code=400, detail="Контакт должен быть объектом")
+            native_fields = any(key in contact_value for key in ("first_name", "last_name", "vcard"))
+            for key in ("first_name", "last_name", "vcard"):
+                if key in contact_value and not isinstance(contact_value[key], str):
+                    raise HTTPException(status_code=400, detail="Поля имени и vCard должны быть строками")
+            first_name = contact_value.get("first_name", "").strip()
+            last_name = contact_value.get("last_name", "").strip()
+            vcard = contact_value.get("vcard", "")
             contact_name = str(contact_value.get("name") or "").strip()
+            parts_name = " ".join(part for part in (first_name, last_name) if part)
+            if parts_name:
+                if contact_name and contact_name != parts_name:
+                    raise HTTPException(status_code=400, detail="Имя контакта не соответствует его частям")
+                contact_name = parts_name
             contact_phone = str(contact_value.get("phone") or "").strip()
             contact_email = str(contact_value.get("email") or "").strip()
             if not contact_name or len(contact_name) > 120:
                 raise HTTPException(status_code=400, detail="Укажите имя контакта до 120 символов")
+            if len(vcard) > 16384 or "\x00" in vcard:
+                raise HTTPException(status_code=400, detail="vCard должен содержать не более 16384 символов без NUL")
             if not re.fullmatch(r"[+0-9(). -]{5,32}", contact_phone):
                 raise HTTPException(status_code=400, detail="Некорректный номер телефона контакта")
             if len(contact_email) > 254 or (
@@ -8127,11 +8162,9 @@ def build_messenger_router(
                 raise HTTPException(status_code=400, detail="Некорректный адрес электронной почты контакта")
             if media_id or location_payload:
                 raise HTTPException(status_code=400, detail="Нельзя объединять контакт с файлом или геолокацией")
-            contact_payload = {
-                "name": contact_name,
-                "phone": contact_phone,
-                "email": contact_email,
-            }
+            contact_payload = {"name": contact_name, "phone": contact_phone, "email": contact_email}
+            if native_fields:
+                contact_payload.update(first_name=first_name, last_name=last_name, vcard=vcard)
         if location_payload and media_id:
             raise HTTPException(status_code=400, detail="Нельзя отправлять геолокацию вместе с файлом")
         body_value = str(payload.get("body") or "")
@@ -8202,13 +8235,17 @@ def build_messenger_router(
             if contact_payload:
                 await db.execute(
                     """INSERT INTO message_contacts
-                       (message_id,contact_name,contact_phone,contact_email)
-                       VALUES(?,?,?,?)""",
+                       (message_id,contact_name,contact_phone,contact_email,
+                        contact_first_name,contact_last_name,contact_vcard)
+                       VALUES(?,?,?,?,?,?,?)""",
                     (
                         message_id,
                         contact_payload["name"],
                         contact_payload["phone"],
                         contact_payload["email"],
+                        contact_payload.get("first_name", ""),
+                        contact_payload.get("last_name", ""),
+                        contact_payload.get("vcard", ""),
                     ),
                 )
             if location_payload:
@@ -11232,6 +11269,8 @@ def build_messenger_router(
         if not isinstance(silent, bool):
             raise HTTPException(status_code=400, detail="silent должен быть логическим значением")
         media_id = str(payload.get("media_id") or "").strip() or None
+        if payload.get("contact") is not None:
+            raise HTTPException(status_code=400, detail="Контакты в группах и каналах пока не поддерживаются")
         location_payload = _parse_message_location(payload.get("location"))
         if location_payload and media_id:
             raise HTTPException(status_code=400, detail="Нельзя отправлять геолокацию вместе с файлом")
