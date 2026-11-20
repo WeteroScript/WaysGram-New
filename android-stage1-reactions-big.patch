@@ -1,0 +1,70 @@
+--- a/WaysGram-Android/TMessagesProj/src/main/java/org/telegram/tgnet/WaysGramMessages.java
++++ b/WaysGram-Android/TMessagesProj/src/main/java/org/telegram/tgnet/WaysGramMessages.java
+@@ -120,6 +120,7 @@
+         JSONObject body = new JSONObject();
+         try {
+             body.put("reactions", selected);
++            body.put("big", req.big);
+             if (req.peer instanceof TLRPC.TL_inputPeerSelf || req.peer instanceof TLRPC.TL_inputPeerUser) {
+                 body.put("peer_id", peer.user_id);
+                 path = "/api/messages/" + serverId + "/reactions";
+--- a/WaysGram-Android/TMessagesProj/src/main/java/org/telegram/tgnet/WaysGramMapper.java
++++ b/WaysGram-Android/TMessagesProj/src/main/java/org/telegram/tgnet/WaysGramMapper.java
+@@ -298,6 +298,27 @@
+         reactions.results.add(result);
+     }
+ 
++    private static void addRecentReactions(TLRPC.TL_messageReactions reactions, JSONArray recent) {
++        if (recent == null) return;
++        for (int i = 0; i < recent.length(); i++) {
++            JSONObject item = recent.optJSONObject(i);
++            if (item == null) continue;
++            long userId = item.optLong("user_id", 0);
++            String emoji = item.optString("reaction", "");
++            if (userId <= 0 || !WaysGramReactions.contains(emoji)) continue;
++            TLRPC.TL_messagePeerReaction peerReaction = new TLRPC.TL_messagePeerReaction();
++            peerReaction.peer_id = peerUser(userId);
++            TLRPC.TL_reactionEmoji value = new TLRPC.TL_reactionEmoji();
++            value.emoticon = emoji;
++            peerReaction.reaction = value;
++            peerReaction.big = item.optBoolean("big", false);
++            peerReaction.unread = item.optBoolean("unread", false);
++            peerReaction.date = item.optInt("date", 0);
++            reactions.recent_reactions.add(peerReaction);
++        }
++        if (!reactions.recent_reactions.isEmpty()) reactions.flags |= TLObject.FLAG_1;
++    }
++
+     /** Read a history summary or an authoritative response from a set request. */
+     public static TLRPC.TL_messageReactions readReactions(JSONObject json) {
+         TLRPC.TL_messageReactions reactions = new TLRPC.TL_messageReactions();
+@@ -309,17 +330,19 @@
+                 JSONObject entry = counts.optJSONObject(i);
+                 if (entry != null) addReaction(reactions, entry.optString("reaction", ""), entry.optInt("count"), mine, seen);
+             }
+-            return reactions;
+-        }
+-        String summary = json.optString("reaction_summary", "");
+-        if (TextUtils.isEmpty(summary) || "null".equals(summary)) return reactions;
+-        for (String entry : summary.split(",")) {
+-            int split = entry.lastIndexOf(':');
+-            if (split <= 0 || split == entry.length() - 1) continue;
+-            try {
+-                addReaction(reactions, entry.substring(0, split), Integer.parseInt(entry.substring(split + 1)), mine, seen);
+-            } catch (NumberFormatException ignored) { }
+-        }
++        } else {
++            String summary = json.optString("reaction_summary", "");
++            if (!TextUtils.isEmpty(summary) && !"null".equals(summary)) {
++                for (String entry : summary.split(",")) {
++                    int split = entry.lastIndexOf(':');
++                    if (split <= 0 || split == entry.length() - 1) continue;
++                    try {
++                        addReaction(reactions, entry.substring(0, split), Integer.parseInt(entry.substring(split + 1)), mine, seen);
++                    } catch (NumberFormatException ignored) { }
++                }
++            }
++        }
++        addRecentReactions(reactions, json.optJSONArray("recent_reactions"));
+         return reactions;
+     }
