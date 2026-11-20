@@ -36,7 +36,7 @@ def main():
     assert 'uploadedDocument.ttl_seconds = ttl' in voice_send
     assert 'media.ttl_seconds = ttl;' in voice_send and 'media.flags |= 1;' in voice_send
     methods = '\n'.join(method(source, name) for name in ('boolean isAudioFilename', 'String audioUploadName',
-        'boolean supportedAudioMime', 'String safeAudioMetadata', 'void requirePersistentMedia', 'JSONObject uploadFor'))
+        'boolean supportedAudioMime', 'boolean isMp4Filename', 'String videoNoteUploadName', 'String safeAudioMetadata', 'void requirePersistentMedia', 'JSONObject uploadFor'))
     java = r'''import java.util.*;
 import java.io.*;
 public class TestVoice {

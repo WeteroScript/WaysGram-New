@@ -8660,3 +8660,54 @@ def test_voice_send_history_download_and_forward(api_env) -> None:
             assert (await client.post('/api/media/documents', headers={**headers, 'X-Media-Metadata':malformed}, content=data)).status_code == 400
             assert (await client.post('/api/media/documents', headers=headers, content=b'invalid')).status_code == 415
     run(scenario())
+
+
+def test_video_note_send_all_scopes_and_forward_preserves_metadata(api_env) -> None:
+    path, _, _, app = api_env
+    for uid in (98701, 98702, 98703):
+        add_account(api_env, uid, f'video_note_scope_{uid}')
+        add_session(path, uid, f'video-note-scope-{uid}')
+    async def scenario():
+        h = lambda uid: {'Authorization': f'Bearer video-note-scope-{uid}'}
+        async with await client_for(app) as client:
+            group = (await client.post('/api/groups', headers=h(98701), json={'title':'Video note group'})).json()['id']
+            assert (await client.post(f'/api/groups/{group}/members', headers=h(98701), json={'telegram_id':98702})).status_code == 201
+            channel = (await client.post('/api/channels', headers=h(98701), json={'title':'Video note channel', 'is_public':False})).json()['id']
+            data = b'\x00\x00\x00\x18ftypisom' + b'\0' * 32
+            meta = {'duration': 8.75, 'width': 360, 'height': 360}
+            headers = {**h(98701), 'Content-Type':'application/octet-stream', 'X-Filename':'round.mp4', 'X-Media-Kind':'video_note',
+                       'X-Media-Metadata': base64.b64encode(json.dumps(meta).encode()).decode()}
+            upload = await client.post('/api/media/documents', headers=headers, content=data)
+            assert upload.status_code == 201, upload.text
+            media = upload.json()
+            assert media['media_kind'] == 'video_note' and json.loads(media['media_metadata']) == meta
+            assert (await client.get(media['url'], headers=h(98703))).status_code in (403,404)
+            dm = await client.post('/api/messages', headers=h(98701), json={'recipient_id':98702,'media_id':media['id']})
+            saved = await client.post('/api/messages', headers=h(98701), json={'recipient_id':98701,'media_id':media['id']})
+            assert dm.status_code == saved.status_code == 201
+            receiver_history = await client.get('/api/messages', headers=h(98702), params={'with':98701,'message_ids':str(dm.json()['id'])})
+            item = receiver_history.json()['messages'][0]
+            assert item['media_kind'] == 'video_note' and json.loads(item['media_metadata']) == meta
+            downloaded = await client.get(media['url'], headers=h(98702))
+            assert downloaded.status_code == 200 and downloaded.content == data
+            for scope, peer in [('group',group),('channel',channel)]:
+                sent = await client.post(f'/api/{scope}s/{peer}/messages', headers=h(98701), json={'media_id':media['id']})
+                assert sent.status_code == 201, sent.text
+                response = await client.get(f'/api/{scope}s/{peer}/messages', headers=h(98701), params={'message_ids':str(sent.json()['id'])})
+                note = response.json()['messages'][0]
+                assert note['media_kind'] == 'video_note' and json.loads(note['media_metadata']) == meta
+                assert (await client.get(f'/api/{scope}s/{peer}/messages', headers=h(98703))).status_code in (403,404)
+                forwarded = await client.post('/api/forward', headers=h(98701), json={'source_scope':scope,'source_peer_id':peer,
+                    'target_scope':'dm','target_peer_id':98702,'message_ids':[note['id']]})
+                assert forwarded.status_code == 201, forwarded.text
+                copy = forwarded.json()['messages'][0]
+                assert copy['media_kind'] == 'video_note' and json.loads(copy['media_metadata']) == meta
+                fetched = await client.get(f"/api/media/{copy['media_id']}", headers=h(98702))
+                assert fetched.status_code == 200 and fetched.content == data
+            invalid = await client.post('/api/media/documents', headers=headers, content=b'invalid mp4')
+            assert invalid.status_code == 415
+            invalid_meta = base64.b64encode(json.dumps({'width':8193, 'height':360}).encode()).decode()
+            assert (await client.post('/api/media/documents', headers={**headers,'X-Media-Metadata':invalid_meta}, content=data)).status_code == 400
+            oversized = await client.post('/api/media/documents', headers={**headers,'Content-Length':str(25*1024*1024+1)}, content=data)
+            assert oversized.status_code == 413
+    run(scenario())
