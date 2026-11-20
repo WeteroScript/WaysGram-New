@@ -3352,6 +3352,81 @@ def build_messenger_router(
             "next_before_id": int(rows[-1]["message_id"]) if rows else 0,
         }
 
+    @router.get("/api/media/shared/messages/v2")
+    async def shared_photo_video_messages(
+        scope: str = Query(...),
+        peer_id: int = Query(..., gt=0),
+        kind: str = Query(...),
+        before_id: int = Query(default=0, ge=0),
+        from_id: int = Query(default=0, ge=0),
+        limit: int = Query(default=40, ge=1, le=100),
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        """List photo/video message IDs and count in one authorized snapshot.
+
+        from_id is inclusive: the native viewer uses its existing anchor when
+        requesting a page toward newer items. Results are always newest first.
+        """
+        user = await current_user(authorization)
+        uid = int(user["telegram_id"])
+        if scope not in ("dm", "group", "channel") or kind not in ("photos", "video", "photo_video"):
+            raise HTTPException(status_code=400, detail="Некорректный тип медиа или чата")
+        if before_id and from_id:
+            raise HTTPException(status_code=400, detail="Укажите только одно направление страницы")
+        photo = "(lower(a.mime_type) LIKE 'image/%' AND COALESCE(a.media_kind,'') <> 'document')"
+        video = "(lower(a.mime_type) LIKE 'video/%' AND a.media_kind='video')"
+        media_clause = photo if kind == "photos" else video if kind == "video" else f"({photo} OR {video})"
+        async with aiosqlite.connect(db_path()) as db:
+            db.row_factory = aiosqlite.Row
+            await db.execute("BEGIN")
+            if scope == "dm":
+                cur = await db.execute("SELECT is_banned FROM accounts WHERE telegram_id=?", (peer_id,))
+                peer = await cur.fetchone()
+                if peer is None:
+                    raise HTTPException(status_code=404, detail="Собеседник не найден")
+                if peer[0]:
+                    raise HTTPException(status_code=403, detail="Аккаунт собеседника недоступен")
+                source = "messages"
+                where = """((m.sender_telegram_id=? AND m.recipient_telegram_id=?) OR
+                             (m.sender_telegram_id=? AND m.recipient_telegram_id=?))
+                             AND NOT EXISTS (SELECT 1 FROM message_hidden_for h
+                                 WHERE h.message_id=m.id AND h.telegram_id=?)"""
+                params = (uid, peer_id, peer_id, uid, uid)
+            elif scope == "group":
+                await require_group_member(db, peer_id, uid)
+                source = "group_messages"
+                where = "m.group_id=?"
+                params = (peer_id,)
+            else:
+                cur = await db.execute(
+                    """SELECT c.is_public,c.owner_telegram_id,
+                         EXISTS(SELECT 1 FROM channel_admins a WHERE a.channel_id=c.id AND a.telegram_id=?),
+                         EXISTS(SELECT 1 FROM channel_members b WHERE b.channel_id=c.id AND b.telegram_id=?)
+                         FROM channels c WHERE c.id=?""", (uid, uid, peer_id))
+                access = await cur.fetchone()
+                if access is None:
+                    raise HTTPException(status_code=404, detail="Канал не найден")
+                if not (access[0] or access[1] == uid or access[2] or access[3]):
+                    raise HTTPException(status_code=403, detail="Нет доступа к приватному каналу")
+                source = "channel_messages"
+                where = "m.channel_id=?"
+                params = (peer_id,)
+            # All interpolated SQL identifiers and predicates above are constants.
+            base = f"FROM {source} m JOIN media_assets a ON a.id=m.media_id WHERE {where} AND {media_clause}"
+            cur = await db.execute(f"SELECT COUNT(*) {base}", params)
+            total = int((await cur.fetchone())[0])
+            if from_id:
+                cur = await db.execute(f"SELECT m.id {base} AND m.id>=? ORDER BY m.id ASC LIMIT ?", params + (from_id, limit))
+                ids = [int(row[0]) for row in await cur.fetchall()][::-1]
+            elif before_id:
+                cur = await db.execute(f"SELECT m.id {base} AND m.id<? ORDER BY m.id DESC LIMIT ?", params + (before_id, limit))
+                ids = [int(row[0]) for row in await cur.fetchall()]
+            else:
+                cur = await db.execute(f"SELECT m.id {base} ORDER BY m.id DESC LIMIT ?", params + (limit,))
+                ids = [int(row[0]) for row in await cur.fetchall()]
+            await db.commit()
+        return {"ids": ids, "total": total, "batch_message_ids": True}
+
     @router.post("/api/media/{media_id}/transcription")
     async def transcribe_media(
         media_id: str,
