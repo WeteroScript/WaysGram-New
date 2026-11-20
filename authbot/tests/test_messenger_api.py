@@ -9083,3 +9083,92 @@ def test_media_spoiler_and_video_cover_metadata_access(api_env) -> None:
             assert invalid_image_spoiler.status_code == 400
 
     run(scenario())
+
+
+
+def test_forwarded_video_cover_remains_scoped_to_destination_chat(api_env) -> None:
+    path, _auth_store, _fake_bot, app = api_env
+    add_account(api_env, 99111, "cover_forward_sender")
+    add_account(api_env, 99112, "cover_forward_recipient")
+    add_account(api_env, 99113, "cover_forward_outsider")
+    add_session(path, 99111, "cover-forward-sender-session")
+    add_session(path, 99112, "cover-forward-recipient-session")
+    add_session(path, 99113, "cover-forward-outsider-session")
+
+    def encoded(value: dict) -> str:
+        return base64.b64encode(json.dumps(value).encode("utf-8")).decode("ascii")
+
+    async def scenario() -> None:
+        headers = lambda token: {"Authorization": f"Bearer {token}"}
+        sender = headers("cover-forward-sender-session")
+        recipient = headers("cover-forward-recipient-session")
+        outsider = headers("cover-forward-outsider-session")
+        async with await client_for(app) as client:
+            cover = await client.post(
+                "/api/media/images",
+                headers={**sender, "Content-Type": "image/png"},
+                content=test_preview_png(),
+            )
+            assert cover.status_code == 201, cover.text
+            cover_id = cover.json()["id"]
+            metadata = {"spoiler": True, "video_cover_media_id": cover_id}
+            video = await client.post(
+                "/api/media/documents",
+                headers={
+                    **sender,
+                    "Content-Type": "video/mp4",
+                    "X-Filename": "forward-covered-video.mp4",
+                    "X-Media-Kind": "video",
+                    "X-Media-Metadata": encoded(metadata),
+                },
+                content=b"\x00\x00\x00\x18ftypisom" + (b"\x00" * 8),
+            )
+            assert video.status_code == 201, video.text
+            sent = await client.post(
+                "/api/messages",
+                headers=sender,
+                json={"recipient_id": 99112, "media_id": video.json()["id"]},
+            )
+            assert sent.status_code == 201, sent.text
+            source_message_id = sent.json()["id"]
+
+            group = await client.post(
+                "/api/groups",
+                headers=recipient,
+                json={"title": "Forwarded video cover"},
+            )
+            assert group.status_code == 201, group.text
+            group_id = group.json()["id"]
+            forwarded = await client.post(
+                "/api/forward",
+                headers=recipient,
+                json={
+                    "source_scope": "dm",
+                    "source_peer_id": 99111,
+                    "target_scope": "group",
+                    "target_peer_id": group_id,
+                    "message_ids": [source_message_id],
+                    "silent": True,
+                },
+            )
+            assert forwarded.status_code == 201, forwarded.text
+            forwarded_message = forwarded.json()["messages"][0]
+            assert forwarded_message["media_id"] == video.json()["id"]
+            assert json.loads(forwarded_message["media_metadata"]) == metadata
+
+            group_history = await client.get(
+                f"/api/groups/{group_id}/messages",
+                headers=recipient,
+            )
+            assert group_history.status_code == 200, group_history.text
+            group_message = group_history.json()["messages"][0]
+            assert json.loads(group_message["media_metadata"]) == metadata
+            visible_to_group_member = await client.get(f"/api/media/{cover_id}", headers=recipient)
+            assert visible_to_group_member.status_code == 200
+            assert (await client.get(f"/api/media/{cover_id}", headers=outsider)).status_code == 404
+
+            # Forwarding does not make the standalone cover public or transfer its ownership.
+            assert (await client.get(f"/api/media/{cover_id}", headers=sender)).status_code == 200
+            assert (await client.get(f"/api/media/{video.json()['id']}", headers=outsider)).status_code == 404
+
+    run(scenario())
