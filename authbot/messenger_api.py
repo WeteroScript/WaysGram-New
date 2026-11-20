@@ -963,6 +963,8 @@ async def init_messenger_storage(database_path: Path) -> None:
                 body TEXT NOT NULL,
                 updated_at INTEGER NOT NULL,
                 entities_json TEXT NOT NULL DEFAULT '[]',
+                reply_to_id INTEGER,
+                reply_quote_json TEXT,
                 PRIMARY KEY(owner_telegram_id,scope,peer_id)
             );
             CREATE INDEX IF NOT EXISTS idx_cloud_drafts_updated
@@ -1455,6 +1457,10 @@ async def init_messenger_storage(database_path: Path) -> None:
         draft_columns = {str(row[1]) for row in await cur.fetchall()}
         if "entities_json" not in draft_columns:
             await db.execute(f"ALTER TABLE {db_split.SCHEMA}.cloud_drafts ADD COLUMN entities_json TEXT NOT NULL DEFAULT '[]'")
+        if "reply_to_id" not in draft_columns:
+            await db.execute(f"ALTER TABLE {db_split.SCHEMA}.cloud_drafts ADD COLUMN reply_to_id INTEGER")
+        if "reply_quote_json" not in draft_columns:
+            await db.execute(f"ALTER TABLE {db_split.SCHEMA}.cloud_drafts ADD COLUMN reply_quote_json TEXT")
         # Receipts contain no message content, but should not outlive deleted messages.
         for table_name, scope in (("messages", "dm"), ("group_messages", "group")):
             await db.execute(f"""CREATE TRIGGER IF NOT EXISTS {db_split.SCHEMA}.read_receipts_delete_{scope}
@@ -11718,6 +11724,7 @@ def build_messenger_router(
             rows = await cur.fetchall()
         return {"readers": [{"user_id": int(row[0]), "read_at": int(row[1])} for row in rows]}
 
+    @router.get("/api/drafts/v3")
     @router.get("/api/drafts/v2")
     @router.get("/api/drafts")
     async def get_cloud_draft(
@@ -11737,7 +11744,7 @@ def build_messenger_router(
             # Single statement provides a consistent text/version pair, even
             # when the draft was deleted and only its version remains.
             cur = await db.execute(
-                """SELECT d.scope,d.peer_id,d.body,d.updated_at,d.entities_json,COALESCE(v.revision,0) AS revision
+                """SELECT d.scope,d.peer_id,d.body,d.updated_at,d.entities_json,d.reply_to_id,d.reply_quote_json,COALESCE(v.revision,0) AS revision
                    FROM (SELECT ? AS owner,? AS scope,? AS peer) key
                    LEFT JOIN cloud_drafts d ON d.owner_telegram_id=key.owner
                        AND d.scope=key.scope AND d.peer_id=key.peer
@@ -11747,11 +11754,17 @@ def build_messenger_router(
             )
             row = await cur.fetchone()
         draft = {key: row[key] for key in ("scope", "peer_id", "body", "updated_at")} if row["scope"] is not None else None
-        if draft is not None and request.url.path.endswith("/v2"):
+        if draft is not None and not request.url.path.endswith("/v3") and not draft["body"].strip():
+            draft = None
+        if draft is not None and request.url.path.endswith(("/v2", "/v3")):
             draft["entities_json"] = row["entities_json"]
             _add_message_entities(draft)
+            if request.url.path.endswith("/v3"):
+                draft["reply_to_id"] = row["reply_to_id"]
+                draft["quote"] = json.loads(row["reply_quote_json"]) if row["reply_quote_json"] else None
         return {"draft": draft, "revision": row["revision"]}
 
+    @router.get("/api/drafts/list/v3")
     @router.get("/api/drafts/list/v2")
     @router.get("/api/drafts/list")
     async def list_cloud_drafts(
@@ -11776,10 +11789,11 @@ def build_messenger_router(
             db.row_factory = aiosqlite.Row
             # Filtering and page selection use the same SQLite read snapshot.
             cur = await db.execute(
-                """SELECT d.scope,d.peer_id,d.body,d.updated_at,d.entities_json,COALESCE(v.revision,0) AS revision
+                """SELECT d.scope,d.peer_id,d.body,d.updated_at,d.entities_json,d.reply_to_id,d.reply_quote_json,COALESCE(v.revision,0) AS revision
                    FROM cloud_drafts d LEFT JOIN cloud_draft_versions v
                      ON v.owner_telegram_id=d.owner_telegram_id AND v.scope=d.scope AND v.peer_id=d.peer_id
                    WHERE d.owner_telegram_id=?
+                     AND (?=1 OR length(trim(d.body))>0)
                      AND (? IS NULL OR d.scope>? OR (d.scope=? AND d.peer_id>?))
                      AND (
                        (d.scope='dm' AND EXISTS (
@@ -11804,16 +11818,22 @@ def build_messenger_router(
                        ))
                      )
                    ORDER BY d.scope,d.peer_id LIMIT ?""",
-                (uid, after_scope, after_scope, after_scope, after_peer_id,
+                (uid, int(request.url.path.endswith("/v3")), after_scope, after_scope, after_scope, after_peer_id,
                  uid, uid, uid, uid, uid, uid, uid, limit + 1),
             )
             rows = await cur.fetchall()
         drafts = [dict(row) for row in rows[:limit]]
         for draft in drafts:
-            if request.url.path.endswith("/v2"):
+            if request.url.path.endswith(("/v2", "/v3")):
                 _add_message_entities(draft)
             else:
                 draft.pop("entities_json", None)
+            if request.url.path.endswith("/v3"):
+                raw_quote = draft.pop("reply_quote_json", None)
+                draft["quote"] = json.loads(raw_quote) if raw_quote else None
+            else:
+                draft.pop("reply_to_id", None)
+                draft.pop("reply_quote_json", None)
         next_cursor = None
         if len(rows) > limit:
             last = drafts[-1]
@@ -11887,6 +11907,7 @@ def build_messenger_router(
         row = await cur.fetchone()
         return int(row[0]) if row else 0
 
+    @router.put("/api/drafts/v3")
     @router.put("/api/drafts/v2")
     @router.put("/api/drafts")
     async def save_cloud_draft(
@@ -11903,11 +11924,18 @@ def build_messenger_router(
             raise HTTPException(status_code=400, detail="scope: dm, group или channel")
         if isinstance(peer_id, bool) or not isinstance(peer_id, int) or peer_id <= 0:
             raise HTTPException(status_code=400, detail="peer_id должен быть положительным целым числом")
-        if not isinstance(body, str) or not body.strip() or len(body) > MAX_MESSAGE_LENGTH:
-            raise HTTPException(status_code=400, detail=f"Черновик должен содержать 1–{MAX_MESSAGE_LENGTH} символов")
-        if request.url.path.endswith("/v2"):
+        v3 = request.url.path.endswith("/v3")
+        reply_to_id = parse_reply_id(payload) if v3 else None
+        if reply_to_id is not None and reply_to_id > 9223372036854775807:
+            raise HTTPException(status_code=400, detail="Некорректный reply_to_id")
+        quote = parse_message_quote(payload, reply_to_id) if v3 else None
+        if not isinstance(body, str) or len(body) > MAX_MESSAGE_LENGTH or (not body.strip() and not reply_to_id):
+            raise HTTPException(status_code=400, detail=f"Черновик должен содержать текст или ответ")
+        if request.url.path.endswith(("/v2", "/v3")) and body.strip():
             body, entities = _message_body_and_entities({"body": body, "entities": payload.get("entities", [])})
         else:
+            if v3 and payload.get("entities", []):
+                raise HTTPException(status_code=400, detail="Пустой черновик не может содержать форматирование")
             entities = []
         if "expected_revision" in payload and (isinstance(expected, bool) or not isinstance(expected, int) or not 0 <= expected <= 9223372036854775807):
             raise HTTPException(status_code=400, detail="expected_revision должен быть неотрицательным целым числом")
@@ -11916,16 +11944,28 @@ def build_messenger_router(
         async with aiosqlite.connect(db_path()) as db:
             await db.execute("BEGIN IMMEDIATE")
             await require_cloud_draft_access(str(scope), peer_id, uid, db)
+            if reply_to_id:
+                if scope == "dm":
+                    await require_reply_target(db, """SELECT 1 FROM messages WHERE id=? AND
+                        ((sender_telegram_id=? AND recipient_telegram_id=?) OR (sender_telegram_id=? AND recipient_telegram_id=?))
+                        AND NOT EXISTS(SELECT 1 FROM message_hidden_for h WHERE h.message_id=messages.id AND h.telegram_id=?)""",
+                        (reply_to_id, uid, peer_id, peer_id, uid, uid))
+                elif scope == "group":
+                    await require_reply_target(db, "SELECT 1 FROM group_messages WHERE id=? AND group_id=?", (reply_to_id, peer_id))
+                else:
+                    await require_reply_target(db, "SELECT 1 FROM channel_messages WHERE id=? AND channel_id=?", (reply_to_id, peer_id))
             current_revision = await cloud_draft_revision(db, uid, str(scope), peer_id)
             if expected is not None and expected != current_revision:
                 await db.rollback()
                 raise HTTPException(status_code=409, detail={"code": "DRAFT_CONFLICT", "revision": current_revision})
             await db.execute(
-                """INSERT INTO cloud_drafts(owner_telegram_id,scope,peer_id,body,updated_at,entities_json)
-                   VALUES(?,?,?,?,?,?)
+                """INSERT INTO cloud_drafts(owner_telegram_id,scope,peer_id,body,updated_at,entities_json,reply_to_id,reply_quote_json)
+                   VALUES(?,?,?,?,?,?,?,?)
                    ON CONFLICT(owner_telegram_id,scope,peer_id) DO UPDATE SET
-                       body=excluded.body,updated_at=excluded.updated_at,entities_json=excluded.entities_json""",
-                (uid, str(scope), peer_id, body, now, _message_entities_json(entities)),
+                       body=excluded.body,updated_at=excluded.updated_at,entities_json=excluded.entities_json,
+                       reply_to_id=excluded.reply_to_id,reply_quote_json=excluded.reply_quote_json""",
+                (uid, str(scope), peer_id, body, now, _message_entities_json(entities), reply_to_id,
+                 json.dumps(quote, ensure_ascii=True, separators=(",", ":")) if quote else None),
             )
             revision = await cloud_draft_revision(db, uid, str(scope), peer_id)
             await db.commit()
