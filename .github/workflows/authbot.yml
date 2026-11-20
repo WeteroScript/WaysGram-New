@@ -190,6 +190,8 @@ jobs:
           import zipfile
 
           messages = Path("/tmp/waysgram-android-source/WaysGram-Android/TMessagesProj/src/main/java/org/telegram/tgnet/WaysGramMessages.java")
+          media = Path("/tmp/waysgram-android-source/WaysGram-Android/TMessagesProj/src/main/java/org/telegram/tgnet/WaysGramMedia.java")
+          transport = Path("/tmp/waysgram-android-source/WaysGram-Android/TMessagesProj/src/main/java/org/telegram/tgnet/WaysGramTransport.java")
           send_helper = Path("/tmp/waysgram-android-source/WaysGram-Android/TMessagesProj/src/main/java/org/telegram/messenger/SendMessagesHelper.java")
           message_text = messages.read_text(encoding="utf-8")
           message_text = message_text.replace("req.id.size() > 100", "req.id.size() > 20")
@@ -208,6 +210,10 @@ jobs:
           replacements = {
               "WaysGram-Android/TMessagesProj/src/main/java/org/telegram/tgnet/WaysGramMessages.java":
                   messages,
+              "WaysGram-Android/TMessagesProj/src/main/java/org/telegram/tgnet/WaysGramMedia.java":
+                  media,
+              "WaysGram-Android/TMessagesProj/src/main/java/org/telegram/tgnet/WaysGramTransport.java":
+                  transport,
               "WaysGram-Android/TMessagesProj/src/main/java/org/telegram/messenger/SendMessagesHelper.java":
                   send_helper,
           }
@@ -237,7 +243,7 @@ jobs:
         run: python3 scripts/test_android_messaging.py
       - name: Commit updated source archive
         env:
-          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          HEAD_REF: ${{ github.event.pull_request.head.ref || github.ref_name }}
         run: |
           set -euo pipefail
           git add WaysGram-Android.zip.part1 WaysGram-Android.zip.part2 WaysGram-Android.zip.part3 WaysGram-Android.zip.part4 WaysGram-Android.zip.part5
@@ -247,7 +253,7 @@ jobs:
           fi
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git commit -m "feat: remove single message attachments"
+          git commit -m "feat: support media spoilers and video covers"
           git push origin "HEAD:refs/heads/${HEAD_REF}"
 
   export-android-source:
