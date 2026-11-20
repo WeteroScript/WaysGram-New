@@ -1615,6 +1615,8 @@ async def init_messenger_storage(database_path: Path) -> None:
             columns = {str(row[1]) for row in await cur.fetchall()}
             if "silent" not in columns:
                 await db.execute(f"ALTER TABLE {db_split.SCHEMA}.{table_name} ADD COLUMN silent INTEGER NOT NULL DEFAULT 0")
+            if "quote_json" not in columns:
+                await db.execute(f"ALTER TABLE {db_split.SCHEMA}.{table_name} ADD COLUMN quote_json TEXT")
             if "entities_json" not in columns:
                 await db.execute(f"ALTER TABLE {db_split.SCHEMA}.{table_name} ADD COLUMN entities_json TEXT NOT NULL DEFAULT '[]'")
             if "media_id" not in columns:
@@ -2334,6 +2336,14 @@ def _message_entities_json(entities: list[dict[str, Any]]) -> str:
 
 
 def _add_message_entities(item: dict[str, Any]) -> None:
+    raw_quote = item.pop("quote_json", None)
+    if raw_quote:
+        try:
+            quote = json.loads(raw_quote)
+            if isinstance(quote, dict):
+                item["quote"] = quote
+        except (TypeError, ValueError):
+            pass
     raw = item.pop("entities_json", "[]")
     try:
         entities = json.loads(raw or "[]")
@@ -8044,7 +8054,7 @@ def build_messenger_router(
                         raise HTTPException(status_code=403, detail="Это приватный канал. Нужна ссылка-приглашение.")
                 if after_id:
                     cur = await db.execute(
-                        """SELECT id,channel_id,author_telegram_id AS author_id,body,entities_json,channel_messages.silent AS silent,media_id,media_album_id,media_album_index,media_album_count,edited_at,reply_to_id,created_at,
+                        """SELECT id,channel_id,author_telegram_id AS author_id,body,entities_json,channel_messages.silent AS silent,channel_messages.quote_json AS quote_json,media_id,media_album_id,media_album_index,media_album_count,edited_at,reply_to_id,created_at,
                                   (SELECT body FROM channel_messages AS replied WHERE replied.id=channel_messages.reply_to_id) AS reply_to_body,
                                   (SELECT author_telegram_id FROM channel_messages AS replied WHERE replied.id=channel_messages.reply_to_id) AS reply_to_sender_id,
                                   (SELECT group_concat(reaction || ':' || reaction_count, ',')
@@ -8063,7 +8073,7 @@ def build_messenger_router(
                     id_filter = "" if selected_ids is None else " AND id IN (" + ",".join("?" for _ in selected_ids) + ")"
                     selected_limit = limit if selected_ids is None else len(selected_ids)
                     cur = await db.execute(
-                        """SELECT id,channel_id,author_telegram_id AS author_id,body,entities_json,channel_messages.silent AS silent,media_id,media_album_id,media_album_index,media_album_count,edited_at,reply_to_id,created_at,
+                        """SELECT id,channel_id,author_telegram_id AS author_id,body,entities_json,channel_messages.silent AS silent,channel_messages.quote_json AS quote_json,media_id,media_album_id,media_album_index,media_album_count,edited_at,reply_to_id,created_at,
                                   (SELECT body FROM channel_messages AS replied WHERE replied.id=channel_messages.reply_to_id) AS reply_to_body,
                                   (SELECT author_telegram_id FROM channel_messages AS replied WHERE replied.id=channel_messages.reply_to_id) AS reply_to_sender_id,
                                   (SELECT group_concat(reaction || ':' || reaction_count, ',')
@@ -8095,10 +8105,28 @@ def build_messenger_router(
             raise HTTPException(status_code=400, detail="Некорректный reply_to_id")
         return value
 
+    def parse_message_quote(payload: dict[str, Any], reply_to_id: int | None) -> dict[str, Any] | None:
+        quote = payload.get("quote")
+        if quote is None:
+            return None
+        if not reply_to_id or not isinstance(quote, dict) or set(quote) - {"text", "entities", "offset"}:
+            raise HTTPException(status_code=400, detail="Некорректная цитата")
+        text = quote.get("text")
+        if not isinstance(text, str) or len(text) > 1024:
+            raise HTTPException(status_code=400, detail="Некорректный текст цитаты")
+        text, entities = _message_body_and_entities({"body": text, "entities": quote.get("entities", [])})
+        offset = quote.get("offset")
+        if offset is not None and (isinstance(offset, bool) or not isinstance(offset, int) or not 0 <= offset <= 100000):
+            raise HTTPException(status_code=400, detail="Некорректное положение цитаты")
+        result = {"text": text, "entities": entities}
+        if offset is not None:
+            result["offset"] = offset
+        return result
+
     def album_allow_documents(payload: dict[str, Any], request: Request) -> bool:
         # A distinct route makes old servers reject the operation rather than
         # silently ignore a new field and misinterpret document albums.
-        enabled = request.url.path.endswith(("/files", "/files/v2"))
+        enabled = request.url.path.endswith(("/files", "/files/v2", "/files/quote/v1"))
         if "allow_documents" in payload:
             raise HTTPException(status_code=400, detail="Неизвестный параметр альбома")
         return enabled
@@ -8179,7 +8207,7 @@ def build_messenger_router(
             db.row_factory = aiosqlite.Row
             await channel_row(channel_id)
             cur = await db.execute(
-                """SELECT id,channel_id,author_telegram_id AS author_id,body,entities_json,channel_messages.silent AS silent,media_id,media_album_id,media_album_index,media_album_count,edited_at,reply_to_id,created_at,
+                """SELECT id,channel_id,author_telegram_id AS author_id,body,entities_json,channel_messages.silent AS silent,channel_messages.quote_json AS quote_json,media_id,media_album_id,media_album_index,media_album_count,edited_at,reply_to_id,created_at,
                           (SELECT body FROM channel_messages AS replied WHERE replied.id=channel_messages.reply_to_id) AS reply_to_body,
                                   (SELECT author_telegram_id FROM channel_messages AS replied WHERE replied.id=channel_messages.reply_to_id) AS reply_to_sender_id,
                                   (SELECT group_concat(reaction || ':' || reaction_count, ',')
@@ -8201,6 +8229,7 @@ def build_messenger_router(
         await attach_my_reactions(items, "channel", channel_id, int(user["telegram_id"]))
         return {"query": term, "messages": items, "count": len(items), "has_more": len(items) == 100}
 
+    @router.post("/api/channels/{channel_id}/messages/quote/v1", status_code=201)
     @router.post("/api/channels/{channel_id}/messages", status_code=201)
     async def create_channel_message(
         channel_id: int,
@@ -8255,6 +8284,7 @@ def build_messenger_router(
                 body = _message_body(await default_media_message_body(db, media_id))
             media_fields = await media_message_fields(db, media_id)
             reply_to_id = parse_reply_id(payload)
+            quote = parse_message_quote(payload, reply_to_id)
             if reply_to_id:
                 await require_reply_target(
                     db, "SELECT 1 FROM channel_messages WHERE id=? AND channel_id=?", (reply_to_id, channel_id)
@@ -8273,6 +8303,9 @@ def build_messenger_router(
                 (channel_id, uid, body, media_id, reply_to_id, now),
             )
             message_id = int(cur.lastrowid)
+            if quote is not None:
+                await db.execute("UPDATE channel_messages SET quote_json=? WHERE id=?",
+                                 (json.dumps(quote, ensure_ascii=True, separators=(",", ":")), message_id))
             if silent:
                 await db.execute("UPDATE channel_messages SET silent=1 WHERE id=?", (message_id,))
             if entities:
@@ -8300,6 +8333,8 @@ def build_messenger_router(
                 result["location"] = location_payload
             if contact_payload:
                 result["contact"] = contact_payload
+            if quote is not None:
+                result["quote"] = quote
             if entities:
                 result["entities"] = entities
             await idempotency_store(db, uid, scope, descriptor, result, now)
@@ -8318,6 +8353,7 @@ def build_messenger_router(
         )
         return result
 
+    @router.post("/api/channels/{channel_id}/messages/album/files/quote/v1", status_code=201)
     @router.post("/api/channels/{channel_id}/messages/album/files/v2", status_code=201)
     @router.post("/api/channels/{channel_id}/messages/album/files", status_code=201)
     @router.post("/api/channels/{channel_id}/messages/album", status_code=201)
@@ -8345,7 +8381,7 @@ def build_messenger_router(
             raise HTTPException(status_code=400, detail="Альбом не должен содержать повторяющиеся файлы")
 
         captions, body, caption_entities = album_captions(
-            payload, len(media_ids), allow_documents, request.url.path.endswith("/files/v2")
+            payload, len(media_ids), allow_documents, request.url.path.endswith(("/files/v2", "/files/quote/v1"))
         )
         silent = payload.get("silent", False)
         if not isinstance(silent, bool):
@@ -8397,6 +8433,7 @@ def build_messenger_router(
                 raise HTTPException(status_code=415, detail="Файлы и фотографии/видео нужно отправить отдельными группами")
 
             reply_to_id = parse_reply_id(payload)
+            quote = parse_message_quote(payload, reply_to_id)
             if reply_to_id:
                 await require_reply_target(
                     db,
@@ -8426,6 +8463,9 @@ def build_messenger_router(
                     ),
                 )
                 message_id = int(cur.lastrowid)
+                if quote is not None:
+                    await db.execute("UPDATE channel_messages SET quote_json=? WHERE id=?",
+                                     (json.dumps(quote, ensure_ascii=True, separators=(",", ":")), message_id))
                 if silent:
                     await db.execute("UPDATE channel_messages SET silent=1 WHERE id=?", (message_id,))
                 if caption_entities[index]:
@@ -8439,6 +8479,7 @@ def build_messenger_router(
                     "body": item_body,
                     "media_id": media_id,
                     "reply_to_id": reply_to_id,
+                    "quote": quote,
                     "media_album_id": album_id,
                     "media_album_index": index,
                     "media_album_count": len(checked_media),
@@ -8579,7 +8620,7 @@ def build_messenger_router(
         params: tuple[Any, ...] = (uid, peer, peer, uid, uid)
         base = """
             SELECT id,sender_telegram_id AS sender_id,
-                   recipient_telegram_id AS recipient_id,body,entities_json,messages.silent AS silent,media_id,edited_at,reply_to_id,created_at,
+                   recipient_telegram_id AS recipient_id,body,entities_json,messages.silent AS silent,messages.quote_json AS quote_json,media_id,edited_at,reply_to_id,created_at,
                    media_album_id,media_album_index,media_album_count,
                    forwarded_from_telegram_id,forwarded_from_message_id,
                    (SELECT display_name FROM accounts WHERE telegram_id=messages.forwarded_from_telegram_id) AS forwarded_from_display_name,
@@ -8825,7 +8866,7 @@ def build_messenger_router(
                 raise HTTPException(status_code=404, detail="Собеседник не найден")
             cur = await db.execute(
                 """SELECT id,sender_telegram_id AS sender_id,
-                          recipient_telegram_id AS recipient_id,body,entities_json,messages.silent AS silent,media_id,edited_at,reply_to_id,created_at,
+                          recipient_telegram_id AS recipient_id,body,entities_json,messages.silent AS silent,messages.quote_json AS quote_json,media_id,edited_at,reply_to_id,created_at,
                           forwarded_from_telegram_id,forwarded_from_message_id,
                           (SELECT display_name FROM accounts WHERE telegram_id=messages.forwarded_from_telegram_id) AS forwarded_from_display_name,
                    (SELECT body FROM messages AS replied WHERE replied.id=messages.reply_to_id) AS reply_to_body,
@@ -8864,6 +8905,7 @@ def build_messenger_router(
         await attach_my_reactions(items, "dm", 0, uid)
         return {"query": term, "messages": items, "count": len(items), "has_more": len(items) == 100}
 
+    @router.post("/api/messages/quote/v1", status_code=201)
     @router.post("/api/messages", status_code=201)
     async def send_message(
         payload: dict[str, Any],
@@ -8937,6 +8979,7 @@ def build_messenger_router(
                     await db.rollback()
                     raise HTTPException(status_code=403, detail="Нельзя отправить сообщение: пользователь находится в чёрном списке")
             reply_to_id = parse_reply_id(payload)
+            quote = parse_message_quote(payload, reply_to_id)
             if reply_to_id:
                 await require_reply_target(
                     db,
@@ -8958,6 +9001,9 @@ def build_messenger_router(
                 (uid, recipient_id, body, media_id, reply_to_id, now),
             )
             message_id = int(cur.lastrowid)
+            if quote is not None:
+                await db.execute("UPDATE messages SET quote_json=? WHERE id=?",
+                                 (json.dumps(quote, ensure_ascii=True, separators=(",", ":")), message_id))
             if silent:
                 await db.execute("UPDATE messages SET silent=1 WHERE id=?", (message_id,))
             if entities:
@@ -9008,6 +9054,8 @@ def build_messenger_router(
                 **media_fields,
                 "created_at": now,
             }
+            if quote is not None:
+                result["quote"] = quote
             if entities:
                 result["entities"] = entities
             await idempotency_store(db, uid, "/api/messages", descriptor, result, now)
@@ -9232,6 +9280,7 @@ def build_messenger_router(
             await db.commit()
         return {"status": "stopped", "id": live_location_id, "stopped_at": stopped_at}
 
+    @router.post("/api/messages/album/files/quote/v1", status_code=201)
     @router.post("/api/messages/album/files/v2", status_code=201)
     @router.post("/api/messages/album/files", status_code=201)
     @router.post("/api/messages/album", status_code=201)
@@ -9266,7 +9315,7 @@ def build_messenger_router(
             raise HTTPException(status_code=400, detail="Альбом не должен содержать повторяющиеся файлы")
 
         captions, body, caption_entities = album_captions(
-            payload, len(media_ids), allow_documents, request.url.path.endswith("/files/v2")
+            payload, len(media_ids), allow_documents, request.url.path.endswith(("/files/v2", "/files/quote/v1"))
         )
         silent = payload.get("silent", False)
         if not isinstance(silent, bool):
@@ -9314,6 +9363,7 @@ def build_messenger_router(
                     )
 
             reply_to_id = parse_reply_id(payload)
+            quote = parse_message_quote(payload, reply_to_id)
             if reply_to_id:
                 await require_reply_target(
                     db,
@@ -9368,6 +9418,9 @@ def build_messenger_router(
                     ),
                 )
                 message_id = int(cur.lastrowid)
+                if quote is not None:
+                    await db.execute("UPDATE messages SET quote_json=? WHERE id=?",
+                                     (json.dumps(quote, ensure_ascii=True, separators=(",", ":")), message_id))
                 if silent:
                     await db.execute("UPDATE messages SET silent=1 WHERE id=?", (message_id,))
                 if caption_entities[index]:
@@ -9384,6 +9437,7 @@ def build_messenger_router(
                     "body": item_body,
                     "media_id": media_id,
                     "reply_to_id": reply_to_id,
+                    "quote": quote,
                     "media_album_id": album_id,
                     "media_album_index": index,
                     "media_album_count": len(checked_media),
@@ -12730,7 +12784,7 @@ def build_messenger_router(
                 db.row_factory = aiosqlite.Row
                 if after_id:
                     cur = await db.execute(
-                        """SELECT id,group_id,sender_telegram_id AS sender_id,body,entities_json,group_messages.silent AS silent,media_id,media_album_id,media_album_index,media_album_count,edited_at,reply_to_id,created_at,
+                        """SELECT id,group_id,sender_telegram_id AS sender_id,body,entities_json,group_messages.silent AS silent,group_messages.quote_json AS quote_json,media_id,media_album_id,media_album_index,media_album_count,edited_at,reply_to_id,created_at,
                                   (SELECT body FROM group_messages AS replied WHERE replied.id=group_messages.reply_to_id) AS reply_to_body,
                                   (SELECT sender_telegram_id FROM group_messages AS replied WHERE replied.id=group_messages.reply_to_id) AS reply_to_sender_id,
                                   (SELECT group_concat(reaction || ':' || reaction_count, ',')
@@ -12748,7 +12802,7 @@ def build_messenger_router(
                     id_filter = "" if selected_ids is None else " AND id IN (" + ",".join("?" for _ in selected_ids) + ")"
                     selected_limit = limit if selected_ids is None else len(selected_ids)
                     cur = await db.execute(
-                        """SELECT id,group_id,sender_telegram_id AS sender_id,body,entities_json,group_messages.silent AS silent,media_id,media_album_id,media_album_index,media_album_count,edited_at,reply_to_id,created_at,
+                        """SELECT id,group_id,sender_telegram_id AS sender_id,body,entities_json,group_messages.silent AS silent,group_messages.quote_json AS quote_json,media_id,media_album_id,media_album_index,media_album_count,edited_at,reply_to_id,created_at,
                                   (SELECT body FROM group_messages AS replied WHERE replied.id=group_messages.reply_to_id) AS reply_to_body,
                                   (SELECT sender_telegram_id FROM group_messages AS replied WHERE replied.id=group_messages.reply_to_id) AS reply_to_sender_id,
                                   (SELECT group_concat(reaction || ':' || reaction_count, ',')
@@ -12786,7 +12840,7 @@ def build_messenger_router(
             await require_group_member(db, group_id, int(user["telegram_id"]))
             db.row_factory = aiosqlite.Row
             cur = await db.execute(
-                """SELECT id,group_id,sender_telegram_id AS sender_id,body,entities_json,group_messages.silent AS silent,media_id,media_album_id,media_album_index,media_album_count,edited_at,reply_to_id,created_at,
+                """SELECT id,group_id,sender_telegram_id AS sender_id,body,entities_json,group_messages.silent AS silent,group_messages.quote_json AS quote_json,media_id,media_album_id,media_album_index,media_album_count,edited_at,reply_to_id,created_at,
                           (SELECT body FROM group_messages AS replied WHERE replied.id=group_messages.reply_to_id) AS reply_to_body,
                                   (SELECT sender_telegram_id FROM group_messages AS replied WHERE replied.id=group_messages.reply_to_id) AS reply_to_sender_id,
                                   (SELECT group_concat(reaction || ':' || reaction_count, ',')
@@ -12808,6 +12862,7 @@ def build_messenger_router(
         await attach_my_reactions(items, "group", group_id, int(user["telegram_id"]))
         return {"query": term, "messages": items, "count": len(items), "has_more": len(items) == 100}
 
+    @router.post("/api/groups/{group_id}/messages/quote/v1", status_code=201)
     @router.post("/api/groups/{group_id}/messages", status_code=201)
     async def send_group_message(
         group_id: int,
@@ -12878,6 +12933,7 @@ def build_messenger_router(
                 body = _message_body(await default_media_message_body(db, media_id))
             media_fields = await media_message_fields(db, media_id)
             reply_to_id = parse_reply_id(payload)
+            quote = parse_message_quote(payload, reply_to_id)
             if reply_to_id:
                 await require_reply_target(
                     db, "SELECT 1 FROM group_messages WHERE id=? AND group_id=?", (reply_to_id, group_id)
@@ -12896,6 +12952,9 @@ def build_messenger_router(
                 (group_id, uid, body, media_id, reply_to_id, now),
             )
             message_id = int(cur.lastrowid)
+            if quote is not None:
+                await db.execute("UPDATE group_messages SET quote_json=? WHERE id=?",
+                                 (json.dumps(quote, ensure_ascii=True, separators=(",", ":")), message_id))
             if silent:
                 await db.execute("UPDATE group_messages SET silent=1 WHERE id=?", (message_id,))
             if entities:
@@ -12927,6 +12986,8 @@ def build_messenger_router(
                 result["location"] = location_payload
             if contact_payload:
                 result["contact"] = contact_payload
+            if quote is not None:
+                result["quote"] = quote
             if entities:
                 result["entities"] = entities
             await idempotency_store(db, uid, scope, descriptor, result, now)
@@ -12945,6 +13006,7 @@ def build_messenger_router(
         )
         return result
 
+    @router.post("/api/groups/{group_id}/messages/album/files/quote/v1", status_code=201)
     @router.post("/api/groups/{group_id}/messages/album/files/v2", status_code=201)
     @router.post("/api/groups/{group_id}/messages/album/files", status_code=201)
     @router.post("/api/groups/{group_id}/messages/album", status_code=201)
@@ -12972,7 +13034,7 @@ def build_messenger_router(
             raise HTTPException(status_code=400, detail="Альбом не должен содержать повторяющиеся файлы")
 
         captions, body, caption_entities = album_captions(
-            payload, len(media_ids), allow_documents, request.url.path.endswith("/files/v2")
+            payload, len(media_ids), allow_documents, request.url.path.endswith(("/files/v2", "/files/quote/v1"))
         )
         silent = payload.get("silent", False)
         if not isinstance(silent, bool):
@@ -13038,6 +13100,7 @@ def build_messenger_router(
                 raise HTTPException(status_code=415, detail="Файлы и фотографии/видео нужно отправить отдельными группами")
 
             reply_to_id = parse_reply_id(payload)
+            quote = parse_message_quote(payload, reply_to_id)
             if reply_to_id:
                 await require_reply_target(
                     db,
@@ -13067,6 +13130,9 @@ def build_messenger_router(
                     ),
                 )
                 message_id = int(cur.lastrowid)
+                if quote is not None:
+                    await db.execute("UPDATE group_messages SET quote_json=? WHERE id=?",
+                                     (json.dumps(quote, ensure_ascii=True, separators=(",", ":")), message_id))
                 if silent:
                     await db.execute("UPDATE group_messages SET silent=1 WHERE id=?", (message_id,))
                 if caption_entities[index]:
@@ -13080,6 +13146,7 @@ def build_messenger_router(
                     "body": item_body,
                     "media_id": media_id,
                     "reply_to_id": reply_to_id,
+                    "quote": quote,
                     "media_album_id": album_id,
                     "media_album_index": index,
                     "media_album_count": len(checked_media),
