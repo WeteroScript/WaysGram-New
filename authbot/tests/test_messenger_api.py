@@ -8613,3 +8613,50 @@ def test_audio_files_retain_bytes_metadata_and_access_in_all_chat_types(api_env)
                 copied = (await client.get('/api/messages', headers=b, params={'with':98902,'message_ids':str(forwarded.json()['messages'][0]['id'])})).json()['messages'][0]
                 assert copied['media_kind'] == 'audio' and json.loads(copied['media_metadata']) == metadata
     run(scenario())
+
+
+def test_voice_send_history_download_and_forward(api_env) -> None:
+    path, _, _, app = api_env
+    for uid in (98801, 98802, 98803):
+        add_account(api_env, uid, f'voice_scope_{uid}')
+        add_session(path, uid, f'voice-scope-{uid}')
+    async def scenario():
+        h = lambda uid: {'Authorization': f'Bearer voice-scope-{uid}'}
+        async with await client_for(app) as client:
+            group = (await client.post('/api/groups', headers=h(98801), json={'title': 'Voice group'})).json()['id']
+            assert (await client.post(f'/api/groups/{group}/members', headers=h(98801), json={'telegram_id': 98802})).status_code == 201
+            channel = (await client.post('/api/channels', headers=h(98801), json={'title': 'Voice channel', 'is_public': False})).json()['id']
+            data = b'OggS' + b'\0' * 32
+            metadata = {'duration': 7.25, 'waveform': base64.b64encode(bytes(range(100))).decode()}
+            encoded = base64.b64encode(json.dumps(metadata).encode()).decode()
+            headers = {**h(98801), 'Content-Type':'application/octet-stream', 'X-Filename':'recording.ogg',
+                       'X-Media-Kind':'voice', 'X-Media-Metadata':encoded}
+            upload = await client.post('/api/media/documents', headers=headers, content=data)
+            assert upload.status_code == 201, upload.text
+            media = upload.json()
+            assert media['media_kind'] == 'voice' and json.loads(media['media_metadata']) == metadata
+            assert (await client.get(f"/api/media/{media['id']}", headers=h(98803))).status_code in (403, 404)
+            dm = await client.post('/api/messages', headers=h(98801), json={'recipient_id':98802,'media_id':media['id']})
+            assert dm.status_code == 201, dm.text
+            mid = dm.json()['id']
+            history = (await client.get('/api/messages', headers=h(98802), params={'with':98801, 'message_ids':str(mid)})).json()['messages'][0]
+            assert history['media_kind'] == 'voice' and json.loads(history['media_metadata']) == metadata
+            fetched = await client.get(f"/api/media/{media['id']}", headers=h(98802))
+            assert fetched.status_code == 200 and fetched.content == data
+            for scope, peer in [('group',group), ('channel',channel), ('dm',98801)]:
+                forward = await client.post('/api/forward', headers=h(98801), json={'source_scope':'dm','source_peer_id':98802,
+                    'target_scope':scope,'target_peer_id':peer,'message_ids':[mid]})
+                assert forward.status_code == 201, forward.text
+                item = forward.json()['messages'][0]
+                assert item['media_kind'] == 'voice' and json.loads(item['media_metadata']) == metadata
+                if scope == 'group':
+                    fetched = await client.get(f"/api/media/{item['media_id']}", headers=h(98802))
+                    assert fetched.status_code == 200 and fetched.content == data
+                if scope in ('group','channel'):
+                    result = await client.get(f'/api/{scope}s/{peer}/messages', headers=h(98801), params={'message_ids':str(item['id'])})
+                    assert result.status_code == 200 and result.json()['messages'][0]['media_kind'] == 'voice'
+                    assert (await client.get(f'/api/{scope}s/{peer}/messages', headers=h(98803))).status_code in (403,404)
+            malformed = base64.b64encode(json.dumps({'duration':7, 'waveform':base64.b64encode(b'x'*769).decode()}).encode()).decode()
+            assert (await client.post('/api/media/documents', headers={**headers, 'X-Media-Metadata':malformed}, content=data)).status_code == 400
+            assert (await client.post('/api/media/documents', headers=headers, content=b'invalid')).status_code == 415
+    run(scenario())
