@@ -23,6 +23,38 @@ class NativeMessagingSourceChecks(unittest.TestCase):
     def source(self, path):
         return self.archive.read(BASE + path).decode('utf-8')
 
+    def test_local_reaction_picker_and_bubble_fallback(self):
+        import xml.etree.ElementTree as ET
+        chat = self.source('ui/ChatActivity.java')
+        bubble = self.source('ui/Components/Reactions/ReactionsLayoutInBubble.java')
+        start = chat.index('    private static final String[] WAYSGRAM_REACTIONS')
+        end = chat.index('    public void selectReaction(', start)
+        picker = chat[start:end]
+        for value in ('👍', '❤️', '😂', '😮', '😢', '🎉', '🙏'):
+            self.assertIn('"' + value + '"', picker)
+        for guard in ('WaysGramTransport.ENABLED', 'chatMode == MODE_DEFAULT', '!isThreadChat()',
+                      '!isSecretChat()', '!message.messageOwner.isThreadMessage',
+                      'message.getId() > 0', 'message.isReactionsAvailable()',
+                      '!message.isSecretMedia()', 'getMessagesController().isFrozen()',
+                      'ChatObject.ACTION_SEND_REACTIONS', 'chosen.size() >= 3',
+                      'reaction.documentId != 0', 'waysGramReactionRequests.contains(key)',
+                      'getSendMessagesHelper().sendReaction(message, chosen',
+                      'waysGramReactionRequests.remove(key)'):
+            self.assertIn(guard, picker)
+        self.assertIn('options.isEmpty() && optionsView == null && !waysGramReactionMenu', chat)
+        self.assertIn('showWaysGramReactionPicker(primaryMessage)', chat)
+        self.assertIn('toggleWaysGramReaction(primaryMessage, visibleReaction.emojicon)', chat)
+        self.assertIn('isReactionsViewAvailable = !org.telegram.tgnet.WaysGramTransport.ENABLED', chat)
+        self.assertIn('org.telegram.tgnet.WaysGramTransport.ENABLED || suggestEdit || isEphemeral', chat)
+        self.assertIn('imageReceiver.setImageBitmap(Emoji.getEmojiDrawable(visibleReaction.emojicon))', bubble)
+        keys = {'WaysGramReactionSelected', 'WaysGramReactionNotSelected', 'WaysGramReactionPending',
+                'WaysGramReactionUnsupported', 'WaysGramReactionLimit'}
+        for language in ('values', 'values-ru'):
+            path = f'WaysGram-Android/TMessagesProj/src/main/res/{language}/waysgram_reactions.xml'
+            xml = ET.fromstring(self.archive.read(path))
+            self.assertEqual({entry.attrib['name'] for entry in xml}, keys)
+            self.assertTrue(all(entry.text for entry in xml))
+
     def test_received_and_cached_plain_messages_are_linkified(self):
         obj = self.source('messenger/MessageObject.java')
         mapper = self.source('tgnet/WaysGramMapper.java')
