@@ -5101,7 +5101,7 @@ def test_typing_indicators_expire_and_respect_chat_membership(api_env) -> None:
             # Expired state is removed and never shown as current activity.
             with db_split.sqlite_connect(path) as db:
                 db.execute(
-                    "UPDATE typing_indicators SET expires_at=? WHERE scope='group' AND chat_id=?",
+                    "UPDATE typing_indicator_sessions SET expires_at=? WHERE scope='group' AND chat_id=?",
                     (int(time.time()) - 1, group_id),
                 )
             expired = await client.get(
@@ -8070,8 +8070,101 @@ def test_typing_active_snapshot_is_private_paginated_and_ephemeral(api_env) -> N
             visible = (await client.get('/api/typing/active', headers=h(86931))).json()['typing_users']
             assert ('group', 86933) not in [(r['scope'], r['id']) for r in visible]
             with db_split.sqlite_connect(path) as db:
-                db.execute("UPDATE typing_indicators SET expires_at=? WHERE user_telegram_id=?", (int(time.time()) - 1, 86933))
+                db.execute("UPDATE typing_indicator_sessions SET expires_at=? WHERE user_telegram_id=?", (int(time.time()) - 1, 86933))
                 db.execute("UPDATE accounts SET is_banned=1 WHERE telegram_id=?", (86932,))
             visible = (await client.get('/api/typing/active', headers=h(86931))).json()['typing_users']
             assert visible == []
+    run(scenario())
+
+
+def test_typing_sessions_aggregate_and_cancel_independently(api_env) -> None:
+    path, _, _, app = api_env
+    for uid in (86941, 86942, 86943):
+        add_account(api_env, uid, f'typing_session_{uid}')
+    add_session(path, 86941, 'typing-session-first')
+    add_session(path, 86941, 'typing-session-second')
+    add_session(path, 86942, 'typing-session-viewer')
+    add_session(path, 86943, 'typing-session-outsider')
+    async def scenario():
+        first = {'Authorization': 'Bearer typing-session-first'}
+        second = {'Authorization': 'Bearer typing-session-second'}
+        viewer = {'Authorization': 'Bearer typing-session-viewer'}
+        async with await client_for(app) as client:
+            group = (await client.post('/api/groups', headers=viewer, json={'title': 'Two devices'})).json()['id']
+            assert (await client.post(f'/api/groups/{group}/members', headers=viewer, json={'telegram_id': 86941})).status_code == 201
+            for scope, peer in (('dm', 86942), ('group', group)):
+                payload = {'scope': scope, 'peer_id': peer, 'is_typing': True}
+                responses = await asyncio.gather(client.put('/api/typing', headers=first, json=payload),
+                                                 client.put('/api/typing', headers=second, json=payload))
+                assert all(r.status_code == 200 for r in responses), [r.text for r in responses]
+            async def rows():
+                # Limit one catches duplicate user rows breaking cursor boundaries.
+                result, cursor = [], {}
+                for _ in range(5):
+                    data = (await client.get('/api/typing/active', headers=viewer, params={'limit': 1, **cursor})).json()
+                    result.extend(data['typing_users'])
+                    if not data['has_more']:
+                        return result
+                    c = data['next_cursor']
+                    cursor = {'after_scope': c['scope'], 'after_peer_id': c['peer_id'], 'after_user_id': c['user_id']}
+                pytest.fail('typing pagination did not terminate')
+            found = await rows()
+            assert [(r['scope'], r['peer_id'], r['id']) for r in found] == [('dm', 86941, 86941), ('group', group, 86941)]
+            assert 'session_hash' not in str(found) and 'typing-session-' not in str(found)
+            for scope, peer in (('dm', 86942), ('group', group)):
+                stop = await client.put('/api/typing', headers=first, json={'scope': scope, 'peer_id': peer, 'is_typing': False})
+                assert stop.status_code == 200
+            assert len(await rows()) == 2  # second device remains active
+            one = await client.get('/api/typing', headers=viewer, params={'scope': 'dm', 'peer_id': 86941})
+            assert one.json()['count'] == 1 and one.json()['typing_users'][0]['id'] == 86941
+            # Restart one session, revoke the other; no stale session leaks into results.
+            assert (await client.put('/api/typing', headers=first, json={'scope': 'dm', 'peer_id': 86942, 'is_typing': True})).status_code == 200
+            assert (await client.post('/api/auth/logout', headers=second)).status_code == 200
+            remaining = await rows()
+            assert [(r['scope'], r['id']) for r in remaining] == [('dm', 86941)]
+            assert (await client.put('/api/typing', headers=second, json={'scope': 'dm', 'peer_id': 86942, 'is_typing': True})).status_code == 401
+            assert (await client.put('/api/typing', headers=first, json={'scope': 'dm', 'peer_id': 86942, 'is_typing': False})).status_code == 200
+            assert await rows() == []
+            with db_split.sqlite_connect(path) as db:
+                saved = db.execute('SELECT session_hash FROM typing_indicator_sessions').fetchall()
+                assert all(token not in str(saved) for token in ('typing-session-first', 'typing-session-second'))
+    run(scenario())
+
+
+def test_typing_session_upgrade_is_idempotent_and_drops_no_legacy_data(api_env) -> None:
+    path, _, _, _ = api_env
+    now = int(time.time())
+    with db_split.sqlite_connect(path) as db:
+        db.execute('DROP TABLE messenger.typing_indicator_sessions')
+        db.execute("INSERT INTO typing_indicators(scope,chat_id,user_telegram_id,updated_at,expires_at) VALUES('dm',1,2,?,?)", (now, now + 8))
+    run(init_messenger_storage(path))
+    run(init_messenger_storage(path))
+    with db_split.sqlite_connect(path) as db:
+        assert db.execute("SELECT count(*) FROM typing_indicators WHERE chat_id=1 AND user_telegram_id=2").fetchone()[0] == 1
+        assert db.execute("SELECT count(*) FROM typing_indicator_sessions").fetchone()[0] == 0
+        assert 'typing_indicator_sessions' in {row[0] for row in db.execute("SELECT name FROM messenger.sqlite_master WHERE type='table'")}
+
+
+def test_typing_snapshot_does_not_outlive_authenticated_session(api_env) -> None:
+    path, _, _, app = api_env
+    for uid in (86951, 86952):
+        add_account(api_env, uid, f'typing_expiry_{uid}')
+    add_session(path, 86951, 'typing-session-short')
+    add_session(path, 86952, 'typing-session-observer')
+    async def scenario():
+        sender = {'Authorization': 'Bearer typing-session-short'}
+        observer = {'Authorization': 'Bearer typing-session-observer'}
+        async with await client_for(app) as client:
+            assert (await client.put('/api/typing', headers=sender, json={'scope': 'dm', 'peer_id': 86952, 'is_typing': True})).status_code == 200
+            digest = hashlib.sha256(b'typing-session-short').hexdigest()
+            with db_split.sqlite_connect(path) as db:
+                deadline = int(time.time()) + 2
+                db.execute('UPDATE api_sessions SET expires_at=? WHERE token_hash=?', (deadline, digest))
+            data = (await client.get('/api/typing/active', headers=observer)).json()
+            assert len(data['typing_users']) == 1 and data['typing_users'][0]['expires_at'] == deadline
+            with db_split.sqlite_connect(path) as db:
+                db.execute('UPDATE api_sessions SET expires_at=? WHERE token_hash=?', (int(time.time()) - 1, digest))
+            assert (await client.get('/api/typing/active', headers=observer)).json()['typing_users'] == []
+            legacy = await client.get('/api/typing', headers=observer, params={'scope': 'dm', 'peer_id': 86951})
+            assert legacy.json()['count'] == 0
     run(scenario())

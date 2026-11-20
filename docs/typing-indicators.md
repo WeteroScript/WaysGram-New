@@ -6,10 +6,11 @@ threads or recording/upload activity. It ignores unsupported activity actions
 rather than presenting them as text typing. User input is not transmitted.
 
 `PUT /api/typing` remains the source of ephemeral activity, expiring eight
-seconds after the last update. The server currently aggregates activity by
-account and chat, not session: if the same account types on two devices, a
-cancel from one device can clear the other device's indicator until it refreshes.
-For that reason the feature remains partial. One account's Android writes are ordered; queued
+seconds after the last update. The server stores a separate activity row per
+session (identified by a token hash, not the bearer token), then aggregates
+active sessions by user and chat. Cancelling on one device does not cancel
+another; revoked or expired sessions are excluded. One account's Android writes
+are ordered; queued
 activity older than eight seconds is discarded and session changes invalidate
 queued requests. The native client's independent per-account poller fetches
 `GET /api/typing/active` roughly every 2.5 seconds. It emits native TL typing and
@@ -33,3 +34,11 @@ Deploy the server with this endpoint before the Android client. On an older
 server or transient error, message polling continues and existing indicators
 expire naturally. Android static checks and backend tests do not replace an
 Android build or device/network test; neither was performed for this change.
+
+On upgrade the old account-wide `typing_indicators` table is retained for
+rollback but is no longer read or updated by the new server. Pre-upgrade
+indicators are transient and disappear until the next typing update (at most
+eight seconds); no message history is changed. Deploy all server workers on
+the same version together: mixed old/new workers do not share typing state.
+The new session table lives in the split messenger database and startup is
+idempotent.

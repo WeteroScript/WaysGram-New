@@ -68,6 +68,7 @@ MESSENGER_TABLES = frozenset(
         "contact_notes",
         "pinned_messages",
         "typing_indicators",
+        "typing_indicator_sessions",
         "bots",
         "bot_commands",
         "bot_chats",

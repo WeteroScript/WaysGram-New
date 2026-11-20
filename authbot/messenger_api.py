@@ -821,6 +821,18 @@ async def init_messenger_storage(database_path: Path) -> None:
             );
             CREATE INDEX IF NOT EXISTS idx_typing_indicators_expiry
                 ON typing_indicators(expires_at);
+            -- Legacy account-wide indicators remain intact for rollback; new activity is per session.
+            CREATE TABLE IF NOT EXISTS typing_indicator_sessions (
+                scope TEXT NOT NULL CHECK(scope IN ('dm','group')),
+                chat_id INTEGER NOT NULL,
+                user_telegram_id INTEGER NOT NULL,
+                session_hash TEXT NOT NULL,
+                updated_at INTEGER NOT NULL,
+                expires_at INTEGER NOT NULL,
+                PRIMARY KEY(scope,chat_id,user_telegram_id,session_hash)
+            );
+            CREATE INDEX IF NOT EXISTS idx_typing_indicator_sessions_expiry
+                ON typing_indicator_sessions(expires_at);
             CREATE TABLE IF NOT EXISTS message_forward_sources (
                 scope TEXT NOT NULL CHECK(scope IN ('dm','group','channel')),
                 message_id INTEGER NOT NULL,
@@ -11008,6 +11020,8 @@ def build_messenger_router(
     ) -> dict[str, Any]:
         user = await current_user(authorization)
         uid = int(user["telegram_id"])
+        # current_user has validated the bearer token. Never persist or expose the token itself.
+        session_hash = _token_hash(authorization[7:].strip())
         scope = payload.get("scope")
         peer_id = payload.get("peer_id")
         is_typing = payload.get("is_typing", True)
@@ -11020,6 +11034,12 @@ def build_messenger_router(
         now = int(time.time())
         async with aiosqlite.connect(db_path()) as db:
             await db.execute("BEGIN IMMEDIATE")
+            # Recheck session under the write lock: logout/revocation may race authentication.
+            now = int(time.time())
+            cur = await db.execute("""SELECT 1 FROM api_sessions s JOIN accounts a ON a.telegram_id=s.telegram_id
+                WHERE s.token_hash=? AND s.telegram_id=? AND s.expires_at>? AND a.is_banned=0""", (session_hash, uid, now))
+            if await cur.fetchone() is None:
+                raise HTTPException(status_code=401, detail="Сессия истекла или недействительна")
             if scope == "dm":
                 if peer_id == uid:
                     await db.rollback()
@@ -11047,21 +11067,21 @@ def build_messenger_router(
             else:
                 await require_group_member(db, peer_id, uid)
                 chat_id = peer_id
-            await db.execute("DELETE FROM typing_indicators WHERE expires_at<=?", (now,))
+            await db.execute("DELETE FROM typing_indicator_sessions WHERE expires_at<=?", (now,))
             if is_typing:
                 expires_at = now + 8
                 await db.execute(
-                    """INSERT INTO typing_indicators(scope,chat_id,user_telegram_id,updated_at,expires_at)
-                       VALUES(?,?,?,?,?)
-                       ON CONFLICT(scope,chat_id,user_telegram_id) DO UPDATE SET
+                    """INSERT INTO typing_indicator_sessions(scope,chat_id,user_telegram_id,session_hash,updated_at,expires_at)
+                       VALUES(?,?,?,?,?,?)
+                       ON CONFLICT(scope,chat_id,user_telegram_id,session_hash) DO UPDATE SET
                            updated_at=excluded.updated_at,expires_at=excluded.expires_at""",
-                    (scope, chat_id, uid, now, expires_at),
+                    (scope, chat_id, uid, session_hash, now, expires_at),
                 )
             else:
                 expires_at = 0
                 await db.execute(
-                    "DELETE FROM typing_indicators WHERE scope=? AND chat_id=? AND user_telegram_id=?",
-                    (scope, chat_id, uid),
+                    "DELETE FROM typing_indicator_sessions WHERE scope=? AND chat_id=? AND user_telegram_id=? AND session_hash=?",
+                    (scope, chat_id, uid, session_hash),
                 )
             await db.commit()
         return {
@@ -11084,7 +11104,7 @@ def build_messenger_router(
         now = int(time.time())
         async with aiosqlite.connect(db_path()) as db:
             db.row_factory = aiosqlite.Row
-            await db.execute("DELETE FROM typing_indicators WHERE expires_at<=?", (now,))
+            await db.execute("DELETE FROM typing_indicator_sessions WHERE expires_at<=?", (now,))
             if scope == "dm":
                 if peer_id == uid:
                     raise HTTPException(status_code=400, detail="Для избранного индикатор набора не используется")
@@ -11105,22 +11125,26 @@ def build_messenger_router(
                 if await cur.fetchone():
                     raise HTTPException(status_code=403, detail="Индикатор недоступен для этого диалога")
                 cur = await db.execute(
-                    """SELECT a.telegram_id AS id,a.username,a.display_name,ti.updated_at
-                       FROM typing_indicators ti JOIN accounts a ON a.telegram_id=ti.user_telegram_id
+                    """SELECT a.telegram_id AS id,a.username,a.display_name,MAX(ti.updated_at) AS updated_at
+                       FROM typing_indicator_sessions ti JOIN accounts a ON a.telegram_id=ti.user_telegram_id
+                       JOIN api_sessions session ON session.token_hash=ti.session_hash AND session.telegram_id=ti.user_telegram_id
                        WHERE ti.scope='dm' AND ti.chat_id=? AND ti.user_telegram_id=?
-                         AND ti.expires_at>? AND a.is_banned=0""",
-                    (uid, peer_id, now),
+                         AND ti.expires_at>? AND session.expires_at>? AND a.is_banned=0
+                       GROUP BY a.telegram_id,a.username,a.display_name""",
+                    (uid, peer_id, now, now),
                 )
             else:
                 await require_group_member(db, peer_id, uid)
                 cur = await db.execute(
-                    """SELECT a.telegram_id AS id,a.username,a.display_name,ti.updated_at
-                       FROM typing_indicators ti JOIN accounts a ON a.telegram_id=ti.user_telegram_id
+                    """SELECT a.telegram_id AS id,a.username,a.display_name,MAX(ti.updated_at) AS updated_at
+                       FROM typing_indicator_sessions ti JOIN accounts a ON a.telegram_id=ti.user_telegram_id
+                       JOIN api_sessions session ON session.token_hash=ti.session_hash AND session.telegram_id=ti.user_telegram_id
                        JOIN group_members gm ON gm.telegram_id=ti.user_telegram_id AND gm.group_id=ti.chat_id
                        WHERE ti.scope='group' AND ti.chat_id=? AND ti.user_telegram_id<>?
-                         AND ti.expires_at>? AND a.is_banned=0
-                       ORDER BY ti.updated_at DESC LIMIT 50""",
-                    (peer_id, uid, now),
+                         AND ti.expires_at>? AND session.expires_at>? AND a.is_banned=0
+                       GROUP BY a.telegram_id,a.username,a.display_name
+                       ORDER BY updated_at DESC,a.telegram_id LIMIT 50""",
+                    (peer_id, uid, now, now),
                 )
             rows = [dict(row) for row in await cur.fetchall()]
             await db.commit()
@@ -11152,24 +11176,30 @@ def build_messenger_router(
             cur = await db.execute(
                 """SELECT * FROM (
                     SELECT 'dm' AS scope, ti.user_telegram_id AS peer_id,
-                           a.telegram_id AS id, a.username, a.display_name, ti.updated_at, ti.expires_at
-                    FROM typing_indicators ti JOIN accounts a ON a.telegram_id=ti.user_telegram_id
+                           a.telegram_id AS id, a.username, a.display_name,
+                           MAX(ti.updated_at) AS updated_at, MAX(MIN(ti.expires_at,session.expires_at)) AS expires_at
+                    FROM typing_indicator_sessions ti JOIN accounts a ON a.telegram_id=ti.user_telegram_id
+                    JOIN api_sessions session ON session.token_hash=ti.session_hash AND session.telegram_id=ti.user_telegram_id
                     WHERE ti.scope='dm' AND ti.chat_id=? AND ti.user_telegram_id<>?
-                      AND ti.expires_at>? AND a.is_banned=0
+                      AND ti.expires_at>? AND session.expires_at>? AND a.is_banned=0
                       AND NOT EXISTS (SELECT 1 FROM blocked_users b WHERE
                           (b.owner_telegram_id=? AND b.blocked_telegram_id=ti.user_telegram_id) OR
                           (b.owner_telegram_id=ti.user_telegram_id AND b.blocked_telegram_id=?))
+                    GROUP BY ti.user_telegram_id,a.telegram_id,a.username,a.display_name
                     UNION ALL
                     SELECT 'group' AS scope, ti.chat_id AS peer_id,
-                           a.telegram_id AS id, a.username, a.display_name, ti.updated_at, ti.expires_at
-                    FROM typing_indicators ti JOIN accounts a ON a.telegram_id=ti.user_telegram_id
+                           a.telegram_id AS id, a.username, a.display_name,
+                           MAX(ti.updated_at) AS updated_at, MAX(MIN(ti.expires_at,session.expires_at)) AS expires_at
+                    FROM typing_indicator_sessions ti JOIN accounts a ON a.telegram_id=ti.user_telegram_id
+                    JOIN api_sessions session ON session.token_hash=ti.session_hash AND session.telegram_id=ti.user_telegram_id
                     JOIN group_members viewer ON viewer.group_id=ti.chat_id AND viewer.telegram_id=?
                     JOIN group_members sender ON sender.group_id=ti.chat_id AND sender.telegram_id=ti.user_telegram_id
-                    WHERE ti.scope='group' AND ti.user_telegram_id<>? AND ti.expires_at>? AND a.is_banned=0
+                    WHERE ti.scope='group' AND ti.user_telegram_id<>? AND ti.expires_at>? AND session.expires_at>? AND a.is_banned=0
+                    GROUP BY ti.chat_id,a.telegram_id,a.username,a.display_name
                 ) AS active
                 WHERE (scope,peer_id,id) > (?,?,?)
                 ORDER BY scope,peer_id,id LIMIT ?""",
-                (uid, uid, now, uid, uid, uid, uid, now,
+                (uid, uid, now, now, uid, uid, uid, uid, now, now,
                  after_scope, after_peer_id, after_user_id, limit + 1),
             )
             rows = [dict(row) for row in await cur.fetchall()]
