@@ -62,6 +62,7 @@ MESSENGER_TABLES = frozenset(
         "group_invites",
         "group_join_requests",
         "cloud_drafts",
+        "cloud_draft_versions",
         "contact_notes",
         "pinned_messages",
         "typing_indicators",

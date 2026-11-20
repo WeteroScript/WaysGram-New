@@ -4313,6 +4313,113 @@ def test_cloud_draft_list_pagination_privacy_and_revoked_access(api_env) -> None
     run(scenario())
 
 
+def test_cloud_draft_versions_compare_and_swap_and_legacy_writes(api_env) -> None:
+    path, _store, _bot, app = api_env
+    add_account(api_env, 96101, "version_owner")
+    add_account(api_env, 96102, "version_peer")
+    add_session(path, 96101, "version-owner-1")
+    add_session(path, 96101, "version-owner-2")
+    add_session(path, 96102, "version-peer")
+
+    async def scenario() -> None:
+        async with await client_for(app) as client:
+            a = {"Authorization": "Bearer version-owner-1"}
+            b = {"Authorization": "Bearer version-owner-2"}
+            peer = {"Authorization": "Bearer version-peer"}
+            key = {"scope": "dm", "peer_id": 96102}
+            get = lambda headers: client.get("/api/drafts", headers=headers, params=key)
+            async def save(headers, text, **extra):
+                return await client.put("/api/drafts", headers=headers, json={**key, "body": text, **extra})
+            async def delete(headers, **extra):
+                return await client.delete("/api/drafts", headers=headers, params={**key, **extra})
+
+            assert (await get(a)).json() == {"draft": None, "revision": 0}
+            for invalid in (True, None, -1, 1.5, "1", 2**63):
+                assert (await save(a, "invalid", expected_revision=invalid)).status_code == 400
+            assert (await delete(a, expected_revision=-1)).status_code == 422
+            assert (await delete(a, expected_revision=2**63)).status_code == 422
+            # Both sessions start at zero: only one may commit.
+            results = await asyncio.gather(save(a, "first", expected_revision=0),
+                                           save(b, "second", expected_revision=0))
+            assert sorted(r.status_code for r in results) == [200, 409]
+            winner = next(r.json()["body"] for r in results if r.status_code == 200)
+            loser = next(r for r in results if r.status_code == 409)
+            assert loser.json()["detail"] == {"code": "DRAFT_CONFLICT", "revision": 1}
+            saved = (await get(b)).json()
+            assert saved["draft"]["body"] == winner and saved["revision"] == 1
+            assert (await client.get("/api/drafts/list", headers=b)).json()["drafts"][0]["revision"] == 1
+            # Old clients do not use CAS, but their writes invalidate stale versions.
+            assert (await save(a, "legacy" )).json()["revision"] == 2
+            assert (await save(b, "stale", expected_revision=1)).status_code == 409
+            assert (await delete(b, expected_revision=1)).status_code == 409
+            assert (await delete(b, expected_revision=2)).json()["revision"] == 3
+            assert (await get(a)).json() == {"draft": None, "revision": 3}
+            assert (await save(a, "resurrection", expected_revision=2)).status_code == 409
+            assert (await delete(a, expected_revision=3)).json()["revision"] == 3
+            assert (await save(a, "new", expected_revision=3)).json()["revision"] == 4
+            # Even direct legacy SQL writes and deletes are revisioned.
+            with db_split.sqlite_connect(path) as db:
+                db.execute("UPDATE cloud_drafts SET body='direct' WHERE owner_telegram_id=?", (96101,))
+                db.commit()
+            assert (await get(a)).json()["revision"] == 5
+            with db_split.sqlite_connect(path) as db:
+                db.execute("DELETE FROM cloud_drafts WHERE owner_telegram_id=?", (96101,))
+                db.commit()
+            assert (await get(a)).json() == {"draft": None, "revision": 6}
+            # Revisions belong to the owner, not to the other participant.
+            peer_key = {"scope": "dm", "peer_id": 96101}
+            assert (await client.get("/api/drafts", headers=peer, params=peer_key)).json()["revision"] == 0
+            assert (await save(a, "again", expected_revision=5)).status_code == 409
+
+    run(scenario())
+
+
+def test_cloud_draft_versions_removed_with_account(api_env) -> None:
+    path, store, _bot, app = api_env
+    number = add_account(api_env, 96301, "deleted_draft_owner")
+    add_account(api_env, 96302, "deleted_draft_peer")
+    add_session(path, 96301, "deleted-draft-owner")
+
+    async def save() -> None:
+        async with await client_for(app) as client:
+            result = await client.put("/api/drafts", headers={"Authorization": "Bearer deleted-draft-owner"},
+                                      json={"scope": "dm", "peer_id": 96302, "body": "private"})
+            assert result.json()["revision"] == 1
+    run(save())
+    assert run(store.delete_number(number, 96301))
+    with db_split.sqlite_connect(path) as db:
+        assert db.execute("SELECT count(*) FROM cloud_draft_versions WHERE owner_telegram_id=96301").fetchone()[0] == 0
+        assert db.execute("SELECT count(*) FROM cloud_drafts WHERE owner_telegram_id=96301").fetchone()[0] == 0
+
+
+def test_cloud_draft_version_upgrade_preserves_old_rows(api_env) -> None:
+    path, _store, _bot, app = api_env
+    add_account(api_env, 96201, "old_draft_owner")
+    add_account(api_env, 96202, "old_draft_peer")
+    add_session(path, 96201, "old-draft-owner")
+    with db_split.sqlite_connect(path) as db:
+        for name in ("draft_revision_insert", "draft_revision_update", "draft_revision_delete", "draft_key_immutable"):
+            db.execute(f"DROP TRIGGER messenger.{name}")
+        db.execute("DROP TABLE messenger.cloud_draft_versions")
+        db.execute("INSERT INTO cloud_drafts(owner_telegram_id,scope,peer_id,body,updated_at) VALUES(96201,'dm',96202,'old content',123)")
+        db.commit()
+    run(init_messenger_storage(path))
+    run(init_messenger_storage(path))  # idempotent: never reset a version on restart
+
+    async def scenario() -> None:
+        async with await client_for(app) as client:
+            headers = {"Authorization": "Bearer old-draft-owner"}
+            key = {"scope": "dm", "peer_id": 96202}
+            old = (await client.get("/api/drafts", headers=headers, params=key)).json()
+            assert old["draft"]["body"] == "old content" and old["revision"] == 0
+            put = await client.put("/api/drafts", headers=headers, json={**key, "body": "updated", "expected_revision": 0})
+            assert put.json()["revision"] == 1
+    run(scenario())
+    run(init_messenger_storage(path))
+    with db_split.sqlite_connect(path) as db:
+        assert db.execute("SELECT revision FROM cloud_draft_versions WHERE owner_telegram_id=96201").fetchone()[0] == 1
+
+
 def test_contact_notes_are_private_and_removed_with_contact(api_env) -> None:
     path, _auth_store, _fake_bot, app = api_env
     add_account(api_env, 95201, "note_owner")

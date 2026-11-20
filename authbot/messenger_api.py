@@ -911,6 +911,14 @@ async def init_messenger_storage(database_path: Path) -> None:
             );
             CREATE INDEX IF NOT EXISTS idx_cloud_drafts_updated
                 ON cloud_drafts(owner_telegram_id,updated_at DESC);
+            -- Tombstones retain only a per-key version, never deleted draft text.
+            CREATE TABLE IF NOT EXISTS cloud_draft_versions (
+                owner_telegram_id INTEGER NOT NULL,
+                scope TEXT NOT NULL CHECK(scope IN ('dm','group','channel')),
+                peer_id INTEGER NOT NULL CHECK(peer_id > 0),
+                revision INTEGER NOT NULL CHECK(revision > 0),
+                PRIMARY KEY(owner_telegram_id,scope,peer_id)
+            );
             CREATE TABLE IF NOT EXISTS scheduled_messages (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 sender_telegram_id INTEGER NOT NULL,
@@ -1367,6 +1375,22 @@ async def init_messenger_storage(database_path: Path) -> None:
                 await db.execute(
                     f"ALTER TABLE {db_split.SCHEMA}.user_gifts ADD COLUMN {column} {definition}"
                 )
+        # Database triggers cover all writers, including older API processes and
+        # administrative deletes. Existing rows start at revision zero on upgrade.
+        for action, ref in (("INSERT", "NEW"), ("UPDATE", "NEW"), ("DELETE", "OLD")):
+            await db.execute(f"""CREATE TRIGGER IF NOT EXISTS {db_split.SCHEMA}.draft_revision_{action.lower()}
+                AFTER {action} ON cloud_drafts
+                BEGIN
+                    INSERT INTO cloud_draft_versions(owner_telegram_id,scope,peer_id,revision)
+                    VALUES({ref}.owner_telegram_id,{ref}.scope,{ref}.peer_id,1)
+                    ON CONFLICT(owner_telegram_id,scope,peer_id)
+                    DO UPDATE SET revision=revision+1;
+                END""")
+        await db.execute(f"""CREATE TRIGGER IF NOT EXISTS {db_split.SCHEMA}.draft_key_immutable
+            BEFORE UPDATE OF owner_telegram_id,scope,peer_id ON cloud_drafts
+            WHEN OLD.owner_telegram_id != NEW.owner_telegram_id OR OLD.scope != NEW.scope
+                 OR OLD.peer_id != NEW.peer_id
+            BEGIN SELECT RAISE(ABORT, 'draft key is immutable'); END""")
         # A transferred gift belongs at the front of its new owner's inventory, even if
         # it later returns to an owner who previously sorted it.
         await db.execute(f"""CREATE TRIGGER IF NOT EXISTS {db_split.SCHEMA}.reset_gift_profile_order
@@ -3588,31 +3612,42 @@ def build_messenger_router(
             raise HTTPException(status_code=403, detail="Вы не состоите в этой группе")
         return dict(row)
 
-    async def require_cloud_draft_access(scope: str, peer_id: int, telegram_id: int) -> None:
+    async def require_cloud_draft_access(scope: str, peer_id: int, telegram_id: int, db: Any) -> None:
+        # Caller holds the read/write transaction so access and the draft state
+        # are observed together, rather than authorizing before a concurrent revoke.
         if scope == "dm":
-            async with aiosqlite.connect(db_path()) as db:
+            cur = await db.execute(
+                "SELECT is_banned FROM accounts WHERE telegram_id=?", (peer_id,)
+            )
+            peer = await cur.fetchone()
+            if peer is None:
+                raise HTTPException(status_code=404, detail="Собеседник не найден")
+            if peer[0]:
+                raise HTTPException(status_code=403, detail="Аккаунт собеседника недоступен")
+            if peer_id != telegram_id:
                 cur = await db.execute(
-                    "SELECT is_banned FROM accounts WHERE telegram_id=?", (peer_id,)
+                    """SELECT 1 FROM blocked_users
+                       WHERE (owner_telegram_id=? AND blocked_telegram_id=?)
+                          OR (owner_telegram_id=? AND blocked_telegram_id=?) LIMIT 1""",
+                    (telegram_id, peer_id, peer_id, telegram_id),
                 )
-                peer = await cur.fetchone()
-                if peer is None:
-                    raise HTTPException(status_code=404, detail="Собеседник не найден")
-                if peer[0]:
-                    raise HTTPException(status_code=403, detail="Аккаунт собеседника недоступен")
-                if peer_id != telegram_id:
-                    cur = await db.execute(
-                        """SELECT 1 FROM blocked_users
-                           WHERE (owner_telegram_id=? AND blocked_telegram_id=?)
-                              OR (owner_telegram_id=? AND blocked_telegram_id=?) LIMIT 1""",
-                        (telegram_id, peer_id, peer_id, telegram_id),
-                    )
-                    if await cur.fetchone():
-                        raise HTTPException(status_code=403, detail="Нельзя работать с черновиком: пользователь в чёрном списке")
+                if await cur.fetchone():
+                    raise HTTPException(status_code=403, detail="Нельзя работать с черновиком: пользователь в чёрном списке")
         elif scope == "group":
-            async with aiosqlite.connect(db_path()) as db:
-                await require_group_member(db, peer_id, telegram_id)
+            await require_group_member(db, peer_id, telegram_id)
         elif scope == "channel":
-            await require_channel_access(peer_id, telegram_id)
+            cur = await db.execute(
+                """SELECT (c.is_public=1 OR c.owner_telegram_id=?
+                       OR EXISTS(SELECT 1 FROM channel_admins ca WHERE ca.channel_id=c.id AND ca.telegram_id=?)
+                       OR EXISTS(SELECT 1 FROM channel_members cm WHERE cm.channel_id=c.id AND cm.telegram_id=?))
+                   FROM channels c WHERE c.id=?""",
+                (telegram_id, telegram_id, telegram_id, peer_id),
+            )
+            row = await cur.fetchone()
+            if row is None:
+                raise HTTPException(status_code=404, detail="Канал не найден")
+            if not row[0]:
+                raise HTTPException(status_code=403, detail="Это приватный канал. Нужна ссылка-приглашение.")
 
     async def current_bot(authorization: str | None) -> dict[str, Any]:
         if not authorization or not authorization.startswith("Bearer "):
@@ -10414,16 +10449,24 @@ def build_messenger_router(
         if scope not in ("dm", "group", "channel"):
             raise HTTPException(status_code=400, detail="scope: dm, group или channel")
         uid = int(user["telegram_id"])
-        await require_cloud_draft_access(scope, peer_id, uid)
         async with aiosqlite.connect(db_path()) as db:
             db.row_factory = aiosqlite.Row
+            await db.execute("BEGIN")
+            await require_cloud_draft_access(scope, peer_id, uid, db)
+            # Single statement provides a consistent text/version pair, even
+            # when the draft was deleted and only its version remains.
             cur = await db.execute(
-                """SELECT scope,peer_id,body,updated_at FROM cloud_drafts
-                   WHERE owner_telegram_id=? AND scope=? AND peer_id=?""",
+                """SELECT d.scope,d.peer_id,d.body,d.updated_at,COALESCE(v.revision,0) AS revision
+                   FROM (SELECT ? AS owner,? AS scope,? AS peer) key
+                   LEFT JOIN cloud_drafts d ON d.owner_telegram_id=key.owner
+                       AND d.scope=key.scope AND d.peer_id=key.peer
+                   LEFT JOIN cloud_draft_versions v ON v.owner_telegram_id=key.owner
+                       AND v.scope=key.scope AND v.peer_id=key.peer""",
                 (uid, scope, peer_id),
             )
             row = await cur.fetchone()
-        return {"draft": dict(row) if row is not None else None}
+        draft = {key: row[key] for key in ("scope", "peer_id", "body", "updated_at")} if row["scope"] is not None else None
+        return {"draft": draft, "revision": row["revision"]}
 
     @router.get("/api/drafts/list")
     async def list_cloud_drafts(
@@ -10447,7 +10490,9 @@ def build_messenger_router(
             db.row_factory = aiosqlite.Row
             # Filtering and page selection use the same SQLite read snapshot.
             cur = await db.execute(
-                """SELECT d.scope,d.peer_id,d.body,d.updated_at FROM cloud_drafts d
+                """SELECT d.scope,d.peer_id,d.body,d.updated_at,COALESCE(v.revision,0) AS revision
+                   FROM cloud_drafts d LEFT JOIN cloud_draft_versions v
+                     ON v.owner_telegram_id=d.owner_telegram_id AND v.scope=d.scope AND v.peer_id=d.peer_id
                    WHERE d.owner_telegram_id=?
                      AND (? IS NULL OR d.scope>? OR (d.scope=? AND d.peer_id>?))
                      AND (
@@ -10484,6 +10529,14 @@ def build_messenger_router(
             next_cursor = {"after_scope": last["scope"], "after_peer_id": last["peer_id"]}
         return {"drafts": drafts, "next_cursor": next_cursor}
 
+    async def cloud_draft_revision(db: Any, uid: int, scope: str, peer_id: int) -> int:
+        cur = await db.execute(
+            "SELECT revision FROM cloud_draft_versions WHERE owner_telegram_id=? AND scope=? AND peer_id=?",
+            (uid, scope, peer_id),
+        )
+        row = await cur.fetchone()
+        return int(row[0]) if row else 0
+
     @router.put("/api/drafts")
     async def save_cloud_draft(
         payload: dict[str, Any],
@@ -10493,16 +10546,24 @@ def build_messenger_router(
         scope = payload.get("scope")
         peer_id = payload.get("peer_id")
         body = payload.get("body")
+        expected = payload.get("expected_revision")
         if scope not in ("dm", "group", "channel"):
             raise HTTPException(status_code=400, detail="scope: dm, group или channel")
         if isinstance(peer_id, bool) or not isinstance(peer_id, int) or peer_id <= 0:
             raise HTTPException(status_code=400, detail="peer_id должен быть положительным целым числом")
         if not isinstance(body, str) or not body.strip() or len(body) > MAX_MESSAGE_LENGTH:
             raise HTTPException(status_code=400, detail=f"Черновик должен содержать 1–{MAX_MESSAGE_LENGTH} символов")
+        if "expected_revision" in payload and (isinstance(expected, bool) or not isinstance(expected, int) or not 0 <= expected <= 9223372036854775807):
+            raise HTTPException(status_code=400, detail="expected_revision должен быть неотрицательным целым числом")
         uid = int(user["telegram_id"])
-        await require_cloud_draft_access(str(scope), peer_id, uid)
         now = int(time.time())
         async with aiosqlite.connect(db_path()) as db:
+            await db.execute("BEGIN IMMEDIATE")
+            await require_cloud_draft_access(str(scope), peer_id, uid, db)
+            current_revision = await cloud_draft_revision(db, uid, str(scope), peer_id)
+            if expected is not None and expected != current_revision:
+                await db.rollback()
+                raise HTTPException(status_code=409, detail={"code": "DRAFT_CONFLICT", "revision": current_revision})
             await db.execute(
                 """INSERT INTO cloud_drafts(owner_telegram_id,scope,peer_id,body,updated_at)
                    VALUES(?,?,?,?,?)
@@ -10510,13 +10571,15 @@ def build_messenger_router(
                        body=excluded.body,updated_at=excluded.updated_at""",
                 (uid, str(scope), peer_id, body, now),
             )
+            revision = await cloud_draft_revision(db, uid, str(scope), peer_id)
             await db.commit()
-        return {"scope": str(scope), "peer_id": peer_id, "body": body, "updated_at": now}
+        return {"scope": str(scope), "peer_id": peer_id, "body": body, "updated_at": now, "revision": revision}
 
     @router.delete("/api/drafts")
     async def delete_cloud_draft(
         scope: str = Query(...),
         peer_id: int = Query(..., gt=0),
+        expected_revision: int | None = Query(default=None, ge=0, le=9223372036854775807),
         authorization: str | None = Header(default=None),
     ) -> dict[str, Any]:
         user = await current_user(authorization)
@@ -10524,13 +10587,19 @@ def build_messenger_router(
             raise HTTPException(status_code=400, detail="scope: dm, group или channel")
         uid = int(user["telegram_id"])
         async with aiosqlite.connect(db_path()) as db:
+            await db.execute("BEGIN IMMEDIATE")
+            current_revision = await cloud_draft_revision(db, uid, scope, peer_id)
+            if expected_revision is not None and expected_revision != current_revision:
+                await db.rollback()
+                raise HTTPException(status_code=409, detail={"code": "DRAFT_CONFLICT", "revision": current_revision})
             cur = await db.execute(
                 "DELETE FROM cloud_drafts WHERE owner_telegram_id=? AND scope=? AND peer_id=?",
                 (uid, scope, peer_id),
             )
             deleted = cur.rowcount == 1
+            revision = await cloud_draft_revision(db, uid, scope, peer_id)
             await db.commit()
-        return {"status": "deleted" if deleted else "not_found", "scope": scope, "peer_id": peer_id}
+        return {"status": "deleted" if deleted else "not_found", "scope": scope, "peer_id": peer_id, "revision": revision}
 
     @router.put("/api/typing")
     async def update_typing_indicator(
