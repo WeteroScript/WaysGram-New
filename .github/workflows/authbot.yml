@@ -177,7 +177,12 @@ jobs:
           unzip -tq /tmp/WaysGram-Android.original.zip
           mkdir -p /tmp/waysgram-android-source
           unzip -q /tmp/WaysGram-Android.original.zip -d /tmp/waysgram-android-source
-          patch --batch --forward -p1 -d /tmp/waysgram-android-source < android-stage1.patch
+          ANDROID_MESSAGES=/tmp/waysgram-android-source/WaysGram-Android/TMessagesProj/src/main/java/org/telegram/tgnet/WaysGramMessages.java
+          if grep -Fq 'body.put("remove_media", true)' "$ANDROID_MESSAGES"; then
+            echo "Attachment-removal bridge is already present."
+          else
+            patch --batch --forward -p1 -d /tmp/waysgram-android-source < android-stage1.patch
+          fi
           python3 - <<'PY'
           from pathlib import Path
           import zipfile
