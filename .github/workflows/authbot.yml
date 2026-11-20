@@ -224,10 +224,10 @@ jobs:
           source = Path("/tmp/waysgram-android-source/WaysGram-Android/TMessagesProj/src/main/java/org/telegram/messenger/waysgram/WaysGramChatFragment.java")
           current = source.read_text(encoding="utf-8")
           if "import android.content.SharedPreferences;" not in current:
-              import_anchor = "import android.content.Context;\\n"
+              import_anchor = "import android.content.Context;\n"
               if import_anchor not in current:
                   raise SystemExit("Could not locate Android Context import")
-              current = current.replace(import_anchor, import_anchor + "import android.content.SharedPreferences;\\n", 1)
+              current = current.replace(import_anchor, import_anchor + "import android.content.SharedPreferences;\n", 1)
           start_marker = "    private void forwardMessage(long messageId, long recipientId, String recipientLabel) {"
           end_marker = "    private void editMessage(long messageId, String currentBody) {"
           start = current.find(start_marker)
