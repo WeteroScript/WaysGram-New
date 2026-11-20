@@ -1845,6 +1845,23 @@ def test_gift_sell_refunds_half_of_the_purchase_price(env) -> None:
     run(scenario())
 
 
+def test_collectible_cannot_be_sold_for_refund(env) -> None:
+    _path, app = env
+
+    async def scenario() -> None:
+        await bot_module.set_telegram_gift_values("g1", price=100, supply=1)
+        async with await client_for(app) as client:
+            bought = await client.post("/api/telegram/gifts/g1/purchase", headers=headers(101), json={})
+            serial = bought.json()["gift"]["serial_number"]
+            upgraded = await client.post(f"/api/gifts/{serial}/upgrade", headers=headers(101))
+            assert upgraded.status_code == 200
+            sold = await client.post(f"/api/gifts/{serial}/sell", headers=headers(101))
+            assert sold.status_code == 409
+            assert (await client.get("/api/me", headers=headers(101))).json()["stars"] == 4875
+
+    run(scenario())
+
+
 def test_gift_sell_is_limited_to_the_first_week(env) -> None:
     path, app = env
 

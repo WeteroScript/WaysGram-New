@@ -7738,7 +7738,7 @@ def build_messenger_router(
                 await db.rollback()
                 return previous
             cur = await db.execute(
-                """SELECT id,gift_name,acquired_at,purchase_asset,purchase_price
+                """SELECT id,gift_name,acquired_at,purchase_asset,purchase_price,upgrade_level,attributes_json
                    FROM user_gifts WHERE serial_number=? AND owner_telegram_id=?""",
                 (serial, uid),
             )
@@ -7746,6 +7746,12 @@ def build_messenger_router(
             if gift is None:
                 await db.rollback()
                 raise HTTPException(status_code=404, detail="Подарок не найден в вашем инвентаре")
+            try:
+                attributes = json.loads(gift["attributes_json"] or "{}")
+            except (TypeError, ValueError):
+                attributes = {}
+            if int(gift["upgrade_level"] or 0) > 0 or _has_collectible_traits(attributes):
+                raise HTTPException(status_code=409, detail="Коллекционный подарок нельзя продать за возврат")
             acquired_at = int(gift["acquired_at"] or 0)
             if now - acquired_at > SELL_WINDOW_SECONDS:
                 await db.rollback()

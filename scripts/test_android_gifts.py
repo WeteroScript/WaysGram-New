@@ -240,9 +240,19 @@ class AndroidGiftSourceChecks(unittest.TestCase):
     def test_gift_edit_menu_animates_both_directions_and_upgrade_respects_eligibility(self):
         container = self.source("ui/Gifts/ProfileGiftsContainer.java")
         self.assertIn('ItemOptions.makeOptions(parent.fragment, v)', container)
-        self.assertIn('ValueAnimator.ofFloat(waysGramCheckProgress, reordering ? 1f : 0f)', container)
+        self.assertIn('ValueAnimator.ofFloat(waysGramCheckProgress, active ? 1f : 0f)', container)
         controller = self.source("messenger/waysgram/WaysGramProfileGiftsController.java")
         self.assertIn('!isCollectible && !isListed && !isAuctioned && optBooleanLike(item, "can_upgrade")', controller)
+
+    def test_gift_batch_only_selects_eligible_regular_gifts_and_uses_internal_api(self):
+        page = self.source("ui/Gifts/ProfileGiftsContainer.java")
+        for fragment in ("GiftBatchMode.UPGRADE", "GiftBatchMode.SELL", "gift.gift instanceof TL_stars.TL_starGift",
+                         "WaysGramGiftSell.canSell(gift, currentAccount)", "if (!selectedGiftSerials.remove(serial))",
+                         "Общая стоимость:", '"/upgrade" : "/sell"', '"wg-batch-" + java.util.UUID.randomUUID()'):
+            self.assertIn(fragment, page)
+        cells = self.source("ui/Gifts/GiftSheet.java")
+        self.assertIn("setWaysGramBatchMark", cells)
+        self.assertIn("0xff34a853", cells)
 
     def test_shop_price_sort_is_persistent_and_uses_a_vector_icon(self):
         import xml.etree.ElementTree as ET
