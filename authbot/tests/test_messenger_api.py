@@ -8013,3 +8013,65 @@ def test_formatting_media_caption_round_trip_and_drop(api_env, monkeypatch) -> N
                 found = next(row for row in history if row['id'] == mid)
                 assert found['entities'] == changed.json()['entities'] and found['media_id'] == media_id
     run(scenario())
+
+
+def test_typing_active_snapshot_is_private_paginated_and_ephemeral(api_env) -> None:
+    path, _, _, app = api_env
+    for uid in (86931, 86932, 86933, 86934):
+        add_account(api_env, uid, f'typing_snapshot_{uid}')
+        add_session(path, uid, f'typing-snapshot-{uid}')
+    async def scenario():
+        h = lambda uid: {'Authorization': f'Bearer typing-snapshot-{uid}'}
+        async with await client_for(app) as client:
+            assert (await client.get('/api/typing/active')).status_code == 401
+            group = (await client.post('/api/groups', headers=h(86931), json={'title': 'Typing snapshot'})).json()['id']
+            for uid in (86932, 86933):
+                assert (await client.post(f'/api/groups/{group}/members', headers=h(86931), json={'telegram_id': uid})).status_code == 201
+            for uid, scope, peer in ((86932, 'dm', 86931), (86933, 'dm', 86931),
+                                      (86932, 'group', group), (86933, 'group', group),
+                                      (86934, 'dm', 86932)):
+                assert (await client.put('/api/typing', headers=h(uid), json={'scope': scope, 'peer_id': peer, 'is_typing': True})).status_code == 200
+            cursor = {}
+            combined = []
+            for _ in range(10):
+                r = await client.get('/api/typing/active', headers=h(86931), params={'limit': 1, **cursor})
+                assert r.status_code == 200, r.text
+                data = r.json()
+                assert len(data['typing_users']) <= 1 and data['server_time'] > 0
+                combined.extend(data['typing_users'])
+                if not data['has_more']:
+                    assert data['next_cursor'] is None
+                    break
+                c = data['next_cursor']
+                cursor = {'after_scope': c['scope'], 'after_peer_id': c['peer_id'], 'after_user_id': c['user_id']}
+            else:
+                pytest.fail('cursor did not terminate')
+            assert [(r['scope'], r['peer_id'], r['id']) for r in combined] == [
+                ('dm', 86932, 86932), ('dm', 86933, 86933), ('group', group, 86932), ('group', group, 86933)]
+            assert all(0 < r['expires_at'] - data['server_time'] <= 8 for r in combined)
+            assert 'phone' not in str(combined)
+            outsider = (await client.get('/api/typing/active', headers=h(86934))).json()['typing_users']
+            assert outsider == []
+            own = (await client.get('/api/typing/active', headers=h(86932))).json()['typing_users']
+            assert all(r['id'] != 86932 for r in own)
+            for params in ({'after_scope': 'bogus', 'after_peer_id': 1, 'after_user_id': 1},
+                           {'after_scope': 'dm'}, {'after_peer_id': 1}, {'limit': 501}):
+                assert (await client.get('/api/typing/active', headers=h(86931), params=params)).status_code in (400, 422)
+            # A new block hides a pre-existing active indicator immediately, not after its TTL.
+            assert (await client.post('/api/blocks', headers=h(86931), json={'user_id': 86932})).status_code == 201
+            visible = (await client.get('/api/typing/active', headers=h(86931))).json()['typing_users']
+            assert ('dm', 86932) not in [(r['scope'], r['id']) for r in visible]
+            assert ('group', 86932) in [(r['scope'], r['id']) for r in visible]  # group policy matches /api/typing
+            assert (await client.delete('/api/blocks/86932', headers=h(86931))).status_code == 200
+            assert (await client.post('/api/blocks', headers=h(86932), json={'user_id': 86931})).status_code == 201
+            visible = (await client.get('/api/typing/active', headers=h(86931))).json()['typing_users']
+            assert ('dm', 86932) not in [(r['scope'], r['id']) for r in visible]
+            assert (await client.delete(f'/api/groups/{group}/members/86933', headers=h(86931))).status_code == 200
+            visible = (await client.get('/api/typing/active', headers=h(86931))).json()['typing_users']
+            assert ('group', 86933) not in [(r['scope'], r['id']) for r in visible]
+            with db_split.sqlite_connect(path) as db:
+                db.execute("UPDATE typing_indicators SET expires_at=? WHERE user_telegram_id=?", (int(time.time()) - 1, 86933))
+                db.execute("UPDATE accounts SET is_banned=1 WHERE telegram_id=?", (86932,))
+            visible = (await client.get('/api/typing/active', headers=h(86931))).json()['typing_users']
+            assert visible == []
+    run(scenario())

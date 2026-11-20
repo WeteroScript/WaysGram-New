@@ -11126,6 +11126,59 @@ def build_messenger_router(
             await db.commit()
         return {"scope": scope, "peer_id": peer_id, "typing_users": rows, "count": len(rows)}
 
+    @router.get("/api/typing/active")
+    async def list_active_typing(
+        after_scope: str = "",
+        after_peer_id: int = Query(default=0, ge=0),
+        after_user_id: int = Query(default=0, ge=0),
+        limit: int = Query(default=200, ge=1, le=500),
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        """One access-filtered, keyset-paginated snapshot for native clients.
+
+        Typing is ephemeral and is never added to the persistent event log.
+        Each page rechecks block lists, membership and expiry.
+        """
+        user = await current_user(authorization)
+        uid = int(user["telegram_id"])
+        if after_scope not in ("", "dm", "group") or (
+            (after_scope == "" and (after_peer_id != 0 or after_user_id != 0))
+            or (after_scope != "" and (after_peer_id <= 0 or after_user_id <= 0))
+        ):
+            raise HTTPException(status_code=400, detail="Некорректный курсор индикатора набора")
+        now = int(time.time())
+        async with aiosqlite.connect(db_path()) as db:
+            db.row_factory = aiosqlite.Row
+            cur = await db.execute(
+                """SELECT * FROM (
+                    SELECT 'dm' AS scope, ti.user_telegram_id AS peer_id,
+                           a.telegram_id AS id, a.username, a.display_name, ti.updated_at, ti.expires_at
+                    FROM typing_indicators ti JOIN accounts a ON a.telegram_id=ti.user_telegram_id
+                    WHERE ti.scope='dm' AND ti.chat_id=? AND ti.user_telegram_id<>?
+                      AND ti.expires_at>? AND a.is_banned=0
+                      AND NOT EXISTS (SELECT 1 FROM blocked_users b WHERE
+                          (b.owner_telegram_id=? AND b.blocked_telegram_id=ti.user_telegram_id) OR
+                          (b.owner_telegram_id=ti.user_telegram_id AND b.blocked_telegram_id=?))
+                    UNION ALL
+                    SELECT 'group' AS scope, ti.chat_id AS peer_id,
+                           a.telegram_id AS id, a.username, a.display_name, ti.updated_at, ti.expires_at
+                    FROM typing_indicators ti JOIN accounts a ON a.telegram_id=ti.user_telegram_id
+                    JOIN group_members viewer ON viewer.group_id=ti.chat_id AND viewer.telegram_id=?
+                    JOIN group_members sender ON sender.group_id=ti.chat_id AND sender.telegram_id=ti.user_telegram_id
+                    WHERE ti.scope='group' AND ti.user_telegram_id<>? AND ti.expires_at>? AND a.is_banned=0
+                ) AS active
+                WHERE (scope,peer_id,id) > (?,?,?)
+                ORDER BY scope,peer_id,id LIMIT ?""",
+                (uid, uid, now, uid, uid, uid, uid, now,
+                 after_scope, after_peer_id, after_user_id, limit + 1),
+            )
+            rows = [dict(row) for row in await cur.fetchall()]
+        has_more = len(rows) > limit
+        rows = rows[:limit]
+        last = rows[-1] if has_more else None
+        return {"typing_users": rows, "server_time": now, "has_more": has_more,
+                "next_cursor": {"scope": last["scope"], "peer_id": last["peer_id"], "user_id": last["id"]} if last else None}
+
     @router.get("/api/events")
     async def message_changes(
         after_id: int | None = Query(default=None, ge=0),

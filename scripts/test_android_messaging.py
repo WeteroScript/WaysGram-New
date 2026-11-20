@@ -98,6 +98,29 @@ class NativeMessagingSourceChecks(unittest.TestCase):
         self.assertIn('request.message = message[0].toString()', helper)
         self.assertIn('json.optJSONArray("entities").length() == 0', media)
 
+    def test_typing_bridge_is_scoped_serial_and_ephemeral(self):
+        transport = self.source('tgnet/WaysGramTransport.java')
+        poller = self.source('tgnet/WaysGramPoller.java')
+        typing = self.source('tgnet/WaysGramTyping.java')
+        controller = self.source('messenger/MessagesController.java')
+        self.assertIn('request instanceof TLRPC.TL_messages_setTyping', transport)
+        self.assertIn('typingRequest ? typingQueue(account)', transport)
+        self.assertIn('newSingleThreadExecutor', transport)
+        self.assertIn('SystemClock.elapsedRealtime() - queuedAt > 8000', transport)
+        self.assertIn('!TextUtils.equals(reactionToken, WaysGramApi.getToken(account))', transport)
+        self.assertIn('WaysGramTyping.start(account)', poller)
+        self.assertIn('WaysGramTyping.stop(account)', poller)
+        self.assertIn('!org.telegram.tgnet.WaysGramTransport.ENABLED && user.status != null', controller)
+        for value in ('TL_inputPeerUser', 'TL_inputPeerChat', 'req.top_msg_id != 0',
+                      'TL_sendMessageTypingAction', 'TL_sendMessageCancelAction', 'WaysGramApi.request("PUT", "/api/typing", body, token, 30000)',
+                      '/api/typing/active?limit=500', 'MAX_PAGES = 40', 'next_cursor', 'after_scope',
+                      'generation[account] != expectedGeneration', 'TextUtils.equals(token, WaysGramApi.getToken(account))',
+                      'TL_updateUserTyping', 'TL_updateChatUserTyping', 'remaining > 8',
+                      'item.deadline <= SystemClock.elapsedRealtime()', 'if (complete)',
+                      'if (controller.getUser(item.user) == null)', 'newSingleThreadScheduledExecutor'):
+            self.assertIn(value, typing)
+        self.assertNotIn('TL_inputPeerChannel)', typing)
+
     def test_group_and_channel_load_old_pages(self):
         chats = self.source('tgnet/WaysGramChats.java')
         self.assertIn('serverGroupId(req.offset_id)', chats)
