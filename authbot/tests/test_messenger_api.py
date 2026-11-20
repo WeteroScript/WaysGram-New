@@ -1080,11 +1080,11 @@ def test_clear_direct_message_history_only_hides_messages_for_current_account(ap
             assert cleared_again.status_code == 200
             assert cleared_again.json()["deleted_count"] == 0
 
-            denied = await client.delete(
-                "/api/conversations/88901/messages?for=all",
+            invalid = await client.delete(
+                "/api/conversations/88901/messages?for=unknown",
                 headers=recipient,
             )
-            assert denied.status_code == 400
+            assert invalid.status_code == 400
 
     run(scenario())
 
@@ -6763,4 +6763,133 @@ def test_silent_single_group_and_channel_messages_persist_without_push(api_env, 
             assert first.status_code == retry.status_code == 201
             assert first.json()['id'] == retry.json()['id']
             assert (await client.post(channel_path, headers=headers, json={**data, 'silent': False})).status_code == 409
+    run(scenario())
+
+
+def test_clear_bounded_history_for_both_and_sync_all_sessions(api_env) -> None:
+    path, _, _, app = api_env
+    for uid in (88501, 88502, 88503):
+        add_account(api_env, uid, f'clear_both_{uid}')
+        add_session(path, uid, f'clear-both-{uid}')
+    add_session(path, 88501, 'clear-both-second-device')
+
+    async def scenario():
+        h = lambda n: {'Authorization': f'Bearer clear-both-{n}'}
+        other_device = {'Authorization': 'Bearer clear-both-second-device'}
+        async with await client_for(app) as client:
+            first = await client.post('/api/messages', headers=h(88501), json={'recipient_id': 88502, 'body': 'one'})
+            second = await client.post('/api/messages', headers=h(88502), json={'recipient_id': 88501, 'body': 'two'})
+            third = await client.post('/api/messages', headers=h(88501), json={'recipient_id': 88502, 'body': 'keep newer'})
+            unrelated = await client.post('/api/messages', headers=h(88501), json={'recipient_id': 88503, 'body': 'other conversation'})
+            assert all(r.status_code == 201 for r in (first, second, third, unrelated))
+            id1, id2, id3, id_other = (r.json()['id'] for r in (first, second, third, unrelated))
+            # A message hidden for the actor must still be removed for both.
+            assert (await client.delete(f'/api/messages/{id1}?for=me', headers=h(88502))).status_code == 200
+            cursor = (await client.get('/api/events', headers=h(88501))).json()['latest_id']
+            with db_split.sqlite_connect(path) as db:
+                now = int(time.time())
+                db.execute("INSERT INTO message_reactions(scope,chat_id,message_id,user_telegram_id,reaction,created_at) VALUES('dm',0,?,?,?,?)", (id1, 88501, '👍', now))
+                db.execute("INSERT INTO pinned_messages(scope,chat_id,message_id,pinned_by,created_at) VALUES('dm',0,?,?,?)", (id1, 88501, now))
+                for mid in (id1, id3, id_other):
+                    db.execute("INSERT INTO push_outbox(recipient_telegram_id,sender_telegram_id,title,body,data_json,created_at,next_attempt_at) VALUES(?,?,?,?,?,?,?)",
+                               (88502, 88501, 'title', 'body', json.dumps({'scope':'dm','message_id':str(mid)}), now, now))
+            cleared = await client.delete(f'/api/conversations/88501/messages?for=all&max_id={id2}', headers=h(88502))
+            assert cleared.status_code == 200, cleared.text
+            assert cleared.json()['status'] == 'cleared_for_all'
+            assert cleared.json()['deleted_count'] == 2
+            assert cleared.json()['max_id'] == id2
+            for headers, peer in ((h(88501), 88502), (other_device, 88502), (h(88502), 88501)):
+                history = await client.get(f'/api/messages?with={peer}', headers=headers)
+                assert [m['id'] for m in history.json()['messages']] == [id3]
+                changes = await client.get(f'/api/events?after_id={cursor}', headers=headers)
+                assert [e['message_id'] for e in changes.json()['events'] if e['kind'] == 'delete_for_all_sync'] == [id1, id2]
+            outsider = await client.get(f'/api/events?after_id={cursor}', headers=h(88503))
+            assert not any(e['kind'] == 'delete_for_all_sync' for e in outsider.json()['events'])
+            other_history = await client.get('/api/messages?with=88503', headers=h(88501))
+            assert [m['id'] for m in other_history.json()['messages']] == [id_other]
+            # Retry with the same bound cannot remove a later message.
+            again = await client.delete(f'/api/conversations/88501/messages?for=all&max_id={id2}', headers=h(88502))
+            assert again.json()['deleted_count'] == 0
+            assert (await client.delete('/api/conversations/88501/messages?for=all&max_id=0', headers=h(88502))).status_code == 422
+            assert (await client.delete('/api/conversations/123/messages?for=all', headers=h(88502))).status_code == 404
+            with db_split.sqlite_connect(path) as db:
+                assert db.execute('SELECT COUNT(*) FROM message_reactions WHERE message_id=?', (id1,)).fetchone()[0] == 0
+                assert db.execute('SELECT COUNT(*) FROM pinned_messages WHERE message_id=?', (id1,)).fetchone()[0] == 0
+                push_ids = {int(json.loads(row[0])['message_id']) for row in db.execute('SELECT data_json FROM push_outbox').fetchall()}
+                assert push_ids == {id3, id_other}
+    run(scenario())
+
+
+def test_clear_history_events_page_and_private_visibility(api_env) -> None:
+    path, _, _, app = api_env
+    for uid in (88401, 88402, 88403):
+        add_account(api_env, uid, f'clear_pages_{uid}')
+        add_session(path, uid, f'clear-pages-{uid}')
+    now = int(time.time())
+    with db_split.sqlite_connect(path) as db:
+        db.executemany('INSERT INTO messages(sender_telegram_id,recipient_telegram_id,body,created_at) VALUES(?,?,?,?)',
+                       [(88401, 88402, f'message {i}', now) for i in range(205)])
+        ids = [row[0] for row in db.execute('SELECT id FROM messages WHERE sender_telegram_id=? AND recipient_telegram_id=? ORDER BY id', (88401, 88402))]
+    async def scenario():
+        h = lambda n: {'Authorization': f'Bearer clear-pages-{n}'}
+        async with await client_for(app) as client:
+            cursor = (await client.get('/api/events', headers=h(88401))).json()['latest_id']
+            cleared = await client.delete('/api/conversations/88402/messages?for=me', headers=h(88401))
+            assert cleared.status_code == 200 and cleared.json()['deleted_count'] == 205
+            all_events = []
+            for _ in range(3):
+                page = (await client.get(f'/api/events?after_id={cursor}', headers=h(88401))).json()
+                all_events.extend(page['events'])
+                cursor = page['latest_id']
+                if not page['events']:
+                    break
+            assert [e['message_id'] for e in all_events if e['kind'] == 'delete_for_me'] == ids
+            recipient = await client.get('/api/messages?with=88401', headers=h(88402))
+            assert len(recipient.json()['messages']) == 100  # API page limit; partner was not cleared.
+            assert len((await client.get('/api/messages?with=88402', headers=h(88401))).json()['messages']) == 0
+            partner_events = (await client.get('/api/events?after_id=0', headers=h(88402))).json()['events']
+            assert not any(e['kind'] in ('delete_for_me', 'clear_for_me') for e in partner_events)
+    run(scenario())
+
+
+def test_clear_for_me_bound_and_saved_messages(api_env) -> None:
+    path, _, _, app = api_env
+    for uid in (88301, 88302):
+        add_account(api_env, uid, f'clear_bound_{uid}')
+        add_session(path, uid, f'clear-bound-{uid}')
+    async def scenario():
+        h = lambda n: {'Authorization': f'Bearer clear-bound-{n}'}
+        async with await client_for(app) as client:
+            first = (await client.post('/api/messages', headers=h(88302), json={'recipient_id': 88301, 'body': 'old'})).json()['id']
+            newer = (await client.post('/api/messages', headers=h(88302), json={'recipient_id': 88301, 'body': 'new'})).json()['id']
+            cleared = await client.delete(f'/api/conversations/88302/messages?for=me&max_id={first}', headers=h(88301))
+            assert cleared.status_code == 200 and cleared.json()['deleted_count'] == 1
+            assert [m['id'] for m in (await client.get('/api/messages?with=88302', headers=h(88301))).json()['messages']] == [newer]
+            assert [m['id'] for m in (await client.get('/api/messages?with=88301', headers=h(88302))).json()['messages']] == [first, newer]
+            saved = await client.post('/api/messages', headers=h(88301), json={'recipient_id': 88301, 'body': 'saved'})
+            assert saved.status_code == 201
+            self_clear = await client.delete('/api/conversations/88301/messages?for=all', headers=h(88301))
+            assert self_clear.status_code == 200 and self_clear.json()['deleted_count'] == 1
+            assert (await client.get('/api/messages?with=88301', headers=h(88301))).json()['messages'] == []
+    run(scenario())
+
+
+def test_clear_for_both_revokes_media_access_for_recipient(api_env) -> None:
+    path, _, _, app = api_env
+    for uid in (88201, 88202):
+        add_account(api_env, uid, f'clear_media_{uid}')
+        add_session(path, uid, f'clear-media-{uid}')
+    async def scenario():
+        h = lambda n: {'Authorization': f'Bearer clear-media-{n}'}
+        async with await client_for(app) as client:
+            image = await client.post('/api/media/images', headers={**h(88201), 'Content-Type': 'image/png'}, content=test_preview_png())
+            assert image.status_code == 201
+            sent = await client.post('/api/messages', headers=h(88201), json={'recipient_id': 88202, 'media_id': image.json()['id']})
+            assert sent.status_code == 201
+            url = image.json()['url']
+            assert (await client.get(url, headers=h(88202))).status_code == 200
+            clear = await client.delete('/api/conversations/88201/messages?for=all', headers=h(88202))
+            assert clear.status_code == 200 and clear.json()['deleted_count'] == 1
+            assert (await client.get(url, headers=h(88202))).status_code == 404
+            assert (await client.get(url, headers=h(88201))).status_code == 200  # owned file is retained
     run(scenario())

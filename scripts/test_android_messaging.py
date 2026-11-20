@@ -119,6 +119,22 @@ class NativeMessagingSourceChecks(unittest.TestCase):
         album = self.source('tgnet/WaysGramMessages.java')
         self.assertIn('body.put("silent", req.silent)', album)
 
+    def test_private_clear_history_is_bounded_and_events_are_synchronized(self):
+        transport = self.source('tgnet/WaysGramTransport.java')
+        messages = self.source('tgnet/WaysGramMessages.java')
+        poller = self.source('tgnet/WaysGramPoller.java')
+        self.assertIn('request instanceof TLRPC.TL_messages_deleteHistory', transport)
+        self.assertIn('WaysGramMessages.clearHistory(', transport)
+        clear = messages[messages.index('public static TLObject clearHistory('):messages.index('public static TLObject delete(', messages.index('public static TLObject clearHistory('))]
+        for value in ('TL_inputPeerUser', 'TL_inputPeerSelf', 'req.max_id <= 0',
+                      'req.min_date != 0', 'req.max_date != 0', 'req.revoke',
+                      '"/api/conversations/"', '"&max_id=" + req.max_id',
+                      'TL_messages_affectedHistory', 'result.offset = 0'):
+            self.assertIn(value, clear)
+        self.assertIn('kind.equals("delete_for_all_sync")', poller)
+        self.assertIn('kind.equals("delete_for_me")', poller)
+        self.assertIn('u.messages.add(messageId)', poller)
+
     def test_native_recordings_and_album_bridges(self):
         transport = self.source('tgnet/WaysGramTransport.java')
         media = self.source('tgnet/WaysGramMedia.java')

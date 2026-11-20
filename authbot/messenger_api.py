@@ -9901,52 +9901,86 @@ def build_messenger_router(
     async def clear_direct_message_history(
         peer_id: int,
         delete_for: str = Query(default="me", alias="for"),
+        max_id: int | None = Query(default=None, ge=1),
         authorization: str | None = Header(default=None),
     ) -> dict[str, Any]:
         user = await current_user(authorization)
         uid = int(user["telegram_id"])
         if peer_id <= 0:
             raise HTTPException(status_code=400, detail="Укажите корректного собеседника")
-        if delete_for != "me":
-            raise HTTPException(status_code=400, detail="Очистка истории поддерживает только for=me")
+        if delete_for not in ("me", "all"):
+            raise HTTPException(status_code=400, detail="for должен быть me или all")
         async with aiosqlite.connect(db_path()) as db:
             await db.execute("BEGIN IMMEDIATE")
-            cur = await db.execute(
-                "SELECT 1 FROM accounts WHERE telegram_id=?",
-                (peer_id,),
-            )
+            cur = await db.execute("SELECT 1 FROM accounts WHERE telegram_id=?", (peer_id,))
             if await cur.fetchone() is None:
                 await db.rollback()
                 raise HTTPException(status_code=404, detail="Собеседник не найден")
-            cur = await db.execute(
-                """SELECT COUNT(*),COALESCE(MAX(id),0) FROM messages
-                   WHERE ((sender_telegram_id=? AND recipient_telegram_id=?) OR
-                          (sender_telegram_id=? AND recipient_telegram_id=?))
-                     AND NOT EXISTS (
-                         SELECT 1 FROM message_hidden_for hidden
-                         WHERE hidden.message_id=messages.id AND hidden.telegram_id=?
-                     )""",
-                (uid, peer_id, peer_id, uid, uid),
+            # Capture exactly the affected IDs inside the write transaction. A bound
+            # prevents an old UI request from deleting newer messages.
+            await db.execute("CREATE TEMP TABLE clear_message_ids (id INTEGER PRIMARY KEY)")
+            visible_clause = ("AND NOT EXISTS (SELECT 1 FROM message_hidden_for h "
+                              "WHERE h.message_id=m.id AND h.telegram_id=?)") if delete_for == "me" else ""
+            params: list[Any] = [uid, peer_id, peer_id, uid]
+            if max_id is not None:
+                bound_clause = "AND m.id<=?"
+                params.append(max_id)
+            else:
+                bound_clause = ""
+            if delete_for == "me":
+                params.append(uid)
+            await db.execute(
+                """INSERT INTO clear_message_ids(id) SELECT m.id FROM messages m
+                   WHERE ((m.sender_telegram_id=? AND m.recipient_telegram_id=?) OR
+                          (m.sender_telegram_id=? AND m.recipient_telegram_id=?)) """
+                + bound_clause + " " + visible_clause, tuple(params),
             )
+            cur = await db.execute("SELECT COUNT(*),COALESCE(MAX(id),0) FROM clear_message_ids")
             count, latest_message_id = await cur.fetchone()
             now = int(time.time())
-            if int(count) > 0:
+            if count:
+                # One event per ID allows clients to invalidate exactly their cached
+                # messages (also when a clear spans multiple /api/events pages).
+                kind = "delete_for_me" if delete_for == "me" else "delete_for_all_sync"
                 await db.execute(
-                    """INSERT OR IGNORE INTO message_hidden_for(message_id,telegram_id,hidden_at)
-                       SELECT id,?,? FROM messages
-                       WHERE ((sender_telegram_id=? AND recipient_telegram_id=?) OR
-                              (sender_telegram_id=? AND recipient_telegram_id=?))""",
-                    (uid, now, uid, peer_id, peer_id, uid),
+                    """INSERT INTO message_events(scope,chat_id,user_a,user_b,message_id,kind,actor_id,created_at)
+                       SELECT 'dm',0,?,?,id,?,?,? FROM clear_message_ids ORDER BY id""",
+                    (uid, peer_id, kind, uid, now),
                 )
-                await record_event(
-                    db, "dm", int(latest_message_id), "clear_for_me", uid,
-                    user_a=uid, user_b=peer_id,
+                # Remove not-yet-dispatched direct-message push jobs for affected
+                # recipients. A push already leased/sent cannot be recalled.
+                recipient_filter = "AND recipient_telegram_id=?" if delete_for == "me" else ""
+                push_params: tuple[Any, ...] = (uid,) if delete_for == "me" else ()
+                await db.execute(
+                    """DELETE FROM push_outbox WHERE
+                       CASE WHEN json_valid(data_json) THEN
+                           json_extract(data_json,'$.scope')='dm' AND
+                           CAST(json_extract(data_json,'$.message_id') AS INTEGER)
+                               IN (SELECT id FROM clear_message_ids)
+                       ELSE 0 END """ + recipient_filter, push_params,
                 )
+                if delete_for == "me":
+                    await db.execute(
+                        """INSERT OR IGNORE INTO message_hidden_for(message_id,telegram_id,hidden_at)
+                           SELECT id,?,? FROM clear_message_ids""", (uid, now),
+                    )
+                    # Keep the original aggregate event for API compatibility.
+                    await record_event(db, "dm", int(latest_message_id), "clear_for_me", uid,
+                                       user_a=uid, user_b=peer_id)
+                else:
+                    # These tables do not all have foreign keys and SQLite
+                    # connections may have FK enforcement disabled.
+                    for table in ("message_hidden_for", "message_gifts", "message_contacts", "message_locations"):
+                        await db.execute(f"DELETE FROM {table} WHERE message_id IN (SELECT id FROM clear_message_ids)")
+                    for table in ("message_forward_sources", "message_reactions", "pinned_messages"):
+                        await db.execute(f"DELETE FROM {table} WHERE scope='dm' AND message_id IN (SELECT id FROM clear_message_ids)")
+                    await db.execute("DELETE FROM messages WHERE id IN (SELECT id FROM clear_message_ids)")
             await db.commit()
         return {
-            "status": "cleared_for_me",
+            "status": "cleared_for_me" if delete_for == "me" else "cleared_for_all",
             "peer_id": peer_id,
             "deleted_count": int(count),
+            "max_id": int(latest_message_id),
         }
 
     @router.put("/api/messages/{message_id}")
@@ -10422,7 +10456,8 @@ def build_messenger_router(
                        FROM message_events
                        WHERE id>? AND (
                            (kind IN ('delete_for_me','clear_for_me') AND actor_id=?)
-                           OR (kind NOT IN ('delete_for_me','clear_for_me') AND actor_id<>?)
+                           OR kind='delete_for_all_sync'
+                           OR (kind NOT IN ('delete_for_me','clear_for_me','delete_for_all_sync') AND actor_id<>?)
                        ) AND (
                            (scope='dm' AND (user_a=? OR user_b=?))
                            OR (scope='group' AND chat_id IN (SELECT group_id FROM group_members WHERE telegram_id=?))
