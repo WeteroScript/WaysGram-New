@@ -316,9 +316,15 @@ def test_admin_can_edit_gift_catalog_and_moderate_channels(tmp_path: Path, monke
         supply = conn.execute("SELECT supply FROM gift_catalog WHERE id=?", (gift_id,)).fetchone()[0]
     assert supply == 9
 
-    grant_callback = FakeAdminCallback(f"wgadm:grantgift:{bot_module.ADMIN_ID}:{gift_id}")
+    async def no_telegram_gifts():
+        return []
+    monkeypatch.setattr(bot_module, "telegram_gift_rows", no_telegram_gifts)
+    grant_callback = FakeAdminCallback(f"wgadm:grant:{bot_module.ADMIN_ID}")
     run(bot_module.admin_callback(grant_callback))
     assert grant_callback.answered
+    token = bot_module.ADMIN_INPUT[bot_module.ADMIN_ID][1]["token"]
+    run(bot_module.admin_callback(FakeAdminCallback(f"wgadm:gsel:{token}:0")))
+    run(bot_module.admin_text_input(FakeAdminMessage("1")))
     with db_split.sqlite_connect(path) as conn:
         serial = conn.execute(
             "SELECT serial_number FROM user_gifts WHERE owner_telegram_id=?",

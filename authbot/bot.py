@@ -32,7 +32,7 @@ from otp_webhook import OtpWebhookError, parse_telesrv_delivery
 from pydantic import BaseModel, Field
 import uvicorn
 from cryptography.fernet import Fernet, InvalidToken
-from messenger_api import build_messenger_router, init_messenger_storage, sync_telegram_gifts
+from messenger_api import build_messenger_router, init_messenger_storage, sync_telegram_gifts, _telegram_gift_metadata
 from telegram_mtproto import TelegramMTProtoGiftCatalog
 
 # All secrets are read only from hosting environment variables.
@@ -1591,6 +1591,99 @@ async def admin_account_card(telegram_id: int) -> tuple[str, InlineKeyboardMarku
         [("⬅️ В меню", "wgadm:home")],
     ])
 
+GRANT_PAGE_SIZE = 10
+GRANT_MAX_QUANTITY = 100
+
+
+async def admin_grant_catalog() -> list[dict[str, Any]]:
+    """Both gift catalogues, including Telegram gifts not currently in the store."""
+    rows = await telegram_gift_rows()
+    gifts = [{"source": "telegram", "id": str(row["id"]), "name": str(row["title"])} for row in rows]
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute("SELECT id,name FROM gift_catalog ORDER BY id")
+        gifts.extend({"source": "legacy", "id": str(row["id"]), "name": str(row["name"])}
+                     for row in await cur.fetchall())
+    return gifts
+
+
+def admin_grant_page(state: dict[str, Any], page: int) -> tuple[str, InlineKeyboardMarkup]:
+    gifts = state["gifts"]
+    last = max(0, (len(gifts) - 1) // GRANT_PAGE_SIZE)
+    page = min(max(0, page), last)
+    token = state["token"]
+    keyboard = [[(f"{'🎁' if gift['source'] == 'telegram' else '📦'} {gift['name']}"[:64],
+                  f"wgadm:gsel:{token}:{index}")]
+                for index, gift in enumerate(gifts) if page * GRANT_PAGE_SIZE <= index < (page + 1) * GRANT_PAGE_SIZE]
+    nav = []
+    if page: nav.append(("⬅️ Назад", f"wgadm:gpage:{token}:{page - 1}"))
+    if page < last: nav.append(("Вперёд ➡️", f"wgadm:gpage:{token}:{page + 1}"))
+    if nav: keyboard.append(nav)
+    keyboard.append([("⬅️ К аккаунту", f"wgadm:user:{state['user_id']}")])
+    text = (f"Выберите подарок · страница {page + 1} из {last + 1} · всего {len(gifts)}.\n"
+            "Административная выдача бесплатна и не меняет остатки магазина WaysGram. "
+            "Это внутренние подарки WaysGram, не отправка в Telegram.")
+    if not gifts: text += "\n\nКаталог пуст: сначала загрузите подарки в AuthBot."
+    return text, admin_keyboard(keyboard)
+
+
+async def admin_grant_gifts(actor_id: int, payload: dict[str, Any], quantity: int) -> None:
+    """Mint gifts into the selected WaysGram inventory in one audited transaction."""
+    if isinstance(quantity, bool) or not isinstance(quantity, int) or not 1 <= quantity <= GRANT_MAX_QUANTITY:
+        raise ValueError("Некорректное количество подарков.")
+    from_id, user_id, gift = SYSTEM_ACCOUNT_ID, int(payload["user_id"]), payload["gift"]
+    now = int(time.time())
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        await db.execute("BEGIN IMMEDIATE")
+        cur = await db.execute("SELECT 1 FROM accounts WHERE telegram_id=?", (user_id,))
+        if not await cur.fetchone():
+            raise ValueError("Аккаунт больше не найден. Начните выдачу заново.")
+        source, gift_id = gift["source"], str(gift["id"])
+        name, emoji, metadata = "", "", {}
+        legacy_id = None
+        if source == "telegram":
+            cur = await db.execute("""SELECT 1 FROM telegram_gift_catalog WHERE gift_id=?
+                UNION ALL SELECT 1 FROM telegram_mtproto_gift_catalog WHERE gift_id=?
+                UNION ALL SELECT 1 FROM telegram_gift_prices WHERE gift_id=? LIMIT 1""", (gift_id, gift_id, gift_id))
+            if not await cur.fetchone():
+                raise ValueError("Подарок больше не найден в каталоге. Начните выдачу заново.")
+            metadata = await _telegram_gift_metadata(db, gift_id) or {
+                "id": gift_id, "source": "telegram", "title": gift["name"],
+                "emoji": "", "sticker_available": False, "sticker": {},
+            }
+            name = str(metadata.get("title") or gift["name"])
+            emoji = str(metadata.get("emoji") or "")
+        elif source == "legacy":
+            legacy_id = int(gift_id)
+            cur = await db.execute("SELECT name FROM gift_catalog WHERE id=?", (legacy_id,))
+            row = await cur.fetchone()
+            if not row: raise ValueError("Подарок больше не найден в каталоге. Начните выдачу заново.")
+            name = str(row["name"])
+        else:
+            raise ValueError("Подарок не найден. Начните выдачу заново.")
+        snapshot = json.dumps(metadata, ensure_ascii=False, separators=(",", ":"))
+        for _ in range(quantity):
+            serial = "WG-" + secrets.token_hex(6).upper()
+            await db.execute("""INSERT INTO user_gifts
+                (serial_number,gift_id,telegram_gift_id,gift_name,gift_emoji,telegram_gift_metadata_json,
+                 owner_telegram_id,acquired_at,purchase_asset,purchase_price)
+                VALUES(?,?,?,?,?,?,?,?,'stars',0)""",
+                (serial, legacy_id, gift_id if source == "telegram" else "", name, emoji, snapshot, user_id, now))
+            await db.execute("""INSERT INTO gift_transactions
+                (event_type,serial_number,gift_name,from_telegram_id,to_telegram_id,created_at)
+                VALUES('admin_grant',?,?,?,?,?)""", (serial, name, from_id, user_id, now))
+        await db.execute("""INSERT INTO admin_logs(admin_id,action,target,details,created_at)
+            VALUES(?,?,?,?,?)""", (actor_id, "gift_grant", str(user_id),
+            f"source={source}; gift_id={gift_id}; name={name}; quantity={quantity}; store_stock=unchanged", now))
+        cur = await db.execute("INSERT INTO messages(sender_telegram_id,recipient_telegram_id,body,created_at) VALUES(?,?,?,?)",
+            (from_id, user_id, f"Вам выдан подарок WaysGram: {name} × {quantity}. Найти его можно в подарках профиля.", now))
+        await db.execute("""INSERT INTO message_events(scope,chat_id,user_a,user_b,message_id,kind,actor_id,created_at)
+            VALUES('dm',0,?,?,?,'new_message',?,?)""",
+            (min(from_id, user_id), max(from_id, user_id), int(cur.lastrowid), from_id, now))
+        await db.commit()
+
+
 async def admin_db_accounts_page() -> tuple[str, InlineKeyboardMarkup]:
     async with aiosqlite.connect(DATABASE_PATH) as db:
         db.row_factory = aiosqlite.Row
@@ -1694,12 +1787,19 @@ class GiftCountOutOfRange(ValueError):
     """The source catalogue no longer contains the requested number of entries."""
 
 
-async def admin_add_first_telegram_gifts(limit: int) -> tuple[int, int]:
-    """Copy the first `limit` active source entries, in Telegram catalogue order.
+class GiftPriceRequired(ValueError):
+    """Some selected gifts have no positive source or existing WaysGram price."""
 
-    Validate against the current source inside the write transaction, since another sync
-    may have changed its length after the administrator saw the prompt.
+
+async def admin_add_first_telegram_gifts(limit: int, fallback_price: int | None = None) -> tuple[int, int]:
+    """Publish the first `limit` source entries as internal WaysGram offers.
+
+    Telegram-sold-out items receive independent unlimited WaysGram stock, not
+    Telegram inventory. A missing price requires an explicit administrator input.
+    The entire batch is validated and committed atomically.
     """
+    if fallback_price is not None and (isinstance(fallback_price, bool) or not 1 <= fallback_price <= 1_000_000_000):
+        raise ValueError("Некорректная цена")
     async with aiosqlite.connect(DATABASE_PATH) as db:
         db.row_factory = aiosqlite.Row
         await db.execute("BEGIN IMMEDIATE")
@@ -1730,24 +1830,34 @@ async def admin_add_first_telegram_gifts(limit: int) -> tuple[int, int]:
         rows = await cur.fetchall()
         if not rows:
             return 0, 0
-        now = int(time.time())
-        unlimited_count = 0
+        # Resolve every price before changing anything, including retries after
+        # a catalogue refresh while the admin was entering a fallback price.
+        prepared = []
+        missing_price = 0
         for row in rows:
             gift_id = str(row["gift_id"])
-            price = max(0, int(row["stars"] or 0))
-            cur = await db.execute(
-                "SELECT sold FROM telegram_gift_prices WHERE gift_id=?",
-                (gift_id,),
-            )
+            cur = await db.execute("SELECT sold,price_stars FROM telegram_gift_prices WHERE gift_id=?", (gift_id,))
             old = await cur.fetchone()
-            sold = max(0, int(old[0])) if old else 0
-            if not bool(row["limited"]):
-                supply = UNLIMITED_GIFT_SUPPLY
+            sold = max(0, int(old["sold"])) if old else 0
+            source_price = max(0, int(row["stars"] or 0))
+            price = source_price or (max(0, int(old["price_stars"])) if old else 0) or (fallback_price or 0)
+            if not price:
+                missing_price += 1
+            prepared.append((row, gift_id, price, sold))
+        if missing_price:
+            raise GiftPriceRequired(missing_price)
+
+        now = int(time.time())
+        unlimited_count = 0
+        for row, gift_id, price, sold in prepared:
+            remaining = max(0, int(row["remaining_stock"] or 0))
+            if not bool(row["limited"]) or bool(row["sold_out"]) or remaining == 0:
+                # WaysGram items are internal; do not mistake Telegram's exhausted
+                # inventory for the administrator's independent WaysGram stock.
+                supply = max(UNLIMITED_GIFT_SUPPLY, sold + 1)
                 unlimited_count += 1
-            elif bool(row["sold_out"]):
-                supply = sold
             else:
-                supply = max(0, int(row["remaining_stock"] or 0)) + sold
+                supply = remaining + sold
             await db.execute(
                 """INSERT INTO telegram_gift_prices(gift_id,price_stars,supply,sold,updated_at)
                    VALUES(?,?,?,?,?)
@@ -2142,7 +2252,9 @@ async def admin_callback(callback: CallbackQuery) -> None:
     action = parts[1]
     await callback.answer()
     # Navigating away from the quantity prompt cancels it, including via older menus.
-    if ADMIN_INPUT.get(actor_id, (None,))[0] == "db_gift_count":
+    if ADMIN_INPUT.get(actor_id, (None,))[0] in {"db_gift_count", "db_gift_fallback_price"}:
+        ADMIN_INPUT.pop(actor_id, None)
+    if ADMIN_INPUT.get(actor_id, (None,))[0] in {"grant_select", "grant_count"} and action not in {"gpage", "gsel"}:
         ADMIN_INPUT.pop(actor_id, None)
 
     if action in {"addadmin", "addadminconfirm", "admins", "adminremoveask", "adminremove", "admincancel"}:
@@ -2530,7 +2642,8 @@ async def admin_callback(callback: CallbackQuery) -> None:
     elif action == "dbgifts":
         await callback.message.answer(
             "Управление подарками в магазине WaysGram.\n"
-            "Добавление копирует исходную цену Stars и доступный остаток из активного каталога Telegram.\n"
+            "Добавление берёт цены и доступные остатки из активного каталога Telegram. "
+            "Для распроданных там подарков создаётся неограниченный внутренний остаток WaysGram.\n"
             "Скрытие влияет только на магазин; инвентари пользователей и история сохраняются.",
             reply_markup=admin_keyboard([
                 [("➕ Добавить все подарки", "wgadm:dbgiftaddall")],
@@ -2553,7 +2666,8 @@ async def admin_callback(callback: CallbackQuery) -> None:
         ADMIN_INPUT[actor_id] = ("db_gift_count", object())
         await callback.message.answer(
             f"Сколько первых подарков добавить в магазин? Введите целое число от 1 до {total}.\n"
-            "Порядок — как в активном каталоге Telegram. Уже добавленные подарки вне выбранного диапазона не изменятся.",
+            "Порядок — как в активном каталоге Telegram. Уже добавленные подарки вне выбранного диапазона не изменятся.\n"
+            "Распроданным в Telegram подаркам будет назначен неограниченный остаток WaysGram; это не покупка в Telegram.",
             reply_markup=admin_keyboard([[("Отмена", "wgadm:dbgifts")]]),
         )
     elif action == "dbgifthideask":
@@ -2624,7 +2738,7 @@ async def admin_callback(callback: CallbackQuery) -> None:
             reply_markup=admin_keyboard([[("⬅️ В меню", "wgadm:home")]]))
     elif action == "accounts":
         ADMIN_INPUT[actor_id] = ("search", None)
-        await callback.message.answer("Отправьте Telegram ID или международный виртуальный номер (+код страны).")
+        await callback.message.answer("Отправьте @username аккаунта WaysGram, Telegram ID или международный виртуальный номер (+код страны).")
     elif action == "gifts":
         page = 0
         if len(parts) >= 3:
@@ -3148,43 +3262,38 @@ async def admin_callback(callback: CallbackQuery) -> None:
         user_id = int(parts[2])
         ADMIN_INPUT[actor_id] = ("transfer_serial", user_id)
         await callback.message.answer(f"Введите серийный номер подарка, который сейчас принадлежит аккаунту {user_id}.")
-    elif action == "grant" and len(parts) == 3:
+    elif action == "grant" and len(parts) == 3 and parts[2].isdigit():
         user_id = int(parts[2])
-        async with aiosqlite.connect(DATABASE_PATH) as db:
-            db.row_factory = aiosqlite.Row
-            cur = await db.execute("SELECT id,name,supply FROM gift_catalog WHERE supply>0 ORDER BY id")
-            rows = await cur.fetchall()
-        if not rows:
-            await callback.message.answer("Нет подарков с доступным остатком.")
+        if not await admin_account_card(user_id):
+            await callback.message.answer("Аккаунт не найден.")
             return
-        keyboard = admin_keyboard([[(f"{r['name']} · {r['supply']}", f"wgadm:grantgift:{user_id}:{r['id']}")] for r in rows] +
-            [[("⬅️ Назад", f"wgadm:user:{user_id}")]])
-        await callback.message.answer("Выберите подарок:", reply_markup=keyboard)
-    elif action == "grantgift" and len(parts) == 4:
-        user_id, gift_id, now = int(parts[2]), int(parts[3]), int(time.time())
-        async with aiosqlite.connect(DATABASE_PATH) as db:
-            await db.execute("BEGIN IMMEDIATE")
-            cur = await db.execute("SELECT name,supply FROM gift_catalog WHERE id=?", (gift_id,))
-            gift = await cur.fetchone()
-            cur = await db.execute("SELECT 1 FROM accounts WHERE telegram_id=?", (user_id,))
-            exists = await cur.fetchone()
-            if not gift or gift[1] < 1 or not exists:
-                await db.rollback()
-                await callback.message.answer("Не удалось выдать подарок: проверьте аккаунт и остаток.")
-                return
-            serial = "WG-" + secrets.token_hex(6).upper()
-            await db.execute("UPDATE gift_catalog SET supply=supply-1 WHERE id=? AND supply>0", (gift_id,))
-            await db.execute("INSERT INTO user_gifts(serial_number,gift_id,gift_name,owner_telegram_id,acquired_at) VALUES(?,?,?,?,?)",
-                (serial,gift_id,gift[0],user_id,now))
-            await db.execute("INSERT INTO gift_transactions(event_type,serial_number,gift_name,from_telegram_id,to_telegram_id,created_at) VALUES('admin_grant',?,?,NULL,?,?)",
-                (serial,gift[0],user_id,now))
-            await db.execute("INSERT INTO admin_logs(admin_id,action,target,details,created_at) VALUES(?,?,?,?,?)",
-                (actor_id,"gift_grant",str(user_id),f"{gift[0]} {serial}",now))
-            await db.commit()
-        await callback.message.answer(f"Подарок выдан. Серийный номер: {serial}")
-        card = await admin_account_card(user_id)
-        if card:
-            await callback.message.answer(card[0], reply_markup=card[1])
+        gifts = await admin_grant_catalog()
+        state = {"user_id": user_id, "gifts": gifts, "token": secrets.token_hex(6), "expires": time.time() + 900}
+        ADMIN_INPUT[actor_id] = ("grant_select", state)
+        text, keyboard = admin_grant_page(state, 0)
+        await callback.message.answer(text, reply_markup=keyboard)
+    elif action in {"gpage", "gsel"} and len(parts) == 4:
+        current = ADMIN_INPUT.get(actor_id)
+        if (not current or current[0] != "grant_select" or current[1]["token"] != parts[2]
+                or time.time() > current[1]["expires"] or not parts[3].isascii() or not parts[3].isdigit()):
+            await callback.message.answer("Выбор устарел. Откройте выдачу подарков заново.")
+            return
+        state = current[1]
+        index = int(parts[3])
+        if action == "gpage":
+            text, keyboard = admin_grant_page(state, index)
+            await callback.message.answer(text, reply_markup=keyboard)
+        elif index >= len(state["gifts"]):
+            await callback.message.answer("Подарок не найден. Откройте список заново.")
+        else:
+            gift = state["gifts"][index]
+            ADMIN_INPUT[actor_id] = ("grant_count", {"user_id": state["user_id"], "gift": gift, "expires": state["expires"]})
+            await callback.message.answer(
+                f"Подарок: {gift['name']}\nПолучатель: аккаунт {state['user_id']}.\n"
+                f"Введите количество от 1 до {GRANT_MAX_QUANTITY}. Бесплатная выдача не изменит остаток магазина.",
+                reply_markup=admin_keyboard([[("Отмена", f"wgadm:user:{state['user_id']}")]]))
+    elif action == "grantgift":
+        await callback.message.answer("Эта кнопка устарела. Откройте выдачу подарков в карточке аккаунта.")
     elif action == "usergifts" and len(parts) == 3:
         user_id = int(parts[2])
         async with aiosqlite.connect(DATABASE_PATH) as db:
@@ -3209,17 +3318,30 @@ async def admin_text_input(message: Message) -> None:
         return
     kind, payload = state
     value = (message.text or "").strip()
-    if kind == "db_gift_count":
-        if not re.fullmatch(r"[0-9]{1,9}", value) or int(value) < 1:
+    if kind in {"db_gift_count", "db_gift_fallback_price"}:
+        if not re.fullmatch(r"[0-9]{1,10}", value) or int(value) < 1:
+            await message.answer("Введите целое положительное число или нажмите «Отмена».")
+            return
+        if kind == "db_gift_fallback_price" and int(value) > 1_000_000_000:
+            await message.answer("Введите цену от 1 до 1000000000 Stars или нажмите «Отмена».")
+            return
+        if kind == "db_gift_count" and len(value) > 9:
             await message.answer("Введите целое положительное число подарков или нажмите «Отмена».")
             return
-        # Authentication above may yield; another message or a menu action can consume
-        # this exact prompt before we resume. Claim it without another await.
         if ADMIN_INPUT.get(actor_id) is not state:
             return
         ADMIN_INPUT.pop(actor_id, None)
+        count_to_add = int(value) if kind == "db_gift_count" else int(payload)
+        fallback = int(value) if kind == "db_gift_fallback_price" else None
         try:
-            count, unlimited_count = await admin_add_first_telegram_gifts(int(value))
+            count, unlimited_count = await admin_add_first_telegram_gifts(count_to_add, fallback)
+        except GiftPriceRequired as exc:
+            ADMIN_INPUT.setdefault(actor_id, ("db_gift_fallback_price", count_to_add))
+            await message.answer(
+                f"У {int(exc.args[0])} подарков нет цены. Введите общую цену для них от 1 до 1000000000 внутренних Stars. "
+                "Остальные сохранят цену источника или уже заданную цену. Пока ничего не добавлено.",
+                reply_markup=admin_keyboard([[("Отмена", "wgadm:dbgifts")]]))
+            return
         except GiftCountOutOfRange as exc:
             total = int(exc.args[0])
             if total:
@@ -3230,14 +3352,14 @@ async def admin_text_input(message: Message) -> None:
             return
         except Exception as exc:
             log.exception("Admin bulk gift import failed (%s)", type(exc).__name__)
-            ADMIN_INPUT.setdefault(actor_id, ("db_gift_count", object()))
+            ADMIN_INPUT.setdefault(actor_id, state)
             await message.answer("Не удалось добавить подарки. Попробуйте ещё раз или нажмите «Отмена».")
             return
-        await admin_log("db_gifts_add_all", "telegram_catalog", f"count={count}; unlimited={unlimited_count}", actor_id=actor_id)
+        await admin_log("db_gifts_add_all", "telegram_catalog", f"count={count}; unlimited={unlimited_count}; fallback_price={fallback or 0}", actor_id=actor_id)
         await message.answer(
             f"Добавлено/обновлено первых подарков: {count}.\n"
-            f"Без ограничения остатка: {unlimited_count}.\n"
-            "Цены и остатки взяты из каталога Telegram. Распроданные подарки могут не отображаться в магазине.",
+            f"С неограниченным остатком WaysGram: {unlimited_count}.\n"
+            "Все выбранные подарки доступны в магазине WaysGram. Остаток WaysGram не означает наличие в Telegram.",
             reply_markup=admin_keyboard([[("К управлению подарками", "wgadm:dbgifts")]]),
         )
     elif kind == "add_admin":
@@ -3328,22 +3450,58 @@ async def admin_text_input(message: Message) -> None:
         if card:
             await message.answer(card[0], reply_markup=card[1])
     elif kind == "search":
-        ADMIN_INPUT.pop(actor_id, None)
+        if not value or len(value) > 128:
+            await message.answer("Введите @username WaysGram, Telegram ID или виртуальный номер.")
+            return
+        number = normalize_admin_number(value)
+        username = value.removeprefix("@").lower()
         async with aiosqlite.connect(DATABASE_PATH) as db:
             db.row_factory = aiosqlite.Row
-            if value.isdigit():
-                cur = await db.execute("SELECT telegram_id,virtual_number,username,display_name,stars,grams,is_banned FROM accounts WHERE telegram_id=? OR virtual_number=?",
-                    (int(value), "+1" + value[-10:]))
+            if value.isascii() and value.isdigit() and len(value) <= 18:
+                cur = await db.execute("SELECT * FROM accounts WHERE telegram_id=? OR virtual_number=? LIMIT 20", (int(value), number or ""))
+            elif value.startswith("+") or number:
+                cur = await db.execute("SELECT * FROM accounts WHERE virtual_number=? LIMIT 20", (number or "",))
             else:
-                cur = await db.execute("SELECT telegram_id,virtual_number,username,display_name,stars,grams,is_banned FROM accounts WHERE virtual_number=? OR username LIKE ? OR display_name LIKE ?",
-                    (value, f"%{value.lstrip('@')}%", f"%{value}%"))
+                cur = await db.execute("SELECT * FROM accounts WHERE lower(username)=? COLLATE NOCASE LIMIT 20", (username,))
             rows = await cur.fetchall()
+            if not rows and not value.startswith("@") and not number and not value.isdigit():
+                # Keep the existing display-name search; do not treat SQL wildcard
+                # characters in an administrator's input as a match-all pattern.
+                escaped = value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+                cur = await db.execute("SELECT * FROM accounts WHERE display_name LIKE ? ESCAPE '\\' LIMIT 20", (f"%{escaped}%",))
+                rows = await cur.fetchall()
         if not rows:
-            await message.answer("Аккаунт не найден. Пользователь должен сначала получить виртуальный номер.")
+            await message.answer("Аккаунт не найден. Проверьте username WaysGram, ID или номер и попробуйте ещё раз.")
             return
+        ADMIN_INPUT.pop(actor_id, None)
         for row in rows:
             label = f"TG {row['telegram_id']} · {row['virtual_number']} · @{row['username'] or '—'} · {row['display_name'] or '—'} · Stars {row['stars']} · Gram {row['grams']}"
             await message.answer(label, reply_markup=admin_keyboard([[("Открыть аккаунт", f"wgadm:user:{row['telegram_id']}")]]))
+    elif kind == "grant_count":
+        if time.time() > payload["expires"]:
+            ADMIN_INPUT.pop(actor_id, None)
+            await message.answer("Время выбора истекло. Откройте выдачу подарков заново.")
+            return
+        if not re.fullmatch(r"[0-9]{1,3}", value) or not 1 <= int(value) <= GRANT_MAX_QUANTITY:
+            await message.answer(f"Введите целое число от 1 до {GRANT_MAX_QUANTITY} или нажмите «Отмена».")
+            return
+        # Only one message can consume this prompt, even when updates arrive concurrently.
+        if ADMIN_INPUT.get(actor_id) is not state:
+            return
+        ADMIN_INPUT.pop(actor_id, None)
+        try:
+            await admin_grant_gifts(actor_id, payload, int(value))
+        except ValueError as exc:
+            await message.answer(str(exc))
+            return
+        except Exception:
+            log.exception("Admin gift grant failed")
+            await message.answer("Не удалось выдать подарки. Откройте выдачу заново и повторите.")
+            return
+        await message.answer(f"Выдано подарков: {value} · {payload['gift']['name']}. Они добавлены в профиль аккаунта; остатки магазина не изменены.")
+        card = await admin_account_card(int(payload["user_id"]))
+        if card:
+            await message.answer(card[0], reply_markup=card[1])
     elif kind == "credit":
         try:
             amount = int(value)
