@@ -811,6 +811,19 @@ def test_scheduled_direct_messages_send_once_and_can_be_cancelled(api_env) -> No
                 assert moved.json()["scheduled_at"] == recurring_time
                 assert moved.json()["repeat_interval_seconds"] == 86400
                 assert moved.json()["silent"]
+                recurring_url = f"/api/messages/scheduled/{recurring.json()['id']}"
+                for invalid in (None, True, 14 * 86400):
+                    response = await client.patch(recurring_url, headers=sender, json={
+                        "scheduled_at": recurring_time, "repeat_interval_seconds": invalid,
+                    })
+                    assert response.status_code == 400
+                for repeat in (604800, 0, 86400):
+                    response = await client.patch(recurring_url, headers=sender, json={
+                        "scheduled_at": recurring_time, "repeat_interval_seconds": repeat,
+                    })
+                    assert response.status_code == 200
+                    assert response.json()["repeat_interval_seconds"] == repeat
+                    assert response.json()["silent"]
                 with db_split.sqlite_connect(path) as db:
                     db.execute(
                         "UPDATE scheduled_messages SET scheduled_at=? WHERE id=?",

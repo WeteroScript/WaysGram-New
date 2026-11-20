@@ -35,6 +35,13 @@ class NativeMessagingSourceChecks(unittest.TestCase):
         self.assertIn('TL_updateNewScheduledMessage', scheduled)
         self.assertIn('new org.telegram.tgnet.WaysGramScheduled.RescheduleRequest()', chat)
 
+    def test_native_repeat_picker_matches_the_server_intervals(self):
+        alerts = self.source('ui/Components/AlertsCreator.java')
+        scheduled = self.source('tgnet/WaysGramScheduled.java')
+        self.assertIn('final int repeatCount = waysGram ? 3 : repeatValues.length', alerts)
+        self.assertIn('if (!waysGram && !UserConfig.getInstance(UserConfig.selectedAccount).isPremium())', alerts)
+        self.assertIn('body.put("repeat_interval_seconds", req.schedule_repeat_period)', scheduled.split('public static TLObject reschedule', 1)[1])
+
     def test_native_scheduled_messages_cannot_enter_ordinary_text_editor(self):
         chat = self.source('ui/ChatActivity.java')
         editor = chat.split('private void startEditingMessageObject(MessageObject messageObject, boolean asSuggestion)', 1)[1]

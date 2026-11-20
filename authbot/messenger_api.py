@@ -9927,6 +9927,9 @@ def build_messenger_router(
             raise HTTPException(status_code=400, detail="scheduled_at должен быть Unix timestamp")
         if not 0 < scheduled_id <= 1073741823:
             raise HTTPException(status_code=404, detail="Отложенное сообщение не найдено")
+        repeat = payload.get("repeat_interval_seconds")
+        if "repeat_interval_seconds" in payload and (type(repeat) is not int or repeat not in (0, 86400, 604800)):
+            raise HTTPException(status_code=400, detail="repeat_interval_seconds: 0, 86400 или 604800")
         peer = payload.get("peer_id", 0)
         if type(peer) is not int or not 0 <= peer <= 2**63 - 1:
             raise HTTPException(status_code=400, detail="Некорректный peer_id")
@@ -9937,12 +9940,12 @@ def build_messenger_router(
             if not now + 10 <= scheduled_at <= now + 30 * 86400:
                 raise HTTPException(status_code=400, detail="Укажите время отправки от 10 секунд до 30 дней вперёд")
             cur = await db.execute(
-                """UPDATE scheduled_messages SET scheduled_at=?
+                """UPDATE scheduled_messages SET scheduled_at=?, repeat_interval_seconds=COALESCE(?,repeat_interval_seconds)
                    WHERE id=? AND sender_telegram_id=? AND status='pending'
                      AND (?=0 OR recipient_telegram_id=?)
                    RETURNING id, recipient_telegram_id AS recipient_id, body, scheduled_at,
                              status, silent, repeat_interval_seconds, entities_json""",
-                (scheduled_at, scheduled_id, uid, peer, peer),
+                (scheduled_at, repeat, scheduled_id, uid, peer, peer),
             )
             task = await cur.fetchone()
             await cur.close()
