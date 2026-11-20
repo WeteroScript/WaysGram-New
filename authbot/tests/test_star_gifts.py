@@ -1904,21 +1904,21 @@ def test_gift_that_is_up_for_sale_cannot_be_sold_back(env) -> None:
     run(scenario())
 
 
-def test_upgrade_costs_fixed_25_stars_without_a_catalog_upgrade_price(env) -> None:
-    path, app = env
+def test_upgrade_rejects_gift_without_telegram_upgrade_capability(env) -> None:
+    _path, app = env
 
     async def scenario() -> None:
-        # The fake catalog has no upgrade_star_count for g2; WaysGram still upgrades it.
         await bot_module.set_telegram_gift_values("g2", price=100, supply=1)
         async with await client_for(app) as client:
             bought = await client.post("/api/telegram/gifts/g2/purchase", headers=headers(101), json={})
             serial = bought.json()["gift"]["serial_number"]
+            preview = await client.get(f"/api/gifts/{serial}/upgrade-preview", headers=headers(101))
             upgraded = await client.post(f"/api/gifts/{serial}/upgrade", headers=headers(101))
-            assert upgraded.status_code == 200
-            assert upgraded.json()["price_stars"] == 25
-            assert upgraded.json()["upgrade_star_count"] == 25
-            assert upgraded.json()["upgrade_level"] == 1
-            assert upgraded.json()["stars_balance"] == 5000 - 100 - 25
+            assert preview.status_code == upgraded.status_code == 409
+            inventory = (await client.get("/api/me/gifts", headers=headers(101))).json()["gifts"]
+            assert inventory[0]["can_upgrade"] is False
+            assert inventory[0]["upgrade_level"] == 0
+            assert (await client.get("/api/me", headers=headers(101))).json()["stars"] == 4900
 
     run(scenario())
 
@@ -1960,6 +1960,10 @@ def test_collectibles_are_numbered_inside_their_own_collection(env) -> None:
                 "/api/telegram/gifts/g2/purchase", headers=headers(101), json={}
             )
             other_serial = other.json()["gift"]["serial_number"]
+            with db_split.sqlite_connect(path) as db:
+                db.execute("UPDATE telegram_gift_catalog SET upgrade_star_count=12 WHERE gift_id='g2'")
+                db.commit()
+
 
             numbers = {}
             for index, serial in enumerate(serials):
@@ -2416,8 +2420,7 @@ def test_sample_only_catalog_does_not_replace_rolled_attribute(env) -> None:
     run(scenario())
 
 
-def test_gift_outside_the_telegram_catalog_still_upgrades(env) -> None:
-    """A WaysGram-only gift has no Telegram models, but the upgrade is WaysGram's own."""
+def test_unverified_waysgram_only_gift_cannot_upgrade(env) -> None:
     path, app = env
 
     async def scenario() -> None:
@@ -2433,16 +2436,11 @@ def test_gift_outside_the_telegram_catalog_still_upgrades(env) -> None:
             await db.commit()
         async with await client_for(app) as client:
             upgraded = await client.post("/api/gifts/WG-000000000001/upgrade", headers=headers(101))
-            assert upgraded.status_code == 200, upgraded.text
-            payload = upgraded.json()
-            assert payload["upgrade_level"] == 1
-            traits = payload["attributes"]["collectible_traits"]
-            # The fallback pool publishes a model, a pattern and a backdrop for every gift.
-            assert traits["model"]["name"]
-            assert traits["pattern"]["name"]
+            assert upgraded.status_code == 409, upgraded.text
             inventory = (await client.get("/api/me/gifts", headers=headers(101))).json()["gifts"]
             stored = next(item for item in inventory if item["serial_number"] == "WG-000000000001")
-            assert stored["upgrade_level"] == 1
+            assert stored["upgrade_level"] == 0
+            assert stored["can_upgrade"] is False
 
     run(scenario())
 

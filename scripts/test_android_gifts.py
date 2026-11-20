@@ -120,7 +120,7 @@ class AndroidGiftSourceChecks(unittest.TestCase):
         start = sheet.index("// WaysGram upgrade: a fixed 25 Stars")
         end = sheet.index("if (savedStarGift.refunded)", start)
         block = sheet[start:end]
-        self.assertIn('savedStarGift.gift instanceof TL_stars.TL_starGift)', block)
+        self.assertIn('savedStarGift.can_upgrade && savedStarGift.gift instanceof TL_stars.TL_starGift)', block)
         self.assertIn('new WaysGramAnimatedStarSpan(button)', block)
         self.assertIn('Улучшить за 25 звёзд', block)
         self.assertIn('class WaysGramAnimatedStarSpan extends ReplacementSpan', sheet)
@@ -236,6 +236,13 @@ class AndroidGiftSourceChecks(unittest.TestCase):
         prefetch_start = attributes.index('public static void startServerPrefetch()')
         prefetch_end = attributes.index('public static void retryFailed()', prefetch_start)
         self.assertIn('WaysGramApi.NETWORK.execute', attributes[prefetch_start:prefetch_end])
+
+    def test_gift_edit_menu_animates_both_directions_and_upgrade_respects_eligibility(self):
+        container = self.source("ui/Gifts/ProfileGiftsContainer.java")
+        self.assertIn('ItemOptions.makeOptions(parent.fragment, v)', container)
+        self.assertIn('ValueAnimator.ofFloat(waysGramCheckProgress, reordering ? 1f : 0f)', container)
+        controller = self.source("messenger/waysgram/WaysGramProfileGiftsController.java")
+        self.assertIn('!isCollectible && !isListed && !isAuctioned && optBooleanLike(item, "can_upgrade")', controller)
 
     def test_shop_price_sort_is_persistent_and_uses_a_vector_icon(self):
         import xml.etree.ElementTree as ET

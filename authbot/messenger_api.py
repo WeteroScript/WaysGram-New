@@ -344,6 +344,15 @@ def _collectible_trait_pool(
     return key, (pool or gift_upgrades.FALLBACK_POOL)
 
 
+def _gift_supports_upgrade(gift_id: str, metadata: dict[str, Any] | None) -> bool:
+    if metadata and "can_upgrade" in metadata:
+        return bool(metadata["can_upgrade"])
+    # The bundled official pools also establish eligibility by exact Telegram ID
+    # when the live catalog is absent. Never infer it from a display name.
+    key, pool = gift_upgrades.pool_for_gift(gift_id)
+    return bool(key and pool)
+
+
 def _has_collectible_traits(attributes: Any) -> bool:
     traits = gift_upgrades.traits_of(attributes)
     if not isinstance(traits, dict) or not traits:
@@ -4758,9 +4767,9 @@ def build_messenger_router(
                     or (str(telegram_gift.get("emoji") or "").strip() if telegram_gift else "")
                 )
                 item["can_upgrade"] = bool(
-                    telegram_gift
-                    and telegram_gift.get("can_upgrade")
+                    _gift_supports_upgrade(gift_id, metadata_by_id[gift_id])
                     and int(item.get("upgrade_level") or 0) == 0
+                    and not collectible
                 )
                 item["waysgram_can_upgrade"] = bool(
                     telegram_gift and telegram_gift.get("can_upgrade")
@@ -7408,6 +7417,11 @@ def build_messenger_router(
             "grams_balance": buyer_balance,
         }
 
+    async def require_gift_upgrade_support(db: Any, gift_id: str) -> None:
+        metadata = await _telegram_gift_metadata(db, gift_id)
+        if not _gift_supports_upgrade(gift_id, metadata):
+            raise HTTPException(status_code=409, detail="Для этого подарка нет улучшения в Telegram")
+
     @router.get("/api/gifts/{serial_number}/upgrade-preview")
     async def preview_gift_upgrade(
         serial_number: str,
@@ -7442,6 +7456,7 @@ def build_messenger_router(
                 if await cur.fetchone():
                     raise HTTPException(status_code=409, detail=detail)
             gift_id = str(gift["telegram_gift_id"] or "")
+            await require_gift_upgrade_support(db, gift_id)
             _, base = _collectible_trait_pool(gift_id, gift["gift_name"])
             rows = await _gift_attribute_rows(db, gift_id)
             pool = gift_upgrades.effective_reveal_pool(base, rows)
@@ -7481,10 +7496,10 @@ def build_messenger_router(
                 (serial, uid),
             )
             attribute_row = await cur.fetchone()
-        if attribute_row is not None:
+            metadata = await _telegram_gift_metadata(attribute_db, attribute_row["telegram_gift_id"]) if attribute_row else None
+        if attribute_row and _gift_supports_upgrade(attribute_row["telegram_gift_id"], metadata):
             await _sync_gift_attribute_documents(
-                db_path(),
-                attribute_row["telegram_gift_id"],
+                db_path(), attribute_row["telegram_gift_id"],
                 mtproto_gift_provider() if mtproto_gift_provider else None,
             )
         async with aiosqlite.connect(db_path()) as db:
@@ -7530,9 +7545,7 @@ def build_messenger_router(
             if await cur.fetchone():
                 await db.rollback()
                 raise HTTPException(status_code=409, detail="Сначала отмените аукцион подарка")
-            # A WaysGram gift that is not in the Telegram catalog still upgrades: the price is
-            # set by WaysGram and the traits come from the fallback pool when Telegram published
-            # no models for it.
+            await require_gift_upgrade_support(db, str(gift["telegram_gift_id"] or ""))
             # The one-time upgrade costs a fixed 25 WaysGram Stars.
             price = UPGRADE_PRICE_STARS
             cur = await db.execute(
