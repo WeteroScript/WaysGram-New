@@ -70,8 +70,6 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-          cache: pip
-          cache-dependency-path: authbot/requirements.txt
       - name: Verify the entry point without installing anything
         run: python bot.py --check > entry.json
       - name: Check the reported path
