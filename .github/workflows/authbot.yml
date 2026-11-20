@@ -178,8 +178,10 @@ jobs:
           mkdir -p /tmp/waysgram-android-source
           unzip -q /tmp/WaysGram-Android.original.zip -d /tmp/waysgram-android-source
           ANDROID_MEDIA=/tmp/waysgram-android-source/WaysGram-Android/TMessagesProj/src/main/java/org/telegram/tgnet/WaysGramMedia.java
-          if grep -Fq 'videoCoverThumbnail' "$ANDROID_MEDIA"; then
-            echo "Media spoiler and custom video-cover bridge is already present."
+          if grep -Fq 'catch (WaysGramApi.ApiException coverError)' "$ANDROID_MEDIA"; then
+            echo "Resilient custom video-cover fallback is already present."
+          elif grep -Fq 'videoCoverThumbnail' "$ANDROID_MEDIA"; then
+            patch --batch --forward -p1 -d /tmp/waysgram-android-source < android-stage1-media-cover-fallback.patch
           else
             patch --batch --forward -p1 -d /tmp/waysgram-android-source < android-stage1.patch
           fi
