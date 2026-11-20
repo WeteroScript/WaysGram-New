@@ -785,6 +785,10 @@ def test_scheduled_direct_messages_send_once_and_can_be_cancelled(api_env) -> No
                     "**scheduled** message"
                 ]
 
+                assert (await client.patch(edit_url, headers=sender, json={
+                    "scheduled_at": int(time.time()) + 60,
+                })).status_code == 404
+
                 recurring = await client.post(
                     "/api/messages/schedule",
                     headers=sender,
@@ -798,6 +802,15 @@ def test_scheduled_direct_messages_send_once_and_can_be_cancelled(api_env) -> No
                 )
                 assert recurring.status_code == 201
                 assert recurring.json()["repeat_interval_seconds"] == 86400
+                recurring_time = int(time.time()) + 120
+                moved = await client.patch(
+                    f"/api/messages/scheduled/{recurring.json()['id']}", headers=sender,
+                    json={"peer_id": 89202, "scheduled_at": recurring_time},
+                )
+                assert moved.status_code == 200
+                assert moved.json()["scheduled_at"] == recurring_time
+                assert moved.json()["repeat_interval_seconds"] == 86400
+                assert moved.json()["silent"]
                 with db_split.sqlite_connect(path) as db:
                     db.execute(
                         "UPDATE scheduled_messages SET scheduled_at=? WHERE id=?",

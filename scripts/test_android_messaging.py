@@ -35,6 +35,11 @@ class NativeMessagingSourceChecks(unittest.TestCase):
         self.assertIn('TL_updateNewScheduledMessage', scheduled)
         self.assertIn('new org.telegram.tgnet.WaysGramScheduled.RescheduleRequest()', chat)
 
+    def test_native_scheduled_messages_cannot_enter_ordinary_text_editor(self):
+        chat = self.source('ui/ChatActivity.java')
+        editor = chat.split('private void startEditingMessageObject(MessageObject messageObject, boolean asSuggestion)', 1)[1]
+        self.assertIn('chatMode == MODE_SCHEDULED || messageObject.scheduled', editor.split('if (selectionReactionsOverlay', 1)[0])
+
     def test_pins_bridge_scope_paging_and_refresh(self):
         pins = self.source('tgnet/WaysGramPins.java')
         transport = self.source('tgnet/WaysGramTransport.java')
