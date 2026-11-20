@@ -7941,6 +7941,8 @@ def test_text_entities_validation_and_legacy_compatibility(api_env, monkeypatch)
             contact = await client.post('/api/messages', headers=headers, json={**base, 'contact': {'name': 'A', 'phone': '+31612345678'}})
             assert contact.status_code == 201, contact.text
             edit = await client.patch(f"/api/messages/{contact.json()['id']}", headers=headers, json={'body': 'X', 'entities': []})
+            assert edit.status_code == 200  # explicitly empty formatting is safe for existing attachments
+            edit = await client.patch(f"/api/messages/{contact.json()['id']}", headers=headers, json={'body': 'X', 'entities': [{'type': 'bold', 'offset': 0, 'length': 1}]})
             assert edit.status_code == 400
             for endpoint in ('/api/messages/schedule', '/api/messages/when-online', '/api/messages/album'):
                 r = await client.post(endpoint, headers=headers, json={**base, 'media_ids': ['a' * 32, 'b' * 32], 'entities': []})
@@ -7964,3 +7966,50 @@ def test_text_entities_schema_upgrade_is_repeatable(api_env) -> None:
             columns = {row[1] for row in db.execute(f'PRAGMA messenger.table_info({table})')}
             assert 'entities_json' in columns
         assert db.execute('SELECT body, entities_json FROM messages WHERE id=?', (mid,)).fetchone() == ('Old text', '[]')
+
+
+def test_formatting_media_caption_round_trip_and_drop(api_env, monkeypatch) -> None:
+    path, _, _, app = api_env
+    for uid in (86921, 86922):
+        add_account(api_env, uid, f'caption_{uid}')
+        add_session(path, uid, f'caption-{uid}')
+    monkeypatch.setattr(messenger_api, '_firebase_service_account', lambda: None)
+    async def scenario():
+        h = {'Authorization': 'Bearer caption-86921'}
+        async with await client_for(app) as client:
+            upload = await client.post('/api/media/images', headers={**h, 'Content-Type': 'image/png'}, content=test_preview_png())
+            assert upload.status_code == 201, upload.text
+            media_id = upload.json()['id']
+            group = (await client.post('/api/groups', headers=h, json={'title': 'Format captions'})).json()['id']
+            channel = (await client.post('/api/channels', headers=h, json={'title': 'Format captions', 'is_public': False})).json()['id']
+            body = '🌷 @test #tag example.com'
+            entities = [{'type': 'bold', 'offset': 0, 'length': 2}, {'type': 'mention', 'offset': 3, 'length': 5},
+                        {'type': 'hashtag', 'offset': 9, 'length': 4}, {'type': 'url', 'offset': 14, 'length': 11}]
+            for scope, peer, url, extra in (('dm', 86922, '/api/messages', {'recipient_id': 86922}),
+                                             ('group', group, f'/api/groups/{group}/messages', {}),
+                                             ('channel', channel, f'/api/channels/{channel}/messages', {})):
+                payload = {**extra, 'body': body, 'entities': entities, 'media_id': media_id, 'silent': True}
+                key = {**h, 'Idempotency-Key': f'caption-idempotency-{scope}-001'}
+                sent = await client.post(url, headers=key, json=payload)
+                assert sent.status_code == 201, sent.text
+                assert sent.json()['entities'] == entities
+                assert (await client.post(url, headers=key, json=payload)).json() == sent.json()
+                mid = sent.json()['id']
+                history_url = '/api/messages?with=86922' if scope == 'dm' else url
+                found = next(row for row in (await client.get(history_url, headers=h)).json()['messages'] if row['id'] == mid)
+                assert found['body'] == body and found['entities'] == entities and found['media_id'] == media_id
+                forward = {'source_scope': scope, 'source_peer_id': peer, 'target_scope': 'dm',
+                           'target_peer_id': 86922, 'message_ids': [mid], 'silent': True}
+                result = await client.post('/api/forward', headers=h, json=forward)
+                assert result.status_code == 201, result.text
+                assert result.json()['messages'][0]['entities'] == entities
+                result = await client.post('/api/forward', headers=h, json={**forward, 'drop_media_captions': True})
+                assert result.status_code == 201, result.text
+                assert result.json()['messages'][0]['body'] == '' and 'entities' not in result.json()['messages'][0]
+                edit_url = f'/api/messages/{mid}' if scope == 'dm' else f'{url}/{mid}'
+                changed = await client.patch(edit_url, headers=h, json={'body': '🌷 edited', 'entities': [{'type': 'italic', 'offset': 0, 'length': 2}]})
+                assert changed.status_code == 200, changed.text
+                history = (await client.get(history_url, headers=h)).json()['messages']
+                found = next(row for row in history if row['id'] == mid)
+                assert found['entities'] == changed.json()['entities'] and found['media_id'] == media_id
+    run(scenario())

@@ -2195,7 +2195,7 @@ def _message_body_and_entities(payload: dict[str, Any]) -> tuple[str, list[dict[
     """Validate opt-in text entities in UTF-16 units, without altering offsets.
 
     Old clients without the entities field keep the historical whitespace behaviour.
-    This first version accepts text-only messages, not media captions or albums.
+    Single-message media captions share this validation; albums are separate.
     """
     if "entities" not in payload:
         return _message_body(payload.get("body") or ""), []
@@ -2213,7 +2213,7 @@ def _message_body_and_entities(payload: dict[str, Any]) -> tuple[str, list[dict[
             raise HTTPException(status_code=400, detail="Некорректный Unicode в тексте")
         units += 2 if codepoint > 0xFFFF else 1
         boundaries.add(units)
-    allowed = {"bold", "italic", "underline", "strike", "spoiler", "code", "pre", "text_url"}
+    allowed = {"bold", "italic", "underline", "strike", "spoiler", "code", "pre", "text_url", "url", "mention", "hashtag"}
     validated = []
     seen = set()
     for entity in entities:
@@ -7792,8 +7792,8 @@ def build_messenger_router(
         elif location_payload and not body_value.strip():
             body_value = str(location_payload["label"] or "Местоположение")
         if "entities" in payload:
-            if media_id or contact_payload or location_payload:
-                raise HTTPException(status_code=400, detail="Форматирование вложений пока не поддерживается")
+            if contact_payload or location_payload:
+                raise HTTPException(status_code=400, detail="Форматирование этого вложения пока не поддерживается")
             body, entities = _message_body_and_entities(payload)
         else:
             body = _message_body(body_value) if body_value.strip() or not media_id else ""
@@ -8421,8 +8421,8 @@ def build_messenger_router(
         elif location_payload and not body_value.strip():
             body_value = location_payload["label"] or "Местоположение"
         if "entities" in payload:
-            if media_id or contact_payload or location_payload:
-                raise HTTPException(status_code=400, detail="Форматирование вложений пока не поддерживается")
+            if contact_payload or location_payload:
+                raise HTTPException(status_code=400, detail="Форматирование этого вложения пока не поддерживается")
             body, entities = _message_body_and_entities(payload)
         else:
             body = _message_body(body_value) if body_value.strip() or not media_id else ""
@@ -10513,8 +10513,8 @@ def build_messenger_router(
                 cur = await db.execute("SELECT entities_json FROM messages WHERE id=?", (message_id,))
                 if (await cur.fetchone())[0] != "[]":
                     raise HTTPException(status_code=409, detail="Укажите entities, чтобы не потерять форматирование")
-            if "entities" in payload:
-                cur = await db.execute("SELECT media_id IS NOT NULL OR EXISTS(SELECT 1 FROM message_contacts WHERE message_id=?) OR EXISTS(SELECT 1 FROM message_locations WHERE message_id=?) OR EXISTS(SELECT 1 FROM message_gifts WHERE message_id=?) FROM messages WHERE id=?", (message_id, message_id, message_id, message_id))
+            if entities:
+                cur = await db.execute("SELECT EXISTS(SELECT 1 FROM message_contacts WHERE message_id=?) OR EXISTS(SELECT 1 FROM message_locations WHERE message_id=?) OR EXISTS(SELECT 1 FROM message_gifts WHERE message_id=?) FROM messages WHERE id=?", (message_id, message_id, message_id, message_id))
                 if (await cur.fetchone())[0]:
                     raise HTTPException(status_code=400, detail="Форматирование вложений пока не поддерживается")
             await db.execute("UPDATE messages SET body=?,edited_at=?,entities_json=? WHERE id=?", (body, now, _message_entities_json(entities), message_id))
@@ -10602,8 +10602,8 @@ def build_messenger_router(
                 cur = await db.execute("SELECT entities_json FROM group_messages WHERE id=?", (message_id,))
                 if (await cur.fetchone())[0] != "[]":
                     raise HTTPException(status_code=409, detail="Укажите entities, чтобы не потерять форматирование")
-            if "entities" in payload:
-                cur = await db.execute("SELECT media_id IS NOT NULL OR EXISTS(SELECT 1 FROM message_scoped_contacts WHERE scope='group' AND message_id=?) OR EXISTS(SELECT 1 FROM message_forward_locations WHERE scope='group' AND message_id=?) FROM group_messages WHERE id=?", (message_id, message_id, message_id))
+            if entities:
+                cur = await db.execute("SELECT EXISTS(SELECT 1 FROM message_scoped_contacts WHERE scope='group' AND message_id=?) OR EXISTS(SELECT 1 FROM message_forward_locations WHERE scope='group' AND message_id=?) FROM group_messages WHERE id=?", (message_id, message_id, message_id))
                 if (await cur.fetchone())[0]:
                     raise HTTPException(status_code=400, detail="Форматирование вложений пока не поддерживается")
             await db.execute("UPDATE group_messages SET body=?,edited_at=?,entities_json=? WHERE id=?", (body, now, _message_entities_json(entities), message_id))
@@ -10682,8 +10682,8 @@ def build_messenger_router(
                 cur = await db.execute("SELECT entities_json FROM channel_messages WHERE id=?", (message_id,))
                 if (await cur.fetchone())[0] != "[]":
                     raise HTTPException(status_code=409, detail="Укажите entities, чтобы не потерять форматирование")
-            if "entities" in payload:
-                cur = await db.execute("SELECT media_id IS NOT NULL OR EXISTS(SELECT 1 FROM message_scoped_contacts WHERE scope='channel' AND message_id=?) OR EXISTS(SELECT 1 FROM message_forward_locations WHERE scope='channel' AND message_id=?) FROM channel_messages WHERE id=?", (message_id, message_id, message_id))
+            if entities:
+                cur = await db.execute("SELECT EXISTS(SELECT 1 FROM message_scoped_contacts WHERE scope='channel' AND message_id=?) OR EXISTS(SELECT 1 FROM message_forward_locations WHERE scope='channel' AND message_id=?) FROM channel_messages WHERE id=?", (message_id, message_id, message_id))
                 if (await cur.fetchone())[0]:
                     raise HTTPException(status_code=400, detail="Форматирование вложений пока не поддерживается")
             await db.execute("UPDATE channel_messages SET body=?,edited_at=?,entities_json=? WHERE id=?", (body, now, _message_entities_json(entities), message_id))
@@ -11924,8 +11924,8 @@ def build_messenger_router(
         elif location_payload and not body_value.strip():
             body_value = str(location_payload["label"] or "Местоположение")
         if "entities" in payload:
-            if media_id or contact_payload or location_payload:
-                raise HTTPException(status_code=400, detail="Форматирование вложений пока не поддерживается")
+            if contact_payload or location_payload:
+                raise HTTPException(status_code=400, detail="Форматирование этого вложения пока не поддерживается")
             body, entities = _message_body_and_entities(payload)
         else:
             body = _message_body(body_value) if body_value.strip() or not media_id else ""

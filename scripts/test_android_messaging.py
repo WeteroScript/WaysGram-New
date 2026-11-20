@@ -67,6 +67,37 @@ class NativeMessagingSourceChecks(unittest.TestCase):
         self.assertIn('entity.offset = matcher.start()', mapper)
         self.assertIn('message.flags |= TLRPC.MESSAGE_FLAG_HAS_ENTITIES', mapper)
 
+    def test_format_entities_bridge_single_messages(self):
+        mapper = self.source('tgnet/WaysGramMapper.java')
+        transport = self.source('tgnet/WaysGramTransport.java')
+        chats = self.source('tgnet/WaysGramChats.java')
+        messages = self.source('tgnet/WaysGramMessages.java')
+        media = self.source('tgnet/WaysGramMedia.java')
+        helper = self.source('messenger/SendMessagesHelper.java')
+        for entity, kind in (('Bold', 'bold'), ('Italic', 'italic'), ('Underline', 'underline'),
+                             ('Strike', 'strike'), ('Spoiler', 'spoiler'), ('Code', 'code'),
+                             ('Pre', 'pre'), ('TextUrl', 'text_url'), ('Url', 'url'),
+                             ('Mention', 'mention'), ('Hashtag', 'hashtag')):
+            self.assertIn('instanceof TLRPC.TL_messageEntity' + entity, mapper)
+            self.assertIn('case "' + kind + '": entity = new TLRPC.TL_messageEntity' + entity, mapper)
+        for value in ('FORMATTING_NOT_SUPPORTED', 'entity.offset', 'entity.length',
+                      'item.put("language"', 'item.put("url"', 'Character.isLowSurrogate',
+                      'length > message.message.length() - offset', 'readTextEntities(message, json)',
+                      'existing instanceof TLRPC.TL_messageEntityCode', 'if (blocked) continue;'):
+            self.assertIn(value, mapper)
+        self.assertIn('WaysGramMapper.writeTextEntities(send.entities)', transport)
+        self.assertLess(transport.index('JSONArray captionEntities = WaysGramMapper.writeTextEntities'),
+                        transport.index('WaysGramMedia.uploadFor(account, send.media)'))
+        self.assertIn('WaysGramMapper.readTextEntities(formatted, result)', transport)
+        self.assertIn('sent.entities = formatted.entities', transport)
+        self.assertIn('sent.flags |= TLObject.FLAG_7', transport)
+        for section in (transport, chats):
+            self.assertIn('body.put("entities", entities)', section)
+        self.assertIn('body.put("entities", WaysGramMapper.writeTextEntities(req.entities))', messages)
+        self.assertIn('WaysGramMapper.hasFormatting(item.entities)', messages)
+        self.assertIn('request.message = message[0].toString()', helper)
+        self.assertIn('json.optJSONArray("entities").length() == 0', media)
+
     def test_group_and_channel_load_old_pages(self):
         chats = self.source('tgnet/WaysGramChats.java')
         self.assertIn('serverGroupId(req.offset_id)', chats)
@@ -212,7 +243,7 @@ class NativeMessagingSourceChecks(unittest.TestCase):
             self.assertIn('send.silent', section)
         self.assertLess(media.index('SCHEDULE_NOT_SUPPORTED'), media.index('WaysGramMedia.uploadFor'))
         direct = transport[transport.index('private static TLObject sendTo('):transport.index('private static TLRPC.TL_error mapError')]
-        self.assertIn('nextPts(account), silent, location, contact)', direct)
+        self.assertIn('nextPts(account), silent, location, contact, entities)', direct)
         self.assertIn('body.put("silent", silent)', direct)
         self.assertGreater(direct.index('body.put("silent", silent)'), direct.index('body.put("location", location)'))
         group = chats[chats.index('public static TLObject send('):chats.index('// ----------------------------------------------------------------', chats.index('public static TLObject send('))]

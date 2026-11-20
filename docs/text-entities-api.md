@@ -1,12 +1,15 @@
-# Text formatting: server API increment
+# Text formatting: API and Android bridge
 
-This is **not** complete client-side formatting. The Android bridge does not yet
-send or interpret these entities, and the editor, captions, albums, drafts and
-scheduled/online delivery do not support them. Do not mark the formatting feature
-complete on the basis of this backend change alone.
+The Android bridge maps supported entities for ordinary text and single-media
+captions on send, edit, history, live updates and forwards. The implementation
+is still incomplete: formatted album sends, drafts and scheduled/online delivery
+are not supported; unknown TL entity types are rejected on send/edit. Android
+source checks are not a build or a device test. Deploy a compatible server
+before distributing this client: older servers may ignore entities and lose
+formatting. Both client and server changes are required.
 
-The existing text-message POST endpoints for direct messages, groups and
-channels, and their PUT/PATCH edit endpoints, accept an optional `entities`
+The existing message POST endpoints for direct messages, groups and
+channels (text and single-media captions), and their PUT/PATCH edit endpoints, accept an optional `entities`
 array alongside `body`. When the field is present, the exact body is stored,
 including leading/trailing whitespace (the body must still contain non-whitespace
 and be at most 4000 Python Unicode code points). The array may be empty and is
@@ -18,7 +21,8 @@ Nested/overlapping ranges are allowed; exact duplicate entries are rejected.
 
 Supported types are `bold`, `italic`, `underline`, `strike`, `spoiler`, `code`,
 `pre` (optional string `language`, up to 64 characters, default empty), and
-`text_url` (required HTTP(S) `url`, up to 2048 characters, without credentials).
+`text_url` (required HTTP(S) `url`, up to 2048 characters, without credentials),
+and the plain-text detection entities `url`, `mention`, `hashtag`.
 Unknown fields and unsupported types are rejected with HTTP 400 rather than
 silently dropped. No URL is fetched or verified by the server.
 
@@ -32,7 +36,8 @@ entities. Idempotency keys include the original request payload.
 Old clients omitting `entities` keep their previous whitespace behavior for
 unformatted text. An edit that omits `entities` on a formatted message returns
 HTTP 409 without changing it: the server cannot safely infer new offsets.
-Clients that intentionally remove formatting must send an empty array. Creating
-or editing an attachment with `entities` is rejected; album and scheduled or
-when-online requests also reject the field. Device behavior and Android build
-have not been validated.
+Clients that intentionally remove formatting must send an empty array. Contact,
+location and gift messages cannot carry nonempty entities. Album and scheduled
+or when-online requests reject the field; Android rejects formatted album sends
+rather than dropping styling. Existing unformatted captions can be edited with
+an empty array. Device behavior and Android build have not been validated.
