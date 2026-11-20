@@ -2237,7 +2237,7 @@ def _message_body_and_entities(payload: dict[str, Any]) -> tuple[str, list[dict[
     """Validate opt-in text entities in UTF-16 units, without altering offsets.
 
     Old clients without the entities field keep the historical whitespace behaviour.
-    Single-message media captions share this validation; albums are separate.
+    Message and media captions share this validation.
     """
     if "entities" not in payload:
         return _message_body(payload.get("body") or ""), []
@@ -8056,7 +8056,7 @@ def build_messenger_router(
     def album_allow_documents(payload: dict[str, Any], request: Request) -> bool:
         # A distinct route makes old servers reject the operation rather than
         # silently ignore a new field and misinterpret document albums.
-        enabled = request.url.path.endswith("/files")
+        enabled = request.url.path.endswith(("/files", "/files/v2"))
         if "allow_documents" in payload:
             raise HTTPException(status_code=400, detail="Неизвестный параметр альбома")
         return enabled
@@ -8074,24 +8074,47 @@ def build_messenger_router(
             return "visual"
         return "document"
 
-    def album_captions(payload: dict[str, Any], count: int, allow_documents: bool = False) -> tuple[list[str], str]:
-        if "entities" in payload:
-            raise HTTPException(status_code=400, detail="Форматирование альбомов пока не поддерживается")
+    def album_captions(payload: dict[str, Any], count: int, allow_documents: bool = False,
+                       formatted: bool = False) -> tuple[list[str], str, list[list[dict[str, Any]]]]:
+        if "entities" in payload or (not formatted and "caption_entities" in payload):
+            raise HTTPException(status_code=400, detail="Используйте маршрут альбомов с форматированием")
+        if formatted:
+            captions = payload.get("captions")
+            caption_entities = payload.get("caption_entities")
+            if (not isinstance(captions, list) or len(captions) != count
+                    or any(not isinstance(caption, str) for caption in captions)
+                    or not isinstance(caption_entities, list) or len(caption_entities) != count):
+                raise HTTPException(status_code=400, detail="Некорректные подписи альбома")
+            checked = []
+            validated_entities = []
+            for caption, entities in zip(captions, caption_entities):
+                if not caption.strip() and isinstance(entities, list) and not entities:
+                    checked.append("")
+                    validated_entities.append([])
+                else:
+                    text, validated = _message_body_and_entities({"body": caption, "entities": entities})
+                    checked.append(text)
+                    validated_entities.append(validated)
+            if not any(checked):
+                if count == 1 and allow_documents:
+                    return checked, "Файл", validated_entities
+                checked[0] = "Медиаальбом"
+            return checked, next((caption for caption in checked if caption), "Медиаальбом"), validated_entities
         captions = payload.get("captions")
         if captions is None:
             text = str(payload.get("body") or "")
             if not text.strip() and count == 1 and allow_documents:
-                return [""], "Файл"
+                return [""], "Файл", [[] for _ in range(count)]
             first = _message_body(text) if text.strip() else "Медиаальбом"
-            return [first] + [""] * (count - 1), first
+            return [first] + [""] * (count - 1), first, [[] for _ in range(count)]
         if not isinstance(captions, list) or len(captions) != count or any(not isinstance(v, str) for v in captions):
             raise HTTPException(status_code=400, detail="Некорректные подписи альбома")
         checked = [_message_body(v) if v.strip() else "" for v in captions]
         if not any(checked):
             if count == 1 and allow_documents:
-                return checked, "Файл"
+                return checked, "Файл", [[] for _ in range(count)]
             checked[0] = "Медиаальбом"
-        return checked, next((caption for caption in checked if caption), "Медиаальбом")
+        return checked, next((caption for caption in checked if caption), "Медиаальбом"), [[] for _ in range(count)]
 
     async def require_reply_target(db: Any, sql: str, params: tuple[Any, ...]) -> None:
         cur = await db.execute(sql, params)
@@ -8252,6 +8275,7 @@ def build_messenger_router(
             )
         return result
 
+    @router.post("/api/channels/{channel_id}/messages/album/files/v2", status_code=201)
     @router.post("/api/channels/{channel_id}/messages/album/files", status_code=201)
     @router.post("/api/channels/{channel_id}/messages/album", status_code=201)
     async def create_channel_message_album(
@@ -8277,7 +8301,9 @@ def build_messenger_router(
         if not allow_documents and len(set(media_ids)) != len(media_ids):
             raise HTTPException(status_code=400, detail="Альбом не должен содержать повторяющиеся файлы")
 
-        captions, body = album_captions(payload, len(media_ids), allow_documents)
+        captions, body, caption_entities = album_captions(
+            payload, len(media_ids), allow_documents, request.url.path.endswith("/files/v2")
+        )
         silent = payload.get("silent", False)
         if not isinstance(silent, bool):
             raise HTTPException(status_code=400, detail="silent должен быть логическим значением")
@@ -8357,6 +8383,9 @@ def build_messenger_router(
                     ),
                 )
                 message_id = int(cur.lastrowid)
+                if caption_entities[index]:
+                    await db.execute("UPDATE channel_messages SET entities_json=? WHERE id=?",
+                                     (_message_entities_json(caption_entities[index]), message_id))
                 await record_event(db, "channel", message_id, "new_message", uid, chat_id=channel_id)
                 created_messages.append({
                     "id": message_id,
@@ -8371,6 +8400,8 @@ def build_messenger_router(
                     **media_fields,
                     "created_at": now,
                 })
+                if caption_entities[index]:
+                    created_messages[-1]["entities"] = caption_entities[index]
 
             result = {
                 "status": "published",
@@ -9154,6 +9185,7 @@ def build_messenger_router(
             await db.commit()
         return {"status": "stopped", "id": live_location_id, "stopped_at": stopped_at}
 
+    @router.post("/api/messages/album/files/v2", status_code=201)
     @router.post("/api/messages/album/files", status_code=201)
     @router.post("/api/messages/album", status_code=201)
     async def send_message_album(
@@ -9186,7 +9218,9 @@ def build_messenger_router(
         if not allow_documents and len(set(media_ids)) != len(media_ids):
             raise HTTPException(status_code=400, detail="Альбом не должен содержать повторяющиеся файлы")
 
-        captions, body = album_captions(payload, len(media_ids), allow_documents)
+        captions, body, caption_entities = album_captions(
+            payload, len(media_ids), allow_documents, request.url.path.endswith("/files/v2")
+        )
         silent = payload.get("silent", False)
         if not isinstance(silent, bool):
             raise HTTPException(status_code=400, detail="silent должен быть логическим значением")
@@ -9287,6 +9321,9 @@ def build_messenger_router(
                     ),
                 )
                 message_id = int(cur.lastrowid)
+                if caption_entities[index]:
+                    await db.execute("UPDATE messages SET entities_json=? WHERE id=?",
+                                     (_message_entities_json(caption_entities[index]), message_id))
                 await record_event(
                     db, "dm", message_id, "new_message", uid,
                     user_a=uid, user_b=recipient_id,
@@ -9304,6 +9341,8 @@ def build_messenger_router(
                     **media_fields,
                     "created_at": now,
                 })
+                if caption_entities[index]:
+                    created_messages[-1]["entities"] = caption_entities[index]
 
             result = {
                 "status": "sent",
@@ -12743,6 +12782,7 @@ def build_messenger_router(
             )
         return result
 
+    @router.post("/api/groups/{group_id}/messages/album/files/v2", status_code=201)
     @router.post("/api/groups/{group_id}/messages/album/files", status_code=201)
     @router.post("/api/groups/{group_id}/messages/album", status_code=201)
     async def send_group_message_album(
@@ -12768,7 +12808,9 @@ def build_messenger_router(
         if not allow_documents and len(set(media_ids)) != len(media_ids):
             raise HTTPException(status_code=400, detail="Альбом не должен содержать повторяющиеся файлы")
 
-        captions, body = album_captions(payload, len(media_ids), allow_documents)
+        captions, body, caption_entities = album_captions(
+            payload, len(media_ids), allow_documents, request.url.path.endswith("/files/v2")
+        )
         silent = payload.get("silent", False)
         if not isinstance(silent, bool):
             raise HTTPException(status_code=400, detail="silent должен быть логическим значением")
@@ -12862,6 +12904,9 @@ def build_messenger_router(
                     ),
                 )
                 message_id = int(cur.lastrowid)
+                if caption_entities[index]:
+                    await db.execute("UPDATE group_messages SET entities_json=? WHERE id=?",
+                                     (_message_entities_json(caption_entities[index]), message_id))
                 await record_event(db, "group", message_id, "new_message", uid, chat_id=group_id)
                 created_messages.append({
                     "id": message_id,
@@ -12876,6 +12921,8 @@ def build_messenger_router(
                     **media_fields,
                     "created_at": now,
                 })
+                if caption_entities[index]:
+                    created_messages[-1]["entities"] = caption_entities[index]
 
             result = {
                 "status": "sent",
