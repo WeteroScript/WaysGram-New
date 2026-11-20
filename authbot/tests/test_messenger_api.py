@@ -1721,6 +1721,58 @@ def test_document_upload_attachment_and_private_download(api_env) -> None:
 
     run(scenario())
 
+def test_utf8_documents_keep_exact_bytes_across_upload_download_and_forward(api_env) -> None:
+    path, _store, _bot, app = api_env
+    for uid in (96801, 96802, 96803):
+        add_account(api_env, uid, f"byte_file_{uid}")
+        add_session(path, uid, f"byte-file-{uid}")
+
+    # Preserve BOM, different newline styles, non-normalized Unicode and emoji.
+    fixtures = [
+        ("notes.txt", "text/plain", b"\xef\xbb\xbf" + "Cafe\u0301\r\nмир 😀\nlast\r".encode("utf-8")),
+        ("data.csv", "text/csv", b"\xef\xbb\xbf" + "name,value\r\n\u00c9lodie,7\r\n".encode("utf-8")),
+        ("plain.txt", "text/plain", "Cafe\u0301\r\nend\n".encode("utf-8")),
+    ]
+
+    async def scenario() -> None:
+        headers = lambda uid: {"Authorization": f"Bearer byte-file-{uid}"}
+        async with await client_for(app) as client:
+            for filename, mime, original in fixtures:
+                result = await client.post("/api/media/documents", headers={**headers(96801),
+                                          "Content-Type": mime, "X-Filename": filename}, content=original)
+                assert result.status_code == 201, result.text
+                asset = result.json()
+                assert asset["mime_type"] == mime and asset["size_bytes"] == len(original)
+                assert (await client.get(asset["url"], headers=headers(96802))).status_code == 404
+                assert (await client.get(asset["url"], headers=headers(96801))).content == original
+                message = await client.post("/api/messages", headers=headers(96801),
+                                            json={"recipient_id": 96802, "media_id": asset["id"], "silent": True})
+                assert message.status_code == 201, message.text
+                received = await client.get(asset["url"], headers=headers(96802))
+                assert received.status_code == 200
+                assert received.headers["content-disposition"].startswith("attachment;")
+                assert hashlib.sha256(received.content).digest() == hashlib.sha256(original).digest()
+                part = await client.get(asset["url"], headers={**headers(96802), "Range": "bytes=0-4"})
+                assert part.status_code == 206 and part.content == original[:5]
+                assert part.headers["content-range"] == f"bytes 0-4/{len(original)}"
+                copied = await client.post("/api/forward", headers=headers(96802), json={
+                    "source_scope": "dm", "source_peer_id": 96801,
+                    "target_scope": "dm", "target_peer_id": 96803,
+                    "message_ids": [message.json()["id"]], "silent": True})
+                assert copied.status_code == 201, copied.text
+                assert copied.json()["messages"][0]["media_id"] == asset["id"]
+                assert (await client.get(asset["url"], headers=headers(96803))).content == original
+            # Validation has not been weakened by byte-preserving storage.
+            for body in (b"bad\xff", b"hello\x00world", b"hello\x01world", b"\xef\xbb\xbf\x00"):
+                rejected = await client.post("/api/media/documents", headers={**headers(96801),
+                                               "Content-Type": "text/plain", "X-Filename": "bad.txt"}, content=body)
+                assert rejected.status_code == 415
+            mismatch = await client.post("/api/media/documents", headers={**headers(96801),
+                                          "Content-Type": "text/csv", "X-Filename": "notes.txt"}, content=b"valid")
+            assert mismatch.status_code == 415
+    run(scenario())
+
+
 def test_uncompressed_image_attachment_preserves_original_bytes(api_env) -> None:
     path, _auth_store, _fake_bot, app = api_env
     add_account(api_env, 89301, "uncompressed_sender")

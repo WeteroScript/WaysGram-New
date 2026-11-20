@@ -245,9 +245,10 @@ def _normalize_uploaded_document(raw: bytes, filename: str) -> tuple[bytes, str,
             ord(char) < 32 and char not in "\t\n\r" for char in decoded
         ):
             raise ValueError("Текстовый документ содержит недопустимые управляющие символы")
-        normalized = decoded.encode("utf-8")
+        # Decode only for validation: re-encoding would strip a UTF-8 BOM and
+        # alter a document the user explicitly sent without compression.
         mime_type = "text/csv" if extension == ".csv" else "text/plain"
-        return normalized, mime_type, extension, safe_name
+        return raw, mime_type, extension, safe_name
 
     if extension in {".mp4", ".m4v", ".mov"}:
         if len(raw) < 12 or raw[4:8] != b"ftyp":
