@@ -2589,6 +2589,12 @@ def build_messenger_router(
         recipients = sorted({int(value) for value in account_ids if int(value) > 0})
         if not recipients:
             return True
+        quiet = data.get("silent") == "1"
+        credentials = None
+        if not quiet:
+            credentials = _firebase_service_account()
+            if not credentials:
+                return False
         placeholders = ",".join("?" for _ in recipients)
         try:
             async with aiosqlite.connect(db_path()) as db:
@@ -2606,14 +2612,14 @@ def build_messenger_router(
                     (int(time.time()), *recipients),
                 )
                 devices = await cur.fetchall()
-            quiet = data.get("silent") == "1"
             if quiet:
                 devices = [device for device in devices if bool(device[2])]
             if not devices:
                 return True
-            credentials = _firebase_service_account()
-            if not credentials:
-                return False
+            if quiet:
+                credentials = _firebase_service_account()
+                if not credentials:
+                    return False
             project_id, access_token = await get_fcm_access_token(credentials)
             notification_data = {
                 "waysgram": "1",
