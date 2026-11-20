@@ -8554,3 +8554,62 @@ def test_batched_history_ids_are_bounded_scoped_and_match_history(api_env) -> No
             assert (await client.get(url, headers=a, params={'message_ids':'1,1'})).status_code == 400
             assert (await client.get('/api/pins/capabilities', headers=a)).json()['batch_message_ids'] is True
     run(scenario())
+
+
+def test_audio_files_retain_bytes_metadata_and_access_in_all_chat_types(api_env) -> None:
+    path, _, _, app = api_env
+    for uid, token in ((98901, 'audio-owner'), (98902, 'audio-peer'), (98903, 'audio-outsider')):
+        add_account(api_env, uid, f'audio_file_{uid}')
+        add_session(path, uid, token)
+    async def scenario() -> None:
+        async with await client_for(app) as client:
+            a = {'Authorization': 'Bearer audio-owner'}
+            b = {'Authorization': 'Bearer audio-peer'}
+            x = {'Authorization': 'Bearer audio-outsider'}
+            group = (await client.post('/api/groups', headers=a, json={'title': 'Audio group'})).json()['id']
+            channel = (await client.post('/api/channels', headers=a, json={'title': 'Audio channel', 'is_public': False})).json()['id']
+            payloads = [
+                ('track.mp3', b'ID3\x04\0\0\0\0\0\0\xff\xfb\x90\x00'),
+                ('track.m4a', b'\x00\x00\x00\x18ftypM4A \x00\x00\x00\x00'),
+                ('track.opus', b'OggS' + b'\0' * 32),
+                ('track.ogg', b'OggS' + b'\0' * 32),
+                ('track.flac', b'fLaC' + b'\0' * 32),
+                ('track.wav', b'RIFF\x08\x00\x00\x00WAVE' + b'\0' * 8),
+            ]
+            metadata = {'duration': 123.5, 'title': 'Ночная песня', 'performer': 'Исполнитель'}
+            encoded = base64.b64encode(json.dumps(metadata, ensure_ascii=False).encode('utf-8')).decode('ascii')
+            invalid = await client.post('/api/media/documents', headers={**a, 'Content-Type':'application/octet-stream',
+                'X-Filename':'broken.mp3', 'X-Media-Kind':'audio'}, content=b'not an mp3')
+            assert invalid.status_code == 415
+            empty = await client.post('/api/media/documents', headers={**a, 'Content-Type':'application/octet-stream',
+                'X-Filename':'empty.mp3', 'X-Media-Kind':'audio'}, content=b'')
+            assert empty.status_code == 400
+            oversized = await client.post('/api/media/documents', headers={**a, 'Content-Type':'application/octet-stream',
+                'X-Filename':'large.mp3', 'X-Media-Kind':'audio', 'Content-Length':str(25 * 1024 * 1024 + 1)}, content=b'ID3')
+            assert oversized.status_code == 413
+            for filename, data in payloads:
+                uploaded = await client.post('/api/media/documents', headers={**a, 'Content-Type':'application/octet-stream',
+                    'X-Filename': filename, 'X-Media-Kind': 'audio', 'X-Media-Metadata': encoded}, content=data)
+                assert uploaded.status_code == 201, uploaded.text
+                media = uploaded.json()
+                assert media['media_kind'] == 'audio' and json.loads(media['media_metadata']) == metadata
+                assert (await client.get(f"/api/media/{media['id']}", headers=x)).status_code in (403, 404)
+                message = await client.post('/api/messages', headers=a, json={'recipient_id':98902, 'media_id':media['id']})
+                assert message.status_code == 201
+                fetched = await client.get(f"/api/media/{media['id']}", headers=b)
+                assert fetched.status_code == 200 and fetched.content == data
+                mid = message.json()['id']
+                history = (await client.get('/api/messages', headers=b, params={'with':98901, 'message_ids':str(mid)})).json()['messages'][0]
+                assert history['media_kind'] == 'audio' and history['media_name'] == filename
+                assert json.loads(history['media_metadata']) == metadata
+                for scope, peer in (('group',group), ('channel',channel)):
+                    sent = await client.post(f'/api/{scope}s/{peer}/messages', headers=a, json={'media_id':media['id']})
+                    assert sent.status_code == 201, sent.text
+                    messages = (await client.get(f'/api/{scope}s/{peer}/messages', headers=a, params={'message_ids':str(sent.json()['id'])})).json()['messages']
+                    assert messages[0]['media_kind'] == 'audio' and json.loads(messages[0]['media_metadata']) == metadata
+                forwarded = await client.post('/api/forward', headers=b, json={'source_scope':'dm', 'source_peer_id':98901,
+                    'target_scope':'dm', 'target_peer_id':98902, 'message_ids':[mid]})
+                assert forwarded.status_code == 201, forwarded.text
+                copied = (await client.get('/api/messages', headers=b, params={'with':98902,'message_ids':str(forwarded.json()['messages'][0]['id'])})).json()['messages'][0]
+                assert copied['media_kind'] == 'audio' and json.loads(copied['media_metadata']) == metadata
+    run(scenario())
