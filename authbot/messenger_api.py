@@ -774,6 +774,8 @@ async def init_messenger_storage(database_path: Path) -> None:
                 ON live_locations(sender_telegram_id,expires_at,stopped_at);
             CREATE INDEX IF NOT EXISTS idx_live_locations_recipient_expiry
                 ON live_locations(recipient_telegram_id,expires_at,stopped_at);
+            CREATE INDEX IF NOT EXISTS idx_live_locations_expiry
+                ON live_locations(stopped_at,expires_at);
             CREATE INDEX IF NOT EXISTS idx_message_gifts_serial
                 ON message_gifts(serial_number);
             CREATE INDEX IF NOT EXISTS idx_api_messages_pair
@@ -2371,6 +2373,30 @@ def _parse_message_location(value: Any) -> dict[str, Any] | None:
             snapshot[key] = field
         result["venue"] = snapshot
     return result
+
+
+async def _expire_live_locations(db: Any, now: int, limit: int = 500) -> int:
+    """Redact expired and legacy stopped coordinates in bounded batches; caller commits."""
+    cur = await db.execute(
+        """UPDATE live_locations
+           SET stopped_at=expires_at, stopped_by_telegram_id=sender_telegram_id,
+               latitude=0, longitude=0, accuracy_m=NULL
+           WHERE id IN (SELECT id FROM live_locations
+                        WHERE stopped_at IS NULL AND expires_at<=?
+                        ORDER BY expires_at LIMIT ?)""",
+        (now, limit),
+    )
+    count = int(cur.rowcount)
+    if count < limit:
+        cur = await db.execute(
+            """UPDATE live_locations SET latitude=0, longitude=0, accuracy_m=NULL
+               WHERE id IN (SELECT id FROM live_locations WHERE stopped_at IS NOT NULL
+                            AND (latitude<>0 OR longitude<>0 OR accuracy_m IS NOT NULL)
+                            LIMIT ?)""",
+            (limit - count,),
+        )
+        count += int(cur.rowcount)
+    return count
 
 
 def _location_venue_json(location: dict[str, Any]) -> str:
@@ -4655,6 +4681,8 @@ def build_messenger_router(
             raise HTTPException(status_code=400, detail="Нельзя заблокировать себя")
         async with aiosqlite.connect(db_path()) as db:
             db.row_factory = aiosqlite.Row
+            # Serialize blocking with live-location start/update transactions.
+            await db.execute("BEGIN IMMEDIATE")
             cur = await db.execute(
                 """SELECT telegram_id AS id,username,display_name,avatar_media_id
                    FROM accounts WHERE telegram_id=? AND is_banned=0""",
@@ -4669,6 +4697,17 @@ def build_messenger_router(
                 (uid, target_id, int(time.time())),
             )
             added = cur.rowcount == 1
+            now = int(time.time())
+            # Blocking either participant permanently ends both streams, even
+            # if the users later unblock one another. Do not retain the fix.
+            await db.execute(
+                """UPDATE live_locations
+                   SET stopped_at=?,stopped_by_telegram_id=?,latitude=0,longitude=0,accuracy_m=NULL
+                   WHERE stopped_at IS NULL AND
+                     ((sender_telegram_id=? AND recipient_telegram_id=?) OR
+                      (sender_telegram_id=? AND recipient_telegram_id=?))""",
+                (now, uid, uid, target_id, target_id, uid),
+            )
             await db.commit()
         return {
             "status": "blocked" if added else "already_blocked",
@@ -8627,23 +8666,27 @@ def build_messenger_router(
     ) -> dict[str, Any]:
         user = await current_user(authorization)
         uid = int(user["telegram_id"])
+        raw_recipient = payload.get("recipient_id")
+        if (isinstance(raw_recipient, bool)
+                or not (isinstance(raw_recipient, int) or isinstance(raw_recipient, str) and raw_recipient.isascii() and raw_recipient.isdecimal())):
+            raise HTTPException(status_code=400, detail="Укажите корректного получателя геолокации")
         try:
-            recipient_id = int(payload.get("recipient_id", 0))
-        except (TypeError, ValueError):
+            recipient_id = int(raw_recipient)
+        except (TypeError, ValueError, OverflowError):
             recipient_id = 0
-        if recipient_id <= 0 or recipient_id == uid:
+        if recipient_id <= 0 or recipient_id > 9223372036854775807 or recipient_id == uid:
             raise HTTPException(status_code=400, detail="Укажите корректного получателя геолокации")
 
         raw_latitude = payload.get("latitude")
         raw_longitude = payload.get("longitude")
         raw_accuracy = payload.get("accuracy_m")
-        if isinstance(raw_latitude, bool) or isinstance(raw_longitude, bool):
+        if isinstance(raw_latitude, bool) or isinstance(raw_longitude, bool) or isinstance(raw_accuracy, bool):
             raise HTTPException(status_code=400, detail="Координаты должны быть числовыми значениями")
         try:
             latitude = float(raw_latitude)
             longitude = float(raw_longitude)
             accuracy = None if raw_accuracy is None else float(raw_accuracy)
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
             raise HTTPException(status_code=400, detail="Укажите корректные координаты")
         if not math.isfinite(latitude) or not math.isfinite(longitude):
             raise HTTPException(status_code=400, detail="Координаты должны быть конечными числами")
@@ -8704,15 +8747,17 @@ def build_messenger_router(
                 )
                 row = await cur.fetchone()
             else:
-                try:
-                    duration = int(payload.get("duration_seconds", 0))
-                except (TypeError, ValueError):
-                    duration = 0
+                raw_duration = payload.get("duration_seconds", 0)
+                if isinstance(raw_duration, bool) or not (
+                    isinstance(raw_duration, int) or isinstance(raw_duration, str) and raw_duration in ("900", "3600", "28800")
+                ):
+                    raise HTTPException(status_code=400, detail="Длительность трансляции должна быть 15 минут, 1 час или 8 часов")
+                duration = int(raw_duration)
                 if duration not in (900, 3600, 28800):
                     await db.rollback()
                     raise HTTPException(status_code=400, detail="Длительность трансляции должна быть 15 минут, 1 час или 8 часов")
                 cur = await db.execute(
-                    """UPDATE live_locations SET stopped_at=?,stopped_by_telegram_id=?
+                    """UPDATE live_locations SET stopped_at=?,stopped_by_telegram_id=?,latitude=0,longitude=0,accuracy_m=NULL
                        WHERE sender_telegram_id=? AND recipient_telegram_id=?
                          AND stopped_at IS NULL AND expires_at<=?""",
                     (now, uid, uid, recipient_id, now),
@@ -8778,20 +8823,15 @@ def build_messenger_router(
                    WHERE ((sender_telegram_id=? AND recipient_telegram_id=?)
                        OR (sender_telegram_id=? AND recipient_telegram_id=?))
                      AND stopped_at IS NULL AND expires_at>?
+                     AND NOT EXISTS (
+                       SELECT 1 FROM blocked_users
+                       WHERE (owner_telegram_id=? AND blocked_telegram_id=?)
+                          OR (owner_telegram_id=? AND blocked_telegram_id=?))
                    ORDER BY started_at DESC LIMIT 2""",
-                (uid, with_user, with_user, uid, now),
+                (uid, with_user, with_user, uid, now, uid, with_user, with_user, uid),
             )
+            # The block check and coordinates share a single SQLite snapshot.
             rows = [dict(row) for row in await cur.fetchall()]
-            cur = await db.execute(
-                """SELECT 1 FROM blocked_users
-                   WHERE (owner_telegram_id=? AND blocked_telegram_id=?)
-                      OR (owner_telegram_id=? AND blocked_telegram_id=?)
-                   LIMIT 1""",
-                (uid, with_user, with_user, uid),
-            )
-            blocked = await cur.fetchone() is not None
-        if blocked:
-            return {"locations": [], "count": 0}
         return {"locations": rows, "count": len(rows)}
 
     @router.delete("/api/messages/live-location/{live_location_id}")
@@ -8805,17 +8845,28 @@ def build_messenger_router(
             raise HTTPException(status_code=400, detail="Некорректный ID трансляции геолокации")
         now = int(time.time())
         async with aiosqlite.connect(db_path()) as db:
+            await db.execute("BEGIN IMMEDIATE")
             cur = await db.execute(
-                """UPDATE live_locations
-                   SET stopped_at=?,stopped_by_telegram_id=?
-                   WHERE id=? AND (sender_telegram_id=? OR recipient_telegram_id=?)
-                     AND stopped_at IS NULL AND expires_at>?""",
-                (now, uid, live_location_id, uid, uid, now),
+                "SELECT stopped_at,expires_at FROM live_locations WHERE id=? AND (sender_telegram_id=? OR recipient_telegram_id=?)",
+                (live_location_id, uid, uid),
             )
+            row = await cur.fetchone()
+            if row is None:
+                raise HTTPException(status_code=404, detail="Активная трансляция геолокации не найдена")
+            if row[0] is not None:
+                # Idempotent retry after a lost response; do not disclose the coordinates.
+                stopped_at = int(row[0])
+            elif int(row[1]) <= now:
+                raise HTTPException(status_code=404, detail="Активная трансляция геолокации не найдена")
+            else:
+                stopped_at = now
+                await db.execute(
+                    """UPDATE live_locations SET stopped_at=?,stopped_by_telegram_id=?,
+                              latitude=0,longitude=0,accuracy_m=NULL WHERE id=?""",
+                    (now, uid, live_location_id),
+                )
             await db.commit()
-        if cur.rowcount != 1:
-            raise HTTPException(status_code=404, detail="Активная трансляция геолокации не найдена")
-        return {"status": "stopped", "id": live_location_id, "stopped_at": now}
+        return {"status": "stopped", "id": live_location_id, "stopped_at": stopped_at}
 
     @router.post("/api/messages/album", status_code=201)
     async def send_message_album(
@@ -10009,6 +10060,7 @@ def build_messenger_router(
 
     async def scheduled_message_worker() -> None:
         last_auction_settlement = 0
+        last_live_cleanup = -60.0
         while True:
             try:
                 await process_due_scheduled_messages()
@@ -10022,6 +10074,18 @@ def build_messenger_router(
                     "Scheduled message or collectible auction processing failed (%s)",
                     type(exc).__name__,
                 )
+            # Privacy cleanup remains independent of failures in unrelated workers.
+            monotonic_now = time.monotonic()
+            if monotonic_now - last_live_cleanup >= 60:
+                try:
+                    async with aiosqlite.connect(db_path()) as db:
+                        count = await _expire_live_locations(db, int(time.time()))
+                        await db.commit()
+                    # Continue bounded batches on the next pass when there is a backlog.
+                    if count < 500:
+                        last_live_cleanup = monotonic_now
+                except Exception as exc:
+                    LOGGER.warning("Live location cleanup failed (%s)", type(exc).__name__)
             await asyncio.sleep(1.0)
 
     @router.on_event("startup")

@@ -8711,3 +8711,95 @@ def test_video_note_send_all_scopes_and_forward_preserves_metadata(api_env) -> N
             oversized = await client.post('/api/media/documents', headers={**headers,'Content-Length':str(25*1024*1024+1)}, content=data)
             assert oversized.status_code == 413
     run(scenario())
+
+
+def test_live_location_stop_block_and_expiry_redact_and_do_not_resume(api_env) -> None:
+    path, _, _, app = api_env
+    for uid in (98601, 98602, 98603):
+        add_account(api_env, uid, f'live_privacy_{uid}')
+        add_session(path, uid, f'live-privacy-{uid}')
+    async def scenario():
+        h = lambda uid: {'Authorization': f'Bearer live-privacy-{uid}'}
+        async with await client_for(app) as client:
+            async def start(sender, recipient, lat=52.1):
+                result = await client.post('/api/messages/live-location', headers=h(sender),
+                    json={'recipient_id':recipient,'latitude':lat,'longitude':4.3,'accuracy_m':8,'duration_seconds':900})
+                assert result.status_code == 201, result.text
+                return result.json()['id']
+            async def assert_redacted(live_id):
+                with db_split.sqlite_connect(path) as db:
+                    row = db.execute('SELECT latitude,longitude,accuracy_m,stopped_at FROM live_locations WHERE id=?', (live_id,)).fetchone()
+                    assert row[0:3] == (0,0,None) and row[3] is not None
+            first = await start(98601,98602)
+            stopped = await client.delete(f'/api/messages/live-location/{first}', headers=h(98601))
+            assert stopped.status_code == 200
+            assert (await client.delete(f'/api/messages/live-location/{first}', headers=h(98602))).json() == stopped.json()
+            assert (await client.delete(f'/api/messages/live-location/{first}', headers=h(98603))).status_code == 404
+            await assert_redacted(first)
+            update = {'recipient_id':98602,'live_location_id':first,'latitude':53,'longitude':4}
+            assert (await client.post('/api/messages/live-location', headers=h(98601), json=update)).status_code == 404
+
+            a = await start(98601,98602)
+            b = await start(98602,98601, lat=52.2)
+            block = await client.post('/api/blocks', headers=h(98602), json={'user_id':98601})
+            assert block.status_code == 201
+            await assert_redacted(a); await assert_redacted(b)
+            assert (await client.get('/api/messages/live-location?with=98601', headers=h(98602))).json()['count'] == 0
+            assert (await client.delete('/api/blocks/98601', headers=h(98602))).status_code == 200
+            assert (await client.get('/api/messages/live-location?with=98602', headers=h(98601))).json()['count'] == 0
+            assert (await client.post('/api/messages/live-location', headers=h(98601), json={**update,'live_location_id':a})).status_code == 404
+            fresh = await start(98601,98602)
+            assert fresh not in (a,b)
+            # A concurrently submitted update cannot resurrect a blocked stream.
+            changed, blocked = await asyncio.gather(
+                client.post('/api/messages/live-location', headers=h(98601), json={**update,'live_location_id':fresh}),
+                client.post('/api/blocks', headers=h(98601), json={'user_id':98602}))
+            assert changed.status_code in (201,403,404) and blocked.status_code == 201
+            await assert_redacted(fresh)
+            assert (await client.delete('/api/blocks/98602', headers=h(98601))).status_code == 200
+            assert (await client.get('/api/messages/live-location?with=98602', headers=h(98601))).json()['count'] == 0
+            for invalid in ({'accuracy_m':True}, {'duration_seconds':True}, {'duration_seconds':900.5}, {'recipient_id':98602.2}, {'recipient_id':True}, {'recipient_id':10**30}, {'latitude':float('inf')}):
+                payload={'recipient_id':98602,'latitude':52,'longitude':4,'duration_seconds':900, **invalid}
+                # httpx deliberately refuses to serialize infinity; send JSON raw for that case.
+                if invalid.get('latitude') == float('inf'):
+                    response = await client.post('/api/messages/live-location', headers={**h(98601),'Content-Type':'application/json'},
+                        content='{"recipient_id":98602,"latitude":1e10000,"longitude":4,"duration_seconds":900}')
+                else:
+                    response = await client.post('/api/messages/live-location', headers=h(98601), json=payload)
+                assert response.status_code == 400, response.text
+            expired = await start(98601,98602)
+            now = int(time.time())
+            with db_split.sqlite_connect(path) as db:
+                db.execute('UPDATE live_locations SET started_at=?,expires_at=? WHERE id=?', (now-1000,now-1,expired))
+                # Legacy stopped records also need their old precise coordinates removed.
+                db.execute('UPDATE live_locations SET latitude=52.2,longitude=4.1,accuracy_m=5 WHERE id=?', (first,))
+                db.commit()
+            assert (await client.get('/api/messages/live-location?with=98602', headers=h(98601))).json()['count'] == 0
+            async with messenger_api.aiosqlite.connect(path) as db:
+                assert await messenger_api._expire_live_locations(db, now, 1) == 1
+                await db.commit()
+                assert await messenger_api._expire_live_locations(db, now, 1) == 1
+                await db.commit()
+            await assert_redacted(first)
+            await assert_redacted(expired)
+            assert (await client.delete(f'/api/messages/live-location/{expired}', headers=h(98601))).status_code == 200
+    run(scenario())
+
+
+def test_live_location_block_check_is_part_of_the_read_snapshot(api_env) -> None:
+    path, _, _, app = api_env
+    for uid in (98501,98502):
+        add_account(api_env,uid,f'live_snapshot_{uid}')
+        add_session(path,uid,f'live-snapshot-{uid}')
+    async def scenario():
+        async with await client_for(app) as client:
+            h = lambda uid: {'Authorization':f'Bearer live-snapshot-{uid}'}
+            response = await client.post('/api/messages/live-location', headers=h(98501), json={
+                'recipient_id':98502,'latitude':52,'longitude':4,'duration_seconds':900})
+            assert response.status_code == 201
+            # Simulate a pre-existing block from outside this API; the read must never expose a fix.
+            with db_split.sqlite_connect(path) as db:
+                db.execute('INSERT INTO blocked_users(owner_telegram_id,blocked_telegram_id,created_at) VALUES(?,?,?)', (98502,98501,int(time.time())))
+                db.commit()
+            assert (await client.get('/api/messages/live-location?with=98501',headers=h(98502))).json() == {'locations':[], 'count':0}
+    run(scenario())
