@@ -115,6 +115,33 @@ class NativeMessagingSourceChecks(unittest.TestCase):
         self.assertIn('Utilities.searchQueue.cancelRunnable(searchRunnable)', adapter)
         self.assertIn('codePointCount', search)
 
+    def test_address_search_handles_permission_and_provider_failures(self):
+        adapter = self.source('ui/Adapters/BaseLocationAdapter.java')
+        results = self.source('ui/Adapters/LocationActivitySearchAdapter.java')
+        attach = self.source('ui/Components/ChatAttachAlertLocationLayout.java')
+        activity = self.source('ui/LocationActivity.java')
+        delayed = adapter[adapter.index('    public void searchDelayed('):adapter.index('    private void searchBotUser(')]
+        self.assertIn('places.clear()', delayed)
+        self.assertIn('locations.clear()', delayed)
+        self.assertLess(delayed.index('locations.clear()'), delayed.index('searchWaysGramAddresses(query.trim(), generation)'))
+        self.assertIn('query.codePointCount(0, query.length()) > 200', adapter)
+        self.assertIn('WG_SEARCH_UNAVAILABLE', adapter)
+        self.assertIn('WG_SEARCH_TOO_LONG', adapter)
+        self.assertIn('generation != waysGramSearchGeneration) return', adapter)
+        self.assertIn('!myLocationDenied || org.telegram.tgnet.WaysGramTransport.ENABLED && !stories && !biz && isSearching()', results)
+        self.assertEqual(attach.count('locationDenied && !parentAlert.isStoryLocationPicker && !org.telegram.tgnet.WaysGramTransport.ENABLED'), 2)
+        for screen in (attach, activity):
+            self.assertIn('searchAdapter.getWaysGramSearchError()', screen)
+            self.assertIn('R.string.WaysGramAddressSearchUnavailable', screen)
+            self.assertIn('R.string.WaysGramAddressSearchTooLong', screen)
+        import xml.etree.ElementTree as ET
+        keys = {'WaysGramAddressSearchError', 'WaysGramAddressSearchUnavailable', 'WaysGramAddressSearchTooLong'}
+        for language in ('values', 'values-ru'):
+            path = f'WaysGram-Android/TMessagesProj/src/main/res/{language}/waysgram_location.xml'
+            xml = ET.fromstring(self.archive.read(path))
+            self.assertEqual({entry.attrib['name'] for entry in xml}, keys)
+            self.assertTrue(all(entry.text for entry in xml))
+
     def test_venue_send_receive_and_metadata(self):
         transport = self.source('tgnet/WaysGramTransport.java')
         media = self.source('tgnet/WaysGramMedia.java')
