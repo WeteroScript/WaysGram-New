@@ -1,0 +1,22 @@
+--- a/WaysGram-Android/TMessagesProj/src/main/java/org/telegram/tgnet/WaysGramMessages.java
++++ b/WaysGram-Android/TMessagesProj/src/main/java/org/telegram/tgnet/WaysGramMessages.java
+@@ -192,7 +192,7 @@
+     }
+ 
+     public static TLObject forward(int account, TLRPC.TL_messages_forwardMessages req, long selfId) throws WaysGramApi.ApiException {
+-        if (req.id.isEmpty() || req.id.size() > 20 || req.id.size() != req.random_id.size()
++        if (req.id.isEmpty() || req.id.size() > 100 || req.id.size() != req.random_id.size()
+                 || req.schedule_date != 0 || req.schedule_repeat_period != 0 || req.reply_to != null
+                 || req.top_msg_id != 0 || req.send_as != null || req.noforwards || req.with_my_score
+                 || req.effect != 0 || req.suggested_post != null || req.allow_paid_stars != 0
+--- a/WaysGram-Android/TMessagesProj/src/main/java/org/telegram/messenger/SendMessagesHelper.java
++++ b/WaysGram-Android/TMessagesProj/src/main/java/org/telegram/messenger/SendMessagesHelper.java
+@@ -2696,7 +2696,7 @@
+                     }
+                 }
+ 
+-                if (arr.size() == (org.telegram.tgnet.WaysGramTransport.ENABLED ? 20 : 100) || a == messages.size() - 1 || a != messages.size() - 1 && messages.get(a + 1).getDialogId() != msgObj.getDialogId()) {
++                if (arr.size() == 100 || a == messages.size() - 1 || a != messages.size() - 1 && messages.get(a + 1).getDialogId() != msgObj.getDialogId()) {
+                     getMessagesStorage().putMessages(new ArrayList<>(arr), false, true, false, 0, scheduleDate != 0 ? 1 : 0, 0);
+                     getMessagesController().updateInterfaceWithMessages(peer, objArr, scheduleDate != 0 ? 1 : 0);
+                     getNotificationCenter().postNotificationName(NotificationCenter.dialogsNeedReload);
