@@ -237,6 +237,19 @@ class AndroidGiftSourceChecks(unittest.TestCase):
         prefetch_end = attributes.index('public static void retryFailed()', prefetch_start)
         self.assertIn('WaysGramApi.NETWORK.execute', attributes[prefetch_start:prefetch_end])
 
+    def test_shop_price_sort_is_persistent_and_uses_a_vector_icon(self):
+        import xml.etree.ElementTree as ET
+        sheet = self.source("ui/Gifts/GiftSheet.java")
+        for fragment in ('getBoolean(PRICE_DESCENDING, false)', 'putBoolean(PRICE_DESCENDING, descending).apply()',
+                         'topView.addView(sortButton', '.addChecked(priceDescending', '.addChecked(!priceDescending',
+                         'items.subList(firstGift, items.size()).sort', 'Long.compare(shopPrice(b), shopPrice(a))',
+                         'Long.compare(shopPrice(a), shopPrice(b))', 'return gift.resell_min_stars'):
+            self.assertIn(fragment, sheet)
+        path = 'WaysGram-Android/TMessagesProj/src/main/res/drawable/waysgram_gift_sort.xml'
+        icon = ET.fromstring(self.archive.read(path))
+        self.assertEqual(icon.tag, 'vector')
+        self.assertIsNotNone(icon.find('path'))
+
     def test_waysgram_profile_keeps_media_and_gifts_as_separate_tabs(self):
         layout = self.source("ui/Components/SharedMediaLayout.java")
         tabs = layout.split("public void updateTabs(boolean animated)", 1)[1].split("private void startStopVisibleGifs", 1)[0]
