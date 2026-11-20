@@ -96,6 +96,22 @@ class NativeMessagingSourceChecks(unittest.TestCase):
             for name in ('WaysGramPinActionFailed', 'WaysGramPinClearExpired', 'WaysGramPinUpdateRequired'):
                 self.assertIn('name="' + name + '"', strings)
 
+    def test_pins_use_batched_history_when_available_and_keep_service_messages(self):
+        pins = self.source('tgnet/WaysGramPins.java')
+        media = self.source('messenger/MediaDataController.java')
+        for marker in ('capabilities.optBoolean("batch_message_ids")',
+                       '"/messages?message_ids="', '"&message_ids="',
+                       'java.util.HashSet<Integer> requested', 'batch.put(id, row)',
+                       'if (row == null) throw new WaysGramApi.ApiException(409, "PINS_CHANGED_RETRY")',
+                       'WaysGramChats.groupMessage(row, t.id, selfId)',
+                       'WaysGramChats.channelMessage(row, WaysGramChats.channelTg(t.id), selfId)',
+                       'WaysGramMapper.toMessage(row, selfId, account)',
+                       'WaysGramMedia.attach(account, message, row)',
+                       'WaysGramMessages.fetchPrivate(account, t.id, id, selfId, token)'):
+            self.assertIn(marker, pins)
+        self.assertIn('message instanceof TLRPC.TL_messageService && !org.telegram.tgnet.WaysGramTransport.ENABLED', media)
+        self.assertIn('message instanceof TLRPC.TL_messageEmpty', media)
+
     def test_local_reaction_picker_and_bubble_fallback(self):
         import xml.etree.ElementTree as ET
         chat = self.source('ui/ChatActivity.java')

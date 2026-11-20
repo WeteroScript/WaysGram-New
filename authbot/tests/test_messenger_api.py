@@ -8484,3 +8484,73 @@ def test_pin_clear_snapshot_protects_concurrent_changes_and_private_pins(api_env
             assert cleared.status_code == 200 and cleared.json()['count'] == 0
             assert (await client.get('/api/pins/v2', headers=a, params={'scope':'channel','peer_id':cid})).json()['total_count'] == 1
     run(scenario())
+
+
+def test_batched_history_ids_are_bounded_scoped_and_match_history(api_env) -> None:
+    path, _, _, app = api_env
+    for uid, token in ((98801, 'batch-owner'), (98802, 'batch-peer'), (98803, 'batch-outsider')):
+        add_account(api_env, uid, f'batch_history_{uid}')
+        add_session(path, uid, token)
+    async def scenario() -> None:
+        async with await client_for(app) as client:
+            a = {'Authorization':'Bearer batch-owner'}
+            b = {'Authorization':'Bearer batch-peer'}
+            x = {'Authorization':'Bearer batch-outsider'}
+            sent = []
+            for text in ('old', 'hidden', 'new'):
+                r = await client.post('/api/messages', headers=a, json={'recipient_id':98802, 'body':text})
+                assert r.status_code == 201
+                sent.append(r.json()['id'])
+            # Same history objects, including metadata and reactions, in normal chronological order.
+            assert (await client.put(f'/api/messages/{sent[0]}/reactions', headers=a, json={'peer_id':98802, 'reactions':['👍']})).status_code == 200
+            history = (await client.get('/api/messages', headers=a, params={'with':98802})).json()['messages']
+            batch = await client.get('/api/messages', headers=a, params={'with':98802, 'message_ids':f'{sent[2]},{sent[0]}'})
+            assert batch.status_code == 200
+            assert batch.json()['messages'] == [m for m in history if m['id'] in (sent[0], sent[2])]
+            assert (await client.delete(f'/api/messages/{sent[1]}?for=me', headers=a)).status_code == 200
+            visible = (await client.get('/api/messages', headers=a, params={'with':98802, 'message_ids':','.join(map(str,sent))})).json()['messages']
+            assert [m['id'] for m in visible] == [sent[0], sent[2]]
+            assert (await client.get('/api/messages', headers=x, params={'with':98802, 'message_ids':str(sent[0])})).json()['messages'] == []
+            for value in ('', '0', '-1', '1,1', '1,,2', '1, 2', str(2**63), ','.join(map(str, range(1,102)))):
+                assert (await client.get('/api/messages', headers=a, params={'with':98802, 'message_ids':value})).status_code == 400
+            for extra in ({'after_id':1}, {'before_id':1}, {'wait_seconds':1}):
+                assert (await client.get('/api/messages', headers=a, params={'with':98802, 'message_ids':'1', **extra})).status_code == 400
+            # Old IDs outside the most recent 100 messages remain retrievable.
+            with db_split.sqlite_connect(path) as db:
+                for i in range(105):
+                    db.execute('INSERT INTO messages(sender_telegram_id,recipient_telegram_id,body,created_at) VALUES(98801,98802,?,?)', (f'bulk {i}', 10000+i))
+            assert (await client.get('/api/messages', headers=a, params={'with':98802, 'message_ids':str(sent[0])})).json()['messages'][0]['id'] == sent[0]
+            with db_split.sqlite_connect(path) as db:
+                last_ids = [row[0] for row in db.execute('SELECT id FROM messages WHERE sender_telegram_id=98801 AND recipient_telegram_id=98802 ORDER BY id DESC LIMIT 100')]
+            selected = await client.get('/api/messages', headers=a, params={'with':98802, 'message_ids':','.join(map(str,last_ids))})
+            assert selected.status_code == 200 and [m['id'] for m in selected.json()['messages']] == sorted(last_ids)
+            group = await client.post('/api/groups', headers=a, json={'title':'Batch History Group'})
+            assert group.status_code == 201
+            gid = group.json()['id']
+            gm = []
+            for text in ('group a','group b'):
+                r = await client.post(f'/api/groups/{gid}/messages', headers=a, json={'body':text})
+                assert r.status_code == 201
+                gm.append(r.json()['id'])
+            url = f'/api/groups/{gid}/messages'
+            expected = (await client.get(url, headers=a)).json()['messages']
+            got = await client.get(url, headers=a, params={'message_ids':f'{gm[1]},{gm[0]}', 'limit':1})
+            assert got.status_code == 200 and got.json()['messages'] == expected
+            assert (await client.get(url, headers=x, params={'message_ids':str(gm[0])})).status_code == 403
+            assert (await client.get(url, headers=a, params={'message_ids':'1,1'})).status_code == 400
+            channel = await client.post('/api/channels', headers=a, json={'title':'Batch History Channel', 'username':'batch_history_channel', 'is_public':False})
+            assert channel.status_code == 201
+            cid = channel.json()['id']
+            cm = []
+            for text in ('channel a','channel b'):
+                r = await client.post(f'/api/channels/{cid}/messages', headers=a, json={'body':text})
+                assert r.status_code == 201
+                cm.append(r.json()['id'])
+            url = f'/api/channels/{cid}/messages'
+            expected = (await client.get(url, headers=a)).json()['messages']
+            got = await client.get(url, headers=a, params={'message_ids':f'{cm[1]},{cm[0]}', 'limit':1})
+            assert got.status_code == 200 and got.json()['messages'] == expected
+            assert (await client.get(url, headers=x, params={'message_ids':str(cm[0])})).status_code == 403
+            assert (await client.get(url, headers=a, params={'message_ids':'1,1'})).status_code == 400
+            assert (await client.get('/api/pins/capabilities', headers=a)).json()['batch_message_ids'] is True
+    run(scenario())

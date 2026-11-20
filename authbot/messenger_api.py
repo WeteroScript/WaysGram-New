@@ -7666,6 +7666,23 @@ def build_messenger_router(
             if contact:
                 item.update(zip(("contact_name", "contact_phone", "contact_email", "contact_first_name", "contact_last_name", "contact_vcard"), contact))
 
+    def parse_history_ids(value: str | None, after_id: int, before_id: int, wait_seconds: int) -> list[int] | None:
+        # Bounded point lookup uses exactly the same authorization and rendering
+        # as history; it is not a second, less restrictive message endpoint.
+        if value is None:
+            return None
+        if after_id or before_id or wait_seconds:
+            raise HTTPException(status_code=400, detail="message_ids нельзя совмещать с курсорами или ожиданием")
+        if len(value) > 2000 or not re.fullmatch(r"[1-9][0-9]*(?:,[1-9][0-9]*)*", value):
+            raise HTTPException(status_code=400, detail="Некорректный список message_ids")
+        values = value.split(",")
+        if len(values) > 100 or any(len(v) > 19 for v in values):
+            raise HTTPException(status_code=400, detail="Слишком много или слишком длинные message_ids")
+        ids = [int(v) for v in values]
+        if len(set(ids)) != len(ids) or any(v > 9223372036854775807 for v in ids):
+            raise HTTPException(status_code=400, detail="Некорректный список message_ids")
+        return ids
+
     @router.get("/api/channels/{channel_id}/messages")
     async def list_channel_messages(
         channel_id: int,
@@ -7673,18 +7690,35 @@ def build_messenger_router(
         before_id: int = Query(default=0, ge=0),
         limit: int = Query(default=100, ge=1, le=100),
         wait_seconds: int = Query(default=0, ge=0, le=20),
+        message_ids: str | None = Query(default=None),
         authorization: str | None = Header(default=None),
     ) -> dict[str, Any]:
         user = await current_user(authorization)
         await require_channel_access(channel_id, int(user["telegram_id"]))
         if after_id and before_id:
             raise HTTPException(status_code=400, detail="Используйте только один курсор: after_id или before_id")
+        selected_ids = parse_history_ids(message_ids, after_id, before_id, wait_seconds)
         deadline = time.monotonic() + (wait_seconds if after_id else 0)
         rows = []
         while True:
             await channel_row(channel_id)
             async with aiosqlite.connect(db_path()) as db:
                 db.row_factory = aiosqlite.Row
+                if selected_ids is not None:
+                    # Re-check visibility in the same snapshot as the batch read.
+                    await db.execute("BEGIN")
+                    uid = int(user["telegram_id"])
+                    cur = await db.execute(
+                        """SELECT is_public,owner_telegram_id,
+                                  EXISTS(SELECT 1 FROM channel_admins a WHERE a.channel_id=channels.id AND a.telegram_id=?) AS is_admin,
+                                  EXISTS(SELECT 1 FROM channel_members m WHERE m.channel_id=channels.id AND m.telegram_id=?) AS is_member
+                           FROM channels WHERE id=?""", (uid, uid, channel_id))
+                    channel = await cur.fetchone()
+                    if channel is None:
+                        raise HTTPException(status_code=404, detail="Канал не найден")
+                    if not (channel["is_public"] or channel["owner_telegram_id"] == uid
+                            or channel["is_admin"] or channel["is_member"]):
+                        raise HTTPException(status_code=403, detail="Это приватный канал. Нужна ссылка-приглашение.")
                 if after_id:
                     cur = await db.execute(
                         """SELECT id,channel_id,author_telegram_id AS author_id,body,entities_json,media_id,media_album_id,media_album_index,media_album_count,edited_at,reply_to_id,created_at,
@@ -7703,6 +7737,8 @@ def build_messenger_router(
                         (channel_id, after_id, limit),
                     )
                 else:
+                    id_filter = "" if selected_ids is None else " AND id IN (" + ",".join("?" for _ in selected_ids) + ")"
+                    selected_limit = limit if selected_ids is None else len(selected_ids)
                     cur = await db.execute(
                         """SELECT id,channel_id,author_telegram_id AS author_id,body,entities_json,media_id,media_album_id,media_album_index,media_album_count,edited_at,reply_to_id,created_at,
                                   (SELECT body FROM channel_messages AS replied WHERE replied.id=channel_messages.reply_to_id) AS reply_to_body,
@@ -7715,9 +7751,8 @@ def build_messenger_router(
                                   (SELECT original_name FROM media_assets WHERE id=channel_messages.media_id) AS media_name,
                                   (SELECT media_kind FROM media_assets WHERE id=channel_messages.media_id) AS media_kind,
                                   (SELECT media_metadata FROM media_assets WHERE id=channel_messages.media_id) AS media_metadata
-                           FROM channel_messages WHERE channel_id=? AND (?=0 OR id<?)
-                           ORDER BY id DESC LIMIT ?""",
-                        (channel_id, before_id, before_id, limit),
+                           FROM channel_messages WHERE channel_id=? AND (?=0 OR id<?)""" + id_filter + " ORDER BY id DESC LIMIT ?",
+                        (channel_id, before_id, before_id) + tuple(selected_ids or ()) + (selected_limit,),
                     )
                 rows = await cur.fetchall()
             if rows or time.monotonic() >= deadline:
@@ -8127,12 +8162,14 @@ def build_messenger_router(
         after_id: int = Query(default=0, ge=0),
         before_id: int = Query(default=0, ge=0),
         wait_seconds: int = Query(default=0, ge=0, le=20),
+        message_ids: str | None = Query(default=None),
         authorization: str | None = Header(default=None),
     ) -> dict[str, Any]:
         user = await current_user(authorization)
         uid = int(user["telegram_id"])
         if after_id and before_id:
             raise HTTPException(status_code=400, detail="Используйте только один курсор: after_id или before_id")
+        selected_ids = parse_history_ids(message_ids, after_id, before_id, wait_seconds)
         async with aiosqlite.connect(db_path()) as db:
             cur = await db.execute("SELECT 1 FROM accounts WHERE telegram_id=?", (peer,))
             if not await cur.fetchone():
@@ -8188,7 +8225,13 @@ def build_messenger_router(
         while True:
             async with aiosqlite.connect(db_path()) as db:
                 db.row_factory = aiosqlite.Row
-                if after_id:
+                if selected_ids is not None:
+                    placeholders = ",".join("?" for _ in selected_ids)
+                    cur = await db.execute(
+                        base + " AND id IN (" + placeholders + ") ORDER BY id DESC LIMIT 100",
+                        params + tuple(selected_ids),
+                    )
+                elif after_id:
                     cur = await db.execute(
                         base + " AND id>? ORDER BY id ASC LIMIT 100",
                         params + (after_id,),
@@ -10345,7 +10388,7 @@ def build_messenger_router(
     async def pin_capabilities(authorization: str | None = Header(default=None)) -> dict[str, Any]:
         await current_user(authorization)
         return {"version": 2, "one_side": True, "keyset_paging": True, "clear_bounded": True,
-                "clear_snapshot": True}
+                "clear_snapshot": True, "batch_message_ids": True}
 
     @router.get("/api/pins")
     @router.get("/api/pins/v2")
@@ -12105,16 +12148,20 @@ def build_messenger_router(
         before_id: int = Query(default=0, ge=0),
         limit: int = Query(default=100, ge=1, le=100),
         wait_seconds: int = Query(default=0, ge=0, le=20),
+        message_ids: str | None = Query(default=None),
         authorization: str | None = Header(default=None),
     ) -> dict[str, Any]:
         user = await current_user(authorization)
         uid = int(user["telegram_id"])
         if after_id and before_id:
             raise HTTPException(status_code=400, detail="Используйте только один курсор: after_id или before_id")
+        selected_ids = parse_history_ids(message_ids, after_id, before_id, wait_seconds)
         deadline = time.monotonic() + (wait_seconds if after_id else 0)
         rows = []
         while True:
             async with aiosqlite.connect(db_path()) as db:
+                if selected_ids is not None:
+                    await db.execute("BEGIN")
                 await require_group_member(db, group_id, uid)
                 db.row_factory = aiosqlite.Row
                 if after_id:
@@ -12134,6 +12181,8 @@ def build_messenger_router(
                         (group_id, after_id, limit),
                     )
                 else:
+                    id_filter = "" if selected_ids is None else " AND id IN (" + ",".join("?" for _ in selected_ids) + ")"
+                    selected_limit = limit if selected_ids is None else len(selected_ids)
                     cur = await db.execute(
                         """SELECT id,group_id,sender_telegram_id AS sender_id,body,entities_json,media_id,media_album_id,media_album_index,media_album_count,edited_at,reply_to_id,created_at,
                                   (SELECT body FROM group_messages AS replied WHERE replied.id=group_messages.reply_to_id) AS reply_to_body,
@@ -12146,8 +12195,8 @@ def build_messenger_router(
                                   (SELECT original_name FROM media_assets WHERE id=group_messages.media_id) AS media_name,
                                   (SELECT media_kind FROM media_assets WHERE id=group_messages.media_id) AS media_kind,
                                   (SELECT media_metadata FROM media_assets WHERE id=group_messages.media_id) AS media_metadata
-                           FROM group_messages WHERE group_id=? AND (?=0 OR id<?) ORDER BY id DESC LIMIT ?""",
-                        (group_id, before_id, before_id, limit),
+                           FROM group_messages WHERE group_id=? AND (?=0 OR id<?)""" + id_filter + " ORDER BY id DESC LIMIT ?",
+                        (group_id, before_id, before_id) + tuple(selected_ids or ()) + (selected_limit,),
                     )
                 rows = await cur.fetchall()
             if rows or time.monotonic() >= deadline:
