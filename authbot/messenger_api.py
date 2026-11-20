@@ -1455,6 +1455,11 @@ async def init_messenger_storage(database_path: Path) -> None:
         draft_columns = {str(row[1]) for row in await cur.fetchall()}
         if "entities_json" not in draft_columns:
             await db.execute(f"ALTER TABLE {db_split.SCHEMA}.cloud_drafts ADD COLUMN entities_json TEXT NOT NULL DEFAULT '[]'")
+        # Receipts contain no message content, but should not outlive deleted messages.
+        for table_name, scope in (("messages", "dm"), ("group_messages", "group")):
+            await db.execute(f"""CREATE TRIGGER IF NOT EXISTS {db_split.SCHEMA}.read_receipts_delete_{scope}
+                AFTER DELETE ON {table_name}
+                BEGIN DELETE FROM read_receipts WHERE scope='{scope}' AND message_id=OLD.id; END""")
         # Database triggers cover all writers, including older API processes and
         # administrative deletes. Existing rows start at revision zero on upgrade.
         for action, ref in (("INSERT", "NEW"), ("UPDATE", "NEW"), ("DELETE", "OLD")):
@@ -11614,9 +11619,10 @@ def build_messenger_router(
                 raise HTTPException(status_code=400, detail="peer_id и last_read_id должны быть целыми числами")
         if not peer_id:
             raise HTTPException(status_code=400, detail="Укажите peer_id")
-        now = int(time.time())
         async with aiosqlite.connect(db_path()) as db:
             await db.execute("BEGIN IMMEDIATE")
+            # Use the time the marker transaction actually acquired the write lock.
+            now = int(time.time())
             if scope == "group":
                 await require_group_member(db, int(peer_id), uid)
             elif scope == "channel":
@@ -11687,6 +11693,8 @@ def build_messenger_router(
         user = await current_user(authorization)
         uid = int(user["telegram_id"])
         async with aiosqlite.connect(db_path()) as db:
+            # Membership, message visibility and receipts share a read snapshot.
+            await db.execute("BEGIN")
             if scope == "dm":
                 cur = await db.execute("""SELECT 1 FROM messages WHERE id=? AND sender_telegram_id=? AND recipient_telegram_id=?
                     AND NOT EXISTS(SELECT 1 FROM message_hidden_for h WHERE h.message_id=messages.id AND h.telegram_id=?)""",
