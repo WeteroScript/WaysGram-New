@@ -9592,6 +9592,10 @@ def build_messenger_router(
                 (uid, recipient_id, body, scheduled_at, repeat_interval, now, int(silent), time_zone, _message_entities_json(entities)),
             )
             scheduled_id = int(cur.lastrowid)
+            if request.url.path.endswith("/v2"):
+                if scheduled_id > 1073741823:
+                    raise HTTPException(status_code=503, detail="Превышен диапазон ID отложенных сообщений")
+                await record_event(db, "scheduled", scheduled_id * 2, "scheduled_changed", uid, chat_id=recipient_id)
             result = {
                 "id": scheduled_id,
                 "status": "pending",
@@ -9678,6 +9682,10 @@ def build_messenger_router(
                 (uid, recipient_id, body, int(silent), now, _message_entities_json(entities)),
             )
             scheduled_id = int(cur.lastrowid)
+            if request.url.path.endswith("/v2"):
+                if scheduled_id > 1073741823:
+                    raise HTTPException(status_code=503, detail="Превышен диапазон ID отложенных сообщений")
+                await record_event(db, "scheduled", scheduled_id * 2 + 1, "scheduled_changed", uid, chat_id=recipient_id)
             result = {
                 "id": scheduled_id,
                 "status": "pending",
@@ -9730,6 +9738,8 @@ def build_messenger_router(
         uid = int(user["telegram_id"])
         async with aiosqlite.connect(db_path()) as db:
             await db.execute("BEGIN IMMEDIATE")
+            cur = await db.execute("SELECT recipient_telegram_id FROM online_scheduled_messages WHERE id=? AND sender_telegram_id=? AND status='pending'", (scheduled_id, uid))
+            task = await cur.fetchone()
             cur = await db.execute(
                 """UPDATE online_scheduled_messages SET status='cancelled'
                    WHERE id=? AND sender_telegram_id=? AND status='pending'""",
@@ -9738,6 +9748,8 @@ def build_messenger_router(
             if cur.rowcount != 1:
                 await db.rollback()
                 raise HTTPException(status_code=404, detail="Сообщение, ожидающее онлайна, не найдено или уже обработано")
+            if task and scheduled_id <= 1073741823:
+                await record_event(db, "scheduled", scheduled_id * 2 + 1, "scheduled_removed", uid, chat_id=int(task[0]))
             await db.commit()
         return {"id": scheduled_id, "status": "cancelled"}
 
@@ -9775,6 +9787,54 @@ def build_messenger_router(
                 row.pop("entities_json", None)
         return {"scheduled_messages": rows, "count": len(rows)}
 
+    @router.get("/api/messages/scheduled/native/v1")
+    async def native_scheduled_list(peer: int = Query(alias="with", gt=0),
+                                    authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        uid = int((await current_user(authorization))["telegram_id"])
+        async with aiosqlite.connect(db_path()) as db:
+            db.row_factory = aiosqlite.Row
+            await db.execute("BEGIN")
+            cur = await db.execute("""SELECT id,recipient_telegram_id AS recipient_id,body,scheduled_at,
+                    repeat_interval_seconds,silent,created_at,status,error,entities_json,0 AS online
+                FROM scheduled_messages WHERE sender_telegram_id=? AND recipient_telegram_id=?
+                  AND status IN ('pending','failed') AND id<=1073741823
+                UNION ALL
+                SELECT id,recipient_telegram_id AS recipient_id,body,2147483646 AS scheduled_at,
+                    0 AS repeat_interval_seconds,silent,created_at,status,error,entities_json,1 AS online
+                FROM online_scheduled_messages WHERE sender_telegram_id=? AND recipient_telegram_id=?
+                  AND status IN ('pending','failed') AND id<=1073741823
+                ORDER BY scheduled_at,id LIMIT 1000""", (uid, peer, uid, peer))
+            rows = [dict(row) for row in await cur.fetchall()]
+        for row in rows:
+            row["native_id"] = int(row["id"]) * 2 + int(row["online"])
+            _add_message_entities(row)
+        return {"scheduled_messages": rows, "count": len(rows)}
+
+    @router.post("/api/messages/scheduled/cancel/native/v1")
+    async def native_cancel_scheduled(payload: dict[str, Any], authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        uid = int((await current_user(authorization))["telegram_id"])
+        peer, ids = payload.get("peer_id"), payload.get("ids")
+        if isinstance(peer, bool) or not isinstance(peer, int) or not 0 < peer <= 9223372036854775807:
+            raise HTTPException(status_code=400, detail="Некорректный собеседник")
+        if not isinstance(ids, list) or not 1 <= len(ids) <= 1000 or any(
+            isinstance(i, bool) or not isinstance(i, int) or i < 2 or i > 2147483647 for i in ids
+        ) or len(set(ids)) != len(ids):
+            raise HTTPException(status_code=400, detail="Некорректный список сообщений")
+        async with aiosqlite.connect(db_path()) as db:
+            await db.execute("BEGIN IMMEDIATE")
+            for native_id in ids:
+                table = "online_scheduled_messages" if native_id % 2 else "scheduled_messages"
+                cur = await db.execute(f"SELECT status FROM {table} WHERE id=? AND sender_telegram_id=? AND recipient_telegram_id=?",
+                                       (native_id // 2, uid, peer))
+                row = await cur.fetchone()
+                if row is None or row[0] not in ("pending", "failed", "cancelled"):
+                    raise HTTPException(status_code=409, detail="Сообщение уже отправлено или недоступно")
+                if row[0] != "cancelled":
+                    await db.execute(f"UPDATE {table} SET status='cancelled' WHERE id=?", (native_id // 2,))
+                    await record_event(db, "scheduled", native_id, "scheduled_removed", uid, chat_id=peer)
+            await db.commit()
+        return {"cancelled": ids}
+
     @router.delete("/api/messages/scheduled/{scheduled_id}")
     async def cancel_scheduled_message(
         scheduled_id: int,
@@ -9784,6 +9844,8 @@ def build_messenger_router(
         uid = int(user["telegram_id"])
         async with aiosqlite.connect(db_path()) as db:
             await db.execute("BEGIN IMMEDIATE")
+            cur = await db.execute("SELECT recipient_telegram_id FROM scheduled_messages WHERE id=? AND sender_telegram_id=? AND status='pending'", (scheduled_id, uid))
+            task = await cur.fetchone()
             cur = await db.execute(
                 """UPDATE scheduled_messages SET status='cancelled'
                    WHERE id=? AND sender_telegram_id=? AND status='pending'""",
@@ -9792,6 +9854,8 @@ def build_messenger_router(
             if cur.rowcount != 1:
                 await db.rollback()
                 raise HTTPException(status_code=404, detail="Отложенное сообщение не найдено или уже обработано")
+            if task and scheduled_id <= 1073741823:
+                await record_event(db, "scheduled", scheduled_id * 2, "scheduled_removed", uid, chat_id=int(task[0]))
             await db.commit()
         return {"id": scheduled_id, "status": "cancelled"}
 
@@ -10424,6 +10488,8 @@ def build_messenger_router(
                         "UPDATE scheduled_messages SET status='failed',error=? WHERE id=? AND status='pending'",
                         (failure, scheduled_id),
                     )
+                    if scheduled_id <= 1073741823:
+                        await record_event(db, "scheduled", scheduled_id * 2, "scheduled_changed", int(sender_id), chat_id=int(recipient_id))
                     continue
                 cur = await db.execute(
                     """INSERT INTO messages(sender_telegram_id,recipient_telegram_id,body,created_at)
@@ -10456,6 +10522,10 @@ def build_messenger_router(
                            WHERE id=? AND status='pending'""",
                         (message_id, scheduled_id),
                     )
+                if scheduled_id <= 1073741823:
+                    await record_event(db, "scheduled", scheduled_id * 2,
+                        "scheduled_changed" if int(repeat_interval) > 0 else "scheduled_removed",
+                        int(sender_id), chat_id=int(recipient_id))
                 notifications.append((
                     int(recipient_id), int(sender_id),
                     str(body), str(scheduled_id), message_id, bool(silent),
@@ -10522,6 +10592,8 @@ def build_messenger_router(
                         "UPDATE online_scheduled_messages SET status='failed',error=? WHERE id=? AND status='pending'",
                         (failure, scheduled_id),
                     )
+                    if scheduled_id <= 1073741823:
+                        await record_event(db, "scheduled", scheduled_id * 2 + 1, "scheduled_changed", int(sender_id), chat_id=int(recipient_id))
                     continue
                 cur = await db.execute(
                     "SELECT COUNT(*) FROM messages WHERE sender_telegram_id=? AND created_at>?",
@@ -10549,6 +10621,8 @@ def build_messenger_router(
                        WHERE id=? AND status='pending'""",
                     (message_id, scheduled_id),
                 )
+                if scheduled_id <= 1073741823:
+                    await record_event(db, "scheduled", scheduled_id * 2 + 1, "scheduled_removed", int(sender_id), chat_id=int(recipient_id))
                 notifications.append((int(recipient_id), int(sender_id), str(body), message_id, bool(silent)))
             await db.commit()
         for recipient_id, sender_id, body, message_id, silent in notifications:
@@ -12272,7 +12346,7 @@ def build_messenger_router(
                 cur = await db.execute(
                     """SELECT id,scope,chat_id,user_a,user_b,message_id,kind,actor_id,created_at
                        FROM message_events
-                       WHERE id>? AND (
+                       WHERE id>? AND (scope='scheduled' AND actor_id=? OR scope<>'scheduled' AND (
                            (kind IN ('delete_for_me','clear_for_me','pin_local','unpin_local') AND actor_id=?)
                            OR kind IN ('delete_for_all_sync','reaction','pin','unpin')
                            OR (kind NOT IN ('delete_for_me','clear_for_me','pin_local','unpin_local','delete_for_all_sync','reaction','pin','unpin') AND actor_id<>?)
@@ -12286,9 +12360,9 @@ def build_messenger_router(
                                             WHERE ca.channel_id=ch.id AND ca.telegram_id=?)
                                   OR EXISTS(SELECT 1 FROM channel_members cm
                                             WHERE cm.channel_id=ch.id AND cm.telegram_id=?)
-                           )))
+                           ))))
                        ORDER BY id ASC LIMIT 200""",
-                    (after_id, uid, uid, uid, uid, uid, uid, uid, uid),
+                    (after_id, uid, uid, uid, uid, uid, uid, uid, uid, uid),
                 )
                 rows = [dict(row) for row in await cur.fetchall()]
             if rows or time.monotonic() >= deadline:
