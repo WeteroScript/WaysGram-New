@@ -11599,18 +11599,68 @@ def build_messenger_router(
             if not old_media:
                 raise HTTPException(status_code=400, detail="В сообщении нет файла для замены")
             if remove_media:
-                if row[5]:
-                    await db.rollback()
-                    raise HTTPException(status_code=409, detail="Удаление отдельного файла из медиаальбома пока не поддерживается")
                 if body is None:
                     body, entity_json = str(row[3] or ""), str(row[4] or "[]")
                 if not str(body or "").strip():
                     body = "Вложение удалено"
                     entity_json = "[]"
-                elif entity_json == "[]" and body == await default_media_message_body(db, old_media):
+                elif entity_json == "[]" and (
+                    body == await default_media_message_body(db, old_media)
+                    or row[5] and body == "Медиаальбом"
+                ):
                     body = "Вложение удалено"
-                await db.execute(f"UPDATE {table} SET media_id=NULL,body=?,entities_json=?,edited_at=? WHERE id=?",
-                                 (body, entity_json, now, message_id))
+
+                # Detach one entry from its album. The remaining entries keep
+                # their album if at least two remain; otherwise the survivor
+                # becomes a regular single-media message.
+                album_id = str(row[5] or "")
+                remaining_album_rows = []
+                if album_id:
+                    if scope == "dm":
+                        album_cur = await db.execute(
+                            "SELECT id,media_album_index FROM messages WHERE media_album_id=? ORDER BY media_album_index,id",
+                            (album_id,),
+                        )
+                    elif scope == "group":
+                        album_cur = await db.execute(
+                            "SELECT id,media_album_index FROM group_messages WHERE group_id=? AND media_album_id=? ORDER BY media_album_index,id",
+                            (chat_id, album_id),
+                        )
+                    else:
+                        album_cur = await db.execute(
+                            "SELECT id,media_album_index FROM channel_messages WHERE channel_id=? AND media_album_id=? ORDER BY media_album_index,id",
+                            (chat_id, album_id),
+                        )
+                    remaining_album_rows = [
+                        (int(item[0]), int(item[1]))
+                        for item in await album_cur.fetchall()
+                        if int(item[0]) != message_id
+                    ]
+
+                await db.execute(
+                    f"UPDATE {table} SET media_id=NULL,body=?,entities_json=?,edited_at=?,"
+                    "media_album_id=NULL,media_album_index=0,media_album_count=0 WHERE id=?",
+                    (body, entity_json, now, message_id),
+                )
+                keep_album = len(remaining_album_rows) >= 2
+                for index, (sibling_id, _old_index) in enumerate(remaining_album_rows):
+                    if keep_album:
+                        await db.execute(
+                            f"UPDATE {table} SET media_album_id=?,media_album_index=?,media_album_count=? WHERE id=?",
+                            (album_id, index, len(remaining_album_rows), sibling_id),
+                        )
+                    else:
+                        await db.execute(
+                            f"UPDATE {table} SET media_album_id=NULL,media_album_index=0,media_album_count=0 WHERE id=?",
+                            (sibling_id,),
+                        )
+                    if scope == "dm":
+                        await record_event(
+                            db, "dm", sibling_id, "edit", uid,
+                            user_a=int(row[0]), user_b=int(row[1]),
+                        )
+                    else:
+                        await record_event(db, scope, sibling_id, "edit", uid, chat_id=chat_id)
                 new_media = None
             else:
                 new_media = await require_owned_media(db, requested_id, uid)
