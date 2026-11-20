@@ -121,9 +121,7 @@ class AndroidGiftSourceChecks(unittest.TestCase):
         end = sheet.index("if (savedStarGift.refunded)", start)
         block = sheet[start:end]
         self.assertIn('savedStarGift.gift instanceof TL_stars.TL_starGift)', block)
-        self.assertIn('savedStarGift.gift instanceof TL_stars.TL_starGiftUnique', block)
         self.assertIn('new WaysGramAnimatedStarSpan(button)', block)
-        self.assertIn('button.setOnClickListener(v -> openWaysGramTransfer())', block)
         self.assertIn('Улучшить за 25 звёзд', block)
         self.assertIn('class WaysGramAnimatedStarSpan extends ReplacementSpan', sheet)
         self.assertIn('canvas.drawPath(star, ink)', sheet)
@@ -164,11 +162,14 @@ class AndroidGiftSourceChecks(unittest.TestCase):
 
     def test_nft_profile_transfer_is_internal_and_retains_retry_key(self):
         sheet = self.source("ui/Stars/StarGiftSheet.java")
-        start = sheet.index("private void openWaysGramTransfer()")
+        start = sheet.index("private boolean canTransferWaysGramGift()")
         end = sheet.index("public void onTransferClick", start)
         block = sheet[start:end]
         self.assertIn('TL_stars.TL_starGiftUnique', block)
-        self.assertIn('!myProfile', block)
+        self.assertIn('return myProfile && walletCollectible == null', block)
+        self.assertIn('topView.setWaysGramTransferOnly(canTransfer)', sheet)
+        self.assertIn('this::openWaysGramTransfer)', sheet)
+        self.assertIn('if (isWaysGramGift()) {\n            openWaysGramTransfer();', sheet)
         self.assertIn('UserSelectorBottomSheet.TYPE_TRANSFER', block)
         self.assertNotIn('addTONOption', block)
         self.assertIn('recipient <= 0', block)
