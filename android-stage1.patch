@@ -68,22 +68,23 @@
          if ((kind.equals("voice") || kind.equals("audio")) && mime != null && mime.startsWith("audio/")) {
              TLRPC.TL_documentAttributeAudio audio = new TLRPC.TL_documentAttributeAudio();
              audio.voice = kind.equals("voice");
-@@ -228,6 +275,20 @@
+@@ -228,6 +275,19 @@
              video.w = width > 0 ? width : 384;
              video.h = height > 0 ? height : 384;
              doc.attributes.add(video);
 +            String coverMediaId = info.optString("video_cover_media_id", "");
 +            if (!TextUtils.isEmpty(coverMediaId) && kind.equals("video")) {
-+                TLRPC.MessageMedia cover = buildMedia(account, coverMediaId, "image/jpeg",
-+                        "video_cover.jpg", "", new JSONObject(), false);
-+                if (cover instanceof TLRPC.TL_messageMediaPhoto) {
-+                    videoCoverPhoto = ((TLRPC.TL_messageMediaPhoto) cover).photo;
-+                    File customThumb = videoCoverThumbnail(account, coverMediaId, mediaId);
-+                    if (customThumb == null) {
-+                        throw new WaysGramApi.ApiException(422, "VIDEO_COVER_INVALID");
++                try {
++                    TLRPC.MessageMedia cover = buildMedia(account, coverMediaId, "image/jpeg",
++                            "video_cover.jpg", "", new JSONObject(), false);
++                    if (cover instanceof TLRPC.TL_messageMediaPhoto) {
++                        File customThumb = videoCoverThumbnail(account, coverMediaId, mediaId);
++                        if (customThumb != null) {
++                            videoCoverPhoto = ((TLRPC.TL_messageMediaPhoto) cover).photo;
++                        }
 +                    }
-+                } else {
-+                    throw new WaysGramApi.ApiException(422, "VIDEO_COVER_INVALID");
++                } catch (WaysGramApi.ApiException coverError) {
++                    FileLog.e(coverError);
 +                }
 +            }
              File thumb = videoThumbnail(mediaId, file);
