@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
+import logging
 import os
 import time
+import weakref
 from collections import OrderedDict
 from pathlib import Path
 from typing import Any
@@ -12,9 +15,13 @@ from io import BytesIO
 from PIL import Image, UnidentifiedImageError
 
 import aiosqlite
-from telethon import functions
+import gift_names
+import gift_model_fallbacks
+from telethon import functions, types
+from telethon.extensions import BinaryReader
 
 
+LOGGER = logging.getLogger(__name__)
 MAX_STICKER_BYTES = 20 * 1024 * 1024
 MAX_STICKER_CACHE_ITEMS = 48
 PLUSH_PEPE_GIFT_ID = "5936013938331222567"
@@ -25,6 +32,9 @@ PLUSH_PEPE_GIFT_ID = "5936013938331222567"
 ATTRIBUTE_KINDS = ("model", "pattern", "backdrop")
 ATTRIBUTE_RARITIES = ("uncommon", "rare", "epic", "legendary")
 GIFT_ATTRIBUTE_TTL_SECONDS = 6 * 60 * 60
+# A preview is incomplete; retry sooner so transient Telegram failures don't pin
+# every upgrade to the same sample for six hours.
+GIFT_ATTRIBUTE_SAMPLE_TTL_SECONDS = 60
 # How many model/pattern documents per gift are downloaded ahead of time. ``0`` means
 # "everything", which the operator can choose when the host has enough disk space.
 PREFETCH_ATTRIBUTES_PER_GIFT = 24
@@ -157,6 +167,9 @@ def _attribute_payloads(attributes: Any) -> list[dict[str, Any]]:
     for attribute in attributes or []:
         class_name = type(attribute).__name__
         if class_name == "StarGiftAttributeModel":
+            # Craft-only models are not obtainable through a normal upgrade.
+            if _value(attribute, "crafted", False):
+                continue
             kind = "model"
         elif class_name == "StarGiftAttributePattern":
             kind = "pattern"
@@ -188,7 +201,17 @@ def _attribute_payloads(attributes: Any) -> list[dict[str, Any]]:
             for field in ("center_color", "edge_color", "pattern_color", "text_color"):
                 row[field] = _int_value(attribute, field)
         else:
-            metadata = _sticker_metadata(_value(attribute, "document"))
+            document = _value(attribute, "document")
+            metadata = _sticker_metadata(document)
+            # Keep the original TL document (including its file reference) so a restart
+            # does not require a fresh complete attribute response for every old gift.
+            if isinstance(document, types.Document):
+                try:
+                    payload = json.loads(row["payload_json"])
+                    payload["_waysgram_document_tl"] = base64.b64encode(bytes(document)).decode("ascii")
+                    row["payload_json"] = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+                except (TypeError, ValueError):
+                    LOGGER.warning("Could not serialize gift attribute document %s", metadata["document_id"])
             row["document_id"] = metadata["document_id"] or 0
             row["dc_id"] = metadata["dc_id"]
             row["mime_type"] = metadata["mime_type"]
@@ -217,36 +240,7 @@ def _sniff_media_type(content: bytes) -> str:
 
 
 def _gift_display_name(title: Any, sticker_set_name: Any, gift_id: Any = "") -> str:
-    if str(gift_id or "").strip() == PLUSH_PEPE_GIFT_ID:
-        return "Plush Pepe"
-
-    value = str(title or "").strip()
-    if value and not value.casefold().startswith("telegram gift") and value.casefold() not in {
-        "gift", "star gift", "telegram"
-    } and any(character.isalnum() for character in value):
-        return value[:160]
-
-    slug = str(sticker_set_name or "").strip()
-    compact_slug = "".join(character for character in slug.casefold() if character.isalnum())
-    if compact_slug.startswith("plushpepe"):
-        return "Plush Pepe"
-    if not slug:
-        return "Подарок Telegram"
-    slug = slug.replace("_", " ").replace("-", " ").strip()
-    words = []
-    current = ""
-    for character in slug:
-        if character.isupper() and current and current[-1].islower():
-            words.append(current)
-            current = character
-        else:
-            current += character
-    if current:
-        words.append(current)
-    readable = " ".join(words).strip()
-    if readable.casefold().startswith("telegram gift"):
-        readable = readable[len("telegram gift"):].strip()
-    return readable[:160] if readable else "Подарок Telegram"
+    return gift_names.resolve_gift_name(title, sticker_set_name, gift_id)[0]
 
 
 def _gift_payload(gift: Any, position: int, synced_at: int) -> dict[str, Any]:
@@ -329,10 +323,12 @@ def _gift_payload(gift: Any, position: int, synced_at: int) -> dict[str, Any]:
 
 
 class TelegramMTProtoGiftCatalog:
-    """Bot-authenticated MTProto reader for Telegram's complete available gift list."""
+    """MTProto reader; the optional user client is used only for upgrade attributes."""
 
-    def __init__(self, client: Any, database_path: Path | str | None = None):
+    def __init__(self, client: Any, database_path: Path | str | None = None,
+                 attribute_client: Any | None = None):
         self.client = client
+        self.attribute_client = attribute_client if attribute_client is not None else client
         self._sync_lock = asyncio.Lock()
         self._media_load_lock = asyncio.Lock()
         self._gifts: dict[str, Any] = {}
@@ -341,6 +337,7 @@ class TelegramMTProtoGiftCatalog:
         # (id and access_hash do not survive a serialisation round trip).
         self._attribute_documents: dict[str, dict[int, Any]] = {}
         self._attribute_locks: dict[str, asyncio.Lock] = {}
+        self._document_locks: weakref.WeakValueDictionary[int, asyncio.Lock] = weakref.WeakValueDictionary()
         self._prefetch_task: asyncio.Task | None = None
         self._prefetch_state: dict[str, Any] = {
             "enabled": PREFETCH_ENABLED,
@@ -563,7 +560,7 @@ class TelegramMTProtoGiftCatalog:
         size = _int_value(document, "size")
         if size is not None and size > MAX_STICKER_BYTES:
             raise ValueError("Telegram sticker file exceeds the supported size")
-        payload = await self.client.download_media(document, file=bytes)
+        payload = await self.attribute_client.download_media(document, file=bytes)
         if hasattr(payload, "getvalue"):
             payload = payload.getvalue()
         if not isinstance(payload, (bytes, bytearray)) or not payload:
@@ -587,19 +584,19 @@ class TelegramMTProtoGiftCatalog:
         getter = getattr(functions.payments, "GetStarGiftUpgradeAttributesRequest", None)
         if getter is not None:
             try:
-                response = await self.client(getter(gift_id=gift_id))
+                response = await self.attribute_client(getter(gift_id=gift_id))
                 attributes = _value(response, "attributes")
                 if attributes:
                     return list(attributes), "attributes"
-            except Exception:
-                # Older Telegram layers do not expose the complete attribute set;
-                # the preview below still returns one sample of every kind.
-                pass
+            except Exception as error:
+                # A preview is useful as a last resort, but it is not a complete set.
+                LOGGER.warning("Gift %s full attribute request failed: %s", gift_id, type(error).__name__)
         try:
-            response = await self.client(
+            response = await self.attribute_client(
                 functions.payments.GetStarGiftUpgradePreviewRequest(gift_id=gift_id)
             )
-        except Exception:
+        except Exception as error:
+            LOGGER.warning("Gift %s attribute preview failed: %s", gift_id, type(error).__name__)
             return [], "none"
         return list(_value(response, "sample_attributes") or []), "preview"
 
@@ -614,7 +611,8 @@ class TelegramMTProtoGiftCatalog:
             if document_id:
                 documents[document_id] = document
         if documents:
-            self._attribute_documents[gift_id] = documents
+            # A later partial response must not erase documents already in use by gifts.
+            self._attribute_documents.setdefault(gift_id, {}).update(documents)
 
     async def sync_upgrade_attributes(
             self, database_path: Path | str, gift_id: str
@@ -645,6 +643,17 @@ class TelegramMTProtoGiftCatalog:
         ]
         async with aiosqlite.connect(database_path) as db:
             await db.execute("BEGIN IMMEDIATE")
+            cursor = await db.execute(
+                "SELECT source FROM telegram_mtproto_gift_attribute_sync WHERE gift_id=?", (key,)
+            )
+            existing = await cursor.fetchone()
+            # Temporary API errors, or a preview response, must not destroy a full set
+            # that is already referenced by owned gifts. Don't extend its TTL either.
+            if not rows or (existing and existing[0] == "full" and source != "full"):
+                await db.rollback()
+                self._keep_attribute_documents(key, attributes)
+                previous, _ = await self._read_attributes(database_path, key)
+                return previous
             await db.execute(
                 "DELETE FROM telegram_mtproto_gift_attributes WHERE gift_id=?", (key,)
             )
@@ -683,11 +692,14 @@ class TelegramMTProtoGiftCatalog:
             )
             rows = [dict(row) for row in await cur.fetchall()]
             cur = await db.execute(
-                "SELECT fetched_at FROM telegram_mtproto_gift_attribute_sync WHERE gift_id=?",
+                "SELECT fetched_at,source FROM telegram_mtproto_gift_attribute_sync WHERE gift_id=?",
                 (gift_id,),
             )
             sync_row = await cur.fetchone()
         fetched_at = int(sync_row["fetched_at"] or 0) if sync_row is not None else 0
+        if fetched_at and sync_row["source"] != "full":
+            # Express the shorter sample TTL using the same freshness calculation below.
+            fetched_at -= GIFT_ATTRIBUTE_TTL_SECONDS - GIFT_ATTRIBUTE_SAMPLE_TTL_SECONDS
         return rows, fetched_at
 
     async def attribute_sync_state(
@@ -763,10 +775,53 @@ class TelegramMTProtoGiftCatalog:
         document = documents.get(int(document_id))
         if document is not None:
             return document
-        # A fresh process has no document objects: re-read them from Telegram.
+        # Try the persisted document first. File references can expire, in which case
+        # download_attribute will refresh the set and retry with a fresh document.
+        async with aiosqlite.connect(database_path) as db:
+            cur = await db.execute(
+                """SELECT payload_json FROM telegram_mtproto_gift_attributes
+                   WHERE gift_id=? AND document_id=? AND is_available=1 LIMIT 1""",
+                (key, int(document_id)),
+            )
+            row = await cur.fetchone()
+        if row:
+            try:
+                encoded = json.loads(row[0] or "{}").get("_waysgram_document_tl", "")
+                if encoded:
+                    with BinaryReader(base64.b64decode(encoded, validate=True)) as reader:
+                        document = reader.tgread_object()
+                    if isinstance(document, types.Document) and document.id == int(document_id):
+                        self._attribute_documents.setdefault(key, {})[int(document_id)] = document
+                        return document
+            except Exception as error:  # noqa: BLE001 - old/corrupt TL data must fall back to Telegram
+                LOGGER.warning("Stored gift document %s could not be restored: %s", document_id, type(error).__name__)
+        # A small, gift-scoped allowlist has an independently identified exact
+        # document. Resolve that first instead of waiting for the full collection
+        # refresh, which can be slow or return only a preview.
+        document = await self._known_remote_model(key, int(document_id))
+        if document is not None:
+            return document
         await self.attributes(database_path, key, refresh=True)
         documents = self._attribute_documents.get(key) or {}
         return documents.get(int(document_id))
+
+    async def _known_remote_model(self, gift_id: str, document_id: int) -> Any:
+        # An explicitly identified model may be resolvable by document ID even when
+        # the full gift-attribute method only returns a sample. Telegram can still
+        # decline or return no document; never substitute a different model.
+        if not gift_model_fallbacks.is_known_remote_document(gift_id, document_id):
+            return None
+        try:
+            result = await self.attribute_client(
+                functions.messages.GetCustomEmojiDocumentsRequest(document_id=[document_id])
+            )
+            for document in result or []:
+                if isinstance(document, types.Document) and document.id == document_id:
+                    self._attribute_documents.setdefault(gift_id, {})[document_id] = document
+                    return document
+        except Exception as error:
+            LOGGER.warning("Known gift model %s could not be resolved: %s", document_id, type(error).__name__)
+        return None
 
     async def download_attribute(
             self, database_path: Path | str, gift_id: str, document_id: int
@@ -779,10 +834,27 @@ class TelegramMTProtoGiftCatalog:
         cached = self._read_asset(numeric_id, database_path)
         if cached:
             return cached, _sniff_media_type(cached)
-        document = await self._attribute_document(database_path, gift_id, numeric_id)
-        if document is None:
-            raise LookupError("Telegram attribute document is unavailable")
-        return await self._download_document(document, numeric_id)
+        # Prefetch and many clients can request the same document concurrently. Share one
+        # Telegram download and one cache write; independent documents stay parallel.
+        lock = self._document_locks.setdefault(numeric_id, asyncio.Lock())
+        async with lock:
+            cached = self._read_asset(numeric_id, database_path)
+            if cached:
+                return cached, _sniff_media_type(cached)
+            document = await self._attribute_document(database_path, gift_id, numeric_id)
+            if document is None:
+                raise LookupError("Telegram attribute document is unavailable")
+            try:
+                return await self._download_document(document, numeric_id)
+            except Exception:
+                # A stored Telegram file reference can expire; refresh it once before failing.
+                await self.attributes(database_path, str(gift_id), refresh=True)
+                fresh = (self._attribute_documents.get(str(gift_id)) or {}).get(numeric_id)
+                if fresh is None or fresh is document:
+                    fresh = await self._known_remote_model(str(gift_id), numeric_id)
+                if fresh is None or fresh is document:
+                    raise
+                return await self._download_document(fresh, numeric_id)
 
     # -------------------------------------------------------------- prefetching
 
@@ -918,10 +990,7 @@ class TelegramMTProtoGiftCatalog:
             if cached:
                 return cached, _sniff_media_type(cached)
             try:
-                document = await self._attribute_document(database_path, key, document_id)
-                if document is None:
-                    continue
-                return await self._download_document(document, document_id)
+                return await self.download_attribute(database_path, key, document_id)
             except Exception:
                 continue
         return None
@@ -972,7 +1041,9 @@ class TelegramMTProtoGiftCatalog:
 
         try:
             await self._ensure_gift_documents()
-        except LookupError:
+        except Exception:
+            # The main catalog can be unavailable even while the sold-out gift's
+            # model is already cached (or its own attribute request still works).
             fallback = await self.sold_out_artwork(database_path, key)
             if fallback is not None:
                 return fallback
@@ -1059,7 +1130,7 @@ class TelegramMTProtoGiftCatalog:
 
         try:
             await self._ensure_gift_documents()
-        except LookupError:
+        except Exception:
             fallback = await self.sold_out_artwork(database_path, key)
             if fallback is not None:
                 self._media_cache[key] = fallback
@@ -1077,11 +1148,21 @@ class TelegramMTProtoGiftCatalog:
         if size is not None and size > MAX_STICKER_BYTES:
             raise ValueError("Telegram sticker file exceeds the supported size")
 
-        payload = await self.client.download_media(document, file=bytes)
-        if hasattr(payload, "getvalue"):
-            payload = payload.getvalue()
-        if not isinstance(payload, (bytes, bytearray)) or not payload:
-            raise RuntimeError("MTProto did not return sticker bytes")
+        try:
+            payload = await self.client.download_media(document, file=bytes)
+            if hasattr(payload, "getvalue"):
+                payload = payload.getvalue()
+            if not isinstance(payload, (bytes, bytearray)) or not payload:
+                raise RuntimeError("MTProto did not return sticker bytes")
+        except Exception:
+            # A sold-out item can still be present in the catalogue with an expired or
+            # inaccessible document. A usable model from the user attribute session is
+            # preferable to leaving both the shop and the inventory blank.
+            fallback = await self.sold_out_artwork(database_path, key)
+            if fallback is not None:
+                self._media_cache[key] = fallback
+                return fallback
+            raise
         content = bytes(payload)
         if len(content) > MAX_STICKER_BYTES:
             raise ValueError("Telegram sticker file exceeds the supported size")

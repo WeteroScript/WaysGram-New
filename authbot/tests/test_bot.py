@@ -316,9 +316,15 @@ def test_admin_can_edit_gift_catalog_and_moderate_channels(tmp_path: Path, monke
         supply = conn.execute("SELECT supply FROM gift_catalog WHERE id=?", (gift_id,)).fetchone()[0]
     assert supply == 9
 
-    grant_callback = FakeAdminCallback(f"wgadm:grantgift:{bot_module.ADMIN_ID}:{gift_id}")
+    async def no_telegram_gifts():
+        return []
+    monkeypatch.setattr(bot_module, "telegram_gift_rows", no_telegram_gifts)
+    grant_callback = FakeAdminCallback(f"wgadm:grant:{bot_module.ADMIN_ID}")
     run(bot_module.admin_callback(grant_callback))
     assert grant_callback.answered
+    token = bot_module.ADMIN_INPUT[bot_module.ADMIN_ID][1]["token"]
+    run(bot_module.admin_callback(FakeAdminCallback(f"wgadm:gsel:{token}:0")))
+    run(bot_module.admin_text_input(FakeAdminMessage("1")))
     with db_split.sqlite_connect(path) as conn:
         serial = conn.execute(
             "SELECT serial_number FROM user_gifts WHERE owner_telegram_id=?",
@@ -405,3 +411,47 @@ def test_new_account_receives_one_time_welcome_balances(
 
     assert (stars, grams) == (4900, 14)
     assert grant_count == 2
+
+
+def test_gift_user_client_requires_authorized_non_bot_session(monkeypatch, caplog) -> None:
+    import telethon
+    import telethon.sessions
+
+    class FakeClient:
+        instances = []
+        authorized = True
+        bot = False
+
+        def __init__(self, session, api_id, api_hash):
+            self.disconnected = False
+            self.instances.append(self)
+
+        async def connect(self):
+            pass
+
+        async def is_user_authorized(self):
+            return self.authorized
+
+        async def get_me(self):
+            return SimpleNamespace(bot=self.bot)
+
+        async def disconnect(self):
+            self.disconnected = True
+
+    monkeypatch.setattr(telethon, "TelegramClient", FakeClient)
+    monkeypatch.setattr(telethon.sessions, "StringSession", lambda value: value)
+
+    async def scenario():
+        assert await bot_module.connect_gift_user_client(1, "hash", "") is None
+        accepted = await bot_module.connect_gift_user_client(1, "hash", "sensitive-session")
+        assert accepted is FakeClient.instances[-1] and not accepted.disconnected
+        FakeClient.bot = True
+        assert await bot_module.connect_gift_user_client(1, "hash", "sensitive-session") is None
+        assert FakeClient.instances[-1].disconnected
+        FakeClient.bot = False
+        FakeClient.authorized = False
+        assert await bot_module.connect_gift_user_client(1, "hash", "sensitive-session") is None
+        assert FakeClient.instances[-1].disconnected
+        assert "sensitive-session" not in caplog.text
+
+    run(scenario())

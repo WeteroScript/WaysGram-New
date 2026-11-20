@@ -21,10 +21,13 @@ from pathlib import Path
 from typing import Any, Callable
 
 import aiosqlite
+import gift_names
+import gift_model_fallbacks
 import db_split  # noqa: F401  # two-file database layout
 import gift_upgrades  # noqa: F401  # official Telegram upgrade pools
 import httpx
 from fastapi import APIRouter, Header, HTTPException, Query, Request, Response
+from fastapi.responses import FileResponse
 from PIL import Image, ImageOps, UnidentifiedImageError
 from pydantic import BaseModel, Field
 from cryptography.hazmat.primitives import hashes, serialization
@@ -54,6 +57,16 @@ SELL_REFUND_PERCENT = 50
 LOGGER = logging.getLogger(__name__)
 FCM_SCOPE = "https://www.googleapis.com/auth/firebase.messaging"
 FCM_TOKEN_URI = "https://oauth2.googleapis.com/token"
+PLUSH_PEPE_GIFT_ID = "5936013938331222567"
+BUNDLED_GIFT_ASSETS = Path(__file__).with_name("assets") / "gifts"
+
+
+def _bundled_gift_artwork(gift_id: str, animated: bool) -> Path | None:
+    # Explicit allowlist: never construct a path from an arbitrary API input.
+    if str(gift_id) != PLUSH_PEPE_GIFT_ID:
+        return None
+    path = BUNDLED_GIFT_ASSETS / (PLUSH_PEPE_GIFT_ID + (".tgs" if animated else ".png"))
+    return path if path.is_file() else None
 
 
 def _b64url(value: bytes) -> str:
@@ -264,10 +277,15 @@ def _normalize_uploaded_document(raw: bytes, filename: str) -> tuple[bytes, str,
             raise ValueError("Файл не является корректным M4A")
         return raw, "audio/mp4", extension, safe_name
 
-    if extension == ".ogg":
+    if extension in {".ogg", ".opus"}:
         if len(raw) < 4 or not raw.startswith(b"OggS"):
             raise ValueError("Файл не является корректным OGG")
         return raw, "audio/ogg", extension, safe_name
+
+    if extension == ".flac":
+        if len(raw) < 4 or not raw.startswith(b"fLaC"):
+            raise ValueError("Файл не является корректным FLAC")
+        return raw, "audio/flac", extension, safe_name
 
     if extension == ".wav":
         if len(raw) < 12 or raw[:4] != b"RIFF" or raw[8:12] != b"WAVE":
@@ -474,22 +492,16 @@ async def _sync_gift_attribute_documents(
     if not key.isdigit() or provider is None:
         return
     try:
-        async with aiosqlite.connect(database_path) as db:
-            cur = await db.execute(
-                """SELECT 1 FROM telegram_mtproto_gift_attributes
-                   WHERE gift_id=? AND is_available=1 AND kind IN ('model','pattern')
-                   LIMIT 1""",
-                (key,),
-            )
-            if await cur.fetchone() is not None:
-                return
+        # The provider owns freshness checks. A single stale preview row must not prevent
+        # future attempts to fetch the full set (and hence different upgrade models).
         await provider.attributes(database_path, key)
     except Exception:  # noqa: BLE001 - a missing catalog must never block an upgrade
         LOGGER.warning("gift attribute sync skipped for %s", key, exc_info=True)
 
 
 def _enrich_traits_documents(
-    traits: dict[str, Any], pool: dict[str, Any], documents: dict[str, list[dict[str, Any]]]
+    traits: dict[str, Any], pool: dict[str, Any], documents: dict[str, list[dict[str, Any]]],
+    *, gift_id: str = "",
 ) -> bool:
     """Stores Telegram's document id (and its slot) inside the rolled traits of a collectible.
 
@@ -502,8 +514,23 @@ def _enrich_traits_documents(
         entry = traits.get(kind)
         if not isinstance(entry, dict):
             continue
+        # Never replace a document already assigned to this collectible with a later
+        # preview sample or a heuristic match while repairing the other attribute.
+        if int(entry.get("document_id") or 0) > 0:
+            continue
         rows = documents.get(kind) or []
         if not rows:
+            continue
+        if (kind == "model"
+                and gift_model_fallbacks.remote_document_for_name(gift_id, entry.get("name"))
+                and not any(_normalise_attribute_name(row.get("name"))
+                            == _normalise_attribute_name(entry.get("name")) for row in rows)):
+            # A known model must not inherit a different partial sample by chance/slot.
+            continue
+        if (len(rows) == 1
+                and _normalise_attribute_name(entry.get("name"))
+                != _normalise_attribute_name(rows[0].get("name"))):
+            # A sample cannot identify a different existing trait by chance or position.
             continue
         entries = [item for item in (pool.get(key) or []) if isinstance(item, list) and item]
         position = None
@@ -512,22 +539,17 @@ def _enrich_traits_documents(
             if _normalise_attribute_name(item[0]) == wanted:
                 position = index
                 break
-        row = _match_attribute_row(
-            rows,
-            entry.get("name"),
-            entry.get("permille"),
-            entry.get("position"),
-            entry.get("pool_size"),
-            position,
-            allow_fallback_position=bool(entries) and len(entries) == len(rows),
-        )
-        if row is None and len(rows) == 1:
-            # Telegram answered with a single sample of this kind, so the name that was rolled
-            # has no counterpart there. Adopting the sample keeps the card truthful — the name
-            # and the animation come from the same attribute — instead of drawing no model.
-            row = rows[0]
-            entry["name"] = str(row["name"] or "").strip() or entry.get("name")
-            entry["permille"] = int(row["permille"] or 0)
+        if traits.get("strict_artwork") is True:
+            matches = [candidate for candidate in rows
+                       if wanted and _normalise_attribute_name(candidate.get("name")) == wanted
+                       and int(candidate.get("document_id") or 0)]
+            row = matches[0] if len(matches) == 1 else None
+        else:
+            row = _match_attribute_row(
+                rows, entry.get("name"), entry.get("permille"), entry.get("position"),
+                entry.get("pool_size"), position,
+                allow_fallback_position=bool(entries) and len(entries) == len(rows),
+            )
         if row is None:
             continue
         document_id = int(row["document_id"] or 0)
@@ -552,24 +574,18 @@ def _enrich_traits_documents(
 def _reveal_pool_documents(
     pool: dict[str, Any], documents: dict[str, list[dict[str, Any]]]
 ) -> dict[str, dict[int, int]]:
-    """Document id per candidate slot, so the reveal can play the official animations."""
+    """Use artwork only when its exact candidate name identifies one document."""
     result: dict[str, dict[int, int]] = {"model": {}, "pattern": {}}
     for kind, key in (("model", "models"), ("pattern", "patterns")):
-        rows = documents.get(kind) or []
-        if not rows:
-            continue
-        entries = [item for item in (pool.get(key) or []) if isinstance(item, list) and item]
-        same_size = len(entries) == len(rows)
-        for index, item in enumerate(entries):
-            document_id = _match_attribute_document(
-                rows,
-                item[0],
-                item[1] if len(item) > 1 else 0,
-                index,
-                allow_position=same_size,
-            )
-            if document_id:
-                result[kind][index] = document_id
+        for index, item in enumerate(pool.get(key) or []):
+            if not isinstance(item, list) or not item:
+                continue
+            name = _normalise_attribute_name(item[0])
+            matches = [row for row in documents.get(kind, [])
+                       if name and _normalise_attribute_name(row.get("name")) == name
+                       and int(row.get("document_id") or 0)]
+            if len(matches) == 1:
+                result[kind][index] = int(matches[0]["document_id"])
     return result
 
 
@@ -641,6 +657,21 @@ async def init_messenger_storage(database_path: Path) -> None:
                 ON push_devices(telegram_id,updated_at DESC);
             CREATE INDEX IF NOT EXISTS idx_push_devices_session
                 ON push_devices(session_token_hash);
+            CREATE TABLE IF NOT EXISTS push_outbox (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                recipient_telegram_id INTEGER NOT NULL,
+                sender_telegram_id INTEGER NOT NULL,
+                title TEXT NOT NULL,
+                body TEXT NOT NULL,
+                data_json TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                next_attempt_at INTEGER NOT NULL,
+                attempts INTEGER NOT NULL DEFAULT 0,
+                lease_until INTEGER NOT NULL DEFAULT 0,
+                lease_token TEXT NOT NULL DEFAULT ''
+            );
+            CREATE INDEX IF NOT EXISTS idx_push_outbox_due
+                ON push_outbox(next_attempt_at,lease_until,id);
             CREATE TABLE IF NOT EXISTS media_assets (
                 id TEXT PRIMARY KEY,
                 owner_telegram_id INTEGER NOT NULL,
@@ -649,7 +680,8 @@ async def init_messenger_storage(database_path: Path) -> None:
                 size_bytes INTEGER NOT NULL CHECK(size_bytes > 0),
                 created_at INTEGER NOT NULL,
                 original_name TEXT,
-                media_kind TEXT NOT NULL DEFAULT ''
+                media_kind TEXT NOT NULL DEFAULT '',
+                media_metadata TEXT NOT NULL DEFAULT '{}'
             );
             CREATE INDEX IF NOT EXISTS idx_media_assets_owner_time
                 ON media_assets(owner_telegram_id,created_at);
@@ -698,7 +730,21 @@ async def init_messenger_storage(database_path: Path) -> None:
                 message_id INTEGER PRIMARY KEY REFERENCES messages(id) ON DELETE CASCADE,
                 contact_name TEXT NOT NULL,
                 contact_phone TEXT NOT NULL,
-                contact_email TEXT NOT NULL DEFAULT ''
+                contact_email TEXT NOT NULL DEFAULT '',
+                contact_first_name TEXT NOT NULL DEFAULT '',
+                contact_last_name TEXT NOT NULL DEFAULT '',
+                contact_vcard TEXT NOT NULL DEFAULT ''
+            );
+            CREATE TABLE IF NOT EXISTS message_scoped_contacts (
+                scope TEXT NOT NULL CHECK(scope IN ('group','channel')),
+                message_id INTEGER NOT NULL,
+                contact_name TEXT NOT NULL,
+                contact_phone TEXT NOT NULL,
+                contact_email TEXT NOT NULL DEFAULT '',
+                contact_first_name TEXT NOT NULL DEFAULT '',
+                contact_last_name TEXT NOT NULL DEFAULT '',
+                contact_vcard TEXT NOT NULL DEFAULT '',
+                PRIMARY KEY(scope,message_id)
             );
             CREATE TABLE IF NOT EXISTS message_locations (
                 message_id INTEGER PRIMARY KEY REFERENCES messages(id) ON DELETE CASCADE,
@@ -773,6 +819,21 @@ async def init_messenger_storage(database_path: Path) -> None:
             );
             CREATE INDEX IF NOT EXISTS idx_typing_indicators_expiry
                 ON typing_indicators(expires_at);
+            CREATE TABLE IF NOT EXISTS message_forward_sources (
+                scope TEXT NOT NULL CHECK(scope IN ('dm','group','channel')),
+                message_id INTEGER NOT NULL,
+                from_name TEXT NOT NULL,
+                from_date INTEGER NOT NULL,
+                PRIMARY KEY(scope,message_id)
+            );
+            CREATE TABLE IF NOT EXISTS message_forward_locations (
+                scope TEXT NOT NULL CHECK(scope IN ('group','channel')),
+                message_id INTEGER NOT NULL,
+                latitude REAL NOT NULL CHECK(latitude >= -90 AND latitude <= 90),
+                longitude REAL NOT NULL CHECK(longitude >= -180 AND longitude <= 180),
+                label TEXT NOT NULL DEFAULT '',
+                PRIMARY KEY(scope,message_id)
+            );
             CREATE TABLE IF NOT EXISTS message_reactions (
                 scope TEXT NOT NULL CHECK(scope IN ('dm','group','channel')),
                 chat_id INTEGER NOT NULL DEFAULT 0,
@@ -850,6 +911,27 @@ async def init_messenger_storage(database_path: Path) -> None:
             );
             CREATE INDEX IF NOT EXISTS idx_cloud_drafts_updated
                 ON cloud_drafts(owner_telegram_id,updated_at DESC);
+            -- Tombstones retain only a per-key version, never deleted draft text.
+            CREATE TABLE IF NOT EXISTS cloud_draft_versions (
+                owner_telegram_id INTEGER NOT NULL,
+                scope TEXT NOT NULL CHECK(scope IN ('dm','group','channel')),
+                peer_id INTEGER NOT NULL CHECK(peer_id > 0),
+                revision INTEGER NOT NULL CHECK(revision > 0),
+                PRIMARY KEY(owner_telegram_id,scope,peer_id)
+            );
+            -- Coalesced change index: at most one key per draft, without text.
+            CREATE TABLE IF NOT EXISTS cloud_draft_change_counters (
+                owner_telegram_id INTEGER PRIMARY KEY,
+                last_seq INTEGER NOT NULL CHECK(last_seq > 0)
+            );
+            CREATE TABLE IF NOT EXISTS cloud_draft_changes (
+                owner_telegram_id INTEGER NOT NULL,
+                scope TEXT NOT NULL CHECK(scope IN ('dm','group','channel')),
+                peer_id INTEGER NOT NULL CHECK(peer_id > 0),
+                seq INTEGER NOT NULL CHECK(seq > 0),
+                PRIMARY KEY(owner_telegram_id,scope,peer_id),
+                UNIQUE(owner_telegram_id,seq)
+            );
             CREATE TABLE IF NOT EXISTS scheduled_messages (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 sender_telegram_id INTEGER NOT NULL,
@@ -1268,6 +1350,16 @@ async def init_messenger_storage(database_path: Path) -> None:
                  AND COALESCE(gifts_per_round,0)>0""",
             (int(time.time()),)
         )
+        # Older databases contain the original name/phone/email contact snapshot.
+        # Keep those rows and add native name parts and vCard losslessly.
+        cur = await db.execute(f"PRAGMA {db_split.SCHEMA}.table_info(message_contacts)")
+        contact_columns = {str(row[1]) for row in await cur.fetchall()}
+        for column in ("contact_first_name", "contact_last_name", "contact_vcard"):
+            if column not in contact_columns:
+                await db.execute(
+                    f"ALTER TABLE {db_split.SCHEMA}.message_contacts ADD COLUMN {column} TEXT NOT NULL DEFAULT ''"
+                )
+
         cur = await db.execute(f"PRAGMA {db_split.SCHEMA}.table_info(user_gifts)")
         user_gift_columns = {str(row[1]) for row in await cur.fetchall()}
         if "upgrade_level" not in user_gift_columns:
@@ -1290,11 +1382,48 @@ async def init_messenger_storage(database_path: Path) -> None:
             # asset it was paid in travel with the gift.
             ("purchase_asset", "TEXT NOT NULL DEFAULT 'stars'"),
             ("purchase_price", "INTEGER NOT NULL DEFAULT 0"),
+            ("profile_order", "INTEGER"),
         ):
             if column not in user_gift_columns:
                 await db.execute(
                     f"ALTER TABLE {db_split.SCHEMA}.user_gifts ADD COLUMN {column} {definition}"
                 )
+        # Database triggers cover all writers, including older API processes and
+        # administrative deletes. Existing rows start at revision zero on upgrade.
+        for action, ref in (("INSERT", "NEW"), ("UPDATE", "NEW"), ("DELETE", "OLD")):
+            await db.execute(f"""CREATE TRIGGER IF NOT EXISTS {db_split.SCHEMA}.draft_revision_{action.lower()}
+                AFTER {action} ON cloud_drafts
+                BEGIN
+                    INSERT INTO cloud_draft_versions(owner_telegram_id,scope,peer_id,revision)
+                    VALUES({ref}.owner_telegram_id,{ref}.scope,{ref}.peer_id,1)
+                    ON CONFLICT(owner_telegram_id,scope,peer_id)
+                    DO UPDATE SET revision=revision+1;
+                END""")
+        # One latest change per key, with a monotonic counter per owner. No
+        # body is copied into the index, including on DELETE or admin cleanup.
+        for action, ref in (("INSERT", "NEW"), ("UPDATE", "NEW"), ("DELETE", "OLD")):
+            await db.execute(f"""CREATE TRIGGER IF NOT EXISTS {db_split.SCHEMA}.draft_change_{action.lower()}
+                AFTER {action} ON cloud_drafts
+                BEGIN
+                    INSERT INTO cloud_draft_change_counters(owner_telegram_id,last_seq)
+                    VALUES({ref}.owner_telegram_id,1)
+                    ON CONFLICT(owner_telegram_id) DO UPDATE SET last_seq=last_seq+1;
+                    INSERT INTO cloud_draft_changes(owner_telegram_id,scope,peer_id,seq)
+                    VALUES({ref}.owner_telegram_id,{ref}.scope,{ref}.peer_id,
+                        (SELECT last_seq FROM cloud_draft_change_counters WHERE owner_telegram_id={ref}.owner_telegram_id))
+                    ON CONFLICT(owner_telegram_id,scope,peer_id) DO UPDATE SET seq=excluded.seq;
+                END""")
+        await db.execute(f"""CREATE TRIGGER IF NOT EXISTS {db_split.SCHEMA}.draft_key_immutable
+            BEFORE UPDATE OF owner_telegram_id,scope,peer_id ON cloud_drafts
+            WHEN OLD.owner_telegram_id != NEW.owner_telegram_id OR OLD.scope != NEW.scope
+                 OR OLD.peer_id != NEW.peer_id
+            BEGIN SELECT RAISE(ABORT, 'draft key is immutable'); END""")
+        # A transferred gift belongs at the front of its new owner's inventory, even if
+        # it later returns to an owner who previously sorted it.
+        await db.execute(f"""CREATE TRIGGER IF NOT EXISTS {db_split.SCHEMA}.reset_gift_profile_order
+            AFTER UPDATE OF owner_telegram_id ON user_gifts
+            WHEN OLD.owner_telegram_id != NEW.owner_telegram_id
+            BEGIN UPDATE user_gifts SET profile_order=NULL WHERE id=NEW.id; END""")
         # Gifts bought before the price was stored take it from their saved receipt, so the
         # refund can be calculated for them as well.
         cur = await db.execute(
@@ -1384,6 +1513,11 @@ async def init_messenger_storage(database_path: Path) -> None:
             await db.execute(
                 f"ALTER TABLE {db_split.SCHEMA}.media_assets "
                 "ADD COLUMN media_kind TEXT NOT NULL DEFAULT ''"
+            )
+        if "media_metadata" not in media_columns:
+            await db.execute(
+                f"ALTER TABLE {db_split.SCHEMA}.media_assets "
+                "ADD COLUMN media_metadata TEXT NOT NULL DEFAULT '{}'"
             )
         cur = await db.execute(f"PRAGMA {db_split.SCHEMA}.table_info(scheduled_messages)")
         scheduled_columns = {str(row[1]) for row in await cur.fetchall()}
@@ -1482,6 +1616,27 @@ async def init_messenger_storage(database_path: Path) -> None:
                 "UPDATE gift_transactions SET serial_number=? WHERE serial_number=?",
                 (new_serial, old_serial),
             )
+
+        # Forward provenance has polymorphic message IDs. Remove it with each
+        # message even on connections where SQLite foreign keys are disabled.
+        for table, scope in (("messages", "dm"), ("group_messages", "group"),
+                             ("channel_messages", "channel")):
+            await db.execute(f"""CREATE TRIGGER IF NOT EXISTS {db_split.SCHEMA}.cleanup_forward_{scope}
+                AFTER DELETE ON {table} BEGIN
+                DELETE FROM message_forward_sources WHERE scope='{scope}' AND message_id=OLD.id;
+                END""")
+
+        for table, scope in (("group_messages", "group"), ("channel_messages", "channel")):
+            await db.execute(f"""CREATE TRIGGER IF NOT EXISTS {db_split.SCHEMA}.cleanup_forward_location_{scope}
+                AFTER DELETE ON {table} BEGIN
+                DELETE FROM message_forward_locations WHERE scope='{scope}' AND message_id=OLD.id;
+                END""")
+
+        for table, scope in (("group_messages", "group"), ("channel_messages", "channel")):
+            await db.execute(f"""CREATE TRIGGER IF NOT EXISTS {db_split.SCHEMA}.cleanup_scoped_contact_{scope}
+                AFTER DELETE ON {table} BEGIN
+                DELETE FROM message_scoped_contacts WHERE scope='{scope}' AND message_id=OLD.id;
+                END""")
 
         # Collectibles are numbered inside their own collection ("Plush Pepe #1"),
         # exactly like Telegram numbers unique gifts.
@@ -1639,10 +1794,8 @@ async def init_messenger_storage(database_path: Path) -> None:
             )
         await db.commit()
 
-        # Previously upgraded gifts either had no traits at all or carried the
-        # hand-made WaysGram pools. Re-roll them from the official Telegram pools
-        # once (the very first collectible keep can be re-rolled, later upgrades
-        # never change) and give every one of them its collection number.
+        # Assign traits only if none were ever stored; preserve even older or
+        # incomplete collectible traits across restarts, and number each gift.
         now = int(time.time())
         try:
             cur = await db.execute(
@@ -1666,7 +1819,7 @@ async def init_messenger_storage(database_path: Path) -> None:
             if not isinstance(attributes, dict):
                 attributes = {}
             traits = gift_upgrades.traits_of(attributes)
-            if not gift_upgrades.is_current_traits(traits):
+            if not traits:
                 _, pool = _collectible_trait_pool(gift_key_hint, title_hint)
                 attributes["collectible_traits"] = gift_upgrades.roll_traits(pool, now)
                 await db.execute(
@@ -1717,40 +1870,7 @@ def _public_account(row: Any, include_phone: bool = False) -> dict[str, Any]:
 
 
 def _gift_display_title(title: Any, sticker_set_name: Any, gift_id: str = "") -> str:
-    if str(gift_id or "").strip() == "5936013938331222567":
-        return "Plush Pepe"
-    value = str(title or "").strip()
-    generic = (
-        not value
-        or value.casefold().startswith("telegram gift")
-        or value.casefold() in {"gift", "star gift", "telegram"}
-        or not any(character.isalnum() for character in value)
-    )
-    if not generic:
-        return value[:160]
-
-    slug = str(sticker_set_name or "").strip()
-    compact = "".join(character for character in slug.casefold() if character.isalnum())
-    if compact.startswith("plushpepe"):
-        return "Plush Pepe"
-    if not slug or compact.startswith("telegramgift"):
-        return "Подарок Telegram"
-
-    slug = slug.replace("_", " ").replace("-", " ").strip()
-    words: list[str] = []
-    current = ""
-    for character in slug:
-        if character.isupper() and current and current[-1].islower():
-            words.append(current)
-            current = character
-        else:
-            current += character
-    if current:
-        words.append(current)
-    readable = " ".join(words).strip()
-    if readable and any(character.isalnum() for character in readable):
-        return readable[:160]
-    return "Подарок Telegram"
+    return gift_names.resolve_gift_name(title, sticker_set_name, gift_id)[0]
 
 
 def _legacy_gift_purchase_details(body: Any) -> dict[str, str] | None:
@@ -1826,8 +1946,18 @@ async def _telegram_gift_metadata(db: Any, gift_id: str) -> dict[str, Any] | Non
             rows[candidate] = row
 
     source = next((candidate for candidate in source_order if candidate in rows), "")
+    bundled = bool(_bundled_gift_artwork(gift_id, True) or _bundled_gift_artwork(gift_id, False))
     if not source:
-        return None
+        if not bundled:
+            return None
+        return {
+            "id": gift_id, "source": "telegram", "catalog_source": "waysgram_bundled",
+            "title": _gift_display_title("", "", gift_id),
+            "sticker_available": True,
+            "sticker": {"url": f"/api/telegram/gifts/{quote(gift_id, safe='')}/sticker",
+                        "is_animated": bool(_bundled_gift_artwork(gift_id, True)),
+                        "mime_type": "application/x-tgsticker"},
+        }
     row = rows[source]
     fallback_source = "telegram_gift_catalog" if source == "telegram_mtproto" else "telegram_mtproto"
     fallback_row = rows.get(fallback_source)
@@ -1878,9 +2008,18 @@ async def _telegram_gift_metadata(db: Any, gift_id: str) -> dict[str, Any] | Non
     video = bool(row["sticker_is_video"]) or bool(
         fallback_row is not None and fallback_row["sticker_is_video"]
     )
-    title = _gift_display_title(fallback_value("title"), fallback_value("sticker_set_name"), gift_id)
+    title, quality = gift_names.resolve_gift_name(row["title"], row["sticker_set_name"], gift_id)
+    if fallback_row is not None:
+        alternate, alternate_quality = gift_names.resolve_gift_name(
+            fallback_row["title"], fallback_row["sticker_set_name"], gift_id
+        )
+        if alternate_quality > quality:
+            title = alternate
     emoji = str(fallback_value("sticker_emoji") or "")
-    sticker_available = primary_sticker_available or fallback_sticker_available
+    sticker_available = primary_sticker_available or fallback_sticker_available or bundled
+    if bundled:
+        animated = bool(_bundled_gift_artwork(gift_id, True))
+        video = False
     return {
         "id": gift_id,
         "source": "telegram",
@@ -1906,7 +2045,8 @@ async def _telegram_gift_metadata(db: Any, gift_id: str) -> dict[str, Any] | Non
             "height": _optional_int(fallback_value("sticker_height")),
             "is_animated": animated,
             "is_video": video,
-            "mime_type": str(fallback_value("sticker_mime_type") or "application/octet-stream"),
+            "mime_type": ("application/x-tgsticker" if animated else "image/png") if bundled
+                         else str(fallback_value("sticker_mime_type") or "application/octet-stream"),
             "url": f"/api/telegram/gifts/{quote(gift_id, safe='')}/sticker" if sticker_available else "",
         },
     }
@@ -2174,6 +2314,66 @@ def _message_body(value: str) -> str:
     return body
 
 
+def _parse_message_contact(contact_value: Any) -> dict[str, str] | None:
+    """Validate a shareable contact snapshot without inventing account identity."""
+    if contact_value is None:
+        return None
+    if not isinstance(contact_value, dict):
+        raise HTTPException(status_code=400, detail="Контакт должен быть объектом")
+    native_fields = any(key in contact_value for key in ("first_name", "last_name", "vcard"))
+    for key in ("first_name", "last_name", "vcard"):
+        if key in contact_value and not isinstance(contact_value[key], str):
+            raise HTTPException(status_code=400, detail="Поля имени и vCard должны быть строками")
+    first_name = contact_value.get("first_name", "").strip()
+    last_name = contact_value.get("last_name", "").strip()
+    vcard = contact_value.get("vcard", "")
+    contact_name = str(contact_value.get("name") or "").strip()
+    parts_name = " ".join(part for part in (first_name, last_name) if part)
+    if parts_name:
+        if contact_name and contact_name != parts_name:
+            raise HTTPException(status_code=400, detail="Имя контакта не соответствует его частям")
+        contact_name = parts_name
+    contact_phone = str(contact_value.get("phone") or "").strip()
+    contact_email = str(contact_value.get("email") or "").strip()
+    if not contact_name or len(contact_name) > 120:
+        raise HTTPException(status_code=400, detail="Укажите имя контакта до 120 символов")
+    if len(vcard) > 16384 or "\x00" in vcard:
+        raise HTTPException(status_code=400, detail="vCard должен содержать не более 16384 символов без NUL")
+    if not re.fullmatch(r"[+0-9(). -]{5,32}", contact_phone):
+        raise HTTPException(status_code=400, detail="Некорректный номер телефона контакта")
+    if len(contact_email) > 254 or (
+        contact_email and not re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", contact_email)
+    ):
+        raise HTTPException(status_code=400, detail="Некорректный адрес электронной почты контакта")
+    contact_payload = {"name": contact_name, "phone": contact_phone, "email": contact_email}
+    if native_fields:
+        contact_payload.update(first_name=first_name, last_name=last_name, vcard=vcard)
+    return contact_payload
+
+
+def _parse_message_location(value: Any) -> dict[str, float | str] | None:
+    """Validate a static location consistently across personal, group and channel messages."""
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise HTTPException(status_code=400, detail="Геолокация должна быть объектом")
+    raw_latitude = value.get("latitude")
+    raw_longitude = value.get("longitude")
+    if isinstance(raw_latitude, bool) or isinstance(raw_longitude, bool):
+        raise HTTPException(status_code=400, detail="Координаты должны быть числовыми значениями")
+    try:
+        latitude = float(raw_latitude)
+        longitude = float(raw_longitude)
+    except (TypeError, ValueError, OverflowError):
+        raise HTTPException(status_code=400, detail="Укажите корректные координаты")
+    if not (-90.0 <= latitude <= 90.0) or not (-180.0 <= longitude <= 180.0):
+        raise HTTPException(status_code=400, detail="Координаты выходят за допустимый диапазон")
+    label = str(value.get("label") or "").strip()
+    if len(label) > 120:
+        raise HTTPException(status_code=400, detail="Название места не должно превышать 120 символов")
+    return {"latitude": latitude, "longitude": longitude, "label": label}
+
+
 def _next_recurring_scheduled_timestamp(
     scheduled_at: int,
     now: int,
@@ -2206,6 +2406,8 @@ def build_messenger_router(
     fcm_access_token_cache: dict[str, Any] = {}
     fcm_access_token_lock = asyncio.Lock()
     pending_attribute_syncs: set[str] = set()
+    push_wakeup = asyncio.Event()
+    push_workers: list[asyncio.Task] = []
 
     def schedule_attribute_sync(gift_id: str) -> None:
         """Asks Telegram for a gift's attribute set without blocking the current request.
@@ -2272,14 +2474,14 @@ def build_messenger_router(
         title: str,
         body: str,
         data: dict[str, str],
-    ) -> None:
+    ) -> bool:
         """Send best-effort FCM notifications only to devices with a live WaysGram session."""
         credentials = _firebase_service_account()
         if not credentials:
-            return
+            return False
         recipients = sorted({int(value) for value in account_ids if int(value) > 0})
         if not recipients:
-            return
+            return True
         placeholders = ",".join("?" for _ in recipients)
         try:
             async with aiosqlite.connect(db_path()) as db:
@@ -2297,7 +2499,7 @@ def build_messenger_router(
                 )
                 devices = await cur.fetchall()
             if not devices:
-                return
+                return True
             project_id, access_token = await get_fcm_access_token(credentials)
             notification_data = {
                 "waysgram": "1",
@@ -2318,6 +2520,7 @@ def build_messenger_router(
                     "notification": {"channel_id": "waysgram_messages"},
                 },
             }
+            delivered = True
             async with httpx.AsyncClient(timeout=httpx.Timeout(8.0)) as client:
                 for token_hash, token_value in devices:
                     response = await client.post(
@@ -2333,10 +2536,100 @@ def build_messenger_router(
                             )
                             await db.commit()
                     elif response.status_code >= 400:
+                        delivered = False
+                        if response.status_code == 401:
+                            fcm_access_token_cache.clear()
                         LOGGER.warning("FCM delivery failed with HTTP %s", response.status_code)
+            return delivered
         except Exception as exc:
             LOGGER.warning("FCM delivery skipped after %s", type(exc).__name__)
+            return False
 
+
+    async def enqueue_push(db: Any, sender: int, recipient: int, title: str, body: str, data: dict[str, str], now: int) -> bool:
+        # Stored in the same transaction as the message, so a restart cannot lose it.
+        if not _firebase_service_account():
+            return False
+        await db.execute(
+            """INSERT INTO push_outbox(sender_telegram_id,recipient_telegram_id,title,body,data_json,created_at,next_attempt_at)
+               VALUES(?,?,?,?,?,?,?)""",
+            (sender, recipient, str(title)[:80], str(body)[:180],
+             json.dumps(data, ensure_ascii=False, separators=(",", ":")), now, now),
+        )
+        return True
+
+    async def push_worker() -> None:
+        while True:
+            try:
+                now = int(time.time())
+                lease = secrets.token_hex(16)
+                async with aiosqlite.connect(db_path()) as db:
+                    db.row_factory = aiosqlite.Row
+                    # A read-only idle check avoids taking a write lock every poll.
+                    cur = await db.execute(
+                        """SELECT id FROM push_outbox WHERE next_attempt_at<=? AND lease_until<=?
+                           ORDER BY id LIMIT 1""", (now, now),
+                    )
+                    candidate = await cur.fetchone()
+                    item = None
+                    if candidate is not None:
+                        await db.execute("BEGIN IMMEDIATE")
+                        cur = await db.execute(
+                            "SELECT * FROM push_outbox WHERE id=? AND next_attempt_at<=? AND lease_until<=?",
+                            (candidate["id"], now, now),
+                        )
+                        item = await cur.fetchone()
+                        if item is not None:
+                            await db.execute("UPDATE push_outbox SET lease_until=?,lease_token=? WHERE id=?",
+                                             (now + 60, lease, item["id"]))
+                        await db.commit()
+                if item is None:
+                    push_wakeup.clear()
+                    try:
+                        await asyncio.wait_for(push_wakeup.wait(), timeout=2.0)
+                    except asyncio.TimeoutError:
+                        pass
+                    continue
+                try:
+                    # Old pushes should not arrive days after the underlying message.
+                    if int(item["created_at"]) < int(time.time()) - 86400:
+                        success = True
+                    else:
+                        data = json.loads(item["data_json"])
+                        success = await asyncio.wait_for(deliver_push_notifications(
+                            [int(item["recipient_telegram_id"])], item["title"], item["body"], data
+                        ), timeout=45.0)
+                except Exception:
+                    success = False
+                async with aiosqlite.connect(db_path()) as db:
+                    if success:
+                        await db.execute("DELETE FROM push_outbox WHERE id=? AND lease_token=?", (item["id"], lease))
+                    else:
+                        attempts = int(item["attempts"]) + 1
+                        delay = min(300, 2 ** min(attempts, 8))
+                        await db.execute(
+                            """UPDATE push_outbox SET attempts=?,next_attempt_at=?,lease_until=0,lease_token=''
+                               WHERE id=? AND lease_token=?""",
+                            (attempts, int(time.time()) + delay, item["id"], lease),
+                        )
+                    await db.commit()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                LOGGER.warning("Push queue worker failed (%s)", type(exc).__name__)
+                await asyncio.sleep(2.0)
+
+    @router.on_event("startup")
+    async def start_push_workers() -> None:
+        if not push_workers:
+            push_workers.extend(asyncio.create_task(push_worker()) for _ in range(2))
+
+    @router.on_event("shutdown")
+    async def stop_push_workers() -> None:
+        for worker in push_workers:
+            worker.cancel()
+        await asyncio.gather(*push_workers, return_exceptions=True)
+        push_workers.clear()
 
     async def ensure_telegram_gifts_fresh() -> dict[str, Any]:
         now = int(time.time())
@@ -2670,9 +2963,9 @@ def build_messenger_router(
 
     async def media_message_fields(db: Any, media_id: str | None) -> dict[str, str | None]:
         if not media_id:
-            return {"media_type": None, "media_name": None, "media_kind": None}
+            return {"media_type": None, "media_name": None, "media_kind": None, "media_metadata": None}
         cur = await db.execute(
-            "SELECT mime_type,original_name,media_kind FROM media_assets WHERE id=?",
+            "SELECT mime_type,original_name,media_kind,media_metadata FROM media_assets WHERE id=?",
             (media_id,),
         )
         media = await cur.fetchone()
@@ -2682,11 +2975,12 @@ def build_messenger_router(
             "media_type": str(media[0]),
             "media_name": str(media[1] or "document"),
             "media_kind": str(media[2] or ""),
+            "media_metadata": str(media[3] or "{}"),
         }
 
     async def default_media_message_body(db: Any, media_id: str) -> str:
         fields = await media_message_fields(db, media_id)
-        if str(fields["media_type"] or "").startswith("image/"):
+        if str(fields["media_type"] or "").startswith("image/") and fields["media_kind"] != "document":
             return "Изображение"
         return "Документ: " + str(fields["media_name"] or "document")
 
@@ -2733,6 +3027,9 @@ def build_messenger_router(
         storage_name = media_id + extension
         file_path = media_storage_dir() / storage_name
         try:
+            # File I/O can be slow; do it before acquiring SQLite's write lock.
+            # Quota checking and metadata insertion remain atomic inside the transaction.
+            await asyncio.to_thread(file_path.write_bytes, normalized)
             async with aiosqlite.connect(db_path()) as db:
                 db.row_factory = aiosqlite.Row
                 await db.execute("BEGIN IMMEDIATE")
@@ -2750,7 +3047,6 @@ def build_messenger_router(
                     await db.rollback()
                     raise HTTPException(status_code=429, detail="Слишком много загрузок. Повторите позже.")
 
-                await asyncio.to_thread(file_path.write_bytes, normalized)
                 await db.execute(
                     """INSERT INTO media_assets
                        (id,owner_telegram_id,storage_name,mime_type,size_bytes,created_at,original_name)
@@ -2777,15 +3073,43 @@ def build_messenger_router(
         uid = int(user["telegram_id"])
         declared_type = str(request.headers.get("content-type", "")).split(";", 1)[0].strip().lower()
         media_kind = str(request.headers.get("x-media-kind", "")).strip().lower()
-        if media_kind not in {"", "video_note", "voice"}:
+        if media_kind not in {"", "video_note", "voice", "video", "audio"}:
             raise HTTPException(status_code=400, detail="Неизвестный тип медиафайла")
+        metadata_header = request.headers.get("x-media-metadata", "")
+        metadata: dict[str, Any] = {}
+        if metadata_header:
+            try:
+                if len(metadata_header) > 4096:
+                    raise ValueError("metadata too large")
+                raw_metadata = json.loads(base64.b64decode(metadata_header, validate=True).decode("utf-8"))
+                if not isinstance(raw_metadata, dict) or set(raw_metadata) - {"duration", "width", "height", "waveform", "title", "performer"}:
+                    raise ValueError("invalid metadata")
+                for key, maximum in (("duration", 86400), ("width", 8192), ("height", 8192)):
+                    value = raw_metadata.get(key)
+                    if value is not None:
+                        if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or not 0 <= value <= maximum:
+                            raise ValueError("invalid media dimension")
+                        metadata[key] = value
+                for key in ("title", "performer"):
+                    value = raw_metadata.get(key)
+                    if value is not None:
+                        if not isinstance(value, str) or len(value) > 160 or any(ord(c) < 32 for c in value):
+                            raise ValueError("invalid media text")
+                        metadata[key] = value
+                waveform = raw_metadata.get("waveform")
+                if waveform is not None:
+                    if not isinstance(waveform, str) or len(waveform) > 1024 or len(base64.b64decode(waveform, validate=True)) > 768:
+                        raise ValueError("invalid waveform")
+                    metadata["waveform"] = waveform
+            except (ValueError, TypeError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+                raise HTTPException(status_code=400, detail="Некорректные параметры медиа") from exc
         allowed_types = {
             "image/jpeg", "image/png", "image/webp",
             "application/pdf", "text/plain", "text/csv", "application/zip",
             "application/vnd.rar", "application/x-7z-compressed", "application/x-tar",
             "application/gzip", "application/x-bzip2", "application/x-xz",
             "video/mp4", "video/webm", "video/quicktime", "video/x-matroska",
-            "audio/mpeg", "audio/mp4", "audio/ogg", "audio/wav",
+            "audio/mpeg", "audio/mp4", "audio/ogg", "audio/wav", "audio/flac",
             "application/octet-stream",
         }
         if declared_type not in allowed_types:
@@ -2824,17 +3148,29 @@ def build_messenger_router(
                 status_code=415,
                 detail="Видеосообщения-кружочки должны быть в формате MP4",
             )
+        if media_kind == "video" and not mime_type.startswith("video/"):
+            raise HTTPException(status_code=415, detail="Видео должно быть видеофайлом")
+        if media_kind == "audio" and not mime_type.startswith("audio/"):
+            raise HTTPException(status_code=415, detail="Аудио должно быть аудиофайлом")
         if media_kind == "voice" and not mime_type.startswith("audio/"):
             raise HTTPException(
                 status_code=415,
                 detail="Голосовые сообщения должны быть аудиофайлами",
             )
+        # Image documents retain their original bytes and their document identity
+        # in histories, forwards and other clients. Legacy rows are ambiguous and
+        # must not be guessed from their filenames.
+        if not media_kind and mime_type.startswith("image/"):
+            media_kind = "document"
 
         now = int(time.time())
         media_id = secrets.token_hex(16)
         storage_name = media_id + extension
         file_path = media_storage_dir() / storage_name
         try:
+            # File I/O can be slow; do it before acquiring SQLite's write lock.
+            # Quota checking and metadata insertion remain atomic inside the transaction.
+            await asyncio.to_thread(file_path.write_bytes, normalized)
             async with aiosqlite.connect(db_path()) as db:
                 db.row_factory = aiosqlite.Row
                 await db.execute("BEGIN IMMEDIATE")
@@ -2852,12 +3188,12 @@ def build_messenger_router(
                     await db.rollback()
                     raise HTTPException(status_code=429, detail="Слишком много загрузок. Повторите позже.")
 
-                await asyncio.to_thread(file_path.write_bytes, normalized)
                 await db.execute(
                     """INSERT INTO media_assets
-                       (id,owner_telegram_id,storage_name,mime_type,size_bytes,created_at,original_name,media_kind)
-                       VALUES(?,?,?,?,?,?,?,?)""",
-                    (media_id, uid, storage_name, mime_type, len(normalized), now, safe_name, media_kind),
+                       (id,owner_telegram_id,storage_name,mime_type,size_bytes,created_at,original_name,media_kind,media_metadata)
+                       VALUES(?,?,?,?,?,?,?,?,?)""",
+                    (media_id, uid, storage_name, mime_type, len(normalized), now, safe_name, media_kind,
+                     json.dumps(metadata, ensure_ascii=False, separators=(",", ":"))),
                 )
                 await db.commit()
         except Exception:
@@ -2868,6 +3204,7 @@ def build_messenger_router(
             "mime_type": mime_type,
             "name": safe_name,
             "media_kind": media_kind,
+            "media_metadata": json.dumps(metadata, ensure_ascii=False, separators=(",", ":")),
             "size_bytes": len(normalized),
             "url": f"/api/media/{media_id}",
         }
@@ -2889,15 +3226,16 @@ def build_messenger_router(
             raise HTTPException(status_code=400, detail="kind: image, video, audio, document или без фильтра")
         mime_clause = ""
         if kind == "image":
-            mime_clause = "AND lower(a.mime_type) LIKE 'image/%'"
+            mime_clause = "AND lower(a.mime_type) LIKE 'image/%' AND COALESCE(a.media_kind,'') <> 'document'"
         elif kind == "video":
             mime_clause = "AND lower(a.mime_type) LIKE 'video/%'"
         elif kind == "audio":
             mime_clause = "AND lower(a.mime_type) LIKE 'audio/%'"
         elif kind == "document":
-            mime_clause = """AND lower(a.mime_type) NOT LIKE 'image/%'
+            mime_clause = """AND (COALESCE(a.media_kind,'') = 'document' OR (
+                             lower(a.mime_type) NOT LIKE 'image/%'
                              AND lower(a.mime_type) NOT LIKE 'video/%'
-                             AND lower(a.mime_type) NOT LIKE 'audio/%'"""
+                             AND lower(a.mime_type) NOT LIKE 'audio/%'))"""
 
         async with aiosqlite.connect(db_path()) as db:
             db.row_factory = aiosqlite.Row
@@ -2915,7 +3253,7 @@ def build_messenger_router(
                 cur = await db.execute(
                     f"""SELECT m.id AS message_id,m.sender_telegram_id AS sender_id,
                                m.recipient_telegram_id AS recipient_id,m.body,m.media_id,
-                               a.mime_type AS media_type,a.original_name AS media_name,m.created_at
+                               a.mime_type AS media_type,a.original_name AS media_name,a.media_kind,m.created_at
                         FROM messages m JOIN media_assets a ON a.id=m.media_id
                         WHERE ((m.sender_telegram_id=? AND m.recipient_telegram_id=?) OR
                                (m.sender_telegram_id=? AND m.recipient_telegram_id=?))
@@ -2933,7 +3271,7 @@ def build_messenger_router(
                 cur = await db.execute(
                     f"""SELECT m.id AS message_id,m.sender_telegram_id AS sender_id,
                                m.body,m.media_id,a.mime_type AS media_type,
-                               a.original_name AS media_name,m.created_at
+                               a.original_name AS media_name,a.media_kind,m.created_at
                         FROM group_messages m JOIN media_assets a ON a.id=m.media_id
                         WHERE m.group_id=? AND m.media_id IS NOT NULL
                           AND (?=0 OR m.id<?) {mime_clause}
@@ -2961,7 +3299,7 @@ def build_messenger_router(
                 cur = await db.execute(
                     f"""SELECT m.id AS message_id,m.author_telegram_id AS sender_id,
                                m.body,m.media_id,a.mime_type AS media_type,
-                               a.original_name AS media_name,m.created_at
+                               a.original_name AS media_name,a.media_kind,m.created_at
                         FROM channel_messages m JOIN media_assets a ON a.id=m.media_id
                         WHERE m.channel_id=? AND m.media_id IS NOT NULL
                           AND (?=0 OR m.id<?) {mime_clause}
@@ -3254,9 +3592,15 @@ def build_messenger_router(
                 allowed = await cur.fetchone() is not None
             if not allowed:
                 cur = await db.execute(
-                    """SELECT 1 FROM channel_messages
-                       WHERE media_id=? LIMIT 1""",
-                    (media_id,),
+                    """SELECT 1 FROM channel_messages cm
+                       JOIN channels c ON c.id=cm.channel_id
+                       WHERE cm.media_id=? AND (c.is_public=1 OR c.owner_telegram_id=?
+                           OR EXISTS(SELECT 1 FROM channel_admins ca
+                                     WHERE ca.channel_id=c.id AND ca.telegram_id=?)
+                           OR EXISTS(SELECT 1 FROM channel_members member
+                                     WHERE member.channel_id=c.id AND member.telegram_id=?))
+                       LIMIT 1""",
+                    (media_id, uid, uid, uid),
                 )
                 allowed = await cur.fetchone() is not None
             if not allowed:
@@ -3267,7 +3611,8 @@ def build_messenger_router(
 
         file_path = media_storage_dir() / str(media["storage_name"])
         try:
-            file_size = (await asyncio.to_thread(file_path.stat)).st_size
+            file_stat = await asyncio.to_thread(file_path.stat)
+            file_size = file_stat.st_size
         except FileNotFoundError as exc:
             raise HTTPException(status_code=404, detail="Файл изображения отсутствует на сервере") from exc
 
@@ -3338,14 +3683,9 @@ def build_messenger_router(
                 },
             )
 
-        try:
-            content = await asyncio.to_thread(file_path.read_bytes)
-        except FileNotFoundError as exc:
-            raise HTTPException(status_code=404, detail="Файл изображения отсутствует на сервере") from exc
-        return Response(
-            content=content,
-            media_type=mime_type,
-            headers=response_headers,
+        # Stream files rather than reading up to 25 MB into memory before the first byte.
+        return FileResponse(
+            file_path, media_type=mime_type, headers=response_headers, stat_result=file_stat,
         )
 
     def idempotency_descriptor(path: str, body: dict[str, Any], key: str | None):
@@ -3457,31 +3797,42 @@ def build_messenger_router(
             raise HTTPException(status_code=403, detail="Вы не состоите в этой группе")
         return dict(row)
 
-    async def require_cloud_draft_access(scope: str, peer_id: int, telegram_id: int) -> None:
+    async def require_cloud_draft_access(scope: str, peer_id: int, telegram_id: int, db: Any) -> None:
+        # Caller holds the read/write transaction so access and the draft state
+        # are observed together, rather than authorizing before a concurrent revoke.
         if scope == "dm":
-            async with aiosqlite.connect(db_path()) as db:
+            cur = await db.execute(
+                "SELECT is_banned FROM accounts WHERE telegram_id=?", (peer_id,)
+            )
+            peer = await cur.fetchone()
+            if peer is None:
+                raise HTTPException(status_code=404, detail="Собеседник не найден")
+            if peer[0]:
+                raise HTTPException(status_code=403, detail="Аккаунт собеседника недоступен")
+            if peer_id != telegram_id:
                 cur = await db.execute(
-                    "SELECT is_banned FROM accounts WHERE telegram_id=?", (peer_id,)
+                    """SELECT 1 FROM blocked_users
+                       WHERE (owner_telegram_id=? AND blocked_telegram_id=?)
+                          OR (owner_telegram_id=? AND blocked_telegram_id=?) LIMIT 1""",
+                    (telegram_id, peer_id, peer_id, telegram_id),
                 )
-                peer = await cur.fetchone()
-                if peer is None:
-                    raise HTTPException(status_code=404, detail="Собеседник не найден")
-                if peer[0]:
-                    raise HTTPException(status_code=403, detail="Аккаунт собеседника недоступен")
-                if peer_id != telegram_id:
-                    cur = await db.execute(
-                        """SELECT 1 FROM blocked_users
-                           WHERE (owner_telegram_id=? AND blocked_telegram_id=?)
-                              OR (owner_telegram_id=? AND blocked_telegram_id=?) LIMIT 1""",
-                        (telegram_id, peer_id, peer_id, telegram_id),
-                    )
-                    if await cur.fetchone():
-                        raise HTTPException(status_code=403, detail="Нельзя работать с черновиком: пользователь в чёрном списке")
+                if await cur.fetchone():
+                    raise HTTPException(status_code=403, detail="Нельзя работать с черновиком: пользователь в чёрном списке")
         elif scope == "group":
-            async with aiosqlite.connect(db_path()) as db:
-                await require_group_member(db, peer_id, telegram_id)
+            await require_group_member(db, peer_id, telegram_id)
         elif scope == "channel":
-            await require_channel_access(peer_id, telegram_id)
+            cur = await db.execute(
+                """SELECT (c.is_public=1 OR c.owner_telegram_id=?
+                       OR EXISTS(SELECT 1 FROM channel_admins ca WHERE ca.channel_id=c.id AND ca.telegram_id=?)
+                       OR EXISTS(SELECT 1 FROM channel_members cm WHERE cm.channel_id=c.id AND cm.telegram_id=?))
+                   FROM channels c WHERE c.id=?""",
+                (telegram_id, telegram_id, telegram_id, peer_id),
+            )
+            row = await cur.fetchone()
+            if row is None:
+                raise HTTPException(status_code=404, detail="Канал не найден")
+            if not row[0]:
+                raise HTTPException(status_code=403, detail="Это приватный канал. Нужна ссылка-приглашение.")
 
     async def current_bot(authorization: str | None) -> dict[str, Any]:
         if not authorization or not authorization.startswith("Bearer "):
@@ -3816,18 +4167,13 @@ def build_messenger_router(
             rows = await cur.fetchall()
         return {"transactions": [dict(row) for row in rows]}
 
-    @router.get("/api/me/gifts")
-    async def my_gifts(
-        authorization: str | None = Header(default=None),
-        limit: int | None = Query(default=None, ge=1, le=200),
-        offset: int = Query(default=0, ge=0),
-    ) -> dict[str, Any]:
-        user = await current_user(authorization)
+    async def gift_inventory(owner_id: int, limit: int | None, offset: int, *, public: bool) -> dict[str, Any]:
+        """The same paginated inventory for the owner and for a profile visitor."""
         async with aiosqlite.connect(db_path()) as db:
             db.row_factory = aiosqlite.Row
             cur = await db.execute(
                 "SELECT COUNT(*) FROM user_gifts WHERE owner_telegram_id=?",
-                (int(user["telegram_id"]),),
+                (owner_id,),
             )
             total = int((await cur.fetchone())[0] or 0)
             query = """SELECT id,serial_number,gift_id,telegram_gift_id,gift_name,gift_emoji,
@@ -3852,8 +4198,9 @@ def build_messenger_router(
                                  WHERE r.gift_id=user_gifts.telegram_gift_id) AS auction_eligible,
                           (SELECT n.unique_num FROM gift_unique_numbers n
                             WHERE n.serial_number=user_gifts.serial_number) AS unique_num
-                   FROM user_gifts WHERE owner_telegram_id=? ORDER BY id DESC"""
-            query_params: tuple[Any, ...] = (int(user["telegram_id"]),)
+                   FROM user_gifts WHERE owner_telegram_id=?
+                   ORDER BY profile_order IS NOT NULL, profile_order ASC, id DESC"""
+            query_params: tuple[Any, ...] = (owner_id,)
             if limit is not None:
                 query += " LIMIT ? OFFSET ?"
                 query_params += (limit + 1, offset)
@@ -3871,6 +4218,38 @@ def build_messenger_router(
         metadata_by_id: dict[str, dict[str, Any] | None] = {}
         async with aiosqlite.connect(db_path()) as gift_db:
             gift_db.row_factory = aiosqlite.Row
+            # Batch provenance for the whole page instead of querying each gift and sender.
+            acquisitions: dict[str, Any] = {}
+            serials = [str(row["serial_number"]) for row in rows]
+            for start in range(0, len(serials), 400):
+                chunk = serials[start:start + 400]
+                placeholders = ",".join("?" for _ in chunk)
+                cur = await gift_db.execute(
+                    f"""SELECT t.serial_number,t.event_type,t.from_telegram_id,t.created_at,
+                               t.message_id,a.telegram_id AS sender_account_id,
+                               a.username,a.display_name,a.avatar_media_id,
+                               m.body,mg.attributes_json AS message_attributes
+                        FROM gift_transactions t
+                        JOIN (SELECT MAX(id) AS id FROM gift_transactions
+                              WHERE to_telegram_id=? AND serial_number IN ({placeholders})
+                                AND event_type IN ('purchase','transfer','chat_send','market_sale','auction_sale')
+                              GROUP BY serial_number) latest ON latest.id=t.id
+                        LEFT JOIN accounts a ON a.telegram_id=CASE WHEN t.event_type='purchase'
+                            THEN t.to_telegram_id ELSE t.from_telegram_id END AND a.is_banned=0
+                        LEFT JOIN message_gifts mg ON mg.serial_number=t.serial_number AND mg.message_id=COALESCE(
+                            t.message_id, CASE WHEN t.event_type IN ('purchase','chat_send') THEN
+                              (SELECT m2.id FROM message_gifts mg2 JOIN messages m2 ON m2.id=mg2.message_id
+                               WHERE mg2.serial_number=t.serial_number
+                                 AND m2.sender_telegram_id=CASE WHEN t.event_type='purchase'
+                                     THEN t.to_telegram_id ELSE t.from_telegram_id END
+                                 AND m2.recipient_telegram_id=t.to_telegram_id
+                                 AND m2.created_at=t.created_at ORDER BY m2.id DESC LIMIT 1)
+                            END)
+                        LEFT JOIN messages m ON m.id=mg.message_id""",
+                    (owner_id, *chunk),
+                )
+                acquisitions.update({str(row["serial_number"]): row for row in await cur.fetchall()})
+            documents_by_id: dict[str, dict[str, list[dict[str, Any]]]] = {}
             for row in rows:
                 item = dict(row)
                 raw_attributes = item.pop("attributes_json", "{}")
@@ -3900,7 +4279,9 @@ def build_messenger_router(
                     and not int((collectible.get(key) or {}).get("document_id") or 0)
                     for key in ("model", "pattern")
                 ):
-                    documents = await _gift_attribute_documents(gift_db, gift_id)
+                    if gift_id not in documents_by_id:
+                        documents_by_id[gift_id] = await _gift_attribute_documents(gift_db, gift_id)
+                    documents = documents_by_id[gift_id]
                     if not documents:
                         # Telegram was never asked about this gift (it was upgraded before the
                         # catalog reached this server): the answer is fetched for the next read.
@@ -3909,7 +4290,7 @@ def build_messenger_router(
                         gift_id,
                         telegram_gift.get("title") if telegram_gift else item.get("gift_name"),
                     )
-                    if _enrich_traits_documents(collectible, pool, documents):
+                    if _enrich_traits_documents(collectible, pool, documents, gift_id=gift_id):
                         await gift_db.execute(
                             "UPDATE user_gifts SET attributes_json=? WHERE id=?",
                             (
@@ -3921,6 +4302,22 @@ def build_messenger_router(
                             ),
                         )
                         await gift_db.commit()
+                # A pinned local artwork pack can supply the exact named model of older
+                # Heart Locket upgrades even when Telegram only provides a preview sample.
+                # This synthetic document ID exists only in the response, never in the DB;
+                # a later authoritative Telegram match can still take precedence.
+                if isinstance(collectible, dict):
+                    model_trait = collectible.get("model")
+                    model_name = model_trait.get("name") if isinstance(model_trait, dict) else model_trait
+                    if not isinstance(model_trait, dict) or not int(model_trait.get("document_id") or 0):
+                        fallback_model = gift_model_fallbacks.model_for_name(gift_id, model_name)
+                        fallback_id = (fallback_model["document_id"] if fallback_model else
+                                       gift_model_fallbacks.remote_document_for_name(gift_id, model_name))
+                        if fallback_id:
+                            if not isinstance(model_trait, dict):
+                                model_trait = {"name": model_name}
+                                collectible["model"] = model_trait
+                            model_trait["document_id"] = fallback_id
                 if telegram_gift and str(telegram_gift.get("title") or "").strip():
                     item["gift_name"] = str(telegram_gift["title"]).strip()
                 item["gift_emoji"] = (
@@ -3953,6 +4350,34 @@ def build_messenger_router(
                     if telegram_gift and item["sticker_available"]
                     else ""
                 )
+                item["owner_id"] = owner_id
+                # The current acquisition is authoritative even when an older chat message
+                # survived a subsequent transfer or resale. Never publish provenance on NFTs.
+                item["sender_id"] = None
+                item["gift_message"] = ""
+                if int(item.get("upgrade_level") or 0) == 0 and not collectible:
+                    acquisition = acquisitions.get(str(item["serial_number"]))
+                    sender = int(acquisition["from_telegram_id"] or 0) if acquisition else 0
+                    if acquisition and acquisition["event_type"] == "purchase":
+                        sender = owner_id
+                    if sender:
+                        try:
+                            message_attributes = json.loads(acquisition["message_attributes"] or "{}")
+                        except (TypeError, ValueError):
+                            message_attributes = {}
+                        hidden = isinstance(message_attributes, dict) and message_attributes.get("hide_name") is True
+                        if not hidden:
+                            item["sender_id"] = sender
+                            if acquisition["sender_account_id"]:
+                                item["sender"] = {
+                                    "id": int(acquisition["sender_account_id"]),
+                                    "username": acquisition["username"],
+                                    "display_name": acquisition["display_name"],
+                                    "avatar_media_id": acquisition["avatar_media_id"],
+                                }
+                        text = str(acquisition["body"] or "").strip()
+                        if text != "Подарок WaysGram":
+                            item["gift_message"] = text
                 purchase_asset = str(item.pop("purchase_asset", "") or "stars").strip()
                 if purchase_asset not in {"stars", "grams"}:
                     purchase_asset = "stars"
@@ -3970,6 +4395,10 @@ def build_messenger_router(
                     and not int(item.get("is_auctioned") or 0)
                     and int(time.time()) < sellable_until
                 )
+                if public:
+                    # Prices, refundable value and the sale window are owner-only data.
+                    for field in ("purchase_asset", "purchase_price", "sell_refund", "sell_refund_asset", "sellable_until", "sellable"):
+                        item.pop(field, None)
                 gifts.append(item)
         return {
             "gifts": gifts,
@@ -3979,6 +4408,60 @@ def build_messenger_router(
             "has_more": has_more,
             "next_offset": offset + len(gifts) if has_more else None,
         }
+
+    @router.put("/api/me/gifts/order")
+    async def reorder_my_gifts(request: Request, authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        user = await current_user(authorization)
+        try:
+            body = await request.json()
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Некорректный порядок подарков")
+        expected = body.get("expected") if isinstance(body, dict) else None
+        order = body.get("order") if isinstance(body, dict) else None
+        if (not isinstance(expected, list) or not isinstance(order, list)
+                or len(order) > 10000 or len(expected) != len(order)
+                or any(type(x) is not int or x <= 0 for x in expected + order)
+                or len(set(expected)) != len(expected) or set(expected) != set(order)):
+            raise HTTPException(status_code=400, detail="Некорректный порядок подарков")
+        uid = int(user["telegram_id"])
+        async with aiosqlite.connect(db_path()) as db:
+            await db.execute("BEGIN IMMEDIATE")
+            cursor = await db.execute(
+                """SELECT id FROM user_gifts WHERE owner_telegram_id=?
+                   ORDER BY profile_order IS NOT NULL, profile_order ASC, id DESC""", (uid,))
+            current = [int(row[0]) for row in await cursor.fetchall()]
+            if current != expected:
+                await db.rollback()
+                raise HTTPException(status_code=409, detail="Список подарков изменился; обновите его")
+            await db.executemany(
+                "UPDATE user_gifts SET profile_order=? WHERE id=? AND owner_telegram_id=?",
+                [(i, gift_id, uid) for i, gift_id in enumerate(order)],
+            )
+            await db.commit()
+        return {"ok": True}
+
+    @router.get("/api/me/gifts")
+    async def my_gifts(
+        authorization: str | None = Header(default=None),
+        limit: int | None = Query(default=None, ge=1, le=200),
+        offset: int = Query(default=0, ge=0),
+    ) -> dict[str, Any]:
+        user = await current_user(authorization)
+        return await gift_inventory(int(user["telegram_id"]), limit, offset, public=False)
+
+    @router.get("/api/users/{user_id}/gifts")
+    async def user_gifts(
+        user_id: int,
+        authorization: str | None = Header(default=None),
+        limit: int | None = Query(default=None, ge=1, le=200),
+        offset: int = Query(default=0, ge=0),
+    ) -> dict[str, Any]:
+        viewer = await current_user(authorization)
+        async with aiosqlite.connect(db_path()) as db:
+            cur = await db.execute("SELECT 1 FROM accounts WHERE telegram_id=? AND is_banned=0", (user_id,))
+            if await cur.fetchone() is None:
+                raise HTTPException(status_code=404, detail="Пользователь не найден")
+        return await gift_inventory(user_id, limit, offset, public=user_id != int(viewer["telegram_id"]))
 
     @router.get("/api/me/gifts/transactions")
     async def my_gift_transactions(authorization: str | None = Header(default=None)) -> dict[str, Any]:
@@ -4021,8 +4504,8 @@ def build_messenger_router(
                 cur = await db.execute(
                     """SELECT telegram_id AS id,username,display_name,avatar_media_id FROM accounts
                        WHERE username LIKE ? OR display_name LIKE ?
-                       ORDER BY telegram_id DESC LIMIT 30""",
-                    (f"%{q}%", f"%{q}%"),
+                       ORDER BY CASE WHEN username = ? COLLATE NOCASE THEN 0 ELSE 1 END, telegram_id DESC LIMIT 30""",
+                    (f"%{q}%", f"%{q}%", q),
                 )
             rows = await cur.fetchall()
         users = []
@@ -4240,25 +4723,6 @@ def build_messenger_router(
             if row is None:
                 raise HTTPException(status_code=404, detail="Пользователь не найден")
             cur = await db.execute(
-                """SELECT id,serial_number,gift_id,telegram_gift_id,gift_name,gift_emoji,
-                          telegram_gift_metadata_json,acquired_at,upgrade_level,attributes_json,
-                          EXISTS(SELECT 1 FROM gift_market_listings l
-                                 WHERE l.serial_number=user_gifts.serial_number
-                                   AND l.status='active') AS is_listed,
-                          EXISTS(SELECT 1 FROM gift_collectible_auctions a
-                                 WHERE a.serial_number=user_gifts.serial_number
-                                   AND a.status='active') AS is_auctioned,
-                          EXISTS(SELECT 1 FROM telegram_auction_gift_registry r
-                                 WHERE r.gift_id=user_gifts.telegram_gift_id) AS auction_eligible,
-                          (SELECT n.unique_num FROM gift_unique_numbers n
-                            WHERE n.serial_number=user_gifts.serial_number) AS unique_num
-                   FROM user_gifts
-                   WHERE owner_telegram_id=?
-                   ORDER BY id DESC""",
-                (user_id,),
-            )
-            gifts = [dict(item) for item in await cur.fetchall()]
-            cur = await db.execute(
                 """SELECT g.id,g.username,g.title,
                           (SELECT COUNT(*) FROM group_members count_members
                            WHERE count_members.group_id=g.id) AS member_count
@@ -4288,59 +4752,7 @@ def build_messenger_router(
         profile["labels"] = await entity_labels("account", user_id)
         for contact in common_contacts:
             contact["labels"] = await entity_labels("account", int(contact["id"]))
-        metadata_by_id: dict[str, dict[str, Any] | None] = {}
-        async with aiosqlite.connect(db_path()) as gift_db:
-            gift_db.row_factory = aiosqlite.Row
-            for gift in gifts:
-                try:
-                    gift["attributes"] = json.loads(gift.pop("attributes_json") or "{}")
-                except (TypeError, ValueError):
-                    gift["attributes"] = {}
-                raw_snapshot = gift.pop("telegram_gift_metadata_json", "{}")
-                try:
-                    snapshot = json.loads(raw_snapshot or "{}")
-                except (TypeError, ValueError):
-                    snapshot = {}
-                snapshot = snapshot if isinstance(snapshot, dict) else {}
-                gift_id = str(gift.get("telegram_gift_id") or "")
-                if gift_id not in metadata_by_id:
-                    metadata_by_id[gift_id] = await _telegram_gift_metadata(gift_db, gift_id)
-                telegram_gift = _merge_telegram_gift_metadata(metadata_by_id[gift_id], snapshot)
-                gift["telegram_gift"] = telegram_gift
-                if telegram_gift and str(telegram_gift.get("title") or "").strip():
-                    gift["gift_name"] = str(telegram_gift["title"]).strip()
-                gift["gift_emoji"] = (
-                    str(gift.get("gift_emoji") or "").strip()
-                    or (str(telegram_gift.get("emoji") or "").strip() if telegram_gift else "")
-                )
-                gift["sticker_available"] = bool(telegram_gift and telegram_gift.get("sticker_available"))
-                gift["sticker_url"] = (
-                    telegram_gift.get("sticker", {}).get("url", "")
-                    if telegram_gift and gift["sticker_available"]
-                    else ""
-                )
-                try:
-                    attributes_level = int(gift["attributes"].get("upgrade_level") or 0)
-                except (TypeError, ValueError):
-                    attributes_level = 0
-                try:
-                    stored_level = int(gift.get("upgrade_level") or 0)
-                except (TypeError, ValueError):
-                    stored_level = 0
-                gift["can_upgrade"] = bool(
-                    telegram_gift
-                    and telegram_gift["can_upgrade"]
-                    and max(attributes_level, stored_level) == 0
-                )
-                # WaysGram charges a fixed price for upgrades, so every screen shows the
-                # same amount instead of the Telegram catalog value.
-                gift["upgrade_star_count"] = UPGRADE_PRICE_STARS
-                if telegram_gift:
-                    gift["telegram_gift"] = {
-                        **telegram_gift,
-                        "upgrade_star_count": UPGRADE_PRICE_STARS,
-                    }
-        profile["gifts"] = gifts
+        profile["gifts"] = (await gift_inventory(user_id, None, 0, public=user_id != viewer_id))["gifts"]
         profile["common_groups"] = common_groups
         profile["common_contacts"] = common_contacts
         return profile
@@ -4569,6 +4981,13 @@ def build_messenger_router(
         recipient = payload.get("recipient_id")
         if recipient is not None and (isinstance(recipient, bool) or not isinstance(recipient, int) or recipient <= 0):
             raise HTTPException(status_code=400, detail="Некорректный получатель")
+        raw_message = payload.get("message", "")
+        if not isinstance(raw_message, str):
+            raise HTTPException(status_code=400, detail="Некорректное сообщение к подарку")
+        caption = _message_body(raw_message.strip()) if raw_message.strip() else ""
+        hide_name = payload.get("hide_name", False)
+        if not isinstance(hide_name, bool):
+            raise HTTPException(status_code=400, detail="Некорректная настройка анонимности")
         key = (idempotency_key or "").strip()
         if key and (len(key) > 128 or not re.fullmatch(r"[A-Za-z0-9._:-]{16,128}", key)):
             raise HTTPException(status_code=400, detail="Некорректный Idempotency-Key")
@@ -4673,7 +5092,7 @@ def build_messenger_router(
                 """INSERT INTO messages
                    (sender_telegram_id,recipient_telegram_id,body,created_at)
                    VALUES(?,?,?,?)""",
-                (uid, owner, "", now),
+                (uid, owner, caption, now),
             )
             receipt_message_id = int(cur.lastrowid)
             await db.execute(
@@ -4685,6 +5104,7 @@ def build_messenger_router(
                      "event_type": "purchase",
                      "native_action": "star_gift_purchase",
                      "price_stars": price,
+                     **({"hide_name": True} if hide_name else {}),
                  }, separators=(",", ":"))),
             )
             await record_event(
@@ -4693,10 +5113,12 @@ def build_messenger_router(
             )
             if owner != uid:
                 await db.execute(
-                    """INSERT INTO gift_transactions(event_type,serial_number,gift_name,from_telegram_id,to_telegram_id,created_at)
-                       VALUES('transfer',?,?,?,?,?)""",
-                    (serial, title, uid, owner, now),
+                    """INSERT INTO gift_transactions(event_type,serial_number,gift_name,from_telegram_id,to_telegram_id,created_at,message_id)
+                       VALUES('transfer',?,?,?,?,?,?)""",
+                    (serial, title, uid, owner, now, receipt_message_id),
                 )
+            else:
+                await db.execute("UPDATE gift_transactions SET message_id=? WHERE serial_number=? AND event_type='purchase'", (receipt_message_id, serial))
             result = {
                 "status": "purchased",
                 "gift": {
@@ -4727,20 +5149,26 @@ def build_messenger_router(
             if source == "telegram_mtproto"
             else ("telegram_gift_catalog", "telegram_mtproto_gift_catalog")
         )
+        best_title = ""
+        best_quality = -1
         for table in tables:
             cur = await db.execute(
                 f"SELECT title,sticker_set_name FROM {table} WHERE gift_id=?",
                 (gift_id,),
             )
             row = await cur.fetchone()
-            if row and str(row["title"] or row["sticker_set_name"] or "").strip():
-                return _gift_display_title(row["title"], row["sticker_set_name"], gift_id)
+            if row:
+                title, quality = gift_names.resolve_gift_name(row["title"], row["sticker_set_name"], gift_id)
+                if quality > best_quality:
+                    best_title, best_quality = title, quality
+        if best_title:
+            return best_title
         cur = await db.execute(
             "SELECT 1 FROM telegram_gift_prices WHERE gift_id=?",
             (gift_id,),
         )
         if await cur.fetchone():
-            return "Подарок Telegram"
+            return _gift_display_title("", "", gift_id)
         return ""
 
     @router.get("/api/telegram/gifts")
@@ -5038,7 +5466,7 @@ def build_messenger_router(
                 "id": gift_id,
                 "source": "telegram",
                 "catalog_source": "waysgram_manual",
-                "title": "Подарок Telegram",
+                "title": _gift_display_title("", "", gift_id),
                 "emoji": "",
                 "star_count": 0,
                 "currency": "telegram_stars",
@@ -5106,6 +5534,14 @@ def build_messenger_router(
         animated: int = Query(default=0, ge=0, le=1),
     ) -> Response:
         await current_user(authorization)
+        # The original sold-out Plush Pepe asset is bundled by its exact gift ID.
+        # Prefer it over a stale Bot API thumbnail or an arbitrary upgrade model.
+        bundled = _bundled_gift_artwork(gift_id, bool(animated))
+        if bundled is not None:
+            return FileResponse(
+                bundled, media_type="application/x-tgsticker" if animated else "image/png",
+                headers={"Cache-Control": "private, max-age=3600"},
+            )
         async with aiosqlite.connect(db_path()) as db:
             db.row_factory = aiosqlite.Row
             cur = await db.execute("SELECT source FROM telegram_gift_sync_state WHERE id=1")
@@ -5504,22 +5940,29 @@ def build_messenger_router(
             numeric_document = int(str(document_id or "").strip())
         except (TypeError, ValueError):
             raise HTTPException(status_code=400, detail="Некорректный документ атрибута") from None
+        # Negative IDs are reserved for our pinned fallback assets, never sent to MTProto.
+        local_model = gift_model_fallbacks.model_for_document(key, numeric_document, synthetic=True)
+        if local_model:
+            return FileResponse(local_model["path"], media_type="application/x-tgsticker",
+                                headers={"Cache-Control": "private, max-age=604800"})
         provider = _gift_provider()
+        error = None
+        if provider is not None:
+            try:
+                content, media_type = await provider.download_attribute(db_path(), key, numeric_document)
+                return Response(content=content, media_type=media_type,
+                                headers={"Cache-Control": "private, max-age=604800"})
+            except Exception as exc:
+                error = exc
+        # For Telegram document IDs explicitly attested in the pinned manifest, the same
+        # model is still available offline if the live file reference has expired.
+        local_model = gift_model_fallbacks.model_for_document(key, numeric_document, synthetic=False)
+        if local_model:
+            return FileResponse(local_model["path"], media_type="application/x-tgsticker",
+                                headers={"Cache-Control": "private, max-age=604800"})
         if provider is None:
             raise HTTPException(status_code=503, detail="Каталог подарков Telegram недоступен")
-        try:
-            content, media_type = await provider.download_attribute(
-                db_path(), key, numeric_document
-            )
-        except Exception as error:
-            raise HTTPException(
-                status_code=502, detail="Не удалось загрузить анимацию атрибута"
-            ) from error
-        return Response(
-            content=content,
-            media_type=media_type,
-            headers={"Cache-Control": "private, max-age=604800"},
-        )
+        raise HTTPException(status_code=502, detail="Не удалось загрузить анимацию атрибута") from error
 
     @router.get("/api/telegram/gifts/prefetch")
     async def telegram_gift_prefetch_state(
@@ -6519,26 +6962,76 @@ def build_messenger_router(
             "grams_balance": buyer_balance,
         }
 
-    @router.post("/api/gifts/{serial_number}/upgrade")
-    async def upgrade_gift(
+    @router.get("/api/gifts/{serial_number}/upgrade-preview")
+    async def preview_gift_upgrade(
         serial_number: str,
         authorization: str | None = Header(default=None),
-        idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
     ) -> dict[str, Any]:
+        """Read-only candidates, never a roll or a reservation of its outcome."""
         user = await current_user(authorization)
         uid = int(user["telegram_id"])
         serial = serial_number.strip().upper()
         if not GIFT_SERIAL_RE.fullmatch(serial):
             raise HTTPException(status_code=400, detail="Некорректный серийный номер подарка")
+        async with aiosqlite.connect(db_path()) as db:
+            db.row_factory = aiosqlite.Row
+            cur = await db.execute(
+                """SELECT gift_name,telegram_gift_id,upgrade_level,attributes_json
+                   FROM user_gifts WHERE serial_number=? AND owner_telegram_id=?""", (serial, uid),
+            )
+            gift = await cur.fetchone()
+            if gift is None:
+                raise HTTPException(status_code=404, detail="Подарок не найден в вашем инвентаре")
+            try:
+                attributes = json.loads(gift["attributes_json"] or "{}")
+            except (ValueError, TypeError):
+                attributes = {}
+            if int(gift["upgrade_level"] or 0) > 0 or _has_collectible_traits(attributes):
+                raise HTTPException(status_code=409, detail="Подарок уже улучшен")
+            for table, detail in (("gift_market_listings", "Сначала снимите подарок с продажи"),
+                                  ("gift_collectible_auctions", "Сначала отмените аукцион подарка")):
+                cur = await db.execute(
+                    f"SELECT 1 FROM {table} WHERE serial_number=? AND status='active'", (serial,),
+                )
+                if await cur.fetchone():
+                    raise HTTPException(status_code=409, detail=detail)
+            gift_id = str(gift["telegram_gift_id"] or "")
+            _, base = _collectible_trait_pool(gift_id, gift["gift_name"])
+            rows = await _gift_attribute_rows(db, gift_id)
+            pool = gift_upgrades.effective_reveal_pool(base, rows)
+            result = {"serial_number": serial, "telegram_gift_id": gift_id,
+                      "price_stars": UPGRADE_PRICE_STARS,
+                      "candidates": gift_upgrades.reveal_pool(
+                          pool, {}, _reveal_pool_documents(pool, rows))}
+        if gift_id:
+            schedule_attribute_sync(gift_id)
+        return result
+
+    @router.post("/api/gifts/{serial_number}/upgrade")
+    async def upgrade_gift(
+        serial_number: str,
+        payload: dict[str, Any] | None = None,
+        authorization: str | None = Header(default=None),
+        idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+    ) -> dict[str, Any]:
+        user = await current_user(authorization)
+        uid = int(user["telegram_id"])
+        payload = payload or {}
+        keep_original = payload.get("keep_original_details", False)
+        if not isinstance(keep_original, bool) or set(payload) - {"keep_original_details"}:
+            raise HTTPException(status_code=400, detail="Некорректные параметры улучшения")
+        serial = serial_number.strip().upper()
+        if not GIFT_SERIAL_RE.fullmatch(serial):
+            raise HTTPException(status_code=400, detail="Некорректный серийный номер подарка")
         now = int(time.time())
         scope = f"/api/gifts/{serial}/upgrade"
-        descriptor = idempotency_descriptor(scope, {}, idempotency_key)
+        descriptor = idempotency_descriptor(scope, {"keep_original_details": True} if keep_original else {}, idempotency_key)
         # Telegram's own attribute set of the gift is fetched before the write transaction
         # opens: the rolled model and pattern then carry the real document ids.
         async with aiosqlite.connect(db_path()) as attribute_db:
             attribute_db.row_factory = aiosqlite.Row
             cur = await attribute_db.execute(
-                "SELECT telegram_gift_id FROM user_gifts WHERE serial_number=? AND owner_telegram_id=?",
+                "SELECT telegram_gift_id FROM user_gifts WHERE serial_number=? AND owner_telegram_id=? AND upgrade_level=0",
                 (serial, uid),
             )
             attribute_row = await cur.fetchone()
@@ -6565,6 +7058,18 @@ def build_messenger_router(
             if gift is None:
                 await db.rollback()
                 raise HTTPException(status_code=404, detail="Подарок не найден в вашем инвентаре")
+            try:
+                attributes = json.loads(str(gift["attributes_json"] or "{}"))
+            except (TypeError, ValueError):
+                attributes = {}
+            if not isinstance(attributes, dict):
+                attributes = {}
+            # Once converted to a collectible it must never be rolled or charged again,
+            # including old records whose traits exist but whose level is missing.
+            existing_traits = gift_upgrades.traits_of(attributes)
+            if int(gift["upgrade_level"] or 0) > 0 or bool(existing_traits):
+                await db.rollback()
+                raise HTTPException(status_code=409, detail="Подарок уже улучшен")
             cur = await db.execute(
                 "SELECT 1 FROM gift_market_listings WHERE serial_number=? AND status='active'",
                 (serial,),
@@ -6582,8 +7087,7 @@ def build_messenger_router(
             # A WaysGram gift that is not in the Telegram catalog still upgrades: the price is
             # set by WaysGram and the traits come from the fallback pool when Telegram published
             # no models for it.
-            # The upgrade price is fixed by WaysGram and does not depend on the Telegram
-            # catalog: the same 25 Stars are charged for every gift and every level.
+            # The one-time upgrade costs a fixed 25 WaysGram Stars.
             price = UPGRADE_PRICE_STARS
             cur = await db.execute(
                 "SELECT stars,is_banned FROM accounts WHERE telegram_id=?",
@@ -6597,13 +7101,47 @@ def build_messenger_router(
                 await db.rollback()
                 raise HTTPException(status_code=402, detail="Недостаточно Stars")
             new_balance = int(account["stars"]) - price
-            new_level = int(gift["upgrade_level"]) + 1
-            try:
-                attributes = json.loads(str(gift["attributes_json"] or "{}"))
-            except (TypeError, ValueError):
-                attributes = {}
-            if not isinstance(attributes, dict):
-                attributes = {}
+            new_level = 1
+            if keep_original:
+                cur = await db.execute(
+                    """SELECT t.event_type,t.from_telegram_id,t.to_telegram_id,t.created_at,
+                              t.message_id,m.body,mg.attributes_json AS message_attributes
+                       FROM gift_transactions t
+                       LEFT JOIN message_gifts mg ON mg.serial_number=t.serial_number AND mg.message_id=COALESCE(
+                           t.message_id, CASE WHEN t.event_type IN ('purchase','chat_send') THEN
+                             (SELECT m2.id FROM message_gifts mg2 JOIN messages m2 ON m2.id=mg2.message_id
+                              WHERE mg2.serial_number=t.serial_number
+                                AND m2.sender_telegram_id=CASE WHEN t.event_type='purchase'
+                                    THEN t.to_telegram_id ELSE t.from_telegram_id END
+                                AND m2.recipient_telegram_id=t.to_telegram_id
+                                AND m2.created_at=t.created_at ORDER BY m2.id DESC LIMIT 1)
+                           END)
+                       LEFT JOIN messages m ON m.id=mg.message_id
+                       WHERE t.serial_number=? AND t.to_telegram_id=?
+                         AND t.event_type IN ('purchase','transfer','chat_send','market_sale','auction_sale')
+                       ORDER BY t.id DESC LIMIT 1""", (serial, uid),
+                )
+                origin = await cur.fetchone()
+                if origin:
+                    try:
+                        msg_attributes = json.loads(origin["message_attributes"] or "{}")
+                    except (ValueError, TypeError):
+                        msg_attributes = None
+                    # Purchases sent to another account can be recorded as transfers too.
+                    # Respect hide_name for every event, and fail closed when a receipt
+                    # that could carry anonymity is missing or invalid.
+                    hidden = (isinstance(msg_attributes, dict) and msg_attributes.get("hide_name") is True) or (
+                        (origin["message_id"] is not None or origin["event_type"] == "chat_send")
+                        and (origin["message_attributes"] is None or not isinstance(msg_attributes, dict))
+                    )
+                    sender = uid if origin["event_type"] == "purchase" else int(origin["from_telegram_id"] or 0)
+                    text = str(origin["body"] or "").strip()
+                    attributes["original_details"] = {
+                        "recipient_id": uid,
+                        "sender_id": sender if sender > 0 and not hidden else None,
+                        "date": int(origin["created_at"] or now),
+                        "message": "" if text == "Подарок WaysGram" else text,
+                    }
             attributes.update({
                 "upgrade_level": new_level,
                 "last_upgraded_at": now,
@@ -6612,17 +7150,8 @@ def build_messenger_router(
             gift_key, gift_pool = _collectible_trait_pool(
                 gift["telegram_gift_id"], gift["gift_name"]
             )
-            # Every upgrade rolls the three attributes again: a WaysGram gift can be
-            # upgraded more than once for the same 25 Stars, and each upgrade has to change
-            # the model, the pattern and the backdrop colours on the card. The previously
-            # rolled values are excluded from the candidates, so the change is guaranteed
-            # whenever the official pool of the gift has an alternative.
+            # This is the only draw for this gift; its collectible traits remain stable.
             previous_traits = gift_upgrades.traits_of(attributes)
-            # Telegram publishes every model and pattern as its own sticker document, and the
-            # roll happens inside that set when it is complete: the winner then brings its
-            # animation with it, exactly like the official client receives it from the server.
-            # A sample of one attribute per kind, or a WaysGram-only gift, still rolls from the
-            # published JSON pools.
             attribute_rows = await _gift_attribute_rows(
                 db, str(gift["telegram_gift_id"] or "")
             )
@@ -6633,23 +7162,21 @@ def build_messenger_router(
                 live=attribute_rows or None,
             )
             traits = gift_upgrades.traits_of(attributes) or {}
-            # Whatever the roll could not resolve (older rows without ids, localised names)
-            # is matched once more against the stored set: name, then chance, then position.
-            # A WaysGram-only gift has no Telegram attribute set, so its traits stay as rolled
-            # from the fallback pool.
+            # New rolls never guess artwork by an unrelated row's chance or position.
+            # Older gifts retain the legacy compatibility mapping.
+            traits["strict_artwork"] = True
+            # A static-pool roll may gain artwork only from an unambiguous exact name.
+            # Live rolls already carry the document ID of the selected row.
             attribute_documents = {
                 kind: rows
                 for kind, rows in attribute_rows.items()
                 if kind in ("model", "pattern") and any(int(row["document_id"] or 0) for row in rows)
             }
-            _enrich_traits_documents(traits, gift_pool, attribute_documents)
-            # The reels of the reveal must name the same set the roll came from.
-            live_pool = gift_upgrades.pool_from_rows(attribute_rows)
-            reveal_base = (
-                live_pool
-                if traits.get("roll_source") == "telegram" and live_pool
-                else gift_pool
+            _enrich_traits_documents(
+                traits, gift_pool, attribute_documents, gift_id=str(gift["telegram_gift_id"] or "")
             )
+            # The reels of the reveal must name the same set the roll came from.
+            reveal_base = gift_upgrades.effective_reveal_pool(gift_pool, attribute_rows)
             unique_num = await _assign_unique_number(
                 db,
                 serial,
@@ -7116,20 +7643,53 @@ def build_messenger_router(
                 (scope, chat_id, user_id, *message_ids),
             )
             rows = await cur.fetchall()
+            cur = await db.execute(
+                f"SELECT message_id,from_name,from_date FROM message_forward_sources WHERE scope=? AND message_id IN ({placeholders})",
+                (scope, *message_ids),
+            )
+            sources = {int(row[0]): (str(row[1]), int(row[2])) for row in await cur.fetchall()}
+            locations = {}
+            contacts = {}
+            if scope in ("group", "channel"):
+                cur = await db.execute(
+                    f"SELECT message_id,latitude,longitude,label FROM message_forward_locations WHERE scope=? AND message_id IN ({placeholders})",
+                    (scope, *message_ids),
+                )
+                locations = {int(row[0]): (row[1], row[2], row[3]) for row in await cur.fetchall()}
+                cur = await db.execute(
+                    f"SELECT message_id,contact_name,contact_phone,contact_email,contact_first_name,contact_last_name,contact_vcard FROM message_scoped_contacts WHERE scope=? AND message_id IN ({placeholders})",
+                    (scope, *message_ids),
+                )
+                contacts = {int(row[0]): tuple(row[1:]) for row in await cur.fetchall()}
         mine: dict[int, list[str]] = {}
         for message_id, reaction in rows:
             mine.setdefault(int(message_id), []).append(str(reaction))
         for item in items:
             item["my_reactions"] = mine.get(int(item["id"]), [])
+            source = sources.get(int(item["id"]))
+            if source:
+                item["forwarded_from_display_name"] = source[0]
+                item["forwarded_from_date"] = source[1]
+            location = locations.get(int(item["id"]))
+            if location:
+                item.update(location_latitude=location[0], location_longitude=location[1], location_label=location[2])
+            contact = contacts.get(int(item["id"]))
+            if contact:
+                item.update(zip(("contact_name", "contact_phone", "contact_email", "contact_first_name", "contact_last_name", "contact_vcard"), contact))
+
     @router.get("/api/channels/{channel_id}/messages")
     async def list_channel_messages(
         channel_id: int,
         after_id: int = Query(default=0, ge=0),
+        before_id: int = Query(default=0, ge=0),
+        limit: int = Query(default=100, ge=1, le=100),
         wait_seconds: int = Query(default=0, ge=0, le=20),
         authorization: str | None = Header(default=None),
     ) -> dict[str, Any]:
         user = await current_user(authorization)
         await require_channel_access(channel_id, int(user["telegram_id"]))
+        if after_id and before_id:
+            raise HTTPException(status_code=400, detail="Используйте только один курсор: after_id или before_id")
         deadline = time.monotonic() + (wait_seconds if after_id else 0)
         rows = []
         while True:
@@ -7146,10 +7706,12 @@ def build_messenger_router(
                                            WHERE scope='channel' AND chat_id=channel_messages.channel_id
                                              AND message_id=channel_messages.id GROUP BY reaction)) AS reaction_summary,
                                   (SELECT mime_type FROM media_assets WHERE id=channel_messages.media_id) AS media_type,
-                                  (SELECT original_name FROM media_assets WHERE id=channel_messages.media_id) AS media_name
+                                  (SELECT original_name FROM media_assets WHERE id=channel_messages.media_id) AS media_name,
+                                  (SELECT media_kind FROM media_assets WHERE id=channel_messages.media_id) AS media_kind,
+                                  (SELECT media_metadata FROM media_assets WHERE id=channel_messages.media_id) AS media_metadata
                            FROM channel_messages WHERE channel_id=? AND id>?
-                           ORDER BY id ASC LIMIT 100""",
-                        (channel_id, after_id),
+                           ORDER BY id ASC LIMIT ?""",
+                        (channel_id, after_id, limit),
                     )
                 else:
                     cur = await db.execute(
@@ -7161,10 +7723,12 @@ def build_messenger_router(
                                            WHERE scope='channel' AND chat_id=channel_messages.channel_id
                                              AND message_id=channel_messages.id GROUP BY reaction)) AS reaction_summary,
                                   (SELECT mime_type FROM media_assets WHERE id=channel_messages.media_id) AS media_type,
-                                  (SELECT original_name FROM media_assets WHERE id=channel_messages.media_id) AS media_name
-                           FROM channel_messages WHERE channel_id=?
-                           ORDER BY id DESC LIMIT 100""",
-                        (channel_id,),
+                                  (SELECT original_name FROM media_assets WHERE id=channel_messages.media_id) AS media_name,
+                                  (SELECT media_kind FROM media_assets WHERE id=channel_messages.media_id) AS media_kind,
+                                  (SELECT media_metadata FROM media_assets WHERE id=channel_messages.media_id) AS media_metadata
+                           FROM channel_messages WHERE channel_id=? AND (?=0 OR id<?)
+                           ORDER BY id DESC LIMIT ?""",
+                        (channel_id, before_id, before_id, limit),
                     )
                 rows = await cur.fetchall()
             if rows or time.monotonic() >= deadline:
@@ -7183,6 +7747,19 @@ def build_messenger_router(
         if isinstance(value, bool) or not isinstance(value, int) or value < 0:
             raise HTTPException(status_code=400, detail="Некорректный reply_to_id")
         return value
+
+    def album_captions(payload: dict[str, Any], count: int) -> tuple[list[str], str]:
+        captions = payload.get("captions")
+        if captions is None:
+            text = str(payload.get("body") or "")
+            first = _message_body(text) if text.strip() else "Медиаальбом"
+            return [first] + [""] * (count - 1), first
+        if not isinstance(captions, list) or len(captions) != count or any(not isinstance(v, str) for v in captions):
+            raise HTTPException(status_code=400, detail="Некорректные подписи альбома")
+        checked = [_message_body(v) if v.strip() else "" for v in captions]
+        if not any(checked):
+            checked[0] = "Медиаальбом"
+        return checked, next((caption for caption in checked if caption), "Медиаальбом")
 
     async def require_reply_target(db: Any, sql: str, params: tuple[Any, ...]) -> None:
         cur = await db.execute(sql, params)
@@ -7213,7 +7790,9 @@ def build_messenger_router(
                                            WHERE scope='channel' AND chat_id=channel_messages.channel_id
                                              AND message_id=channel_messages.id GROUP BY reaction)) AS reaction_summary,
                                   (SELECT mime_type FROM media_assets WHERE id=channel_messages.media_id) AS media_type,
-                          (SELECT original_name FROM media_assets WHERE id=channel_messages.media_id) AS media_name
+                          (SELECT original_name FROM media_assets WHERE id=channel_messages.media_id) AS media_name,
+                                  (SELECT media_kind FROM media_assets WHERE id=channel_messages.media_id) AS media_kind,
+                                  (SELECT media_metadata FROM media_assets WHERE id=channel_messages.media_id) AS media_metadata
                    FROM channel_messages
                    WHERE channel_id=? AND body LIKE ? COLLATE NOCASE
                    ORDER BY id DESC LIMIT 100""",
@@ -7234,8 +7813,21 @@ def build_messenger_router(
     ) -> dict[str, Any]:
         user = await current_user(authorization)
         uid = int(user["telegram_id"])
+        silent = payload.get("silent", False)
+        if not isinstance(silent, bool):
+            raise HTTPException(status_code=400, detail="silent должен быть логическим значением")
         media_id = str(payload.get("media_id") or "").strip() or None
+        contact_payload = _parse_message_contact(payload.get("contact"))
+        location_payload = _parse_message_location(payload.get("location"))
+        if contact_payload and (media_id or location_payload):
+            raise HTTPException(status_code=400, detail="Нельзя объединять контакт с файлом или геолокацией")
+        if location_payload and media_id:
+            raise HTTPException(status_code=400, detail="Нельзя отправлять геолокацию вместе с файлом")
         body_value = str(payload.get("body") or "")
+        if contact_payload and not body_value.strip():
+            body_value = "Контакт: " + contact_payload["name"]
+        elif location_payload and not body_value.strip():
+            body_value = str(location_payload["label"] or "Местоположение")
         body = _message_body(body_value) if body_value.strip() or not media_id else ""
         if not await can_manage_channel(channel_id, uid):
             raise HTTPException(status_code=403, detail="Публиковать в канале может только владелец или администратор")
@@ -7244,6 +7836,13 @@ def build_messenger_router(
         descriptor = idempotency_descriptor(scope, payload, idempotency_key)
         async with aiosqlite.connect(db_path()) as db:
             await db.execute("BEGIN IMMEDIATE")
+            # Verify posting rights under the same lock used for the message
+            # and contact snapshot; demotion cannot race this write or replay.
+            cur = await db.execute("""SELECT 1 FROM channels c WHERE c.id=? AND
+                (c.owner_telegram_id=? OR EXISTS(SELECT 1 FROM channel_admins a
+                WHERE a.channel_id=c.id AND a.telegram_id=?))""", (channel_id, uid, uid))
+            if await cur.fetchone() is None:
+                raise HTTPException(status_code=403, detail="Публиковать в канале может только владелец или администратор")
             previous = await idempotency_lookup(db, uid, scope, descriptor, now)
             if previous is not None:
                 await db.rollback()
@@ -7271,24 +7870,44 @@ def build_messenger_router(
                 (channel_id, uid, body, media_id, reply_to_id, now),
             )
             message_id = int(cur.lastrowid)
+            if contact_payload:
+                await db.execute(
+                    """INSERT INTO message_scoped_contacts(scope,message_id,contact_name,contact_phone,contact_email,
+                       contact_first_name,contact_last_name,contact_vcard) VALUES(?,?,?,?,?,?,?,?)""",
+                    ("channel", message_id, contact_payload["name"], contact_payload["phone"],
+                     contact_payload["email"], contact_payload.get("first_name", ""),
+                     contact_payload.get("last_name", ""), contact_payload.get("vcard", "")),
+                )
+            if location_payload:
+                await db.execute(
+                    """INSERT INTO message_forward_locations(scope,message_id,latitude,longitude,label)
+                       VALUES(?,?,?,?,?)""",
+                    ("channel", message_id, location_payload["latitude"],
+                     location_payload["longitude"], location_payload["label"]),
+                )
             await record_event(
                 db, "channel", message_id, "new_message", uid, chat_id=channel_id,
             )
             result = {"id": message_id, "status": "published", "channel_id": channel_id, "author_id": uid, "body": body, "media_id": media_id, "reply_to_id": reply_to_id, **media_fields, "created_at": now}
+            if location_payload:
+                result["location"] = location_payload
+            if contact_payload:
+                result["contact"] = contact_payload
             await idempotency_store(db, uid, scope, descriptor, result, now)
             await db.commit()
-        async with aiosqlite.connect(db_path()) as db:
-            cur = await db.execute(
-                "SELECT telegram_id FROM channel_members WHERE channel_id=? AND telegram_id<>?",
-                (channel_id, uid),
+        if not silent:
+            async with aiosqlite.connect(db_path()) as db:
+                cur = await db.execute(
+                    "SELECT telegram_id FROM channel_members WHERE channel_id=? AND telegram_id<>?",
+                    (channel_id, uid),
+                )
+                channel_recipients = [int(row[0]) for row in await cur.fetchall()]
+            await deliver_push_notifications(
+                channel_recipients,
+                str(user.get("display_name") or user.get("username") or "Новая публикация"),
+                body,
+                {"scope": "channel", "chat_id": str(channel_id), "message_id": str(message_id)},
             )
-            channel_recipients = [int(row[0]) for row in await cur.fetchall()]
-        await deliver_push_notifications(
-            channel_recipients,
-            str(user.get("display_name") or user.get("username") or "Новая публикация"),
-            body,
-            {"scope": "channel", "chat_id": str(channel_id), "message_id": str(message_id)},
-        )
         return result
 
     @router.post("/api/channels/{channel_id}/messages/album", status_code=201)
@@ -7315,8 +7934,7 @@ def build_messenger_router(
         if len(set(media_ids)) != len(media_ids):
             raise HTTPException(status_code=400, detail="Альбом не должен содержать повторяющиеся файлы")
 
-        body_value = str(payload.get("body") or "")
-        body = _message_body(body_value) if body_value.strip() else "Медиаальбом"
+        captions, body = album_captions(payload, len(media_ids))
         silent = payload.get("silent", False)
         if not isinstance(silent, bool):
             raise HTTPException(status_code=400, detail="silent должен быть логическим значением")
@@ -7366,7 +7984,7 @@ def build_messenger_router(
                 raise HTTPException(status_code=429, detail="Превышен лимит публикаций для медиаальбома")
 
             for index, (media_id, media_fields) in enumerate(checked_media):
-                item_body = body if index == 0 else ""
+                item_body = captions[index]
                 cur = await db.execute(
                     """INSERT INTO channel_messages
                        (channel_id,author_telegram_id,body,media_id,reply_to_id,
@@ -7534,9 +8152,13 @@ def build_messenger_router(
                    (SELECT mime_type FROM media_assets WHERE id=messages.media_id) AS media_type,
                    (SELECT original_name FROM media_assets WHERE id=messages.media_id) AS media_name,
                    (SELECT media_kind FROM media_assets WHERE id=messages.media_id) AS media_kind,
+                   (SELECT media_metadata FROM media_assets WHERE id=messages.media_id) AS media_metadata,
                    (SELECT contact_name FROM message_contacts WHERE message_id=messages.id) AS contact_name,
                    (SELECT contact_phone FROM message_contacts WHERE message_id=messages.id) AS contact_phone,
                    (SELECT contact_email FROM message_contacts WHERE message_id=messages.id) AS contact_email,
+                   (SELECT contact_first_name FROM message_contacts WHERE message_id=messages.id) AS contact_first_name,
+                   (SELECT contact_last_name FROM message_contacts WHERE message_id=messages.id) AS contact_last_name,
+                   (SELECT contact_vcard FROM message_contacts WHERE message_id=messages.id) AS contact_vcard,
                    (SELECT latitude FROM message_locations WHERE message_id=messages.id) AS location_latitude,
                    (SELECT longitude FROM message_locations WHERE message_id=messages.id) AS location_longitude,
                    (SELECT label FROM message_locations WHERE message_id=messages.id) AS location_label,
@@ -7544,7 +8166,11 @@ def build_messenger_router(
                    gift_attachment.gift_name AS gift_name,
                    gift_attachment.telegram_gift_id AS gift_telegram_gift_id,
                    gift_attachment.upgrade_level AS gift_upgrade_level,
-                   gift_attachment.attributes_json AS gift_attributes_json
+                   gift_attachment.attributes_json AS gift_attributes_json,
+                   (SELECT unique_num FROM gift_unique_numbers n
+                    WHERE n.serial_number=gift_attachment.serial_number) AS gift_unique_num,
+                   (SELECT id FROM user_gifts ug
+                    WHERE ug.serial_number=gift_attachment.serial_number) AS gift_instance_id
             FROM messages
             LEFT JOIN message_gifts gift_attachment ON gift_attachment.message_id=messages.id
             WHERE
@@ -7764,9 +8390,13 @@ def build_messenger_router(
                           (SELECT mime_type FROM media_assets WHERE id=messages.media_id) AS media_type,
                           (SELECT original_name FROM media_assets WHERE id=messages.media_id) AS media_name,
                           (SELECT media_kind FROM media_assets WHERE id=messages.media_id) AS media_kind,
+                   (SELECT media_metadata FROM media_assets WHERE id=messages.media_id) AS media_metadata,
                           (SELECT contact_name FROM message_contacts WHERE message_id=messages.id) AS contact_name,
                           (SELECT contact_phone FROM message_contacts WHERE message_id=messages.id) AS contact_phone,
                           (SELECT contact_email FROM message_contacts WHERE message_id=messages.id) AS contact_email,
+                   (SELECT contact_first_name FROM message_contacts WHERE message_id=messages.id) AS contact_first_name,
+                   (SELECT contact_last_name FROM message_contacts WHERE message_id=messages.id) AS contact_last_name,
+                   (SELECT contact_vcard FROM message_contacts WHERE message_id=messages.id) AS contact_vcard,
                           (SELECT latitude FROM message_locations WHERE message_id=messages.id) AS location_latitude,
                           (SELECT longitude FROM message_locations WHERE message_id=messages.id) AS location_longitude,
                           (SELECT label FROM message_locations WHERE message_id=messages.id) AS location_label
@@ -7804,51 +8434,10 @@ def build_messenger_router(
         media_id = str(payload.get("media_id") or "").strip() or None
         contact_value = payload.get("contact")
         contact_payload: dict[str, str] | None = None
-        location_value = payload.get("location")
-        location_payload: dict[str, float | str] | None = None
-        if location_value is not None:
-            if not isinstance(location_value, dict):
-                raise HTTPException(status_code=400, detail="Геолокация должна быть объектом")
-            raw_latitude = location_value.get("latitude")
-            raw_longitude = location_value.get("longitude")
-            if isinstance(raw_latitude, bool) or isinstance(raw_longitude, bool):
-                raise HTTPException(status_code=400, detail="Координаты должны быть числовыми значениями")
-            try:
-                latitude = float(raw_latitude)
-                longitude = float(raw_longitude)
-            except (TypeError, ValueError):
-                raise HTTPException(status_code=400, detail="Укажите корректные координаты")
-            if not (-90.0 <= latitude <= 90.0) or not (-180.0 <= longitude <= 180.0):
-                raise HTTPException(status_code=400, detail="Координаты выходят за допустимый диапазон")
-            location_label = str(location_value.get("label") or "").strip()
-            if len(location_label) > 120:
-                raise HTTPException(status_code=400, detail="Название места не должно превышать 120 символов")
-            location_payload = {
-                "latitude": latitude,
-                "longitude": longitude,
-                "label": location_label,
-            }
-        if contact_value is not None:
-            if not isinstance(contact_value, dict):
-                raise HTTPException(status_code=400, detail="Контакт должен быть объектом")
-            contact_name = str(contact_value.get("name") or "").strip()
-            contact_phone = str(contact_value.get("phone") or "").strip()
-            contact_email = str(contact_value.get("email") or "").strip()
-            if not contact_name or len(contact_name) > 120:
-                raise HTTPException(status_code=400, detail="Укажите имя контакта до 120 символов")
-            if not re.fullmatch(r"[+0-9(). -]{5,32}", contact_phone):
-                raise HTTPException(status_code=400, detail="Некорректный номер телефона контакта")
-            if len(contact_email) > 254 or (
-                contact_email and not re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", contact_email)
-            ):
-                raise HTTPException(status_code=400, detail="Некорректный адрес электронной почты контакта")
-            if media_id or location_payload:
-                raise HTTPException(status_code=400, detail="Нельзя объединять контакт с файлом или геолокацией")
-            contact_payload = {
-                "name": contact_name,
-                "phone": contact_phone,
-                "email": contact_email,
-            }
+        location_payload = _parse_message_location(payload.get("location"))
+        contact_payload = _parse_message_contact(contact_value)
+        if contact_payload and (media_id or location_payload):
+            raise HTTPException(status_code=400, detail="Нельзя объединять контакт с файлом или геолокацией")
         if location_payload and media_id:
             raise HTTPException(status_code=400, detail="Нельзя отправлять геолокацию вместе с файлом")
         body_value = str(payload.get("body") or "")
@@ -7919,13 +8508,17 @@ def build_messenger_router(
             if contact_payload:
                 await db.execute(
                     """INSERT INTO message_contacts
-                       (message_id,contact_name,contact_phone,contact_email)
-                       VALUES(?,?,?,?)""",
+                       (message_id,contact_name,contact_phone,contact_email,
+                        contact_first_name,contact_last_name,contact_vcard)
+                       VALUES(?,?,?,?,?,?,?)""",
                     (
                         message_id,
                         contact_payload["name"],
                         contact_payload["phone"],
                         contact_payload["email"],
+                        contact_payload.get("first_name", ""),
+                        contact_payload.get("last_name", ""),
+                        contact_payload.get("vcard", ""),
                     ),
                 )
             if location_payload:
@@ -7958,6 +8551,12 @@ def build_messenger_router(
                 "created_at": now,
             }
             await idempotency_store(db, uid, "/api/messages", descriptor, result, now)
+            queued_push = False
+            if not silent and recipient_id != uid:
+                queued_push = await enqueue_push(
+                    db, uid, recipient_id, str(user.get("display_name") or user.get("username") or "Новое сообщение"),
+                    body, {"scope": "dm", "chat_id": str(uid), "message_id": str(message_id)}, now,
+                )
             await db.commit()
         if recipient_id != uid:
             try:
@@ -7967,13 +8566,8 @@ def build_messenger_router(
                     await hook_db.commit()
             except Exception:
                 LOGGER.warning("streak/ai-clone hook failed", exc_info=True)
-        if not silent and recipient_id != uid:
-            await deliver_push_notifications(
-                [recipient_id],
-                str(user.get("display_name") or user.get("username") or "Новое сообщение"),
-                body,
-                {"scope": "dm", "chat_id": str(uid), "message_id": str(message_id)},
-            )
+        if queued_push:
+            push_wakeup.set()
         return result
 
 
@@ -8202,8 +8796,7 @@ def build_messenger_router(
         if len(set(media_ids)) != len(media_ids):
             raise HTTPException(status_code=400, detail="Альбом не должен содержать повторяющиеся файлы")
 
-        body_value = str(payload.get("body") or "")
-        body = _message_body(body_value) if body_value.strip() else "Медиаальбом"
+        captions, body = album_captions(payload, len(media_ids))
         silent = payload.get("silent", False)
         if not isinstance(silent, bool):
             raise HTTPException(status_code=400, detail="silent должен быть логическим значением")
@@ -8283,7 +8876,7 @@ def build_messenger_router(
                 )
 
             for index, (media_id, media_fields) in enumerate(checked_media):
-                item_body = body if index == 0 else ""
+                item_body = captions[index]
                 cur = await db.execute(
                     """INSERT INTO messages
                        (sender_telegram_id,recipient_telegram_id,body,media_id,reply_to_id,
@@ -8657,7 +9250,9 @@ def build_messenger_router(
                 await db.rollback()
                 raise HTTPException(status_code=403, detail="Нельзя отправить подарок: пользователь находится в чёрном списке")
             cur = await db.execute(
-                """SELECT id,gift_name,telegram_gift_id,upgrade_level,attributes_json
+                """SELECT id,gift_name,telegram_gift_id,upgrade_level,attributes_json,
+                          (SELECT unique_num FROM gift_unique_numbers n
+                           WHERE n.serial_number=user_gifts.serial_number) AS unique_num
                    FROM user_gifts WHERE serial_number=? AND owner_telegram_id=?""",
                 (serial, uid),
             )
@@ -8718,9 +9313,9 @@ def build_messenger_router(
             )
             await db.execute(
                 """INSERT INTO gift_transactions
-                   (event_type,serial_number,gift_name,from_telegram_id,to_telegram_id,created_at)
-                   VALUES('chat_send',?,?,?,?,?)""",
-                (serial, gift_name, uid, recipient_id, now),
+                   (event_type,serial_number,gift_name,from_telegram_id,to_telegram_id,created_at,message_id)
+                   VALUES('chat_send',?,?,?,?,?,?)""",
+                (serial, gift_name, uid, recipient_id, now, message_id),
             )
             await record_event(
                 db, "dm", message_id, "new_message", uid,
@@ -8737,17 +9332,295 @@ def build_messenger_router(
                 "gift_name": gift_name,
                 "gift_telegram_gift_id": telegram_gift_id,
                 "gift_upgrade_level": upgrade_level,
+                "gift_unique_num": int(gift["unique_num"] or 0),
+                "gift_instance_id": int(gift["id"]),
                 "gift_attributes": attributes,
                 "created_at": now,
             }
             await idempotency_store(db, uid, scope, descriptor, result, now)
+            queued_push = await enqueue_push(
+                db, uid, recipient_id, str(user.get("display_name") or user.get("username") or "Новый подарок"),
+                f"Подарок WaysGram: {gift_name}",
+                {"scope": "dm", "chat_id": str(uid), "message_id": str(message_id), "type": "gift"}, now,
+            )
             await db.commit()
-        await deliver_push_notifications(
-            [recipient_id],
-            str(user.get("display_name") or user.get("username") or "Новый подарок"),
-            f"Подарок WaysGram: {gift_name}",
-            {"scope": "dm", "chat_id": str(uid), "message_id": str(message_id), "type": "gift"},
-        )
+        if queued_push:
+            push_wakeup.set()
+        return result
+
+    @router.post("/api/forward", status_code=201)
+    async def forward_batch(
+        payload: dict[str, Any],
+        authorization: str | None = Header(default=None),
+        idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+    ) -> dict[str, Any]:
+        """Atomically forward text, files and static locations between authorized chats."""
+        user = await current_user(authorization)
+        uid = int(user["telegram_id"])
+        source_scope, target_scope = payload.get("source_scope"), payload.get("target_scope")
+        source_peer, target_peer = payload.get("source_peer_id"), payload.get("target_peer_id")
+        ids = payload.get("message_ids")
+        if source_scope not in ("dm", "group", "channel") or target_scope not in ("dm", "group", "channel"):
+            raise HTTPException(status_code=400, detail="Некорректный тип чата")
+        if (isinstance(source_peer, bool) or not isinstance(source_peer, int) or source_peer <= 0
+                or isinstance(target_peer, bool) or not isinstance(target_peer, int) or target_peer <= 0):
+            raise HTTPException(status_code=400, detail="Некорректный идентификатор чата")
+        if (not isinstance(ids, list) or not 1 <= len(ids) <= 20
+                or any(isinstance(v, bool) or not isinstance(v, int) or v <= 0 for v in ids)
+                or len(set(ids)) != len(ids)):
+            raise HTTPException(status_code=400, detail="Выберите от 1 до 20 разных сообщений")
+        for key in ("silent", "drop_author", "drop_media_captions"):
+            if not isinstance(payload.get(key, False), bool):
+                raise HTTPException(status_code=400, detail=f"{key} должен быть логическим значением")
+        silent, drop_author, drop_captions = (payload.get(key, False) for key in
+                                              ("silent", "drop_author", "drop_media_captions"))
+        scope = "/api/forward"
+        descriptor = idempotency_descriptor(scope, payload, idempotency_key)
+        now = int(time.time())
+        notifications: list[int] = []
+        queued_push = False
+        async with aiosqlite.connect(db_path()) as db:
+            db.row_factory = aiosqlite.Row
+            await db.execute("BEGIN IMMEDIATE")
+            prior = await idempotency_lookup(db, uid, scope, descriptor, now)
+            if prior is not None:
+                # Cached responses may contain private contact cards: do not reveal
+                # them after source access or destination rights were revoked.
+                if source_scope == "group":
+                    await require_group_member(db, source_peer, uid)
+                elif source_scope == "channel":
+                    cur = await db.execute("""SELECT 1 FROM channels c WHERE c.id=? AND
+                        (c.is_public=1 OR c.owner_telegram_id=? OR EXISTS(SELECT 1 FROM channel_admins a
+                        WHERE a.channel_id=c.id AND a.telegram_id=?) OR EXISTS(SELECT 1 FROM channel_members m
+                        WHERE m.channel_id=c.id AND m.telegram_id=?))""", (source_peer, uid, uid, uid))
+                    if await cur.fetchone() is None:
+                        raise HTTPException(status_code=403, detail="Нет доступа к исходному каналу")
+                for source_id in ids:
+                    if source_scope == "dm":
+                        cur = await db.execute("""SELECT 1 FROM messages m WHERE m.id=? AND
+                            ((m.sender_telegram_id=? AND m.recipient_telegram_id=?) OR
+                             (m.sender_telegram_id=? AND m.recipient_telegram_id=?)) AND NOT EXISTS
+                            (SELECT 1 FROM message_hidden_for h WHERE h.message_id=m.id AND h.telegram_id=?)""",
+                            (source_id, uid, source_peer, source_peer, uid, uid))
+                    elif source_scope == "group":
+                        cur = await db.execute("SELECT 1 FROM group_messages WHERE id=? AND group_id=?", (source_id, source_peer))
+                    else:
+                        cur = await db.execute("SELECT 1 FROM channel_messages WHERE id=? AND channel_id=?", (source_id, source_peer))
+                    if await cur.fetchone() is None:
+                        raise HTTPException(status_code=404, detail="Исходное сообщение не найдено")
+                if target_scope == "group":
+                    await require_group_member(db, target_peer, uid)
+                elif target_scope == "channel":
+                    cur = await db.execute("""SELECT 1 FROM channels c WHERE c.id=? AND
+                        (c.owner_telegram_id=? OR EXISTS(SELECT 1 FROM channel_admins a
+                        WHERE a.channel_id=c.id AND a.telegram_id=?))""", (target_peer, uid, uid))
+                    if await cur.fetchone() is None:
+                        raise HTTPException(status_code=403, detail="Публиковать может только администратор канала")
+                else:
+                    cur = await db.execute("SELECT is_banned FROM accounts WHERE telegram_id=?", (target_peer,))
+                    target = await cur.fetchone()
+                    if target is None:
+                        raise HTTPException(status_code=404, detail="Получатель не найден")
+                    if target[0]:
+                        raise HTTPException(status_code=403, detail="Получатель заблокирован")
+                    cur = await db.execute("""SELECT 1 FROM blocked_users WHERE
+                        (owner_telegram_id=? AND blocked_telegram_id=?) OR
+                        (owner_telegram_id=? AND blocked_telegram_id=?) LIMIT 1""", (uid, target_peer, target_peer, uid))
+                    if await cur.fetchone():
+                        raise HTTPException(status_code=403, detail="Пересылка заблокирована")
+                await db.rollback()
+                return prior
+
+            # All access checks share the write transaction with the copies, so
+            # leaving a group or changing channel privacy cannot race a forward.
+            if source_scope == "group":
+                await require_group_member(db, source_peer, uid)
+            elif source_scope == "channel":
+                cur = await db.execute("""SELECT 1 FROM channels c WHERE c.id=? AND
+                    (c.is_public=1 OR c.owner_telegram_id=? OR EXISTS(
+                        SELECT 1 FROM channel_admins a WHERE a.channel_id=c.id AND a.telegram_id=?) OR EXISTS(
+                        SELECT 1 FROM channel_members m WHERE m.channel_id=c.id AND m.telegram_id=?))""",
+                    (source_peer, uid, uid, uid))
+                if await cur.fetchone() is None:
+                    raise HTTPException(status_code=403, detail="Нет доступа к исходному каналу")
+
+            member = None
+            if target_scope == "dm":
+                cur = await db.execute("SELECT is_banned FROM accounts WHERE telegram_id=?", (target_peer,))
+                target = await cur.fetchone()
+                if target is None:
+                    raise HTTPException(status_code=404, detail="Получатель не найден")
+                if target[0]:
+                    raise HTTPException(status_code=403, detail="Получатель заблокирован")
+                cur = await db.execute("""SELECT 1 FROM blocked_users
+                    WHERE (owner_telegram_id=? AND blocked_telegram_id=?) OR
+                          (owner_telegram_id=? AND blocked_telegram_id=?) LIMIT 1""",
+                    (uid, target_peer, target_peer, uid))
+                if await cur.fetchone():
+                    raise HTTPException(status_code=403, detail="Пересылка заблокирована")
+                table, sender_col, limit = "messages", "sender_telegram_id", DM_MESSAGES_PER_MINUTE
+            elif target_scope == "group":
+                member = await require_group_member(db, target_peer, uid)
+                table, sender_col, limit = "group_messages", "sender_telegram_id", DM_MESSAGES_PER_MINUTE
+                cur = await db.execute("SELECT slow_mode_seconds FROM chat_groups WHERE id=?", (target_peer,))
+                slow = int((await cur.fetchone())[0])
+                if slow and member["role"] not in ("owner", "admin"):
+                    if len(ids) > 1:
+                        raise HTTPException(status_code=429, detail="Медленный режим: пересылайте сообщения по одному")
+                    cur = await db.execute("""SELECT created_at FROM group_messages WHERE group_id=? AND sender_telegram_id=?
+                        ORDER BY id DESC LIMIT 1""", (target_peer, uid))
+                    previous = await cur.fetchone()
+                    if previous and now - int(previous[0]) < slow:
+                        remaining = slow - max(0, now - int(previous[0]))
+                        raise HTTPException(status_code=429, detail="Действует медленный режим", headers={"Retry-After": str(remaining)})
+            else:
+                cur = await db.execute("""SELECT 1 FROM channels c WHERE c.id=? AND
+                    (c.owner_telegram_id=? OR EXISTS(SELECT 1 FROM channel_admins a
+                     WHERE a.channel_id=c.id AND a.telegram_id=?))""", (target_peer, uid, uid))
+                if await cur.fetchone() is None:
+                    raise HTTPException(status_code=403, detail="Публиковать может только администратор канала")
+                table, sender_col, limit = "channel_messages", "author_telegram_id", CHANNEL_POSTS_PER_MINUTE
+            cur = await db.execute(f"SELECT COUNT(*) FROM {table} WHERE {sender_col}=? AND created_at>?", (uid, now - 60))
+            if int((await cur.fetchone())[0]) + len(ids) > limit:
+                raise HTTPException(status_code=429, detail="Превышен лимит отправки сообщений")
+
+            sources = []
+            for mid in ids:
+                if source_scope == "dm":
+                    cur = await db.execute("""SELECT m.*,m.sender_telegram_id AS author_id FROM messages m
+                        WHERE m.id=? AND ((m.sender_telegram_id=? AND m.recipient_telegram_id=?) OR
+                        (m.sender_telegram_id=? AND m.recipient_telegram_id=?)) AND NOT EXISTS
+                        (SELECT 1 FROM message_hidden_for h WHERE h.message_id=m.id AND h.telegram_id=?)""",
+                        (mid, uid, source_peer, source_peer, uid, uid))
+                elif source_scope == "group":
+                    cur = await db.execute("SELECT *,sender_telegram_id AS author_id FROM group_messages WHERE id=? AND group_id=?", (mid, source_peer))
+                else:
+                    cur = await db.execute("SELECT *,author_telegram_id AS author_id FROM channel_messages WHERE id=? AND channel_id=?", (mid, source_peer))
+                row = await cur.fetchone()
+                if row is None:
+                    raise HTTPException(status_code=404, detail="Исходное сообщение не найдено")
+                item = dict(row)
+                if source_scope == "dm":
+                    cur = await db.execute("SELECT 1 FROM message_gifts WHERE message_id=?", (mid,))
+                    if await cur.fetchone():
+                        raise HTTPException(status_code=400, detail="Этот тип вложения пока нельзя переслать")
+                    cur = await db.execute("SELECT latitude,longitude,label FROM message_locations WHERE message_id=?", (mid,))
+                else:
+                    cur = await db.execute("SELECT latitude,longitude,label FROM message_forward_locations WHERE scope=? AND message_id=?", (source_scope, mid))
+                location = await cur.fetchone()
+                item["forward_location"] = tuple(location) if location else None
+                contact_columns = "contact_name,contact_phone,contact_email,contact_first_name,contact_last_name,contact_vcard"
+                if source_scope == "dm":
+                    cur = await db.execute(f"SELECT {contact_columns} FROM message_contacts WHERE message_id=?", (mid,))
+                else:
+                    cur = await db.execute(f"SELECT {contact_columns} FROM message_scoped_contacts WHERE scope=? AND message_id=?", (source_scope, mid))
+                contact = await cur.fetchone()
+                item["forward_contact"] = tuple(contact) if contact else None
+                if contact and (location or item.get("media_id")):
+                    raise HTTPException(status_code=400, detail="Нельзя переслать несовместимые вложения")
+                cur = await db.execute("SELECT from_name,from_date FROM message_forward_sources WHERE scope=? AND message_id=?", (source_scope, mid))
+                prior_source = await cur.fetchone()
+                if prior_source:
+                    from_name, from_date = str(prior_source[0]), int(prior_source[1])
+                elif source_scope == "channel":
+                    cur = await db.execute("SELECT title FROM channels WHERE id=?", (source_peer,))
+                    from_name, from_date = str((await cur.fetchone())[0]), int(item["created_at"])
+                else:
+                    author_id = item.get("forwarded_from_telegram_id") or item["author_id"]
+                    cur = await db.execute("SELECT COALESCE(NULLIF(display_name,''),NULLIF(username,''),'Пользователь') FROM accounts WHERE telegram_id=?", (author_id,))
+                    author = await cur.fetchone()
+                    from_name, from_date = str(author[0]) if author else "Пользователь", int(item["created_at"])
+                item["forward_name"], item["forward_date"] = from_name, from_date
+                item["media_fields"] = await media_message_fields(db, item.get("media_id"))
+                sources.append(item)
+
+            # Preserve albums (including a selected subset) without reusing the
+            # source album identity in the destination chat.
+            albums: dict[str, list[int]] = {}
+            for index, item in enumerate(sources):
+                album = str(item.get("media_album_id") or "")
+                if album and item.get("media_id"):
+                    albums.setdefault(album, []).append(index)
+            album_for: dict[int, tuple[str, int, int]] = {}
+            for indexes in albums.values():
+                if len(indexes) > 1:
+                    album_id = secrets.token_hex(16)
+                    for position, index in enumerate(indexes):
+                        album_for[index] = (album_id, position, len(indexes))
+
+            created = []
+            for index, item in enumerate(sources):
+                media_id = item.get("media_id")
+                body = "" if drop_captions and media_id else str(item["body"] or "")
+                album_id, album_index, album_count = album_for.get(index, (None, 0, 0))
+                if target_scope == "dm":
+                    cur = await db.execute("""INSERT INTO messages(sender_telegram_id,recipient_telegram_id,body,media_id,
+                        media_album_id,media_album_index,media_album_count,created_at) VALUES(?,?,?,?,?,?,?,?)""",
+                        (uid, target_peer, body, media_id, album_id, album_index, album_count, now))
+                elif target_scope == "group":
+                    cur = await db.execute("""INSERT INTO group_messages(group_id,sender_telegram_id,body,media_id,
+                        media_album_id,media_album_index,media_album_count,created_at) VALUES(?,?,?,?,?,?,?,?)""",
+                        (target_peer, uid, body, media_id, album_id, album_index, album_count, now))
+                else:
+                    cur = await db.execute("""INSERT INTO channel_messages(channel_id,author_telegram_id,body,media_id,
+                        media_album_id,media_album_index,media_album_count,created_at) VALUES(?,?,?,?,?,?,?,?)""",
+                        (target_peer, uid, body, media_id, album_id, album_index, album_count, now))
+                mid = int(cur.lastrowid)
+                location = item["forward_location"]
+                if location:
+                    if target_scope == "dm":
+                        await db.execute("INSERT INTO message_locations(message_id,latitude,longitude,label) VALUES(?,?,?,?)", (mid, *location))
+                    else:
+                        await db.execute("INSERT INTO message_forward_locations(scope,message_id,latitude,longitude,label) VALUES(?,?,?,?,?)", (target_scope, mid, *location))
+                contact = item["forward_contact"]
+                if contact:
+                    if target_scope == "dm":
+                        await db.execute("""INSERT INTO message_contacts(message_id,contact_name,contact_phone,contact_email,
+                            contact_first_name,contact_last_name,contact_vcard) VALUES(?,?,?,?,?,?,?)""", (mid, *contact))
+                    else:
+                        await db.execute("""INSERT INTO message_scoped_contacts(scope,message_id,contact_name,contact_phone,contact_email,
+                            contact_first_name,contact_last_name,contact_vcard) VALUES(?,?,?,?,?,?,?,?)""", (target_scope, mid, *contact))
+                if not drop_author:
+                    await db.execute("INSERT INTO message_forward_sources(scope,message_id,from_name,from_date) VALUES(?,?,?,?)",
+                                     (target_scope, mid, item["forward_name"], item["forward_date"]))
+                await record_event(db, target_scope, mid, "new_message", uid,
+                                   chat_id=target_peer if target_scope != "dm" else 0,
+                                   user_a=uid if target_scope == "dm" else 0,
+                                   user_b=target_peer if target_scope == "dm" else 0)
+                result_item = {"id": mid, "body": body, "media_id": media_id, "created_at": now,
+                    "media_album_id": album_id, "media_album_index": album_index, "media_album_count": album_count,
+                    **item["media_fields"]}
+                if location:
+                    result_item.update(location_latitude=location[0], location_longitude=location[1], location_label=location[2])
+                if contact:
+                    result_item.update(zip(("contact_name", "contact_phone", "contact_email", "contact_first_name", "contact_last_name", "contact_vcard"), contact))
+                if target_scope == "dm":
+                    result_item.update(sender_id=uid, recipient_id=target_peer)
+                elif target_scope == "group":
+                    result_item.update(group_id=target_peer, sender_id=uid)
+                else:
+                    result_item.update(channel_id=target_peer, author_id=uid)
+                if not drop_author:
+                    result_item.update(forwarded_from_display_name=item["forward_name"], forwarded_from_date=item["forward_date"])
+                created.append(result_item)
+            result = {"status": "forwarded", "messages": created, "count": len(created)}
+            await idempotency_store(db, uid, scope, descriptor, result, now)
+            if not silent and target_scope == "dm" and target_peer != uid:
+                queued_push = await enqueue_push(db, uid, target_peer,
+                    str(user.get("display_name") or user.get("username") or "Новое сообщение"),
+                    "Переслано сообщений: " + str(len(created)),
+                    {"scope": "dm", "chat_id": str(uid), "message_id": str(created[-1]["id"])}, now)
+            elif not silent and target_scope in ("group", "channel"):
+                member_table, id_column = ("group_members", "group_id") if target_scope == "group" else ("channel_members", "channel_id")
+                cur = await db.execute(f"SELECT telegram_id FROM {member_table} WHERE {id_column}=? AND telegram_id<>? LIMIT 500", (target_peer, uid))
+                notifications = [int(row[0]) for row in await cur.fetchall()]
+            await db.commit()
+        if queued_push:
+            push_wakeup.set()
+        if notifications:
+            await deliver_push_notifications(notifications, str(user.get("display_name") or "Новое сообщение"),
+                "Переслано сообщений: " + str(len(created)),
+                {"scope": target_scope, "chat_id": str(target_peer), "message_id": str(created[-1]["id"])})
         return result
 
     @router.post("/api/messages/{message_id}/forward", status_code=201)
@@ -8782,13 +9655,26 @@ def build_messenger_router(
                    FROM messages m
                    LEFT JOIN accounts a
                      ON a.telegram_id=COALESCE(m.forwarded_from_telegram_id,m.sender_telegram_id)
-                   WHERE m.id=? AND (m.sender_telegram_id=? OR m.recipient_telegram_id=?)""",
-                (message_id, uid, uid),
+                   WHERE m.id=? AND (m.sender_telegram_id=? OR m.recipient_telegram_id=?)
+                     AND NOT EXISTS (SELECT 1 FROM message_hidden_for h
+                                     WHERE h.message_id=m.id AND h.telegram_id=?)""",
+                (message_id, uid, uid, uid),
             )
             source = await cur.fetchone()
             if source is None:
                 await db.rollback()
                 raise HTTPException(status_code=404, detail="Исходное сообщение не найдено")
+            # These attachments have distinct semantics and must not be silently
+            # converted to plain text or transfer a gift to an unintended recipient.
+            cur = await db.execute(
+                """SELECT EXISTS(SELECT 1 FROM message_gifts WHERE message_id=?)
+                        OR EXISTS(SELECT 1 FROM message_contacts WHERE message_id=?)
+                        OR EXISTS(SELECT 1 FROM message_locations WHERE message_id=?)""",
+                (message_id, message_id, message_id),
+            )
+            if (await cur.fetchone())[0]:
+                await db.rollback()
+                raise HTTPException(status_code=400, detail="Пересылка этого типа вложения пока не поддерживается")
             cur = await db.execute(
                 "SELECT is_banned FROM accounts WHERE telegram_id=?", (recipient_id,)
             )
@@ -9409,52 +10295,86 @@ def build_messenger_router(
     async def clear_direct_message_history(
         peer_id: int,
         delete_for: str = Query(default="me", alias="for"),
+        max_id: int | None = Query(default=None, ge=1),
         authorization: str | None = Header(default=None),
     ) -> dict[str, Any]:
         user = await current_user(authorization)
         uid = int(user["telegram_id"])
         if peer_id <= 0:
             raise HTTPException(status_code=400, detail="Укажите корректного собеседника")
-        if delete_for != "me":
-            raise HTTPException(status_code=400, detail="Очистка истории поддерживает только for=me")
+        if delete_for not in ("me", "all"):
+            raise HTTPException(status_code=400, detail="for должен быть me или all")
         async with aiosqlite.connect(db_path()) as db:
             await db.execute("BEGIN IMMEDIATE")
-            cur = await db.execute(
-                "SELECT 1 FROM accounts WHERE telegram_id=?",
-                (peer_id,),
-            )
+            cur = await db.execute("SELECT 1 FROM accounts WHERE telegram_id=?", (peer_id,))
             if await cur.fetchone() is None:
                 await db.rollback()
                 raise HTTPException(status_code=404, detail="Собеседник не найден")
-            cur = await db.execute(
-                """SELECT COUNT(*),COALESCE(MAX(id),0) FROM messages
-                   WHERE ((sender_telegram_id=? AND recipient_telegram_id=?) OR
-                          (sender_telegram_id=? AND recipient_telegram_id=?))
-                     AND NOT EXISTS (
-                         SELECT 1 FROM message_hidden_for hidden
-                         WHERE hidden.message_id=messages.id AND hidden.telegram_id=?
-                     )""",
-                (uid, peer_id, peer_id, uid, uid),
+            # Capture exactly the affected IDs inside the write transaction. A bound
+            # prevents an old UI request from deleting newer messages.
+            await db.execute("CREATE TEMP TABLE clear_message_ids (id INTEGER PRIMARY KEY)")
+            visible_clause = ("AND NOT EXISTS (SELECT 1 FROM message_hidden_for h "
+                              "WHERE h.message_id=m.id AND h.telegram_id=?)") if delete_for == "me" else ""
+            params: list[Any] = [uid, peer_id, peer_id, uid]
+            if max_id is not None:
+                bound_clause = "AND m.id<=?"
+                params.append(max_id)
+            else:
+                bound_clause = ""
+            if delete_for == "me":
+                params.append(uid)
+            await db.execute(
+                """INSERT INTO clear_message_ids(id) SELECT m.id FROM messages m
+                   WHERE ((m.sender_telegram_id=? AND m.recipient_telegram_id=?) OR
+                          (m.sender_telegram_id=? AND m.recipient_telegram_id=?)) """
+                + bound_clause + " " + visible_clause, tuple(params),
             )
+            cur = await db.execute("SELECT COUNT(*),COALESCE(MAX(id),0) FROM clear_message_ids")
             count, latest_message_id = await cur.fetchone()
             now = int(time.time())
-            if int(count) > 0:
+            if count:
+                # One event per ID allows clients to invalidate exactly their cached
+                # messages (also when a clear spans multiple /api/events pages).
+                kind = "delete_for_me" if delete_for == "me" else "delete_for_all_sync"
                 await db.execute(
-                    """INSERT OR IGNORE INTO message_hidden_for(message_id,telegram_id,hidden_at)
-                       SELECT id,?,? FROM messages
-                       WHERE ((sender_telegram_id=? AND recipient_telegram_id=?) OR
-                              (sender_telegram_id=? AND recipient_telegram_id=?))""",
-                    (uid, now, uid, peer_id, peer_id, uid),
+                    """INSERT INTO message_events(scope,chat_id,user_a,user_b,message_id,kind,actor_id,created_at)
+                       SELECT 'dm',0,?,?,id,?,?,? FROM clear_message_ids ORDER BY id""",
+                    (uid, peer_id, kind, uid, now),
                 )
-                await record_event(
-                    db, "dm", int(latest_message_id), "clear_for_me", uid,
-                    user_a=uid, user_b=peer_id,
+                # Remove not-yet-dispatched direct-message push jobs for affected
+                # recipients. A push already leased/sent cannot be recalled.
+                recipient_filter = "AND recipient_telegram_id=?" if delete_for == "me" else ""
+                push_params: tuple[Any, ...] = (uid,) if delete_for == "me" else ()
+                await db.execute(
+                    """DELETE FROM push_outbox WHERE
+                       CASE WHEN json_valid(data_json) THEN
+                           json_extract(data_json,'$.scope')='dm' AND
+                           CAST(json_extract(data_json,'$.message_id') AS INTEGER)
+                               IN (SELECT id FROM clear_message_ids)
+                       ELSE 0 END """ + recipient_filter, push_params,
                 )
+                if delete_for == "me":
+                    await db.execute(
+                        """INSERT OR IGNORE INTO message_hidden_for(message_id,telegram_id,hidden_at)
+                           SELECT id,?,? FROM clear_message_ids""", (uid, now),
+                    )
+                    # Keep the original aggregate event for API compatibility.
+                    await record_event(db, "dm", int(latest_message_id), "clear_for_me", uid,
+                                       user_a=uid, user_b=peer_id)
+                else:
+                    # These tables do not all have foreign keys and SQLite
+                    # connections may have FK enforcement disabled.
+                    for table in ("message_hidden_for", "message_gifts", "message_contacts", "message_locations"):
+                        await db.execute(f"DELETE FROM {table} WHERE message_id IN (SELECT id FROM clear_message_ids)")
+                    for table in ("message_forward_sources", "message_reactions", "pinned_messages"):
+                        await db.execute(f"DELETE FROM {table} WHERE scope='dm' AND message_id IN (SELECT id FROM clear_message_ids)")
+                    await db.execute("DELETE FROM messages WHERE id IN (SELECT id FROM clear_message_ids)")
             await db.commit()
         return {
-            "status": "cleared_for_me",
+            "status": "cleared_for_me" if delete_for == "me" else "cleared_for_all",
             "peer_id": peer_id,
             "deleted_count": int(count),
+            "max_id": int(latest_message_id),
         }
 
     @router.put("/api/messages/{message_id}")
@@ -9522,9 +10442,6 @@ def build_messenger_router(
                 )
                 await db.commit()
                 return {"id": message_id, "status": "hidden_for_me"}
-            if sender_id != uid:
-                await db.rollback()
-                raise HTTPException(status_code=403, detail="Удалять для всех можно только свои сообщения")
             await db.execute("DELETE FROM messages WHERE id=?", (message_id,))
             await record_event(
                 db, "dm", message_id, "delete", uid,
@@ -9725,16 +10642,152 @@ def build_messenger_router(
         if scope not in ("dm", "group", "channel"):
             raise HTTPException(status_code=400, detail="scope: dm, group или channel")
         uid = int(user["telegram_id"])
-        await require_cloud_draft_access(scope, peer_id, uid)
         async with aiosqlite.connect(db_path()) as db:
             db.row_factory = aiosqlite.Row
+            await db.execute("BEGIN")
+            await require_cloud_draft_access(scope, peer_id, uid, db)
+            # Single statement provides a consistent text/version pair, even
+            # when the draft was deleted and only its version remains.
             cur = await db.execute(
-                """SELECT scope,peer_id,body,updated_at FROM cloud_drafts
-                   WHERE owner_telegram_id=? AND scope=? AND peer_id=?""",
+                """SELECT d.scope,d.peer_id,d.body,d.updated_at,COALESCE(v.revision,0) AS revision
+                   FROM (SELECT ? AS owner,? AS scope,? AS peer) key
+                   LEFT JOIN cloud_drafts d ON d.owner_telegram_id=key.owner
+                       AND d.scope=key.scope AND d.peer_id=key.peer
+                   LEFT JOIN cloud_draft_versions v ON v.owner_telegram_id=key.owner
+                       AND v.scope=key.scope AND v.peer_id=key.peer""",
                 (uid, scope, peer_id),
             )
             row = await cur.fetchone()
-        return {"draft": dict(row) if row is not None else None}
+        draft = {key: row[key] for key in ("scope", "peer_id", "body", "updated_at")} if row["scope"] is not None else None
+        return {"draft": draft, "revision": row["revision"]}
+
+    @router.get("/api/drafts/list")
+    async def list_cloud_drafts(
+        limit: int = Query(default=100, ge=1, le=200),
+        after_scope: str | None = Query(default=None),
+        after_peer_id: int | None = Query(default=None, gt=0),
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        """List currently accessible drafts owned by this account, in key order.
+
+        Pagination is not a cross-request snapshot: concurrent writes or access
+        changes can affect subsequent pages. A missing row is not a deletion event.
+        """
+        user = await current_user(authorization)
+        if (after_scope is None) != (after_peer_id is None) or (
+            after_scope is not None and after_scope not in ("dm", "group", "channel")
+        ):
+            raise HTTPException(status_code=400, detail="Некорректный курсор черновиков")
+        uid = int(user["telegram_id"])
+        async with aiosqlite.connect(db_path()) as db:
+            db.row_factory = aiosqlite.Row
+            # Filtering and page selection use the same SQLite read snapshot.
+            cur = await db.execute(
+                """SELECT d.scope,d.peer_id,d.body,d.updated_at,COALESCE(v.revision,0) AS revision
+                   FROM cloud_drafts d LEFT JOIN cloud_draft_versions v
+                     ON v.owner_telegram_id=d.owner_telegram_id AND v.scope=d.scope AND v.peer_id=d.peer_id
+                   WHERE d.owner_telegram_id=?
+                     AND (? IS NULL OR d.scope>? OR (d.scope=? AND d.peer_id>?))
+                     AND (
+                       (d.scope='dm' AND EXISTS (
+                          SELECT 1 FROM accounts a WHERE a.telegram_id=d.peer_id AND a.is_banned=0
+                       ) AND (d.peer_id=? OR NOT EXISTS (
+                          SELECT 1 FROM blocked_users b
+                          WHERE (b.owner_telegram_id=? AND b.blocked_telegram_id=d.peer_id)
+                             OR (b.owner_telegram_id=d.peer_id AND b.blocked_telegram_id=?)
+                       )))
+                       OR (d.scope='group' AND EXISTS (
+                          SELECT 1 FROM group_members gm JOIN chat_groups g ON g.id=gm.group_id
+                          WHERE gm.group_id=d.peer_id AND gm.telegram_id=?
+                       ))
+                       OR (d.scope='channel' AND EXISTS (
+                          SELECT 1 FROM channels c WHERE c.id=d.peer_id AND (
+                             c.is_public=1 OR c.owner_telegram_id=?
+                             OR EXISTS (SELECT 1 FROM channel_admins ca
+                                        WHERE ca.channel_id=c.id AND ca.telegram_id=?)
+                             OR EXISTS (SELECT 1 FROM channel_members cm
+                                        WHERE cm.channel_id=c.id AND cm.telegram_id=?)
+                          )
+                       ))
+                     )
+                   ORDER BY d.scope,d.peer_id LIMIT ?""",
+                (uid, after_scope, after_scope, after_scope, after_peer_id,
+                 uid, uid, uid, uid, uid, uid, uid, limit + 1),
+            )
+            rows = await cur.fetchall()
+        drafts = [dict(row) for row in rows[:limit]]
+        next_cursor = None
+        if len(rows) > limit:
+            last = drafts[-1]
+            next_cursor = {"after_scope": last["scope"], "after_peer_id": last["peer_id"]}
+        return {"drafts": drafts, "next_cursor": next_cursor}
+
+    @router.get("/api/drafts/changes")
+    async def cloud_draft_changes(
+        after: int = Query(default=0, ge=0, le=9223372036854775807),
+        limit: int = Query(default=100, ge=1, le=200),
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        """Return latest changed keys, not a history; callers must bootstrap from the list."""
+        user = await current_user(authorization)
+        uid = int(user["telegram_id"])
+        async with aiosqlite.connect(db_path()) as db:
+            db.row_factory = aiosqlite.Row
+            await db.execute("BEGIN")
+            cur = await db.execute(
+                "SELECT last_seq FROM cloud_draft_change_counters WHERE owner_telegram_id=?", (uid,)
+            )
+            counter = await cur.fetchone()
+            latest = int(counter[0]) if counter else 0
+            if after > latest:
+                raise HTTPException(status_code=400, detail="Курсор черновиков больше текущей версии; требуется повторная синхронизация")
+            # The counter and accessible keys come from the same read transaction.
+            cur = await db.execute(
+                """SELECT c.scope,c.peer_id,c.seq,COALESCE(v.revision,0) AS revision,
+                          NOT EXISTS(SELECT 1 FROM cloud_drafts d WHERE d.owner_telegram_id=c.owner_telegram_id
+                                     AND d.scope=c.scope AND d.peer_id=c.peer_id) AS deleted
+                   FROM cloud_draft_changes c LEFT JOIN cloud_draft_versions v
+                     ON v.owner_telegram_id=c.owner_telegram_id AND v.scope=c.scope AND v.peer_id=c.peer_id
+                   WHERE c.owner_telegram_id=? AND c.seq>?
+                     AND (
+                       (c.scope='dm' AND EXISTS (
+                          SELECT 1 FROM accounts a WHERE a.telegram_id=c.peer_id AND a.is_banned=0
+                       ) AND (c.peer_id=? OR NOT EXISTS (
+                          SELECT 1 FROM blocked_users b
+                          WHERE (b.owner_telegram_id=? AND b.blocked_telegram_id=c.peer_id)
+                             OR (b.owner_telegram_id=c.peer_id AND b.blocked_telegram_id=?)
+                       )))
+                       OR (c.scope='group' AND EXISTS (
+                          SELECT 1 FROM group_members gm JOIN chat_groups g ON g.id=gm.group_id
+                          WHERE gm.group_id=c.peer_id AND gm.telegram_id=?
+                       ))
+                       OR (c.scope='channel' AND EXISTS (
+                          SELECT 1 FROM channels ch WHERE ch.id=c.peer_id AND (
+                             ch.is_public=1 OR ch.owner_telegram_id=?
+                             OR EXISTS (SELECT 1 FROM channel_admins ca
+                                        WHERE ca.channel_id=ch.id AND ca.telegram_id=?)
+                             OR EXISTS (SELECT 1 FROM channel_members cm
+                                        WHERE cm.channel_id=ch.id AND cm.telegram_id=?)
+                          )
+                       ))
+                     )
+                   ORDER BY c.seq LIMIT ?""",
+                (uid, after, uid, uid, uid, uid, uid, uid, uid, limit + 1),
+            )
+            rows = await cur.fetchall()
+        changes = [dict(row) for row in rows[:limit]]
+        for change in changes:
+            change["deleted"] = bool(change["deleted"])
+        cursor = changes[-1]["seq"] if len(rows) > limit else latest
+        return {"changes": changes, "cursor": cursor, "latest_cursor": latest}
+
+    async def cloud_draft_revision(db: Any, uid: int, scope: str, peer_id: int) -> int:
+        cur = await db.execute(
+            "SELECT revision FROM cloud_draft_versions WHERE owner_telegram_id=? AND scope=? AND peer_id=?",
+            (uid, scope, peer_id),
+        )
+        row = await cur.fetchone()
+        return int(row[0]) if row else 0
 
     @router.put("/api/drafts")
     async def save_cloud_draft(
@@ -9745,16 +10798,24 @@ def build_messenger_router(
         scope = payload.get("scope")
         peer_id = payload.get("peer_id")
         body = payload.get("body")
+        expected = payload.get("expected_revision")
         if scope not in ("dm", "group", "channel"):
             raise HTTPException(status_code=400, detail="scope: dm, group или channel")
         if isinstance(peer_id, bool) or not isinstance(peer_id, int) or peer_id <= 0:
             raise HTTPException(status_code=400, detail="peer_id должен быть положительным целым числом")
         if not isinstance(body, str) or not body.strip() or len(body) > MAX_MESSAGE_LENGTH:
             raise HTTPException(status_code=400, detail=f"Черновик должен содержать 1–{MAX_MESSAGE_LENGTH} символов")
+        if "expected_revision" in payload and (isinstance(expected, bool) or not isinstance(expected, int) or not 0 <= expected <= 9223372036854775807):
+            raise HTTPException(status_code=400, detail="expected_revision должен быть неотрицательным целым числом")
         uid = int(user["telegram_id"])
-        await require_cloud_draft_access(str(scope), peer_id, uid)
         now = int(time.time())
         async with aiosqlite.connect(db_path()) as db:
+            await db.execute("BEGIN IMMEDIATE")
+            await require_cloud_draft_access(str(scope), peer_id, uid, db)
+            current_revision = await cloud_draft_revision(db, uid, str(scope), peer_id)
+            if expected is not None and expected != current_revision:
+                await db.rollback()
+                raise HTTPException(status_code=409, detail={"code": "DRAFT_CONFLICT", "revision": current_revision})
             await db.execute(
                 """INSERT INTO cloud_drafts(owner_telegram_id,scope,peer_id,body,updated_at)
                    VALUES(?,?,?,?,?)
@@ -9762,13 +10823,15 @@ def build_messenger_router(
                        body=excluded.body,updated_at=excluded.updated_at""",
                 (uid, str(scope), peer_id, body, now),
             )
+            revision = await cloud_draft_revision(db, uid, str(scope), peer_id)
             await db.commit()
-        return {"scope": str(scope), "peer_id": peer_id, "body": body, "updated_at": now}
+        return {"scope": str(scope), "peer_id": peer_id, "body": body, "updated_at": now, "revision": revision}
 
     @router.delete("/api/drafts")
     async def delete_cloud_draft(
         scope: str = Query(...),
         peer_id: int = Query(..., gt=0),
+        expected_revision: int | None = Query(default=None, ge=0, le=9223372036854775807),
         authorization: str | None = Header(default=None),
     ) -> dict[str, Any]:
         user = await current_user(authorization)
@@ -9776,13 +10839,19 @@ def build_messenger_router(
             raise HTTPException(status_code=400, detail="scope: dm, group или channel")
         uid = int(user["telegram_id"])
         async with aiosqlite.connect(db_path()) as db:
+            await db.execute("BEGIN IMMEDIATE")
+            current_revision = await cloud_draft_revision(db, uid, scope, peer_id)
+            if expected_revision is not None and expected_revision != current_revision:
+                await db.rollback()
+                raise HTTPException(status_code=409, detail={"code": "DRAFT_CONFLICT", "revision": current_revision})
             cur = await db.execute(
                 "DELETE FROM cloud_drafts WHERE owner_telegram_id=? AND scope=? AND peer_id=?",
                 (uid, scope, peer_id),
             )
             deleted = cur.rowcount == 1
+            revision = await cloud_draft_revision(db, uid, scope, peer_id)
             await db.commit()
-        return {"status": "deleted" if deleted else "not_found", "scope": scope, "peer_id": peer_id}
+        return {"status": "deleted" if deleted else "not_found", "scope": scope, "peer_id": peer_id, "revision": revision}
 
     @router.put("/api/typing")
     async def update_typing_indicator(
@@ -9933,7 +11002,8 @@ def build_messenger_router(
                        FROM message_events
                        WHERE id>? AND (
                            (kind IN ('delete_for_me','clear_for_me') AND actor_id=?)
-                           OR (kind NOT IN ('delete_for_me','clear_for_me') AND actor_id<>?)
+                           OR kind='delete_for_all_sync'
+                           OR (kind NOT IN ('delete_for_me','clear_for_me','delete_for_all_sync') AND actor_id<>?)
                        ) AND (
                            (scope='dm' AND (user_a=? OR user_b=?))
                            OR (scope='group' AND chat_id IN (SELECT group_id FROM group_members WHERE telegram_id=?))
@@ -10588,11 +11658,15 @@ def build_messenger_router(
     async def list_group_messages(
         group_id: int,
         after_id: int = Query(default=0, ge=0),
+        before_id: int = Query(default=0, ge=0),
+        limit: int = Query(default=100, ge=1, le=100),
         wait_seconds: int = Query(default=0, ge=0, le=20),
         authorization: str | None = Header(default=None),
     ) -> dict[str, Any]:
         user = await current_user(authorization)
         uid = int(user["telegram_id"])
+        if after_id and before_id:
+            raise HTTPException(status_code=400, detail="Используйте только один курсор: after_id или before_id")
         deadline = time.monotonic() + (wait_seconds if after_id else 0)
         rows = []
         while True:
@@ -10609,9 +11683,11 @@ def build_messenger_router(
                                            WHERE scope='group' AND chat_id=group_messages.group_id
                                              AND message_id=group_messages.id GROUP BY reaction)) AS reaction_summary,
                                   (SELECT mime_type FROM media_assets WHERE id=group_messages.media_id) AS media_type,
-                                  (SELECT original_name FROM media_assets WHERE id=group_messages.media_id) AS media_name
-                           FROM group_messages WHERE group_id=? AND id>? ORDER BY id ASC LIMIT 100""",
-                        (group_id, after_id),
+                                  (SELECT original_name FROM media_assets WHERE id=group_messages.media_id) AS media_name,
+                                  (SELECT media_kind FROM media_assets WHERE id=group_messages.media_id) AS media_kind,
+                                  (SELECT media_metadata FROM media_assets WHERE id=group_messages.media_id) AS media_metadata
+                           FROM group_messages WHERE group_id=? AND id>? ORDER BY id ASC LIMIT ?""",
+                        (group_id, after_id, limit),
                     )
                 else:
                     cur = await db.execute(
@@ -10623,9 +11699,11 @@ def build_messenger_router(
                                            WHERE scope='group' AND chat_id=group_messages.group_id
                                              AND message_id=group_messages.id GROUP BY reaction)) AS reaction_summary,
                                   (SELECT mime_type FROM media_assets WHERE id=group_messages.media_id) AS media_type,
-                                  (SELECT original_name FROM media_assets WHERE id=group_messages.media_id) AS media_name
-                           FROM group_messages WHERE group_id=? ORDER BY id DESC LIMIT 100""",
-                        (group_id,),
+                                  (SELECT original_name FROM media_assets WHERE id=group_messages.media_id) AS media_name,
+                                  (SELECT media_kind FROM media_assets WHERE id=group_messages.media_id) AS media_kind,
+                                  (SELECT media_metadata FROM media_assets WHERE id=group_messages.media_id) AS media_metadata
+                           FROM group_messages WHERE group_id=? AND (?=0 OR id<?) ORDER BY id DESC LIMIT ?""",
+                        (group_id, before_id, before_id, limit),
                     )
                 rows = await cur.fetchall()
             if rows or time.monotonic() >= deadline:
@@ -10659,7 +11737,9 @@ def build_messenger_router(
                                            WHERE scope='group' AND chat_id=group_messages.group_id
                                              AND message_id=group_messages.id GROUP BY reaction)) AS reaction_summary,
                                   (SELECT mime_type FROM media_assets WHERE id=group_messages.media_id) AS media_type,
-                          (SELECT original_name FROM media_assets WHERE id=group_messages.media_id) AS media_name
+                          (SELECT original_name FROM media_assets WHERE id=group_messages.media_id) AS media_name,
+                                  (SELECT media_kind FROM media_assets WHERE id=group_messages.media_id) AS media_kind,
+                                  (SELECT media_metadata FROM media_assets WHERE id=group_messages.media_id) AS media_metadata
                    FROM group_messages
                    WHERE group_id=? AND body LIKE ? COLLATE NOCASE
                    ORDER BY id DESC LIMIT 100""",
@@ -10676,16 +11756,36 @@ def build_messenger_router(
         group_id: int,
         payload: dict[str, Any],
         authorization: str | None = Header(default=None),
+        idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
     ) -> dict[str, Any]:
         user = await current_user(authorization)
         uid = int(user["telegram_id"])
+        silent = payload.get("silent", False)
+        if not isinstance(silent, bool):
+            raise HTTPException(status_code=400, detail="silent должен быть логическим значением")
         media_id = str(payload.get("media_id") or "").strip() or None
+        contact_payload = _parse_message_contact(payload.get("contact"))
+        location_payload = _parse_message_location(payload.get("location"))
+        if contact_payload and (media_id or location_payload):
+            raise HTTPException(status_code=400, detail="Нельзя объединять контакт с файлом или геолокацией")
+        if location_payload and media_id:
+            raise HTTPException(status_code=400, detail="Нельзя отправлять геолокацию вместе с файлом")
         body_value = str(payload.get("body") or "")
+        if contact_payload and not body_value.strip():
+            body_value = "Контакт: " + contact_payload["name"]
+        elif location_payload and not body_value.strip():
+            body_value = str(location_payload["label"] or "Местоположение")
         body = _message_body(body_value) if body_value.strip() or not media_id else ""
         now = int(time.time())
+        scope = f"/api/groups/{group_id}/messages"
+        descriptor = idempotency_descriptor(scope, payload, idempotency_key)
         async with aiosqlite.connect(db_path()) as db:
             await db.execute("BEGIN IMMEDIATE")
             membership = await require_group_member(db, group_id, uid)
+            previous = await idempotency_lookup(db, uid, scope, descriptor, now)
+            if previous is not None:
+                await db.rollback()
+                return previous
             cur = await db.execute(
                 "SELECT slow_mode_seconds FROM chat_groups WHERE id=?",
                 (group_id,),
@@ -10733,32 +11833,49 @@ def build_messenger_router(
                 (group_id, uid, body, media_id, reply_to_id, now),
             )
             message_id = int(cur.lastrowid)
+            if contact_payload:
+                await db.execute(
+                    """INSERT INTO message_scoped_contacts(scope,message_id,contact_name,contact_phone,contact_email,
+                       contact_first_name,contact_last_name,contact_vcard) VALUES(?,?,?,?,?,?,?,?)""",
+                    ("group", message_id, contact_payload["name"], contact_payload["phone"],
+                     contact_payload["email"], contact_payload.get("first_name", ""),
+                     contact_payload.get("last_name", ""), contact_payload.get("vcard", "")),
+                )
+            if location_payload:
+                await db.execute(
+                    """INSERT INTO message_forward_locations(scope,message_id,latitude,longitude,label)
+                       VALUES(?,?,?,?,?)""",
+                    ("group", message_id, location_payload["latitude"],
+                     location_payload["longitude"], location_payload["label"]),
+                )
             await record_event(
                 db, "group", message_id, "new_message", uid, chat_id=group_id,
             )
+            result = {
+                "id": message_id, "group_id": group_id, "sender_id": uid,
+                "body": body, "media_id": media_id, "reply_to_id": reply_to_id,
+                **media_fields, "created_at": now,
+            }
+            if location_payload:
+                result["location"] = location_payload
+            if contact_payload:
+                result["contact"] = contact_payload
+            await idempotency_store(db, uid, scope, descriptor, result, now)
             await db.commit()
-        async with aiosqlite.connect(db_path()) as db:
-            cur = await db.execute(
-                "SELECT telegram_id FROM group_members WHERE group_id=? AND telegram_id<>?",
-                (group_id, uid),
+        if not silent:
+            async with aiosqlite.connect(db_path()) as db:
+                cur = await db.execute(
+                    "SELECT telegram_id FROM group_members WHERE group_id=? AND telegram_id<>?",
+                    (group_id, uid),
+                )
+                group_recipients = [int(row[0]) for row in await cur.fetchall()]
+            await deliver_push_notifications(
+                group_recipients,
+                str(user.get("display_name") or user.get("username") or "Новое сообщение"),
+                body,
+                {"scope": "group", "chat_id": str(group_id), "message_id": str(message_id)},
             )
-            group_recipients = [int(row[0]) for row in await cur.fetchall()]
-        await deliver_push_notifications(
-            group_recipients,
-            str(user.get("display_name") or user.get("username") or "Новое сообщение"),
-            body,
-            {"scope": "group", "chat_id": str(group_id), "message_id": str(message_id)},
-        )
-        return {
-            "id": message_id,
-            "group_id": group_id,
-            "sender_id": uid,
-            "body": body,
-            "media_id": media_id,
-            "reply_to_id": reply_to_id,
-            **media_fields,
-            "created_at": now,
-        }
+        return result
 
     @router.post("/api/groups/{group_id}/messages/album", status_code=201)
     async def send_group_message_album(
@@ -10781,8 +11898,7 @@ def build_messenger_router(
         if len(set(media_ids)) != len(media_ids):
             raise HTTPException(status_code=400, detail="Альбом не должен содержать повторяющиеся файлы")
 
-        body_value = str(payload.get("body") or "")
-        body = _message_body(body_value) if body_value.strip() else "Медиаальбом"
+        captions, body = album_captions(payload, len(media_ids))
         silent = payload.get("silent", False)
         if not isinstance(silent, bool):
             raise HTTPException(status_code=400, detail="silent должен быть логическим значением")
@@ -10855,7 +11971,7 @@ def build_messenger_router(
                 raise HTTPException(status_code=429, detail="Превышен лимит отправки сообщений для медиаальбома")
 
             for index, (media_id, media_fields) in enumerate(checked_media):
-                item_body = body if index == 0 else ""
+                item_body = captions[index]
                 cur = await db.execute(
                     """INSERT INTO group_messages
                        (group_id,sender_telegram_id,body,media_id,reply_to_id,

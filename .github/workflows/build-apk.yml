@@ -1,8 +1,9 @@
 name: Build Android APK
 
 concurrency:
-  group: waysgram-android-apk-${{ github.ref }}
-  cancel-in-progress: true
+  group: waysgram-android-apk-${{ github.ref }}-${{ github.run_id }}
+  # Unique groups keep both running and pending builds from being displaced.
+  cancel-in-progress: false
 
 on:
   push:
@@ -320,6 +321,9 @@ jobs:
       # A release asset is served with range requests, so a dropped download can be resumed,
       # and the size and sha256 sit next to the APK. That is the link users should install from.
       - name: Publish APK as a release asset
+        # Branch builds must not delete and replace the shared apk-latest release.
+        # Their APK is available in the workflow artifact above.
+        if: github.ref == 'refs/heads/main'
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}

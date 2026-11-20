@@ -7,10 +7,10 @@ client uses to paint the card.
 
 The pools in :file:`gift_upgrade_pools.json` are copied from the official
 Telegram star-gift catalog (``payments.getStarGifts``) together with those
-chances, so a WaysGram upgrade yields the same names, the same colours and the
-same probability distribution as the original client. Attributes that Telegram
-marks with a bare rarity class instead of a permille value (some models) share
-the probability mass that is left over, weighted by that class.
+chances. Complete pools totaling 1000 permille retain their published distribution.
+Incomplete pools are normalized over the available entries; attributes with only a
+rarity class share the remaining mass by class weights. These are estimates, not
+verified Telegram odds. The effective chance is rounded to integer permille for UI.
 """
 
 from __future__ import annotations
@@ -171,39 +171,16 @@ def _rarest(kinds: Iterable[str]) -> str:
     return RARITY_ORDER[best]
 
 
-def _pick(
-        entries: list[list[Any]], weights: list[int], avoid: str = ""
-) -> list[Any]:
-    """Picks one entry, never repeating ``avoid`` while another slot can be rolled.
-
-    Telegram rolls the three attributes exactly once, when a gift is upgraded for the
-    first and only time. A WaysGram gift can be upgraded again for the same 25 Stars, and
-    every upgrade must visibly change the card, so the previous winner of a slot is dropped
-    from the candidates. Chances stay as published for every other candidate.
-    """
-    banned = str(avoid or "").strip().lower()
-    if banned:
-        kept = [
-            (entry, weight)
-            for entry, weight in zip(entries, weights)
-            if str(entry[0]).strip().lower() != banned
-        ]
-        if kept and any(weight > 0 for _, weight in kept):
-            entries = [entry for entry, _ in kept]
-            weights = [weight for _, weight in kept]
+def _pick(entries: list[list[Any]], weights: list[int]) -> list[Any]:
+    # Each upgrade is an independent draw. Excluding the old value changes every
+    # advertised probability and makes it impossible for an attribute to repeat.
     return _choose(entries, weights)
 
 
-def _avoided_names(previous: Any) -> dict[str, str]:
-    """Names of the traits a gift already carries, per slot."""
-    result = {"model": "", "pattern": "", "backdrop": ""}
-    if not isinstance(previous, dict):
-        return result
-    for key in result:
-        entry = previous.get(key)
-        if isinstance(entry, dict):
-            result[key] = str(entry.get("name") or "").strip()
-    return result
+def _effective_permille(weight: int, weights: list[int]) -> int:
+    # UI protocol has integer permille; return the nearest representable chance.
+    total = sum(weights)
+    return (weight * PERMILLE_TOTAL + total // 2) // total if total > 0 else 0
 
 
 def _live_rows(live: Any, kind: str) -> list[dict[str, Any]]:
@@ -245,10 +222,10 @@ def _live_weights(rows: list[dict[str, Any]]) -> list[int]:
     return weights
 
 
-def _pick_row(rows: list[dict[str, Any]], avoid: str = "") -> dict[str, Any]:
-    """Picks one of Telegram's rows, never repeating the ``avoid`` name."""
+def _pick_row(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    """Picks one of Telegram's rows with an independent weighted draw."""
     entries = [[str(row.get("name") or ""), int(row.get("permille") or 0)] for row in rows]
-    chosen = _pick(entries, _live_weights(rows), avoid)
+    chosen = _pick(entries, _live_weights(rows))
     return rows[entries.index(chosen)]
 
 
@@ -272,12 +249,16 @@ def _live_traits(row: dict[str, Any], kind: str, pool_size: int) -> dict[str, An
     return traits
 
 
-def _live_slot(live: Any, kind: str, avoid: str) -> dict[str, Any] | None:
+def _live_slot(live: Any, kind: str) -> dict[str, Any] | None:
     """Rolls one slot from Telegram's own set, or ``None`` when that set is too small."""
     rows = _live_rows(live, kind)
     if len(rows) < MIN_LIVE_ROWS:
         return None
-    return _live_traits(_pick_row(rows, avoid), kind, len(rows))
+    weights = _live_weights(rows)
+    selected = _pick_row(rows)
+    result = _live_traits(selected, kind, len(rows))
+    result["permille"] = _effective_permille(weights[rows.index(selected)], weights)
+    return result
 
 
 def roll_traits(
@@ -286,10 +267,11 @@ def roll_traits(
         previous: dict[str, Any] | None = None,
         live: dict[str, list[dict[str, Any]]] | None = None,
 ) -> dict[str, Any]:
-    """Rolls one trait set with the original Telegram chances.
+    """Rolls one trait set using available weighted chances.
 
-    ``previous`` holds the traits the gift already had; every slot then avoids repeating
-    them, so a repeated upgrade always changes model, pattern and backdrop colours.
+    Each roll is independent, including repeat upgrades; an attribute may repeat.
+    Displayed permille is the effective weighted chance, rounded to the nearest permille
+    when a source pool is incomplete or contains class-only entries.
 
     ``live`` are Telegram's own attribute rows of the gift. When a slot has a real set there,
     the roll happens inside it and the chosen row brings its animation document with it, so
@@ -306,21 +288,21 @@ def roll_traits(
     if not backdrops:
         backdrops = FALLBACK_POOL["backdrops"]
 
-    avoid = _avoided_names(previous)
     live_hits = {
-        "model": _live_slot(live, "model", avoid["model"]),
-        "pattern": _live_slot(live, "pattern", avoid["pattern"]),
-        "backdrop": _live_slot(live, "backdrop", avoid["backdrop"]),
+        "model": _live_slot(live, "model"),
+        "pattern": _live_slot(live, "pattern"),
+        "backdrop": _live_slot(live, "backdrop"),
     }
-    model = live_hits["model"] or _model_traits(
-        _pick(models, _slot_weights(models), avoid["model"])
-    )
-    pattern = live_hits["pattern"] or _model_traits(
-        _pick(patterns, _slot_weights(patterns), avoid["pattern"])
-    )
-    backdrop = live_hits["backdrop"] or _backdrop_traits(
-        _pick(backdrops, _slot_weights(backdrops, colored=True), avoid["backdrop"])
-    )
+    def pool_slot(entries: list[list[Any]], *, colored: bool = False) -> dict[str, Any]:
+        weights = _slot_weights(entries, colored=colored)
+        selected = _pick(entries, weights)
+        result = _backdrop_traits(selected) if colored else _model_traits(selected)
+        result["permille"] = _effective_permille(weights[entries.index(selected)], weights)
+        return result
+
+    model = live_hits["model"] or pool_slot(models)
+    pattern = live_hits["pattern"] or pool_slot(patterns)
+    backdrop = live_hits["backdrop"] or pool_slot(backdrops, colored=True)
     used = sum(1 for hit in live_hits.values() if hit is not None)
     return {
         "version": TRAITS_VERSION,
@@ -360,6 +342,15 @@ def pool_from_rows(live: Any) -> dict[str, Any]:
     }
     return {key: value for key, value in result.items() if value}
 
+
+def effective_reveal_pool(base: dict[str, Any], live: Any) -> dict[str, Any]:
+    """Mirror the per-slot live/fallback selection used by roll_traits."""
+    result = dict(base)
+    live_pool = pool_from_rows(live)
+    for kind, slot in (("model", "models"), ("pattern", "patterns"), ("backdrop", "backdrops")):
+        if len(_live_rows(live, kind)) >= MIN_LIVE_ROWS:
+            result[slot] = live_pool[slot]
+    return result
 
 
 def _reel(entries: list[list[Any]], winner: str, limit: int = 40) -> list[list[Any]]:

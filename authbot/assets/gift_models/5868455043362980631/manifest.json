@@ -1,0 +1,239 @@
+{
+  "gift_id": "5868455043362980631",
+  "source": "https://github.com/ssamy2/TelegramGiftsAssests",
+  "commit": "1eb0666fff81b63f9002004084ff0ee3a9eed10f",
+  "models": [
+    {
+      "name": "Mirror",
+      "file": "mirror.tgs",
+      "document_id": -2194122079498616802,
+      "telegram_document_id": 5224550299351415108,
+      "sha256": "ec559eafffbe91c2dcd380f856ee017f7ec32f5539fca83755dd96e5dfb7fbb5",
+      "bytes": 65367
+    },
+    {
+      "name": "Queen Bee",
+      "file": "queen_bee.tgs",
+      "document_id": -3565696921861007019,
+      "telegram_document_id": 5210826165148740660,
+      "sha256": "f5171c0dce13c07d9c70e5f33a1d9ec419c1c5eb4b068dfca838d77e1ba07414",
+      "bytes": 55483
+    },
+    {
+      "name": "Synthwave",
+      "file": "synthwave.tgs",
+      "document_id": -35807698210491018,
+      "telegram_document_id": 5226918183541173882,
+      "sha256": "12331d84c917576cc14136a4d2c8ae05bae8d6505cf8d61cc5693126b3acd152",
+      "bytes": 51134
+    },
+    {
+      "name": "Jupiter",
+      "file": "jupiter.tgs",
+      "document_id": -2913554941301554882,
+      "telegram_document_id": 0,
+      "sha256": "5b139302ff9757db01aa848378c7fca25134e96290d696e6f58579463987f0f0",
+      "bytes": 29458
+    },
+    {
+      "name": "Acorn Hunter",
+      "file": "acorn_hunter.tgs",
+      "document_id": -1979119247056956138,
+      "telegram_document_id": 5226910963701147511,
+      "sha256": "f500d030fdad6d4807947d7f896864991cbfd42c3074a8dc4eaec284613b94e5",
+      "bytes": 53663
+    },
+    {
+      "name": "Matryoshka",
+      "file": "matryoshka.tgs",
+      "document_id": -3604154439104551094,
+      "telegram_document_id": 5226829170343963240,
+      "sha256": "8866d80d716ab0d21ad05fcaa060ab6d290a91bc225c16f5466309083b5957c2",
+      "bytes": 45350
+    },
+    {
+      "name": "Sanctuary",
+      "file": "sanctuary.tgs",
+      "document_id": -4054628665546508469,
+      "telegram_document_id": 5415766426667476205,
+      "sha256": "eada9f4f6257b2a4e60d0a9c45caa3cf1732b45d1e3e371bb2ad768cb683fbef",
+      "bytes": 52448
+    },
+    {
+      "name": "Mars",
+      "file": "mars.tgs",
+      "document_id": -3069618278045036575,
+      "telegram_document_id": 5451623854491333509,
+      "sha256": "00466248d8e60445870b474a0609401139b63fd4cc840fbc8f5807526392905d",
+      "bytes": 31783
+    },
+    {
+      "name": "Sakura",
+      "file": "sakura.tgs",
+      "document_id": -465928139546800136,
+      "telegram_document_id": 0,
+      "sha256": "23dd6696c7a2d3c05e3c7b696d1d70f9e39eaceb2317e9a9a72d0523e3567618",
+      "bytes": 59292
+    },
+    {
+      "name": "Glam Furry",
+      "file": "glam_furry.tgs",
+      "document_id": -322792422893739386,
+      "telegram_document_id": 0,
+      "sha256": "ed06717318403a02723a1409b956b44e485120c030a32c322e52e1debd6564cd",
+      "bytes": 53780
+    },
+    {
+      "name": "Soulkeeper",
+      "file": "soulkeeper.tgs",
+      "document_id": -4061389185592075982,
+      "telegram_document_id": 5413864314501097423,
+      "sha256": "3f2f0589d1617a3d203f3d0355a485cd289b7b77ea2682f3148f0e0b7cf95afa",
+      "bytes": 65424
+    },
+    {
+      "name": "Heartwood",
+      "file": "heartwood.tgs",
+      "document_id": -3864117052129944750,
+      "telegram_document_id": 0,
+      "sha256": "75da3b9b499e18f3961fe3e8d6e8c353a3f630724ef93741fdc412cb810da419",
+      "bytes": 58105
+    },
+    {
+      "name": "Luna",
+      "file": "luna.tgs",
+      "document_id": -4483600107758306152,
+      "telegram_document_id": 5413342682133065188,
+      "sha256": "a6a20afd61011d11fbee9a529234276b6241a9c0f943a8488d9992683502ea92",
+      "bytes": 54412
+    },
+    {
+      "name": "Toy Joy",
+      "file": "toy_joy.tgs",
+      "document_id": -615134133732329544,
+      "telegram_document_id": 5215469802184797866,
+      "sha256": "0a6f7badf095e96fc57db911a6377a5ec22345180979d42fb1ac24a906699b48",
+      "bytes": 32476
+    },
+    {
+      "name": "Vampire",
+      "file": "vampire.tgs",
+      "document_id": -879634334945524989,
+      "telegram_document_id": 5413689543691888770,
+      "sha256": "9c4753feedfa70866f45c9b0c808dbd975b874056564e0cbcea3ff4b38152d63",
+      "bytes": 60565
+    },
+    {
+      "name": "Reactor",
+      "file": "reactor.tgs",
+      "document_id": -2899514452710683425,
+      "telegram_document_id": 5228773527808665406,
+      "sha256": "8aa7a11f19e1efac260dfad4223b66cdbb80b201820027abc0cdcafa2c0f5c73",
+      "bytes": 16381
+    },
+    {
+      "name": "Karaoke Bar",
+      "file": "karaoke_bar.tgs",
+      "document_id": -605815807672591940,
+      "telegram_document_id": 0,
+      "sha256": "0e94b5bc74f142c54ec119a86d49355a841d38e32edd2df38e5fcbc92d7c14f1",
+      "bytes": 41977
+    },
+    {
+      "name": "Trapped Heart",
+      "file": "trapped_heart.tgs",
+      "document_id": -2376146150060190979,
+      "telegram_document_id": 5226665673823905217,
+      "sha256": "28aed04c90ab5a4edbf24290da5a6455cace9bf7ef8dfc5c974a2508fcc76f63",
+      "bytes": 50148
+    },
+    {
+      "name": "Compass",
+      "file": "compass.tgs",
+      "document_id": -626638176519917569,
+      "telegram_document_id": 0,
+      "sha256": "6c141b3867efd037d08f5ebead7c02e5f7b3febd3bd81e3ee1e349cadb7049c5",
+      "bytes": 35484
+    },
+    {
+      "name": "Waffle Maker",
+      "file": "waffle_maker.tgs",
+      "document_id": -3258712979046093473,
+      "telegram_document_id": 5451610574452453384,
+      "sha256": "c2945341e86650d3b5239f81eb20b77621fddd2f7c5572909eb8034df151994b",
+      "bytes": 39658
+    },
+    {
+      "name": "Emocore",
+      "file": "emocore.tgs",
+      "document_id": -2615284906539868253,
+      "telegram_document_id": 0,
+      "sha256": "15351c057595dcca88788f42662281a24edd4008eb5bd49635e1d1b1ba36f354",
+      "bytes": 45046
+    },
+    {
+      "name": "Satoru",
+      "file": "satoru.tgs",
+      "document_id": -4057674079184382156,
+      "telegram_document_id": 5427170118889137986,
+      "sha256": "ee6ec1f0878c0daccd2e5e2ded9a58aa6b8c28563947b976c77b5d2417e18ace",
+      "bytes": 65392
+    },
+    {
+      "name": "Hell Rise",
+      "file": "hell_rise.tgs",
+      "document_id": -415293943084533944,
+      "telegram_document_id": 0,
+      "sha256": "dc7d1a8407b83709974dbdf482fbf5d652378864f83fc8508b06c34e344c8d87",
+      "bytes": 61419
+    },
+    {
+      "name": "Royal Flush",
+      "file": "royal_flush.tgs",
+      "document_id": -3541838723457436836,
+      "telegram_document_id": 0,
+      "sha256": "9b50363e922654f51e1867aa0f727392703ab8467b7c8011675c2b374e72b26d",
+      "bytes": 52054
+    },
+    {
+      "name": "Comic Book",
+      "file": "comic_book.tgs",
+      "document_id": -2507734463244748868,
+      "telegram_document_id": 0,
+      "sha256": "f6a2873ed85fd8cbf416c06a2fd6181be0512e459c25a9ee0aa86ac484046696",
+      "bytes": 42636
+    },
+    {
+      "name": "Nightclub",
+      "file": "nightclub.tgs",
+      "document_id": -3642384783742161761,
+      "telegram_document_id": 5393493263141331044,
+      "sha256": "07c074eadbed3691fd974afaf8e8cd3f6ce7507806837c628a3f8d6c4fb49233",
+      "bytes": 56040
+    },
+    {
+      "name": "Azure Gem",
+      "file": "azure_gem.tgs",
+      "document_id": -3733786117796314600,
+      "telegram_document_id": 0,
+      "sha256": "6b1d647efe8d20307c0a9c3b1bf32e73179d5c7a7ac89e9849bb90c41b36fd6f",
+      "bytes": 55014
+    },
+    {
+      "name": "Pepperoni",
+      "file": "pepperoni.tgs",
+      "document_id": -3026270695223587240,
+      "telegram_document_id": 0,
+      "sha256": "e0e27f67aa115f9b89e3c2c4ccb007c06d2e630032bf704ecc8766e49e9e2fe9",
+      "bytes": 36719
+    },
+    {
+      "name": "Disco",
+      "file": "disco.tgs",
+      "document_id": -2214364159218473049,
+      "telegram_document_id": 5393419153480641357,
+      "sha256": "b2722a51ac6c0806f279b91bfbba571ace1f7a228db0c4632e99872fbef0ba8e",
+      "bytes": 54522
+    }
+  ]
+}

@@ -78,6 +78,11 @@ def test_transfer_changes_owner_and_revokes_all_existing_sessions(account_store)
     path, store = account_store
     account_id = run(bot_module.admin_create_account("+15551234567", 100, 5))
     add_session_rows(path, account_id)
+    with db_split.sqlite_connect(path) as db:
+        db.execute("""INSERT INTO messenger.push_outbox
+            (sender_telegram_id,recipient_telegram_id,title,body,data_json,created_at,next_attempt_at)
+            VALUES(?,?, 'title','test','{}',1,1)""", (ADMIN, account_id))
+        db.commit()
 
     assert run(store.find_registered_user("@recipient")) == RECIPIENT
     assert run(store.transfer_number("+15551234567", ADMIN, RECIPIENT)) == account_id
@@ -89,6 +94,7 @@ def test_transfer_changes_owner_and_revokes_all_existing_sessions(account_store)
     assert owner["chat_id"] == RECIPIENT
     assert rows(path, "SELECT COUNT(*) FROM api_sessions WHERE telegram_id=?", (account_id,))[0][0] == 0
     assert rows(path, "SELECT COUNT(*) FROM push_devices WHERE telegram_id=?", (account_id,))[0][0] == 0
+    assert rows(path, "SELECT COUNT(*) FROM messenger.push_outbox WHERE recipient_telegram_id=?", (account_id,))[0][0] == 0
 
 
 def test_delete_removes_account_and_related_data_but_keeps_bot_owner(account_store):
@@ -101,6 +107,9 @@ def test_delete_removes_account_and_related_data_but_keeps_bot_owner(account_sto
             "INSERT INTO messenger.messages(sender_telegram_id,recipient_telegram_id,body,created_at) VALUES(?,?,?,?)",
             (account_id, RECIPIENT, "test", 1),
         )
+        conn.execute("""INSERT INTO messenger.push_outbox
+            (sender_telegram_id,recipient_telegram_id,title,body,data_json,created_at,next_attempt_at)
+            VALUES(?,?, 'title','test','{}',1,1)""", (account_id, RECIPIENT))
         conn.commit()
     finally:
         conn.close()
@@ -113,3 +122,4 @@ def test_delete_removes_account_and_related_data_but_keeps_bot_owner(account_sto
     assert rows(path, "SELECT COUNT(*) FROM api_sessions WHERE telegram_id=?", (account_id,))[0][0] == 0
     assert rows(path, "SELECT COUNT(*) FROM push_devices WHERE telegram_id=?", (account_id,))[0][0] == 0
     assert rows(path, "SELECT COUNT(*) FROM messenger.messages WHERE sender_telegram_id=?", (account_id,))[0][0] == 0
+    assert rows(path, "SELECT COUNT(*) FROM messenger.push_outbox WHERE sender_telegram_id=?", (account_id,))[0][0] == 0

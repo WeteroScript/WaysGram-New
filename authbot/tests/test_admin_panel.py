@@ -21,7 +21,8 @@ def run(coro):
 class Msg:
     def __init__(self, text=None, user_id=ADMIN):
         self.text = text
-        self.from_user = SimpleNamespace(id=user_id)
+        self.from_user = SimpleNamespace(id=user_id, username=None)
+        self.chat = SimpleNamespace(id=user_id, type="private")
         self.sent: list[tuple[str, object]] = []
 
     async def answer(self, text, reply_markup=None):
@@ -448,8 +449,11 @@ def test_admin_bulk_gift_import_and_hide_preserve_inventory(panel, monkeypatch: 
     finally:
         conn.close()
 
-    added = press("wgadm:dbgiftaddall")
-    assert "Добавлено/обновлено подарков: 2" in added.sent[0][0]
+    prompt = press("wgadm:dbgiftaddall")
+    assert "от 1 до 2" in prompt.sent[0][0]
+    assert query(path, "SELECT COUNT(*) FROM telegram_gift_prices WHERE gift_id='unlimited'") == [(0,)]
+    added = type_text("2")
+    assert "Добавлено/обновлено первых подарков: 2" in added.sent[0][0]
     assert query(path, "SELECT price_stars,supply,sold FROM telegram_gift_prices WHERE gift_id='limited'") == [(25, 7, 3)]
     assert query(path, "SELECT price_stars,supply,sold FROM telegram_gift_prices WHERE gift_id='unlimited'") == [
         (50, bot_module.UNLIMITED_GIFT_SUPPLY, 0)
@@ -458,3 +462,521 @@ def test_admin_bulk_gift_import_and_hide_preserve_inventory(panel, monkeypatch: 
     press("wgadm:dbgifthideall")
     assert query(path, "SELECT COUNT(*) FROM telegram_gift_prices WHERE price_stars=0 AND supply=0")[0][0] == 2
     assert query(path, "SELECT COUNT(*) FROM user_gifts WHERE serial_number='WG-KEEP'")[0][0] == 1
+
+
+def press_as(data: str, user_id: int, chat_type: str = "private") -> Msg:
+    message = Msg(user_id=user_id)
+    message.chat.type = chat_type
+    cb = Cb(data, message)
+    cb.from_user = SimpleNamespace(id=user_id)
+    run(bot_module.admin_callback(cb))
+    return message
+
+
+def type_as(text: str, user_id: int) -> Msg:
+    message = Msg(text, user_id=user_id)
+    run(bot_module.admin_text_input(message))
+    return message
+
+
+def test_admin_grant_username_confirmation_persistence_and_revoke(panel) -> None:
+    path, store = panel
+    run(store.upsert_user(77, 77, "Real_Admin"))
+    assert "Добавить админа" in str(bot_module.admin_home_keyboard(ADMIN))
+    assert "Добавить админа" not in str(bot_module.admin_home_keyboard(77))
+    assert not run(bot_module.is_authbot_admin(77))
+    press("wgadm:addadmin")
+    candidate = type_text("@REAL_ADMIN")
+    assert "Telegram ID 77" in candidate.sent[0][0]
+    assert not run(bot_module.is_authbot_admin(77))
+    press("wgadm:addadminconfirm:77")
+    assert query(path, "SELECT telegram_id,added_by FROM authbot_admins") == [(77, ADMIN)]
+    assert run(bot_module.is_authbot_admin(77))
+    run(bot_module.init_admin_storage())  # startup migration must keep delegated access
+    assert run(bot_module.is_authbot_admin(77))
+
+    panel_msg = Msg(user_id=77)
+    run(bot_module.admin_handler(panel_msg))
+    assert "Панель администратора" in panel_msg.sent[0][0]
+    assert "Добавить админа" not in str(panel_msg.sent[0][1])
+    assert "Только главный" in press_as("wgadm:addadmin", 77).sent[0][0]
+    assert "Только главный" in press_as("wgadm:addadminconfirm:88", 77).sent[0][0]
+    assert "Только главный" in press_as(f"wgadm:adminremove:{ADMIN}", 77).sent[0][0]
+
+    # Another admin's input state and audit identity are independent of the owner.
+    press("wgadm:labelnew")
+    press_as("wgadm:labelnew", 77)
+    type_as("Метка второго", 77)
+    type_as("#123456", 77)
+    assert bot_module.ADMIN_INPUT[ADMIN][0] == "label_text"
+    assert query(path, "SELECT admin_id FROM admin_logs WHERE action='label_create'") == [(77,)]
+
+    assert "77" in str(press("wgadm:admins").sent[0][1])
+    press("wgadm:adminremoveask:77")
+    press("wgadm:adminremove:77")
+    assert not run(bot_module.is_authbot_admin(77))
+    denied = Msg(user_id=77)
+    run(bot_module.admin_handler(denied))
+    assert "Доступ запрещён" in denied.sent[0][0]
+    assert query(path, "SELECT action,admin_id,target FROM admin_logs WHERE action IN ('admin_add','admin_remove') ORDER BY id") == [
+        ("admin_add", ADMIN, "77"), ("admin_remove", ADMIN, "77")]
+
+
+def test_admin_add_id_validation_cancellation_and_private_scope(panel) -> None:
+    path, store = panel
+    # The owner must have a current confirmation, and ordinary users cannot forge one.
+    press("wgadm:addadminconfirm:100")
+    assert not run(bot_module.is_authbot_admin(100))
+    press_as("wgadm:addadminconfirm:100", 100)
+    assert not run(bot_module.is_authbot_admin(100))
+    assert not press_as("wgadm:addadmin", ADMIN, chat_type="group").sent
+    press("wgadm:addadmin")
+    assert "Некорректный" in type_text("9" * 100).sent[0][0]
+    assert "username не найден" in type_text("@nobody_found").sent[0][0].lower()
+    type_text("100")
+    press("wgadm:admincancel")
+    press("wgadm:addadminconfirm:100")
+    assert not run(bot_module.is_authbot_admin(100))
+    press("wgadm:addadmin")
+    type_text("100")
+    press("wgadm:addadminconfirm:100")
+    assert run(bot_module.is_authbot_admin(100))
+    assert query(path, "SELECT COUNT(*) FROM authbot_admins WHERE telegram_id=100") == [(1,)]
+    press("wgadm:addadminconfirm:100")
+    assert query(path, "SELECT COUNT(*) FROM authbot_admins WHERE telegram_id=100") == [(1,)]
+    press(f"wgadm:adminremove:{ADMIN}")
+    assert run(bot_module.is_authbot_admin(ADMIN))
+
+
+def test_duplicate_telegram_usernames_require_explicit_id(panel) -> None:
+    path, store = panel
+    run(store.upsert_user(77, 77, "same_name"))
+    run(store.upsert_user(78, 78, "same_name"))
+    press("wgadm:addadmin")
+    assert "неоднозначен" in type_text("@same_name").sent[0][0]
+    assert query(path, "SELECT COUNT(*) FROM authbot_admins") == [(0,)]
+
+
+def test_bot_admin_grant_does_not_grant_waysgram_admin_status(panel) -> None:
+    from fastapi import FastAPI
+    from test_messenger_api import FakeBot, add_session, client_for
+
+    path, store = panel
+    run(store.upsert_user(77, 77, "apiadmin"))
+    run(store.set_verified(77, True))
+    number = run(store.allocate_number(77))
+    run(bot_module.ensure_account(77, number, "apiadmin", "API Admin"))
+    add_session(path, 77, "admin-session-token")
+    app = FastAPI()
+    app.include_router(messenger_api.build_messenger_router(
+        path, store, lambda: FakeBot(), bot_module.account_is_banned, admin_id=ADMIN,
+    ))
+
+    async def get_flag():
+        async with await client_for(app) as client:
+            response = await client.get("/api/me", headers={"Authorization": "Bearer admin-session-token"})
+            assert response.status_code == 200
+            return response.json()["is_admin"]
+
+    assert run(get_flag()) is False
+    press("wgadm:addadmin")
+    type_text("77")
+    press("wgadm:addadminconfirm:77")
+    assert run(bot_module.is_authbot_admin(77)) is True
+    assert run(get_flag()) is False
+    press("wgadm:adminremove:77")
+    assert run(get_flag()) is False
+
+
+def test_delegated_admin_created_account_is_owned_and_audited_by_actor(panel) -> None:
+    path, store = panel
+    press("wgadm:addadmin")
+    type_text("88")
+    press("wgadm:addadminconfirm:88")
+    press_as("wgadm:newacct", 88)
+    type_as("5552220000", 88)
+    type_as("15", 88)
+    type_as("2", 88)
+    row = query(path, "SELECT telegram_id,owner_telegram_id FROM numbers WHERE number=?", ("+15552220000",))[0]
+    assert row[1] == 88
+    assert run(store.resolve_number("+15552220000"))["chat_id"] == 88
+    assert query(path, "SELECT admin_id FROM admin_logs WHERE action='create_account'") == [(88,)]
+    assert query(path, "SELECT DISTINCT admin_id FROM economy_transactions WHERE reason='admin_create_account'") == [(88,)]
+
+
+def test_add_admin_confirmation_expires(panel, monkeypatch) -> None:
+    path, store = panel
+    press("wgadm:addadmin")
+    type_text("900")
+    monkeypatch.setattr(bot_module.time, "time", lambda: 2_000_000_000)
+    result = press("wgadm:addadminconfirm:900")
+    assert "устарело" in result.sent[0][0]
+    assert not run(bot_module.is_authbot_admin(900))
+
+
+@pytest.mark.parametrize("source", ["telegram_mtproto", "telegram_bot_api"])
+def test_bulk_gifts_import_first_n_in_source_order(panel, monkeypatch, source) -> None:
+    path, _ = panel
+    # The refresh is mocked; both catalogues exercise the actual selection and writes.
+    class FakeCatalog:
+        async def sync(self, database_path):
+            return {"gift_count": 40, "source": source}
+
+    async def fake_bot_sync(database_path, bot):
+        return {"gift_count": 40, "source": source}
+
+    monkeypatch.setattr(bot_module, "mtproto_gift_catalog", FakeCatalog() if source == "telegram_mtproto" else None)
+    monkeypatch.setattr(bot_module, "bot", None if source == "telegram_mtproto" else object())
+    monkeypatch.setattr(bot_module, "sync_telegram_gifts", fake_bot_sync)
+    now = int(time.time())
+    with db_split.sqlite_connect(path) as db:
+        db.execute("INSERT INTO telegram_gift_sync_state(id,last_synced_at,gift_count,source) VALUES(1,?,?,?)", (now, 40, source))
+        # Gift IDs descend while positions ascend, so ordering by ID would select the wrong items.
+        for position in reversed(range(41)):
+            gift_id = str(1000 - position)
+            active = int(position != 40)
+            if source == "telegram_mtproto":
+                db.execute("""INSERT INTO telegram_mtproto_gift_catalog
+                    (gift_id,title,stars,limited,sold_out,availability_remains,is_available,source_payload,position,synced_at)
+                    VALUES(?,'Gift',25,1,0,4,?,'{}',?,?)""", (gift_id, active, position, now))
+            else:
+                db.execute("""INSERT INTO telegram_gift_catalog
+                    (gift_id,title,sticker_file_id,star_count,total_count,remaining_count,is_available,source_payload,position,synced_at)
+                    VALUES(?,'Gift','file',25,10,4,?,'{}',?,?)""", (gift_id, active, position, now))
+        # An unrelated existing listing must not be hidden or overwritten.
+        db.execute("INSERT INTO telegram_gift_prices(gift_id,price_stars,supply,sold,updated_at) VALUES('970',99,20,1,?)", (now,))
+        db.commit()
+
+    prompt = press("wgadm:dbgiftaddall")
+    assert "от 1 до 40" in prompt.sent[0][0]
+    assert query(path, "SELECT COUNT(*) FROM telegram_gift_prices") == [(1,)]
+    for invalid in ("0", "-1", "1.5", "abc", "9" * 100):
+        assert "Введите" in type_text(invalid).sent[0][0]
+    assert "от 1 до 40" in type_text("41").sent[0][0]
+    assert query(path, "SELECT COUNT(*) FROM telegram_gift_prices") == [(1,)]
+
+    result = type_text("30")
+    assert "подарков: 30" in result.sent[0][0]
+    assert {row[0] for row in query(path, "SELECT gift_id FROM telegram_gift_prices WHERE gift_id!='970'")} == {
+        str(1000 - i) for i in range(30)
+    }
+    assert query(path, "SELECT price_stars,supply,sold FROM telegram_gift_prices WHERE gift_id='970'") == [(99, 20, 1)]
+    assert query(path, "SELECT COUNT(*) FROM admin_logs WHERE action='db_gifts_add_all'") == [(1,)]
+    assert ADMIN not in bot_module.ADMIN_INPUT
+
+    # Full range remains available and includes the previously unselected entries.
+    press("wgadm:dbgiftaddall")
+    assert "подарков: 40" in type_text("40").sent[0][0]
+    assert query(path, "SELECT COUNT(*) FROM telegram_gift_prices") == [(40,)]
+    assert query(path, "SELECT price_stars,supply,sold FROM telegram_gift_prices WHERE gift_id='970'") == [(25, 5, 1)]
+
+
+def test_bulk_gift_prompt_cancel_and_catalog_change(panel, monkeypatch) -> None:
+    path, _ = panel
+    class FakeCatalog:
+        async def sync(self, database_path):
+            return {"gift_count": 2}
+    monkeypatch.setattr(bot_module, "mtproto_gift_catalog", FakeCatalog())
+    now = int(time.time())
+    with db_split.sqlite_connect(path) as db:
+        db.execute("INSERT INTO telegram_gift_sync_state(id,last_synced_at,gift_count,source) VALUES(1,?,2,'telegram_mtproto')", (now,))
+        for pos in range(2):
+            db.execute("""INSERT INTO telegram_mtproto_gift_catalog
+                (gift_id,title,stars,source_payload,position,synced_at) VALUES(?,'Gift',25,'{}',?,?)""", (str(pos), pos, now))
+        db.commit()
+
+    press("wgadm:dbgiftaddall")
+    press("wgadm:dbgifts")
+    assert ADMIN not in bot_module.ADMIN_INPUT
+    type_text("1")
+    assert query(path, "SELECT COUNT(*) FROM telegram_gift_prices") == [(0,)]
+
+    press("wgadm:dbgiftaddall")
+    with db_split.sqlite_connect(path) as db:
+        db.execute("UPDATE telegram_mtproto_gift_catalog SET is_available=0 WHERE gift_id='1'")
+        db.commit()
+    assert "от 1 до 1" in type_text("2").sent[0][0]
+    assert query(path, "SELECT COUNT(*) FROM telegram_gift_prices") == [(0,)]
+    assert "подарков: 1" in type_text("1").sent[0][0]
+    assert query(path, "SELECT gift_id FROM telegram_gift_prices") == [("0",)]
+
+
+def test_bulk_gift_input_is_consumed_once_after_concurrent_authentication(panel, monkeypatch) -> None:
+    path, _ = panel
+    class FakeCatalog:
+        async def sync(self, database_path):
+            return {"gift_count": 1}
+    monkeypatch.setattr(bot_module, "mtproto_gift_catalog", FakeCatalog())
+    now = int(time.time())
+    with db_split.sqlite_connect(path) as db:
+        db.execute("INSERT INTO telegram_gift_sync_state(id,last_synced_at,gift_count,source) VALUES(1,?,1,'telegram_mtproto')", (now,))
+        db.execute("""INSERT INTO telegram_mtproto_gift_catalog
+            (gift_id,title,stars,source_payload,position,synced_at) VALUES('one','Gift',25,'{}',0,?)""", (now,))
+        db.commit()
+    press("wgadm:dbgiftaddall")
+
+    async def simultaneous_messages():
+        gate = asyncio.Event()
+        count = 0
+        async def slow_auth(actor_id):
+            nonlocal count
+            count += 1
+            if count == 2:
+                gate.set()
+            await gate.wait()
+            return True
+        monkeypatch.setattr(bot_module, "is_authbot_admin", slow_auth)
+        first, second = Msg("1"), Msg("1")
+        await asyncio.gather(bot_module.admin_text_input(first), bot_module.admin_text_input(second))
+        return first, second
+
+    first, second = run(simultaneous_messages())
+    assert len(first.sent) + len(second.sent) == 1
+    assert query(path, "SELECT COUNT(*) FROM admin_logs WHERE action='db_gifts_add_all'") == [(1,)]
+    assert query(path, "SELECT gift_id FROM telegram_gift_prices") == [("one",)]
+
+
+def test_bulk_gift_sync_failure_does_not_import_or_wait_for_input(panel, monkeypatch) -> None:
+    path, _ = panel
+    class FailingCatalog:
+        async def sync(self, database_path):
+            raise RuntimeError("offline")
+    monkeypatch.setattr(bot_module, "mtproto_gift_catalog", FailingCatalog())
+    message = press("wgadm:dbgiftaddall")
+    assert "Не удалось обновить" in message.sent[0][0]
+    assert ADMIN not in bot_module.ADMIN_INPUT
+    assert query(path, "SELECT COUNT(*) FROM telegram_gift_prices") == [(0,)]
+
+
+def test_admin_names_use_known_ids_and_better_secondary_catalog(panel) -> None:
+    path, _ = panel
+    now = int(time.time())
+    with db_split.sqlite_connect(path) as db:
+        db.execute("INSERT INTO telegram_gift_sync_state(id,last_synced_at,gift_count,source) VALUES(1,?,2,'telegram_mtproto')", (now,))
+        db.execute("""INSERT INTO telegram_mtproto_gift_catalog
+            (gift_id,title,sticker_set_name,source_payload,position,synced_at)
+            VALUES('5167939598143193218','s','TelegramGifts','{}',0,?)""", (now,))
+        db.execute("""INSERT INTO telegram_mtproto_gift_catalog
+            (gift_id,title,sticker_set_name,source_payload,position,synced_at)
+            VALUES('98765','Подарок Telegram','','{}',1,?)""", (now,))
+        db.execute("""INSERT INTO telegram_gift_catalog
+            (gift_id,title,sticker_file_id,source_payload,position,synced_at)
+            VALUES('98765','Real Name','file','{}',0,?)""", (now,))
+        db.commit()
+    rows = {row["id"]: row for row in run(bot_module.telegram_gift_rows())}
+    assert rows["5167939598143193218"]["title"] == "Sakura Flower"
+    assert rows["98765"]["title"] == "Real Name"
+    assert rows["98765"]["catalog_source"] == "telegram_mtproto"
+    assert bot_module.telegram_gift_display_name("", "TelegramGifts", "123") == "Подарок №123"
+    assert bot_module.telegram_gift_display_name("s", "", "123") == "Подарок №123"
+
+
+def test_find_waysgram_account_and_grant_telegram_gifts(panel) -> None:
+    from fastapi import FastAPI
+    from test_messenger_api import FakeBot, add_session, client_for
+
+    path, store = panel
+    user_id = 770077
+    run(bot_module.ensure_system_account())
+    run(bot_module.ensure_account(user_id, "+15550770077", "WaysGram_Name", "Example"))
+    gifts = [
+        {"id": f"gift{i}", "title": f"Gift {i}",
+         "sticker": {"file_id": f"file{i}", "file_unique_id": f"uniq{i}",
+                     "type": "regular", "width": 512, "height": 512,
+                     "is_animated": False, "is_video": False, "emoji": "🎁", "mime_type": "image/webp"},
+         "star_count": 25, "upgrade_star_count": 10}
+        for i in range(13)
+    ]
+    run(messenger_api.store_telegram_gifts(path, gifts, int(time.time())))
+    run(bot_module.set_telegram_gift_values("gift0", price=25, supply=2))
+    assert "@username" in press("wgadm:accounts").sent[0][0]
+    assert "не найден" in type_text("@missing").sent[0][0]
+    found = type_text("@wAYSGRAM_nAME")
+    assert f"wgadm:user:{user_id}" in str(found.sent[0][1])
+    press("wgadm:accounts")
+    assert f"wgadm:user:{user_id}" in str(type_text("waysgram_name").sent[0][1])
+    press("wgadm:accounts")
+    assert f"wgadm:user:{user_id}" in str(type_text("+15550770077").sent[0][1])
+    press("wgadm:accounts")
+    assert f"wgadm:user:{user_id}" in str(type_text("xamp").sent[0][1])
+    press("wgadm:accounts")
+    assert f"wgadm:user:{user_id}" in str(type_text(str(user_id)).sent[0][1])
+    assert "Выдать подарок" in str(press(f"wgadm:user:{user_id}").sent[0][1])
+
+    page = press(f"wgadm:grant:{user_id}")
+    assert "всего 13" in page.sent[0][0] and "не меняет остатки" in page.sent[0][0]
+    state = bot_module.ADMIN_INPUT[ADMIN][1]
+    token = state["token"]
+    assert "Вперёд" in str(page.sent[0][1])
+    assert "страница 2" in press(f"wgadm:gpage:{token}:1").sent[0][0]
+    chosen = next(i for i, gift in enumerate(state["gifts"]) if gift["id"] == "gift0")
+    assert "Введите количество" in press(f"wgadm:gsel:{token}:{chosen}").sent[0][0]
+    assert "целое число" in type_text("0").sent[0][0]
+    assert "целое число" in type_text("101").sent[0][0]
+    assert "Выдано подарков: 3" in type_text("3").sent[0][0]
+    assert query(path, "SELECT COUNT(*),COUNT(DISTINCT serial_number) FROM user_gifts WHERE owner_telegram_id=? AND telegram_gift_id='gift0'", (user_id,)) == [(3, 3)]
+    assert query(path, "SELECT supply,sold FROM telegram_gift_prices WHERE gift_id='gift0'") == [(2, 0)]
+    assert query(path, "SELECT COUNT(*) FROM gift_transactions WHERE event_type='admin_grant' AND to_telegram_id=?", (user_id,)) == [(3,)]
+    assert query(path, "SELECT admin_id,action FROM admin_logs WHERE action='gift_grant'") == [(ADMIN, 'gift_grant')]
+    assert "× 3" in query(path, "SELECT body FROM messages WHERE recipient_telegram_id=? ORDER BY id DESC LIMIT 1", (user_id,))[0][0]
+    assert query(path, "SELECT COUNT(*) FROM message_events WHERE actor_id=? AND user_b=?", (bot_module.SYSTEM_ACCOUNT_ID, max(bot_module.SYSTEM_ACCOUNT_ID, user_id))) == [(1,)]
+    assert "устарел" in press(f"wgadm:gsel:{token}:{chosen}").sent[0][0]
+    assert not type_text("3").sent
+
+    add_session(path, user_id, "grant-inventory-session")
+    app = FastAPI()
+    app.include_router(messenger_api.build_messenger_router(path, store, lambda: FakeBot(), bot_module.account_is_banned, admin_id=ADMIN))
+    async def inventory():
+        async with await client_for(app) as client:
+            response = await client.get("/api/me/gifts", headers={"Authorization": "Bearer grant-inventory-session"})
+            assert response.status_code == 200
+            return response.json()["gifts"]
+    received = run(inventory())
+    assert len(received) == 3
+    assert all(gift["telegram_gift_id"] == "gift0" and gift["telegram_gift"]["sticker_available"] for gift in received)
+    assert all(gift["purchase_price"] == 0 for gift in received)
+
+
+def test_grant_cancellation_stale_and_removed_gift_are_safe(panel) -> None:
+    path, _ = panel
+    run(bot_module.ensure_system_account())
+    run(bot_module.ensure_account(770077, "+15550770077", "target", "Target"))
+    run(messenger_api.store_telegram_gifts(path, [{"id": "gift1", "sticker": {"file_id": "f1", "file_unique_id": "u1", "type": "regular", "width": 512, "height": 512}, "star_count": 10}], int(time.time())))
+    press("wgadm:grant:770077")
+    token = bot_module.ADMIN_INPUT[ADMIN][1]["token"]
+    press(f"wgadm:gsel:{token}:0")
+    press("wgadm:user:770077")
+    assert not type_text("5").sent
+    assert query(path, "SELECT COUNT(*) FROM user_gifts WHERE owner_telegram_id=770077") == [(0,)]
+    assert "устарел" in press(f"wgadm:gsel:{token}:0").sent[0][0]
+    press("wgadm:grant:770077")
+    token = bot_module.ADMIN_INPUT[ADMIN][1]["token"]
+    press(f"wgadm:gsel:{token}:0")
+    with db_split.sqlite_connect(path) as db:
+        db.execute("DELETE FROM telegram_gift_catalog WHERE gift_id='gift1'")
+    assert "больше не найден" in type_text("1").sent[0][0]
+    assert query(path, "SELECT COUNT(*) FROM user_gifts WHERE owner_telegram_id=770077") == [(0,)]
+    assert query(path, "SELECT COUNT(*) FROM admin_logs WHERE action='gift_grant'") == [(0,)]
+
+
+def test_grant_duplicate_inputs_and_failed_batch_are_atomic(panel, monkeypatch) -> None:
+    path, _ = panel
+    run(bot_module.ensure_system_account())
+    run(bot_module.ensure_account(770077, "+15550770077", "target", "Target"))
+    run(messenger_api.store_telegram_gifts(path, [{"id": "gift1", "sticker": {"file_id": "f1", "file_unique_id": "u1", "type": "regular", "width": 512, "height": 512}, "star_count": 10}], int(time.time())))
+    press("wgadm:grant:770077")
+    token = bot_module.ADMIN_INPUT[ADMIN][1]["token"]
+    press(f"wgadm:gsel:{token}:0")
+    first, second = Msg("3"), Msg("3")
+    async def concurrent():
+        await asyncio.gather(bot_module.admin_text_input(first), bot_module.admin_text_input(second))
+    run(concurrent())
+    assert query(path, "SELECT COUNT(*) FROM user_gifts WHERE owner_telegram_id=770077") == [(3,)]
+    assert query(path, "SELECT COUNT(*) FROM admin_logs WHERE action='gift_grant'") == [(1,)]
+
+    press("wgadm:grant:770077")
+    token = bot_module.ADMIN_INPUT[ADMIN][1]["token"]
+    press(f"wgadm:gsel:{token}:0")
+    monkeypatch.setattr(bot_module.secrets, "token_hex", lambda n: "a" * (n * 2))
+    failed = type_text("2")  # duplicate serial in the same transaction
+    assert "Не удалось" in failed.sent[0][0]
+    assert query(path, "SELECT COUNT(*) FROM user_gifts WHERE owner_telegram_id=770077") == [(3,)]
+    assert query(path, "SELECT COUNT(*) FROM admin_logs WHERE action='gift_grant'") == [(1,)]
+
+
+def test_grant_buttons_require_admin_and_current_selection(panel) -> None:
+    path, _ = panel
+    run(bot_module.ensure_account(770077, "+15550770077", "target", "Target"))
+    with db_split.sqlite_connect(path) as db:
+        db.execute("INSERT INTO gift_catalog(name,price_grams,supply,created_at) VALUES('Legacy',1,3,?)", (int(time.time()),))
+        db.execute("INSERT INTO telegram_gift_sync_state(id,last_synced_at,gift_count,source) VALUES(1,?,0,'telegram_bot_api')", (int(time.time()),))
+    press("wgadm:grant:770077")
+    token = bot_module.ADMIN_INPUT[ADMIN][1]["token"]
+    press_as(f"wgadm:gsel:{token}:0", 999)
+    assert bot_module.ADMIN_INPUT[ADMIN][0] == "grant_select"
+    assert not type_as("3", 999).sent
+    assert "устарела" in press("wgadm:grantgift:770077:1").sent[0][0]
+    assert query(path, "SELECT COUNT(*) FROM user_gifts WHERE owner_telegram_id=770077") == [(0,)]
+
+
+@pytest.mark.parametrize("source", ["telegram_mtproto", "telegram_bot_api"])
+def test_bulk_import_all_151_are_visible_in_store_including_telegram_sold_out(panel, monkeypatch, source):
+    from fastapi import FastAPI
+    from test_messenger_api import FakeBot, add_session, client_for
+
+    path, store = panel
+    class FakeCatalog:
+        async def sync(self, database_path):
+            return {"gift_count": 151, "source": source}
+    async def fake_bot_sync(database_path, bot):
+        return {"gift_count": 151, "source": source}
+    monkeypatch.setattr(bot_module, "mtproto_gift_catalog", FakeCatalog() if source == "telegram_mtproto" else None)
+    monkeypatch.setattr(bot_module, "bot", None if source == "telegram_mtproto" else object())
+    monkeypatch.setattr(bot_module, "sync_telegram_gifts", fake_bot_sync)
+    now = int(time.time())
+    with db_split.sqlite_connect(path) as db:
+        db.execute("INSERT INTO telegram_gift_sync_state(id,last_synced_at,gift_count,source) VALUES(1,?,151,?)", (now, source))
+        for position in range(151):
+            gift_id = str(5000 + position)
+            available = position < 11
+            if source == "telegram_mtproto":
+                db.execute("""INSERT INTO telegram_mtproto_gift_catalog
+                    (gift_id,title,stars,limited,sold_out,availability_remains,is_available,source_payload,position,synced_at)
+                    VALUES(?,?,25,1,?,?,1,'{}',?,?)""", (gift_id, f"Gift {position}", int(not available), 3 if available else 0, position, now))
+            else:
+                db.execute("""INSERT INTO telegram_gift_catalog
+                    (gift_id,title,sticker_file_id,star_count,total_count,remaining_count,is_available,source_payload,position,synced_at)
+                    VALUES(?,?, 'file',25,100,?,1,'{}',?,?)""", (gift_id, f"Gift {position}", 3 if available else 0, position, now))
+        db.execute("INSERT INTO telegram_gift_prices(gift_id,price_stars,supply,sold,updated_at) VALUES('5011',25,6,6,?)", (now,))
+    run(bot_module.ensure_account(770077, "+15550770077", "target", "Target"))
+    add_session(path, 770077, "bulk-gift-session")
+    assert "до 151" in press("wgadm:dbgiftaddall").sent[0][0]
+    assert "подарков: 151" in type_text("151").sent[0][0]
+    assert query(path, "SELECT COUNT(*) FROM telegram_gift_prices WHERE price_stars>0 AND supply>sold") == [(151,)]
+    assert query(path, "SELECT sold FROM telegram_gift_prices WHERE gift_id='5011'") == [(6,)]
+
+    app = FastAPI()
+    app.include_router(messenger_api.build_messenger_router(path, store, lambda: FakeBot(), bot_module.account_is_banned, admin_id=ADMIN))
+    async def shop():
+        async with await client_for(app) as client:
+            headers = {"Authorization": "Bearer bulk-gift-session"}
+            response = await client.get("/api/telegram/gifts", headers=headers)
+            assert response.status_code == 200, response.text
+            gifts = response.json()["gifts"]
+            assert len(gifts) == 151
+            exhausted = next(g for g in gifts if g["id"] == "5011")
+            assert exhausted["for_sale"] and exhausted["unlimited_supply"]
+            bought = await client.post("/api/telegram/gifts/5011/purchase", headers=headers, json={})
+            assert bought.status_code == 201, bought.text
+    run(shop())
+
+
+def test_bulk_import_missing_price_prompts_before_atomic_write_and_can_cancel(panel, monkeypatch):
+    path, _ = panel
+    class FakeCatalog:
+        async def sync(self, database_path):
+            return {"gift_count": 3}
+    monkeypatch.setattr(bot_module, "mtproto_gift_catalog", FakeCatalog())
+    now = int(time.time())
+    with db_split.sqlite_connect(path) as db:
+        db.execute("INSERT INTO telegram_gift_sync_state(id,last_synced_at,gift_count,source) VALUES(1,?,3,'telegram_mtproto')", (now,))
+        for pos, price in enumerate((25, 0, 0)):
+            db.execute("""INSERT INTO telegram_mtproto_gift_catalog
+                (gift_id,title,stars,limited,sold_out,availability_remains,source_payload,position,synced_at)
+                VALUES(?,'Gift',?,1,1,0,'{}',?,?)""", (str(pos), price, pos, now))
+        db.execute("INSERT INTO telegram_gift_prices(gift_id,price_stars,supply,sold,updated_at) VALUES('2',40,0,2,?)", (now,))
+    press("wgadm:dbgiftaddall")
+    assert "У 1 подарков нет цены" in type_text("3").sent[0][0]
+    assert query(path, "SELECT gift_id,price_stars,supply FROM telegram_gift_prices") == [("2", 40, 0)]
+    assert "положительное" in type_text("0").sent[0][0]
+    assert "цену от 1" in type_text("1000000001").sent[0][0]
+    press("wgadm:dbgifts")
+    assert ADMIN not in bot_module.ADMIN_INPUT
+    assert not type_text("50").sent
+    assert query(path, "SELECT COUNT(*) FROM telegram_gift_prices") == [(1,)]
+
+    press("wgadm:dbgiftaddall")
+    type_text("3")
+    assert "подарков: 3" in type_text("50").sent[0][0]
+    assert query(path, "SELECT gift_id,price_stars FROM telegram_gift_prices ORDER BY gift_id") == [("0", 25), ("1", 50), ("2", 40)]
+    assert query(path, "SELECT COUNT(*) FROM telegram_gift_prices WHERE supply>sold") == [(3,)]
