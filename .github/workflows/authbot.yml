@@ -151,3 +151,23 @@ jobs:
           docker image inspect waysgram-authbot:test \
             --format '{{json .Config.Healthcheck}}' |
             grep -q '127.0.0.1'
+
+  export-android-source:
+    name: Temporary export of Android source archive
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Reconstruct and validate source archive
+        run: |
+          set -euo pipefail
+          cat WaysGram-Android.zip.part1 WaysGram-Android.zip.part2 WaysGram-Android.zip.part3 WaysGram-Android.zip.part4 WaysGram-Android.zip.part5 > /tmp/WaysGram-Android.zip
+          unzip -tq /tmp/WaysGram-Android.zip
+      - name: Upload source archive for the code audit
+        uses: actions/upload-artifact@v4
+        with:
+          name: waysgram-android-source-audit
+          path: /tmp/WaysGram-Android.zip
+          compression-level: 0
+          retention-days: 1
