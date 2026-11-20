@@ -8020,6 +8020,98 @@ def test_formatting_media_caption_round_trip_and_drop(api_env, monkeypatch) -> N
     run(scenario())
 
 
+def test_forward_copies_formatting_and_drop_media_captions_clears_it(api_env, monkeypatch) -> None:
+    """Stage 1 continuation: full formatting transfer on forward — snapshot copies keep
+    formatting in every chat type; drop_media_captions clears the caption formatting."""
+    path, _, _, app = api_env
+    for uid in (86961, 86962):
+        add_account(api_env, uid, f'fwd_fmt_{uid}')
+        add_session(path, uid, f'fwd-fmt-{uid}')
+    monkeypatch.setattr(messenger_api, '_firebase_service_account', lambda: None)
+    async def scenario():
+        h = lambda uid: {'Authorization': f'Bearer fwd-fmt-{uid}'}
+        entities = [{'type': 'bold', 'offset': 0, 'length': 2},
+                    {'type': 'text_url', 'offset': 3, 'length': 2, 'url': 'https://example.org/x'}]
+        async with await client_for(app) as client:
+            group = (await client.post('/api/groups', headers=h(86961), json={'title': 'Fwd fmt'})).json()['id']
+            assert (await client.post(f'/api/groups/{group}/members', headers=h(86961), json={'telegram_id': 86962})).status_code == 201
+            channel_data = (await client.post('/api/channels', headers=h(86961), json={'title': 'Fwd fmt', 'is_public': False})).json()
+            channel = channel_data['id']
+            assert (await client.post('/api/channels/join', headers=h(86962), json={'invite_link': channel_data['invite_link']})).status_code == 200
+            upload = await client.post('/api/media/images', headers={**h(86961), 'Content-Type': 'image/png'}, content=test_preview_png())
+            media_id = upload.json()['id']
+            sources = []
+            for scope, url, extra in (('dm', '/api/messages', {'recipient_id': 86962}),
+                                      ('group', f'/api/groups/{group}/messages', {}),
+                                      ('channel', f'/api/channels/{channel}/messages', {})):
+                sent = await client.post(url, headers=h(86961), json={**extra, 'body': ' A bc ', 'entities': entities, 'silent': True})
+                assert sent.status_code == 201, sent.text
+                plain_id = sent.json()['id']
+                media_sent = await client.post(url, headers=h(86961), json={**extra, 'body': ' A bc ', 'entities': entities, 'media_id': media_id, 'silent': True})
+                assert media_sent.status_code == 201, media_sent.text
+                media_message_id = media_sent.json()['id']
+                sources.append((scope, url, plain_id, media_message_id))
+            for scope, url, plain_id, media_message_id in sources:
+                # All forwards target the private chat A->B; the copies land in that target history.
+                history_url = '/api/messages?with=86962'
+                forward = {'source_scope': scope, 'source_peer_id': 86962 if scope == 'dm' else (group if scope == 'group' else channel),
+                           'target_scope': 'dm', 'target_peer_id': 86962, 'silent': True}
+                plain = await client.post('/api/forward', headers=h(86961), json={**forward, 'message_ids': [plain_id]})
+                assert plain.status_code == 201, plain.text
+                assert plain.json()['messages'][0]['entities'] == entities
+                saved = next(row for row in (await client.get(history_url, headers=h(86961))).json()['messages']
+                             if row['id'] == plain.json()['messages'][0]['id'])
+                assert saved['entities'] == entities
+                copy = await client.post('/api/forward', headers=h(86961), json={**forward, 'message_ids': [media_message_id]})
+                assert copy.status_code == 201, copy.text
+                assert copy.json()['messages'][0]['entities'] == entities
+                dropped = await client.post('/api/forward', headers=h(86961),
+                                            json={**forward, 'message_ids': [media_message_id], 'drop_media_captions': True})
+                assert dropped.status_code == 201, dropped.text
+                assert dropped.json()['messages'][0]['body'] == '' and 'entities' not in dropped.json()['messages'][0]
+                saved = next(row for row in (await client.get(history_url, headers=h(86961))).json()['messages']
+                             if row['id'] == dropped.json()['messages'][0]['id'])
+                assert 'entities' not in saved
+    run(scenario())
+
+
+def test_edit_media_v2_preserves_and_clears_caption_formatting(api_env, monkeypatch) -> None:
+    """Stage 1 continuation: media replacement preserves or updates the formatted
+    caption via /media/v2, including clearing the caption and its formatting."""
+    path, _, _, app = api_env
+    for uid in (86971, 86972):
+        add_account(api_env, uid, f'media_fmt_{uid}')
+        add_session(path, uid, f'media-fmt-{uid}')
+    monkeypatch.setattr(messenger_api, '_firebase_service_account', lambda: None)
+    async def scenario():
+        h = {'Authorization': 'Bearer media-fmt-86971'}
+        h2 = {'Authorization': 'Bearer media-fmt-86972'}
+        entities = [{'type': 'bold', 'offset': 0, 'length': 2}]
+        italic = [{'type': 'italic', 'offset': 0, 'length': 4}]
+        async with await client_for(app) as client:
+            upload = await client.post('/api/media/images', headers={**h, 'Content-Type': 'image/png'}, content=test_preview_png())
+            media_id = upload.json()['id']
+            upload2 = await client.post('/api/media/images', headers={**h, 'Content-Type': 'image/png'}, content=test_preview_png())
+            media_id2 = upload2.json()['id']
+            sent = await client.post('/api/messages', headers=h, json={'recipient_id': 86972, 'body': 'cap 🌷', 'entities': entities, 'media_id': media_id})
+            assert sent.status_code == 201, sent.text
+            mid = sent.json()['id']
+            replaced = await client.put(f'/api/messages/{mid}/media/v2', headers=h, json={'media_id': media_id2})
+            assert replaced.status_code == 200, replaced.text
+            found = next(row for row in (await client.get('/api/messages?with=86972', headers=h)).json()['messages'] if row['id'] == mid)
+            assert found['body'] == 'cap 🌷' and found['entities'] == entities and found['media_id'] == media_id2
+            replaced = await client.put(f'/api/messages/{mid}/media/v2', headers=h,
+                                        json={'media_id': media_id, 'body': 'newcap 🌷', 'entities': italic})
+            assert replaced.status_code == 200, replaced.text
+            found = next(row for row in (await client.get('/api/messages?with=86972', headers=h)).json()['messages'] if row['id'] == mid)
+            assert found['body'] == 'newcap 🌷' and found['entities'] == italic and found['media_id'] == media_id
+            replaced = await client.put(f'/api/messages/{mid}/media/v2', headers=h, json={'media_id': media_id, 'body': ''})
+            assert replaced.status_code == 200, replaced.text
+            found = next(row for row in (await client.get('/api/messages?with=86972', headers=h)).json()['messages'] if row['id'] == mid)
+            assert found['body'] == '' and 'entities' not in found
+    run(scenario())
+
+
 def test_typing_active_snapshot_is_private_paginated_and_ephemeral(api_env) -> None:
     path, _, _, app = api_env
     for uid in (86931, 86932, 86933, 86934):
