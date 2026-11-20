@@ -10713,10 +10713,11 @@ def build_messenger_router(
 
     async def set_message_reactions(
         scope: str, chat_id: int, message_id: int, user_id: int,
-        requested: Any, peer_id: Any = None,
+        requested: Any, peer_id: Any = None, extended: bool = False,
     ) -> dict[str, Any]:
         """Atomically replace this account's emoji set, never toggle on retry."""
-        allowed = {"👍", "❤️", "😂", "😮", "😢", "🎉", "🙏"}
+        basic = {"👍", "❤️", "😂", "😮", "😢", "🎉", "🙏"}
+        allowed = {"👍", "❤️", "😂", "😮", "😢", "🎉", "🙏", "👎", "🔥", "🥰", "👏", "😁", "🤔", "🤯", "😱", "🤬", "😡", "🤩", "😎", "💯", "❤️‍🔥", "💔", "💩", "🤮", "🤝", "👀", "🙌", "😍", "🥳", "😭", "😘", "🤣", "🤗", "🫡", "🕊️", "⚡", "🏆", "🍾", "🎄", "🤡"} if extended else basic
         if not isinstance(requested, list) or len(requested) > 3:
             raise HTTPException(status_code=400, detail="Можно выбрать не более трёх реакций")
         if any(not isinstance(value, str) or value not in allowed for value in requested) or len(set(requested)) != len(requested):
@@ -10769,6 +10770,10 @@ def build_messenger_router(
                    AND user_telegram_id=? ORDER BY created_at,reaction""", (scope, chat_id, message_id, user_id),
             )
             previous = {str(row[0]) for row in await cur.fetchall()}
+            # Older clients cannot display extended choices and would otherwise
+            # unintentionally erase them when replacing their own reaction set.
+            if not extended and previous - basic:
+                raise HTTPException(status_code=409, detail="Обновите приложение для изменения расширенных реакций")
             desired = set(requested)
             changed = previous != desired
             if changed:
@@ -11189,6 +11194,25 @@ def build_messenger_router(
         return await toggle_message_reaction(
             "channel", channel_id, message_id, int(user["telegram_id"]), str(payload.get("reaction") or "")
         )
+
+    @router.put("/api/messages/{message_id}/reactions/v2")
+    async def set_direct_reactions_v2(message_id: int, payload: dict[str, Any],
+                                      authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        user = await current_user(authorization)
+        return await set_message_reactions("dm", 0, message_id, int(user["telegram_id"]),
+                                           payload.get("reactions"), payload.get("peer_id"), True)
+
+    @router.put("/api/groups/{group_id}/messages/{message_id}/reactions/v2")
+    async def set_group_reactions_v2(group_id: int, message_id: int, payload: dict[str, Any],
+                                     authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        user = await current_user(authorization)
+        return await set_message_reactions("group", group_id, message_id, int(user["telegram_id"]), payload.get("reactions"), extended=True)
+
+    @router.put("/api/channels/{channel_id}/messages/{message_id}/reactions/v2")
+    async def set_channel_reactions_v2(channel_id: int, message_id: int, payload: dict[str, Any],
+                                       authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        user = await current_user(authorization)
+        return await set_message_reactions("channel", channel_id, message_id, int(user["telegram_id"]), payload.get("reactions"), extended=True)
 
     @router.put("/api/messages/{message_id}/reactions")
     async def set_direct_reactions(message_id: int, payload: dict[str, Any],
