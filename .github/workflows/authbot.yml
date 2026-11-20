@@ -152,6 +152,74 @@ jobs:
             --format '{{json .Config.Healthcheck}}' |
             grep -q '127.0.0.1'
 
+
+  apply-stage1-android-patch:
+    name: Apply and statically verify stage 1 Android patch
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout pull request head
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.event.pull_request.head.repo.full_name }}
+          ref: ${{ github.event.pull_request.head.ref }}
+          token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Apply Android source patch and rebuild split archive
+        env:
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+        run: |
+          set -euo pipefail
+          test -s android-stage1.patch
+          cat WaysGram-Android.zip.part1 WaysGram-Android.zip.part2 WaysGram-Android.zip.part3 WaysGram-Android.zip.part4 WaysGram-Android.zip.part5 > /tmp/WaysGram-Android.original.zip
+          unzip -tq /tmp/WaysGram-Android.original.zip
+          mkdir -p /tmp/waysgram-android-source
+          unzip -q /tmp/WaysGram-Android.original.zip -d /tmp/waysgram-android-source
+          patch --batch --forward -p1 -d /tmp/waysgram-android-source < android-stage1.patch
+          python3 - <<'PY'
+          from pathlib import Path
+          import zipfile
+
+          original = Path("/tmp/WaysGram-Android.original.zip")
+          rebuilt = Path("/tmp/WaysGram-Android.updated.zip")
+          replacement = Path("/tmp/waysgram-android-source/WaysGram-Android/TMessagesProj/src/main/java/org/telegram/tgnet/WaysGramMessages.java")
+          target = "WaysGram-Android/TMessagesProj/src/main/java/org/telegram/tgnet/WaysGramMessages.java"
+          with zipfile.ZipFile(original, "r") as source, zipfile.ZipFile(rebuilt, "w", allowZip64=True) as output:
+              for info in source.infolist():
+                  data = replacement.read_bytes() if info.filename == target else source.read(info.filename)
+                  output.writestr(info, data)
+          with zipfile.ZipFile(rebuilt, "r") as archive:
+              bad = archive.testzip()
+              assert bad is None, f"Corrupt ZIP member: {bad}"
+              assert target in archive.namelist()
+          part_size = 23_068_672
+          data = rebuilt.read_bytes()
+          assert len(data) > part_size * 4
+          for index in range(5):
+              chunk = data[index * part_size:(index + 1) * part_size]
+              path = Path(f"WaysGram-Android.zip.part{index + 1}")
+              path.write_bytes(chunk)
+          assert Path("WaysGram-Android.zip.part5").stat().st_size > 0
+          PY
+      - name: Run Android source contract checks (no Gradle build)
+        run: python3 scripts/test_android_messaging.py
+      - name: Commit updated source archive
+        env:
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+        run: |
+          set -euo pipefail
+          git add WaysGram-Android.zip.part1 WaysGram-Android.zip.part2 WaysGram-Android.zip.part3 WaysGram-Android.zip.part4 WaysGram-Android.zip.part5
+          if git diff --cached --quiet; then
+            echo "Android source archive already contains the requested patch."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "feat: remove single message attachments"
+          git push origin "HEAD:refs/heads/${HEAD_REF}"
+
   export-android-source:
     name: Temporary export of Android source archive
     if: github.event_name == 'pull_request'
