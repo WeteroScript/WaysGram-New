@@ -34,7 +34,7 @@ ATTRIBUTE_RARITIES = ("uncommon", "rare", "epic", "legendary")
 GIFT_ATTRIBUTE_TTL_SECONDS = 6 * 60 * 60
 # A preview is incomplete; retry sooner so transient Telegram failures don't pin
 # every upgrade to the same sample for six hours.
-GIFT_ATTRIBUTE_SAMPLE_TTL_SECONDS = 5 * 60
+GIFT_ATTRIBUTE_SAMPLE_TTL_SECONDS = 60
 # How many model/pattern documents per gift are downloaded ahead of time. ``0`` means
 # "everything", which the operator can choose when the host has enough disk space.
 PREFETCH_ATTRIBUTES_PER_GIFT = 24
@@ -795,12 +795,15 @@ class TelegramMTProtoGiftCatalog:
                         return document
             except Exception as error:  # noqa: BLE001 - old/corrupt TL data must fall back to Telegram
                 LOGGER.warning("Stored gift document %s could not be restored: %s", document_id, type(error).__name__)
-        await self.attributes(database_path, key, refresh=True)
-        documents = self._attribute_documents.get(key) or {}
-        document = documents.get(int(document_id))
+        # A small, gift-scoped allowlist has an independently identified exact
+        # document. Resolve that first instead of waiting for the full collection
+        # refresh, which can be slow or return only a preview.
+        document = await self._known_remote_model(key, int(document_id))
         if document is not None:
             return document
-        return await self._known_remote_model(key, int(document_id))
+        await self.attributes(database_path, key, refresh=True)
+        documents = self._attribute_documents.get(key) or {}
+        return documents.get(int(document_id))
 
     async def _known_remote_model(self, gift_id: str, document_id: int) -> Any:
         # An explicitly identified model may be resolvable by document ID even when

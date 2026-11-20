@@ -701,7 +701,10 @@ def test_preview_set_is_retried_before_full_set_ttl(tmp_path: Path) -> None:
         client = FakeAttributeClient()
         client.fail_attributes = True
         provider = TelegramMTProtoGiftCatalog(client, database)
+        assert GIFT_ATTRIBUTE_SAMPLE_TTL_SECONDS == 60
         assert len(await provider.attributes(database, "123456789")) == 1
+        client.fail_attributes = False
+        assert len(await provider.attributes(database, "123456789")) == 1  # still fresh
         async with aiosqlite.connect(database) as db:
             await db.execute("UPDATE telegram_mtproto_gift_attribute_sync SET fetched_at=? WHERE gift_id=?",
                              (int(time.time()) - GIFT_ATTRIBUTE_SAMPLE_TTL_SECONDS - 1, "123456789"))
@@ -822,7 +825,37 @@ def test_known_heart_model_can_resolve_by_id_when_attribute_set_is_missing(tmp_p
         content, mime = await provider.download_attribute(path, gift_id, document_id)
         assert content == b'\x1f\x8b' + b'a' * 30 and mime == 'application/x-tgsticker'
         assert provider._attribute_documents[gift_id][document_id] is document
+        provider.attributes.assert_not_awaited()  # exact document does not wait for a collection refresh
         # The known identifier is scoped to Heart Locket only, not an arbitrary gift.
         assert await provider._known_remote_model('1', document_id) is None
         assert await provider._known_remote_model(gift_id, document_id + 1) is None
+    asyncio.run(scenario())
+
+
+def test_known_document_failure_falls_back_to_full_set_without_wrong_match(tmp_path):
+    from telethon.tl import types
+    from datetime import datetime, timezone
+    from unittest.mock import AsyncMock
+
+    gift_id = '5868455043362980631'
+    document_id = 5226650538359158786
+    document = types.Document(id=document_id, access_hash=1, file_reference=b'ref',
+                              date=datetime.now(timezone.utc), mime_type='application/x-tgsticker',
+                              size=32, dc_id=2, attributes=[])
+
+    async def scenario():
+        path = tmp_path / 'gifts.sqlite'
+        await _prepare_database(path)
+        provider = TelegramMTProtoGiftCatalog(object(), path)
+        provider._known_remote_model = AsyncMock(return_value=None)
+        async def refresh(database, key, refresh=False):
+            assert key == gift_id and refresh is True
+            provider._attribute_documents[key] = {document_id: document}
+            return []
+        provider.attributes = AsyncMock(side_effect=refresh)
+        assert await provider._attribute_document(path, gift_id, document_id) is document
+        provider.attributes.assert_awaited_once()
+        provider._attribute_documents.clear()
+        provider.attributes = AsyncMock(return_value=[])
+        assert await provider._attribute_document(path, gift_id, document_id + 1) is None
     asyncio.run(scenario())
