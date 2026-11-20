@@ -3076,6 +3076,7 @@ def build_messenger_router(
             "url": f"/api/media/{media_id}",
         }
 
+    @router.post("/api/media/documents/original", status_code=201)
     @router.post("/api/media/documents", status_code=201)
     async def upload_document(
         request: Request,
@@ -3083,8 +3084,11 @@ def build_messenger_router(
     ) -> dict[str, Any]:
         user = await current_user(authorization)
         uid = int(user["telegram_id"])
+        original_document = request.url.path.endswith("/original")
         declared_type = str(request.headers.get("content-type", "")).split(";", 1)[0].strip().lower()
         media_kind = str(request.headers.get("x-media-kind", "")).strip().lower()
+        if original_document and (declared_type != "application/octet-stream" or media_kind or request.headers.get("x-media-metadata")):
+            raise HTTPException(status_code=400, detail="Некорректные параметры исходного файла")
         if media_kind not in {"", "video_note", "voice", "video", "audio"}:
             raise HTTPException(status_code=400, detail="Неизвестный тип медиафайла")
         metadata_header = request.headers.get("x-media-metadata", "")
@@ -3124,7 +3128,7 @@ def build_messenger_router(
             "audio/mpeg", "audio/mp4", "audio/ogg", "audio/wav", "audio/flac",
             "application/octet-stream",
         }
-        if declared_type not in allowed_types:
+        if not original_document and declared_type not in allowed_types:
             raise HTTPException(
                 status_code=415,
                 detail="Поддерживаются JPEG, PNG, WebP, PDF, TXT, CSV, ZIP, RAR, 7Z, TAR, GZIP, BZIP2, XZ, MP4, WebM, MOV, MKV, MP3, M4A, OGG и WAV",
@@ -3148,9 +3152,25 @@ def build_messenger_router(
         raw_filename = request.headers.get("x-filename", "document")
         try:
             filename = unquote(raw_filename, errors="strict")
-            normalized, mime_type, extension, safe_name = await asyncio.to_thread(
-                _normalize_uploaded_document, bytes(incoming), filename
-            )
+            if original_document:
+                # A file deliberately sent as a document must not be decoded or
+                # re-encoded. Keep its storage name unrelated to user input.
+                safe_name = filename.replace("\\", "/").rsplit("/", 1)[-1]
+                safe_name = "".join(c for c in safe_name if not unicodedata.category(c).startswith("C"))
+                safe_name = safe_name.strip(" .") or "document"
+                if len(safe_name) > 120:
+                    suffix = Path(safe_name).suffix
+                    if len(suffix) > 32:
+                        suffix = ""
+                    safe_name = safe_name[:120 - len(suffix)].rstrip(" .") + suffix
+                normalized = bytes(incoming)
+                mime_type = mimetypes.guess_type(safe_name)[0] or "application/octet-stream"
+                extension = ".bin"
+                media_kind = "document"
+            else:
+                normalized, mime_type, extension, safe_name = await asyncio.to_thread(
+                    _normalize_uploaded_document, bytes(incoming), filename
+                )
         except (UnicodeDecodeError, ValueError) as exc:
             raise HTTPException(status_code=415, detail=str(exc)) from exc
         if declared_type not in {mime_type, "application/octet-stream"}:
@@ -3240,9 +3260,9 @@ def build_messenger_router(
         if kind == "image":
             mime_clause = "AND lower(a.mime_type) LIKE 'image/%' AND COALESCE(a.media_kind,'') <> 'document'"
         elif kind == "video":
-            mime_clause = "AND lower(a.mime_type) LIKE 'video/%'"
+            mime_clause = "AND lower(a.mime_type) LIKE 'video/%' AND COALESCE(a.media_kind,'') <> 'document'"
         elif kind == "audio":
-            mime_clause = "AND lower(a.mime_type) LIKE 'audio/%'"
+            mime_clause = "AND lower(a.mime_type) LIKE 'audio/%' AND COALESCE(a.media_kind,'') <> 'document'"
         elif kind == "document":
             mime_clause = """AND (COALESCE(a.media_kind,'') = 'document' OR (
                              lower(a.mime_type) NOT LIKE 'image/%'
@@ -3630,9 +3650,14 @@ def build_messenger_router(
 
         mime_type = str(media["mime_type"])
         original_name = str(media["original_name"] or "document")
+        # Arbitrary original documents are untrusted: never render them in the
+        # API origin, regardless of the extension-derived display MIME.
+        is_document = str(media["media_kind"] or "") == "document"
+        if is_document:
+            mime_type = "application/octet-stream"
         content_disposition = (
             "inline"
-            if mime_type.startswith(("image/", "video/", "audio/"))
+            if not is_document and mime_type.startswith(("image/", "video/", "audio/"))
             else "attachment; filename=\"" + re.sub(r"[^A-Za-z0-9._-]", "_", original_name)
                  + "\"; filename*=UTF-8''" + quote(original_name, safe="")
         )
@@ -3640,6 +3665,7 @@ def build_messenger_router(
             "Accept-Ranges": "bytes",
             "Cache-Control": "private, max-age=3600",
             "X-Content-Type-Options": "nosniff",
+            "Content-Security-Policy": "default-src 'none'; sandbox",
             "Content-Disposition": content_disposition,
         }
 
