@@ -9021,6 +9021,32 @@ def test_media_spoiler_and_video_cover_metadata_access(api_env) -> None:
             with Image.open(BytesIO(visible_cover.content)) as cover_image:
                 assert cover_image.size == (16, 16)
 
+            replacement_cover = await client.post(
+                "/api/media/images",
+                headers={**owner, "Content-Type": "image/png"},
+                content=test_preview_png(),
+            )
+            assert replacement_cover.status_code == 201, replacement_cover.text
+            replacement_cover_id = replacement_cover.json()["id"]
+            edited_metadata = {"spoiler": False, "video_cover_media_id": replacement_cover_id}
+            edited = await client.put(
+                f"/api/messages/{message_id}/media/v2",
+                headers=owner,
+                json={"media_id": video_id, "media_metadata": edited_metadata},
+            )
+            assert edited.status_code == 200, edited.text
+            edited_history = await client.get(
+                "/api/messages",
+                headers=receiver,
+                params={"with": 99101, "message_ids": str(message_id)},
+            )
+            assert edited_history.status_code == 200, edited_history.text
+            assert json.loads(edited_history.json()["messages"][0]["media_metadata"]) == {
+                "video_cover_media_id": replacement_cover_id,
+            }
+            assert (await client.get(f"/api/media/{cover_id}", headers=receiver)).status_code == 404
+            assert (await client.get(f"/api/media/{replacement_cover_id}", headers=receiver)).status_code == 200
+
             # The link must not make the cover public to unrelated accounts.
             hidden_from_outsider = await client.get(f"/api/media/{cover_id}", headers=outsider)
             assert hidden_from_outsider.status_code == 404
@@ -9028,7 +9054,7 @@ def test_media_spoiler_and_video_cover_metadata_access(api_env) -> None:
             # A receiver who hides the parent message loses access to its cover.
             hidden = await client.delete(f"/api/messages/{message_id}?for=me", headers=receiver)
             assert hidden.status_code == 200, hidden.text
-            no_longer_visible = await client.get(f"/api/media/{cover_id}", headers=receiver)
+            no_longer_visible = await client.get(f"/api/media/{replacement_cover_id}", headers=receiver)
             assert no_longer_visible.status_code == 404
 
             # An account cannot attach somebody else's uploaded image as a cover.
