@@ -8909,7 +8909,7 @@ def test_edit_message_can_remove_single_attachment_but_not_album_member(api_env)
 
             # An album is one logical message group; removing one member would corrupt it.
             album_ids = []
-            for index in range(2):
+            for index in range(3):
                 upload = await client.post(
                     "/api/media/images",
                     headers={**h(98701), "Content-Type": "image/png"},
@@ -8921,12 +8921,23 @@ def test_edit_message_can_remove_single_attachment_but_not_album_member(api_env)
                 **h(98701), "Idempotency-Key": "remove-media-album-0001",
             }, json={"recipient_id": 98702, "media_ids": album_ids, "body": "Album caption"})
             assert album.status_code == 201, album.text
-            member_id = album.json()["messages"][0]["id"]
+            original_album = album.json()["messages"]
+            album_id = album.json()["album_id"]
+            member_id = original_album[0]["id"]
             album_remove = await client.put(
                 f"/api/messages/{member_id}/media/v2",
                 headers=h(98701),
                 json={"remove_media": True},
             )
-            assert album_remove.status_code == 409, album_remove.text
+            assert album_remove.status_code == 200, album_remove.text
+            assert album_remove.json()["media_removed"] is True
+            album_history = (await client.get("/api/messages?with=98701", headers=h(98702))).json()["messages"]
+            detached = next(item for item in album_history if item["id"] == member_id)
+            assert detached["media_id"] is None
+            assert detached["body"] == "Album caption"
+            survivors = [item for item in album_history if item["id"] in {row["id"] for row in original_album[1:]}]
+            assert len(survivors) == 2
+            assert all(item["media_album_id"] == album_id and item["media_album_count"] == 2 for item in survivors)
+            assert sorted(item["media_album_index"] for item in survivors) == [0, 1]
 
     run(scenario())
