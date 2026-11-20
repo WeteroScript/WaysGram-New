@@ -3369,13 +3369,26 @@ def build_messenger_router(
         """
         user = await current_user(authorization)
         uid = int(user["telegram_id"])
-        if scope not in ("dm", "group", "channel") or kind not in ("photos", "video", "photo_video"):
+        if scope not in ("dm", "group", "channel") or kind not in ("photos", "video", "photo_video", "music", "round_voice", "document"):
             raise HTTPException(status_code=400, detail="Некорректный тип медиа или чата")
         if before_id and from_id:
             raise HTTPException(status_code=400, detail="Укажите только одно направление страницы")
         photo = "(lower(a.mime_type) LIKE 'image/%' AND COALESCE(a.media_kind,'') <> 'document')"
-        video = "(lower(a.mime_type) LIKE 'video/%' AND a.media_kind='video')"
-        media_clause = photo if kind == "photos" else video if kind == "video" else f"({photo} OR {video})"
+        video = "(lower(a.mime_type) LIKE 'video/%' AND COALESCE(a.media_kind,'')='video')"
+        # Mirror the native document attributes, including its repair of old
+        # recordings whose kind was not stored at upload time.
+        voice = """((COALESCE(a.media_kind,'')='voice' AND lower(a.mime_type) LIKE 'audio/%')
+                    OR (COALESCE(a.media_kind,'')='video_note' AND lower(a.mime_type) LIKE 'video/%')
+                    OR (COALESCE(a.media_kind,'')='' AND
+                        ((lower(a.mime_type) LIKE 'audio/%' AND substr(lower(COALESCE(a.original_name,'')),1,22)='audio_recording_voice_')
+                         OR (lower(a.mime_type) LIKE 'video/%' AND substr(lower(COALESCE(a.original_name,'')),1,12)='round_video_'))))"""
+        music = "(COALESCE(a.media_kind,'')='audio' AND lower(a.mime_type) LIKE 'audio/%')"
+        clauses = {
+            "photos": photo, "video": video, "photo_video": f"({photo} OR {video})",
+            "music": music, "round_voice": voice,
+            "document": f"NOT ({photo} OR {video} OR {voice} OR {music})",
+        }
+        media_clause = clauses[kind]
         async with aiosqlite.connect(db_path()) as db:
             db.row_factory = aiosqlite.Row
             await db.execute("BEGIN")
