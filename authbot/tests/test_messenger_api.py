@@ -7219,8 +7219,27 @@ def test_forward_batch_enforces_limits_and_cleans_all_scopes(api_env) -> None:
             two = (await client.post('/api/messages', headers=h(87202), json={'recipient_id': 87201, 'body': 'Two'})).json()['id']
             base = {'source_scope': 'dm', 'source_peer_id': 87202, 'target_scope': 'channel', 'target_peer_id': channel, 'message_ids': [one, two], 'silent': True}
             for malformed in ({**base, 'message_ids': [one, one]}, {**base, 'message_ids': [True]},
-                              {**base, 'message_ids': list(range(1, 22))}, {**base, 'silent': 'false'}):
+                              {**base, 'message_ids': list(range(1, 102))}, {**base, 'silent': 'false'}):
                 assert (await client.post('/api/forward', headers=h(87201), json=malformed)).status_code == 400
+
+            # The transaction limit is 100 messages; all copies must be written together.
+            with db_split.sqlite_connect(path) as db:
+                now = int(time.time())
+                db.executemany(
+                    'INSERT INTO messages(sender_telegram_id,recipient_telegram_id,body,created_at) VALUES(?,?,?,?)',
+                    [(87202, 87201, f'Bulk source {i}', now) for i in range(98)],
+                )
+                extra_ids = [row[0] for row in db.execute(
+                    'SELECT id FROM messages WHERE sender_telegram_id=? AND recipient_telegram_id=? ORDER BY id DESC LIMIT 98',
+                    (87202, 87201),
+                ).fetchall()]
+            bulk_ids = [one, two] + list(reversed(extra_ids))
+            bulk = await client.post('/api/forward', headers={**h(87201), 'Idempotency-Key': 'forward-100-items-0001'}, json={
+                **base, 'target_scope': 'group', 'target_peer_id': group, 'message_ids': bulk_ids,
+            })
+            assert bulk.status_code == 201, bulk.text
+            assert len(bulk.json()['messages']) == 100
+
             with db_split.sqlite_connect(path) as db:
                 for i in range(messenger_api.CHANNEL_POSTS_PER_MINUTE - 1):
                     db.execute('INSERT INTO channel_messages(channel_id,author_telegram_id,body,created_at) VALUES(?,?,?,?)', (channel, 87201, str(i), int(time.time())))
