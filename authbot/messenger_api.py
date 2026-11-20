@@ -1591,6 +1591,8 @@ async def init_messenger_storage(database_path: Path) -> None:
         for table_name in ("messages", "group_messages", "channel_messages"):
             cur = await db.execute(f"PRAGMA {db_split.SCHEMA}.table_info({table_name})")
             columns = {str(row[1]) for row in await cur.fetchall()}
+            if "silent" not in columns:
+                await db.execute(f"ALTER TABLE {db_split.SCHEMA}.{table_name} ADD COLUMN silent INTEGER NOT NULL DEFAULT 0")
             if "entities_json" not in columns:
                 await db.execute(f"ALTER TABLE {db_split.SCHEMA}.{table_name} ADD COLUMN entities_json TEXT NOT NULL DEFAULT '[]'")
             if "media_id" not in columns:
@@ -8007,7 +8009,7 @@ def build_messenger_router(
                         raise HTTPException(status_code=403, detail="Это приватный канал. Нужна ссылка-приглашение.")
                 if after_id:
                     cur = await db.execute(
-                        """SELECT id,channel_id,author_telegram_id AS author_id,body,entities_json,media_id,media_album_id,media_album_index,media_album_count,edited_at,reply_to_id,created_at,
+                        """SELECT id,channel_id,author_telegram_id AS author_id,body,entities_json,channel_messages.silent AS silent,media_id,media_album_id,media_album_index,media_album_count,edited_at,reply_to_id,created_at,
                                   (SELECT body FROM channel_messages AS replied WHERE replied.id=channel_messages.reply_to_id) AS reply_to_body,
                                   (SELECT author_telegram_id FROM channel_messages AS replied WHERE replied.id=channel_messages.reply_to_id) AS reply_to_sender_id,
                                   (SELECT group_concat(reaction || ':' || reaction_count, ',')
@@ -8026,7 +8028,7 @@ def build_messenger_router(
                     id_filter = "" if selected_ids is None else " AND id IN (" + ",".join("?" for _ in selected_ids) + ")"
                     selected_limit = limit if selected_ids is None else len(selected_ids)
                     cur = await db.execute(
-                        """SELECT id,channel_id,author_telegram_id AS author_id,body,entities_json,media_id,media_album_id,media_album_index,media_album_count,edited_at,reply_to_id,created_at,
+                        """SELECT id,channel_id,author_telegram_id AS author_id,body,entities_json,channel_messages.silent AS silent,media_id,media_album_id,media_album_index,media_album_count,edited_at,reply_to_id,created_at,
                                   (SELECT body FROM channel_messages AS replied WHERE replied.id=channel_messages.reply_to_id) AS reply_to_body,
                                   (SELECT author_telegram_id FROM channel_messages AS replied WHERE replied.id=channel_messages.reply_to_id) AS reply_to_sender_id,
                                   (SELECT group_concat(reaction || ':' || reaction_count, ',')
@@ -8142,7 +8144,7 @@ def build_messenger_router(
             db.row_factory = aiosqlite.Row
             await channel_row(channel_id)
             cur = await db.execute(
-                """SELECT id,channel_id,author_telegram_id AS author_id,body,entities_json,media_id,media_album_id,media_album_index,media_album_count,edited_at,reply_to_id,created_at,
+                """SELECT id,channel_id,author_telegram_id AS author_id,body,entities_json,channel_messages.silent AS silent,media_id,media_album_id,media_album_index,media_album_count,edited_at,reply_to_id,created_at,
                           (SELECT body FROM channel_messages AS replied WHERE replied.id=channel_messages.reply_to_id) AS reply_to_body,
                                   (SELECT author_telegram_id FROM channel_messages AS replied WHERE replied.id=channel_messages.reply_to_id) AS reply_to_sender_id,
                                   (SELECT group_concat(reaction || ':' || reaction_count, ',')
@@ -8236,6 +8238,8 @@ def build_messenger_router(
                 (channel_id, uid, body, media_id, reply_to_id, now),
             )
             message_id = int(cur.lastrowid)
+            if silent:
+                await db.execute("UPDATE channel_messages SET silent=1 WHERE id=?", (message_id,))
             if entities:
                 await db.execute("UPDATE channel_messages SET entities_json=? WHERE id=?", (_message_entities_json(entities), message_id))
             if contact_payload:
@@ -8388,6 +8392,8 @@ def build_messenger_router(
                     ),
                 )
                 message_id = int(cur.lastrowid)
+                if silent:
+                    await db.execute("UPDATE channel_messages SET silent=1 WHERE id=?", (message_id,))
                 if caption_entities[index]:
                     await db.execute("UPDATE channel_messages SET entities_json=? WHERE id=?",
                                      (_message_entities_json(caption_entities[index]), message_id))
@@ -8539,7 +8545,7 @@ def build_messenger_router(
         params: tuple[Any, ...] = (uid, peer, peer, uid, uid)
         base = """
             SELECT id,sender_telegram_id AS sender_id,
-                   recipient_telegram_id AS recipient_id,body,entities_json,media_id,edited_at,reply_to_id,created_at,
+                   recipient_telegram_id AS recipient_id,body,entities_json,messages.silent AS silent,media_id,edited_at,reply_to_id,created_at,
                    media_album_id,media_album_index,media_album_count,
                    forwarded_from_telegram_id,forwarded_from_message_id,
                    (SELECT display_name FROM accounts WHERE telegram_id=messages.forwarded_from_telegram_id) AS forwarded_from_display_name,
@@ -8785,7 +8791,7 @@ def build_messenger_router(
                 raise HTTPException(status_code=404, detail="Собеседник не найден")
             cur = await db.execute(
                 """SELECT id,sender_telegram_id AS sender_id,
-                          recipient_telegram_id AS recipient_id,body,entities_json,media_id,edited_at,reply_to_id,created_at,
+                          recipient_telegram_id AS recipient_id,body,entities_json,messages.silent AS silent,media_id,edited_at,reply_to_id,created_at,
                           forwarded_from_telegram_id,forwarded_from_message_id,
                           (SELECT display_name FROM accounts WHERE telegram_id=messages.forwarded_from_telegram_id) AS forwarded_from_display_name,
                    (SELECT body FROM messages AS replied WHERE replied.id=messages.reply_to_id) AS reply_to_body,
@@ -8918,6 +8924,8 @@ def build_messenger_router(
                 (uid, recipient_id, body, media_id, reply_to_id, now),
             )
             message_id = int(cur.lastrowid)
+            if silent:
+                await db.execute("UPDATE messages SET silent=1 WHERE id=?", (message_id,))
             if entities:
                 await db.execute("UPDATE messages SET entities_json=? WHERE id=?", (_message_entities_json(entities), message_id))
             if contact_payload:
@@ -9326,6 +9334,8 @@ def build_messenger_router(
                     ),
                 )
                 message_id = int(cur.lastrowid)
+                if silent:
+                    await db.execute("UPDATE messages SET silent=1 WHERE id=?", (message_id,))
                 if caption_entities[index]:
                     await db.execute("UPDATE messages SET entities_json=? WHERE id=?",
                                      (_message_entities_json(caption_entities[index]), message_id))
@@ -10017,6 +10027,8 @@ def build_messenger_router(
                 if drop_captions and media_id:
                     entity_json = "[]"
                 target_table = {"dm": "messages", "group": "group_messages", "channel": "channel_messages"}[target_scope]
+                if silent:
+                    await db.execute(f"UPDATE {target_table} SET silent=1 WHERE id=?", (mid,))
                 if entity_json != "[]":
                     await db.execute(f"UPDATE {target_table} SET entities_json=? WHERE id=?", (entity_json, mid))
                 location = item["forward_location"]
@@ -10278,6 +10290,8 @@ def build_messenger_router(
                     (sender_id, recipient_id, body, now),
                 )
                 message_id = int(cur.lastrowid)
+                if silent:
+                    await db.execute("UPDATE messages SET silent=1 WHERE id=?", (message_id,))
                 await record_event(
                     db, "dm", message_id, "new_message", int(sender_id),
                     user_a=int(sender_id), user_b=int(recipient_id),
@@ -10378,6 +10392,8 @@ def build_messenger_router(
                     (sender_id, recipient_id, body, now),
                 )
                 message_id = int(cur.lastrowid)
+                if silent:
+                    await db.execute("UPDATE messages SET silent=1 WHERE id=?", (message_id,))
                 await record_event(
                     db, "dm", message_id, "new_message", int(sender_id),
                     user_a=int(sender_id), user_b=int(recipient_id),
@@ -12680,7 +12696,7 @@ def build_messenger_router(
                 db.row_factory = aiosqlite.Row
                 if after_id:
                     cur = await db.execute(
-                        """SELECT id,group_id,sender_telegram_id AS sender_id,body,entities_json,media_id,media_album_id,media_album_index,media_album_count,edited_at,reply_to_id,created_at,
+                        """SELECT id,group_id,sender_telegram_id AS sender_id,body,entities_json,group_messages.silent AS silent,media_id,media_album_id,media_album_index,media_album_count,edited_at,reply_to_id,created_at,
                                   (SELECT body FROM group_messages AS replied WHERE replied.id=group_messages.reply_to_id) AS reply_to_body,
                                   (SELECT sender_telegram_id FROM group_messages AS replied WHERE replied.id=group_messages.reply_to_id) AS reply_to_sender_id,
                                   (SELECT group_concat(reaction || ':' || reaction_count, ',')
@@ -12698,7 +12714,7 @@ def build_messenger_router(
                     id_filter = "" if selected_ids is None else " AND id IN (" + ",".join("?" for _ in selected_ids) + ")"
                     selected_limit = limit if selected_ids is None else len(selected_ids)
                     cur = await db.execute(
-                        """SELECT id,group_id,sender_telegram_id AS sender_id,body,entities_json,media_id,media_album_id,media_album_index,media_album_count,edited_at,reply_to_id,created_at,
+                        """SELECT id,group_id,sender_telegram_id AS sender_id,body,entities_json,group_messages.silent AS silent,media_id,media_album_id,media_album_index,media_album_count,edited_at,reply_to_id,created_at,
                                   (SELECT body FROM group_messages AS replied WHERE replied.id=group_messages.reply_to_id) AS reply_to_body,
                                   (SELECT sender_telegram_id FROM group_messages AS replied WHERE replied.id=group_messages.reply_to_id) AS reply_to_sender_id,
                                   (SELECT group_concat(reaction || ':' || reaction_count, ',')
@@ -12736,7 +12752,7 @@ def build_messenger_router(
             await require_group_member(db, group_id, int(user["telegram_id"]))
             db.row_factory = aiosqlite.Row
             cur = await db.execute(
-                """SELECT id,group_id,sender_telegram_id AS sender_id,body,entities_json,media_id,media_album_id,media_album_index,media_album_count,edited_at,reply_to_id,created_at,
+                """SELECT id,group_id,sender_telegram_id AS sender_id,body,entities_json,group_messages.silent AS silent,media_id,media_album_id,media_album_index,media_album_count,edited_at,reply_to_id,created_at,
                           (SELECT body FROM group_messages AS replied WHERE replied.id=group_messages.reply_to_id) AS reply_to_body,
                                   (SELECT sender_telegram_id FROM group_messages AS replied WHERE replied.id=group_messages.reply_to_id) AS reply_to_sender_id,
                                   (SELECT group_concat(reaction || ':' || reaction_count, ',')
@@ -12846,6 +12862,8 @@ def build_messenger_router(
                 (group_id, uid, body, media_id, reply_to_id, now),
             )
             message_id = int(cur.lastrowid)
+            if silent:
+                await db.execute("UPDATE group_messages SET silent=1 WHERE id=?", (message_id,))
             if entities:
                 await db.execute("UPDATE group_messages SET entities_json=? WHERE id=?", (_message_entities_json(entities), message_id))
             if contact_payload:
@@ -13016,6 +13034,8 @@ def build_messenger_router(
                     ),
                 )
                 message_id = int(cur.lastrowid)
+                if silent:
+                    await db.execute("UPDATE group_messages SET silent=1 WHERE id=?", (message_id,))
                 if caption_entities[index]:
                     await db.execute("UPDATE group_messages SET entities_json=? WHERE id=?",
                                      (_message_entities_json(caption_entities[index]), message_id))
