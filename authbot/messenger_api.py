@@ -11656,6 +11656,22 @@ def build_messenger_router(
         if not isinstance(remove_media, bool):
             raise HTTPException(status_code=400, detail="remove_media должен быть логическим значением")
         requested_id = payload.get("media_id")
+        raw_media_metadata = payload.get("media_metadata")
+        normalized_media_metadata: dict[str, Any] | None = None
+        if raw_media_metadata is not None:
+            if remove_media or not isinstance(raw_media_metadata, dict):
+                raise HTTPException(status_code=400, detail="Некорректные параметры медиа")
+            if set(raw_media_metadata) - {"spoiler", "video_cover_media_id"}:
+                raise HTTPException(status_code=400, detail="Неизвестный параметр медиа")
+            spoiler = raw_media_metadata.get("spoiler", False)
+            if not isinstance(spoiler, bool):
+                raise HTTPException(status_code=400, detail="Некорректный флаг спойлера")
+            normalized_media_metadata = {"spoiler": True} if spoiler else {}
+            cover_id = raw_media_metadata.get("video_cover_media_id")
+            if cover_id is not None:
+                if not isinstance(cover_id, str) or not re.fullmatch(r"[a-f0-9]{32}", cover_id):
+                    raise HTTPException(status_code=400, detail="Некорректный идентификатор обложки")
+                normalized_media_metadata["video_cover_media_id"] = cover_id
         if remove_media:
             if requested_id not in (None, ""):
                 raise HTTPException(status_code=400, detail="Нельзя одновременно удалить и заменить вложение")
@@ -11763,6 +11779,33 @@ def build_messenger_router(
                 new_media = None
             else:
                 new_media = await require_owned_media(db, requested_id, uid)
+                if normalized_media_metadata is not None:
+                    cur = await db.execute(
+                        "SELECT mime_type,media_kind FROM media_assets WHERE id=? AND owner_telegram_id=?",
+                        (new_media, uid),
+                    )
+                    target_media = await cur.fetchone()
+                    if target_media is None:
+                        raise HTTPException(status_code=404, detail="Вложение не найдено")
+                    cover_id = normalized_media_metadata.get("video_cover_media_id")
+                    if cover_id:
+                        if str(target_media[1] or "") != "video" or not str(target_media[0] or "").startswith("video/"):
+                            raise HTTPException(status_code=400, detail="Обложка доступна только для обычного видео")
+                        if cover_id == new_media:
+                            raise HTTPException(status_code=400, detail="Вложение не может быть собственной обложкой")
+                        cur = await db.execute(
+                            """SELECT 1 FROM media_assets
+                               WHERE id=? AND owner_telegram_id=?
+                                 AND lower(mime_type) LIKE 'image/%'
+                                 AND COALESCE(media_kind,'')<>'document'""",
+                            (cover_id, uid),
+                        )
+                        if await cur.fetchone() is None:
+                            raise HTTPException(status_code=404, detail="Обложка не найдена или недоступна")
+                    await db.execute(
+                        "UPDATE media_assets SET media_metadata=? WHERE id=? AND owner_telegram_id=?",
+                        (json.dumps(normalized_media_metadata, ensure_ascii=False, separators=(",", ":")), new_media, uid),
+                    )
                 if row[5]:
                     old_class = album_media_class(await media_message_fields(db, old_media))
                     new_class = album_media_class(await media_message_fields(db, new_media))
