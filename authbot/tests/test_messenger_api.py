@@ -8942,3 +8942,117 @@ def test_edit_message_can_remove_single_attachment_but_not_album_member(api_env)
             assert sorted(item["media_album_index"] for item in survivors) == [0, 1]
 
     run(scenario())
+
+
+
+def test_media_spoiler_and_video_cover_metadata_access(api_env) -> None:
+    path, _auth_store, _fake_bot, app = api_env
+    add_account(api_env, 99101, "media_cover_owner")
+    add_account(api_env, 99102, "media_cover_receiver")
+    add_account(api_env, 99103, "media_cover_outsider")
+    add_session(path, 99101, "media-cover-owner-session")
+    add_session(path, 99102, "media-cover-receiver-session")
+    add_session(path, 99103, "media-cover-outsider-session")
+
+    def encoded(value: dict) -> str:
+        return base64.b64encode(json.dumps(value).encode("utf-8")).decode("ascii")
+
+    async def scenario() -> None:
+        headers = lambda token: {"Authorization": f"Bearer {token}"}
+        async with await client_for(app) as client:
+            owner = headers("media-cover-owner-session")
+            receiver = headers("media-cover-receiver-session")
+            outsider = headers("media-cover-outsider-session")
+
+            cover = await client.post(
+                "/api/media/images",
+                headers={**owner, "Content-Type": "image/png"},
+                content=test_preview_png(),
+            )
+            assert cover.status_code == 201, cover.text
+            cover_id = cover.json()["id"]
+            assert json.loads(cover.json()["media_metadata"]) == {}
+
+            video_metadata = {
+                "duration": 8,
+                "width": 1280,
+                "height": 720,
+                "spoiler": True,
+                "video_cover_media_id": cover_id,
+            }
+            video_bytes = b"\\x00\\x00\\x00\\x18ftypisom" + (b"\\x00" * 8)
+            video = await client.post(
+                "/api/media/documents",
+                headers={
+                    **owner,
+                    "Content-Type": "video/mp4",
+                    "X-Filename": "covered-video.mp4",
+                    "X-Media-Kind": "video",
+                    "X-Media-Metadata": encoded(video_metadata),
+                },
+                content=video_bytes,
+            )
+            assert video.status_code == 201, video.text
+            video_id = video.json()["id"]
+            assert json.loads(video.json()["media_metadata"]) == video_metadata
+
+            sent = await client.post(
+                "/api/messages",
+                headers=owner,
+                json={"recipient_id": 99102, "media_id": video_id},
+            )
+            assert sent.status_code == 201, sent.text
+            message_id = sent.json()["id"]
+
+            history = await client.get(
+                "/api/messages",
+                headers=receiver,
+                params={"with": 99101, "message_ids": str(message_id)},
+            )
+            assert history.status_code == 200, history.text
+            item = history.json()["messages"][0]
+            assert item["media_id"] == video_id
+            assert json.loads(item["media_metadata"]) == video_metadata
+
+            # The recipient can fetch the separately stored cover because it is
+            # linked to a visible video message in this DM.
+            visible_cover = await client.get(f"/api/media/{cover_id}", headers=receiver)
+            assert visible_cover.status_code == 200
+            assert visible_cover.content == test_preview_png()
+
+            # The link must not make the cover public to unrelated accounts.
+            hidden_from_outsider = await client.get(f"/api/media/{cover_id}", headers=outsider)
+            assert hidden_from_outsider.status_code == 404
+
+            # A receiver who hides the parent message loses access to its cover.
+            hidden = await client.delete(f"/api/messages/{message_id}?for=me", headers=receiver)
+            assert hidden.status_code == 200, hidden.text
+            no_longer_visible = await client.get(f"/api/media/{cover_id}", headers=receiver)
+            assert no_longer_visible.status_code == 404
+
+            # An account cannot attach somebody else's uploaded image as a cover.
+            other_video = await client.post(
+                "/api/media/documents",
+                headers={
+                    **outsider,
+                    "Content-Type": "video/mp4",
+                    "X-Filename": "foreign-cover.mp4",
+                    "X-Media-Kind": "video",
+                    "X-Media-Metadata": encoded({"video_cover_media_id": cover_id}),
+                },
+                content=video_bytes,
+            )
+            assert other_video.status_code == 404
+
+            invalid_image_spoiler = await client.post(
+                "/api/media/images",
+                headers={
+                    **owner,
+                    "Content-Type": "image/png",
+                    "X-Media-Metadata": encoded({"spoiler": "true"}),
+                },
+                content=test_preview_png(),
+            )
+            assert invalid_image_spoiler.status_code == 400
+
+    run(scenario())
