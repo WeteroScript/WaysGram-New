@@ -155,8 +155,10 @@ class NativeMessagingSourceChecks(unittest.TestCase):
         start = chat.index('    private static final String[] WAYSGRAM_REACTIONS')
         end = chat.index('    public void selectReaction(', start)
         picker = chat[start:end]
+        palette = self.source('tgnet/WaysGramReactions.java')
+        self.assertIn('WaysGramReactions.EMOJI', picker)
         for value in ('👍', '❤️', '😂', '😮', '😢', '🎉', '🙏'):
-            self.assertIn('"' + value + '"', picker)
+            self.assertIn('"' + value + '"', palette)
         for guard in ('WaysGramTransport.ENABLED', 'chatMode == MODE_DEFAULT', '!isThreadChat()',
                       '!isSecretChat()', '!message.messageOwner.isThreadMessage',
                       'message.getId() > 0', 'message.isReactionsAvailable()',
@@ -219,7 +221,8 @@ class NativeMessagingSourceChecks(unittest.TestCase):
         for section in (transport, chats):
             self.assertIn('body.put("entities", entities)', section)
         self.assertIn('body.put("entities", WaysGramMapper.writeTextEntities(req.entities))', messages)
-        self.assertIn('WaysGramMapper.hasFormatting(item.entities)', messages)
+        self.assertIn('WaysGramMapper.writeTextEntities(item.entities)', messages)
+        self.assertIn('hasCaptionEntities |= entities.length() > 0', messages)
         self.assertIn('request.message = message[0].toString()', helper)
         self.assertIn('json.optJSONArray("entities").length() == 0', media)
 
@@ -385,13 +388,15 @@ class NativeMessagingSourceChecks(unittest.TestCase):
         chats = self.source('tgnet/WaysGramChats.java')
         text = transport[transport.index('request instanceof TLRPC.TL_messages_sendMessage'):transport.index('request instanceof TLRPC.TL_messages_sendMedia')]
         media = transport[transport.index('request instanceof TLRPC.TL_messages_sendMedia'):transport.index('request instanceof TLRPC.TL_messages_sendMultiMedia')]
+        self.assertIn('WaysGramScheduled.send(account, send, selfId, expectedToken)', text)
+        self.assertIn('if (send.schedule_repeat_period != 0)', text)
+        self.assertIn('send.schedule_date != 0 || send.schedule_repeat_period != 0', media)
         for section in (text, media):
-            self.assertIn('send.schedule_date != 0 || send.schedule_repeat_period != 0', section)
             self.assertIn('SCHEDULE_NOT_SUPPORTED', section)
             self.assertIn('send.silent', section)
         self.assertLess(media.index('SCHEDULE_NOT_SUPPORTED'), media.index('WaysGramMedia.uploadFor'))
         direct = transport[transport.index('private static TLObject sendTo('):transport.index('private static TLRPC.TL_error mapError')]
-        self.assertIn('nextPts(account), silent, location, contact, entities)', direct)
+        self.assertIn('nextPts(account), silent, location, contact, entities, quote)', direct)
         self.assertIn('body.put("silent", silent)', direct)
         self.assertGreater(direct.index('body.put("silent", silent)'), direct.index('body.put("location", location)'))
         group = chats[chats.index('public static TLObject send('):chats.index('// ----------------------------------------------------------------', chats.index('public static TLObject send('))]
@@ -467,8 +472,8 @@ class NativeMessagingSourceChecks(unittest.TestCase):
             self.assertIn(value, transport)
         for value in ('WaysGramChats.serverGroupId(id)', 'WaysGramChats.channelServer(req.peer.channel_id)',
                       'body.put("peer_id", peer.user_id)', 'body.put("reactions", selected)',
-                      'WaysGramApi.put(account, path, body)', 'REACTION_NOT_SUPPORTED',
-                      'new TLRPC.TL_messageReactions()', 'REACTIONS_BATCH_NOT_SUPPORTED'):
+                      'WaysGramApi.request("PUT", path + "/v2", body, token, 30000)',
+                      'REACTION_NOT_SUPPORTED', 'start += 100', 'WaysGramMapper.readReactions(response)'):
             self.assertIn(value, bridge)
         self.assertIn('json.optJSONArray("reactions")', mapper)
         start = helper.index('    public void sendReaction(')
