@@ -1457,6 +1457,7 @@ async def init_messenger_storage(database_path: Path) -> None:
             ("purchase_asset", "TEXT NOT NULL DEFAULT 'stars'"),
             ("purchase_price", "INTEGER NOT NULL DEFAULT 0"),
             ("profile_order", "INTEGER"),
+            ("profile_pinned", "INTEGER NOT NULL DEFAULT 0"),
         ):
             if column not in user_gift_columns:
                 await db.execute(
@@ -1511,6 +1512,10 @@ async def init_messenger_storage(database_path: Path) -> None:
             AFTER UPDATE OF owner_telegram_id ON user_gifts
             WHEN OLD.owner_telegram_id != NEW.owner_telegram_id
             BEGIN UPDATE user_gifts SET profile_order=NULL WHERE id=NEW.id; END""")
+        await db.execute(f"""CREATE TRIGGER IF NOT EXISTS {db_split.SCHEMA}.reset_gift_profile_pin
+            AFTER UPDATE OF owner_telegram_id ON user_gifts
+            WHEN OLD.owner_telegram_id != NEW.owner_telegram_id
+            BEGIN UPDATE user_gifts SET profile_pinned=0 WHERE id=NEW.id; END""")
         # Gifts bought before the price was stored take it from their saved receipt, so the
         # refund can be calculated for them as well.
         cur = await db.execute(
@@ -4620,7 +4625,7 @@ def build_messenger_router(
             total = int((await cur.fetchone())[0] or 0)
             query = """SELECT id,serial_number,gift_id,telegram_gift_id,gift_name,gift_emoji,
                           telegram_gift_metadata_json,acquired_at,upgrade_level,attributes_json,
-                          purchase_asset,purchase_price,
+                          purchase_asset,purchase_price,profile_pinned,
                           EXISTS(SELECT 1 FROM gift_market_listings l
                                  WHERE l.serial_number=user_gifts.serial_number
                                    AND l.status='active') AS is_listed,
@@ -4641,7 +4646,7 @@ def build_messenger_router(
                           (SELECT n.unique_num FROM gift_unique_numbers n
                             WHERE n.serial_number=user_gifts.serial_number) AS unique_num
                    FROM user_gifts WHERE owner_telegram_id=?
-                   ORDER BY profile_order IS NOT NULL, profile_order ASC, id DESC"""
+                   ORDER BY profile_pinned DESC, profile_order IS NOT NULL, profile_order ASC, id DESC"""
             query_params: tuple[Any, ...] = (owner_id,)
             if limit is not None:
                 query += " LIMIT ? OFFSET ?"
@@ -4851,6 +4856,38 @@ def build_messenger_router(
             "next_offset": offset + len(gifts) if has_more else None,
         }
 
+    @router.put("/api/me/gifts/{serial_number}/pin")
+    async def set_gift_profile_pin(
+        serial_number: str, payload: dict[str, Any], authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        uid = int((await current_user(authorization))["telegram_id"])
+        serial = serial_number.strip().upper()
+        pinned = payload.get("pinned")
+        if not GIFT_SERIAL_RE.fullmatch(serial) or type(pinned) is not bool:
+            raise HTTPException(status_code=400, detail="Некорректные параметры закрепления")
+        async with aiosqlite.connect(db_path()) as db:
+            await db.execute("BEGIN IMMEDIATE")
+            cur = await db.execute(
+                "SELECT id,upgrade_level,attributes_json,profile_pinned FROM user_gifts WHERE serial_number=? AND owner_telegram_id=?",
+                (serial, uid),
+            )
+            gift = await cur.fetchone()
+            if gift is None:
+                raise HTTPException(status_code=404, detail="Подарок не найден")
+            try:
+                attrs = json.loads(gift[2] or "{}")
+            except (TypeError, ValueError):
+                attrs = {}
+            if pinned and not (int(gift[1] or 0) > 0 or _has_collectible_traits(attrs)):
+                raise HTTPException(status_code=409, detail="Можно закрепить только коллекционный подарок")
+            if pinned and not gift[3]:
+                cur = await db.execute("SELECT COUNT(*) FROM user_gifts WHERE owner_telegram_id=? AND profile_pinned=1", (uid,))
+                if int((await cur.fetchone())[0]) >= 3:
+                    raise HTTPException(status_code=409, detail="Можно закрепить до трёх подарков. Сначала открепите один из них.")
+            await db.execute("UPDATE user_gifts SET profile_pinned=? WHERE id=?", (int(pinned), gift[0]))
+            await db.commit()
+        return {"serial_number": serial, "pinned": pinned}
+
     @router.put("/api/me/gifts/order")
     async def reorder_my_gifts(request: Request, authorization: str | None = Header(default=None)) -> dict[str, Any]:
         user = await current_user(authorization)
@@ -4869,12 +4906,16 @@ def build_messenger_router(
         async with aiosqlite.connect(db_path()) as db:
             await db.execute("BEGIN IMMEDIATE")
             cursor = await db.execute(
-                """SELECT id FROM user_gifts WHERE owner_telegram_id=?
-                   ORDER BY profile_order IS NOT NULL, profile_order ASC, id DESC""", (uid,))
-            current = [int(row[0]) for row in await cursor.fetchall()]
+                """SELECT id,profile_pinned FROM user_gifts WHERE owner_telegram_id=?
+                   ORDER BY profile_pinned DESC, profile_order IS NOT NULL, profile_order ASC, id DESC""", (uid,))
+            rows = await cursor.fetchall()
+            current = [int(row[0]) for row in rows]
             if current != expected:
                 await db.rollback()
                 raise HTTPException(status_code=409, detail="Список подарков изменился; обновите его")
+            pinned_ids = {int(row[0]) for row in rows if row[1]}
+            if set(order[:len(pinned_ids)]) != pinned_ids:
+                raise HTTPException(status_code=409, detail="Закреплённые подарки должны оставаться сверху")
             await db.executemany(
                 "UPDATE user_gifts SET profile_order=? WHERE id=? AND owner_telegram_id=?",
                 [(i, gift_id, uid) for i, gift_id in enumerate(order)],

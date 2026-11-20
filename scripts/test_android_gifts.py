@@ -244,6 +244,13 @@ class AndroidGiftSourceChecks(unittest.TestCase):
         controller = self.source("messenger/waysgram/WaysGramProfileGiftsController.java")
         self.assertIn('!isCollectible && !isListed && !isAuctioned && optBooleanLike(item, "can_upgrade")', controller)
 
+    def test_waysgram_collectible_pin_uses_internal_profile_route(self):
+        sheet = self.source("ui/Stars/StarGiftSheet.java")
+        self.assertIn('this::toggleWaysGramPin', sheet)
+        self.assertIn('"/api/me/gifts/" + serial + "/pin"', sheet)
+        controller = self.source("messenger/waysgram/WaysGramProfileGiftsController.java")
+        self.assertIn('savedGift.pinned_to_top = isCollectible && optBooleanLike(item, "profile_pinned")', controller)
+
     def test_gift_batch_only_selects_eligible_regular_gifts_and_uses_internal_api(self):
         page = self.source("ui/Gifts/ProfileGiftsContainer.java")
         for fragment in ("GiftBatchMode.UPGRADE", "GiftBatchMode.SELL", "gift.gift instanceof TL_stars.TL_starGift",
