@@ -129,6 +129,39 @@ class AndroidGiftSourceChecks(unittest.TestCase):
         self.assertIn('canvas.drawPath(star, ink)', sheet)
         self.assertIn('host.isShown()) host.postInvalidateDelayed(33)', sheet)
 
+    def test_upgrade_preview_confirm_reveal_and_durable_retry(self):
+        sheet = self.source("ui/Stars/StarGiftSheet.java")
+        block = sheet[sheet.index("private void openWaysGramUpgrade("):sheet.index("private ArrayList<TL_stars.StarGiftAttribute> sample_attributes;")]
+        for fragment in ('client.previewGiftUpgrade(serial', 'showWaysGramUpgradePreview(serial, preview)',
+                         'switchPage(PAGE_UPGRADE, true)', 'waysGramCandidateAttributes(giftId, pool)',
+                         'topView.setPreviewingAttributes(attributes)', 'new AlertDialog.Builder',
+                         'Это не операция Telegram или TON.', 'doWaysGramUpgrade(serial)',
+                         'WaysGramGiftUpgrade.upgrade(getContext(), currentAccount, serial, keep',
+                         'result.optJSONObject("roll_pool")', 'roller.preload(actualPool)',
+                         'savedStarGift.gift = gift', 'rolling = animate',
+                         'activeRoller.skip()', 'waysGramUpgradeActive(serial)'):
+            self.assertIn(fragment, block)
+        self.assertIn('refreshWaysGramResultArtwork(giftId)', sheet)
+        self.assertIn('&& !(roller != null && roller.isRolling())', sheet)
+        self.assertIn('WaysGramGiftTraits.remembered(currentAccount, waysGramGiftSerial())', sheet)
+        self.assertIn('!isWaysGramGift() && isMine(currentAccount, DialogObject.getPeerDialogId(gift.owner_id))', sheet)
+        helper = self.source("messenger/waysgram/WaysGramGiftUpgrade.java")
+        for fragment in ('waysgram_pending_upgrades_', 'putBoolean(serial + ":keep", keepOriginal)',
+                         'client.upgradeGift(serial, key, keepOriginal,',
+                         'pending.getBoolean(serial + ":keep", false) != keepOriginal',
+                         'remove(serial).remove(serial + ":keep").commit()'):
+            self.assertIn(fragment, helper)
+        client = self.source("messenger/waysgram/WaysGramGiftCatalogClient.java")
+        self.assertIn('static final ConcurrentHashMap<String, Boolean> inFlightUpgradeSerials', client)
+        self.assertIn('sessionProvider.getTelegramAccount() + ":" + giftSerial', client)
+        self.assertIn('/upgrade-preview", "GET", null', client)
+        self.assertIn('keep_original_details', client)
+        controller = self.source("messenger/waysgram/WaysGramProfileGiftsController.java")
+        self.assertIn('attributes.optJSONObject("original_details")', controller)
+        self.assertIn('WaysGramGiftTraits.remember(currentAccount, serial, traits)', controller)
+        attrs = self.source("messenger/waysgram/WaysGramGiftAttributes.java")
+        self.assertIn('traits.optBoolean("strict_artwork", false)', attrs)
+
     def test_nft_profile_transfer_is_internal_and_retains_retry_key(self):
         sheet = self.source("ui/Stars/StarGiftSheet.java")
         start = sheet.index("private void openWaysGramTransfer()")

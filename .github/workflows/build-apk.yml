@@ -2,7 +2,8 @@ name: Build Android APK
 
 concurrency:
   group: waysgram-android-apk-${{ github.ref }}
-  cancel-in-progress: true
+  # A new manual build must never cancel an APK that is already running.
+  cancel-in-progress: false
 
 on:
   push:

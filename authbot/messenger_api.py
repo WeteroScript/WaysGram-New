@@ -534,15 +534,17 @@ def _enrich_traits_documents(
             if _normalise_attribute_name(item[0]) == wanted:
                 position = index
                 break
-        row = _match_attribute_row(
-            rows,
-            entry.get("name"),
-            entry.get("permille"),
-            entry.get("position"),
-            entry.get("pool_size"),
-            position,
-            allow_fallback_position=bool(entries) and len(entries) == len(rows),
-        )
+        if traits.get("strict_artwork") is True:
+            matches = [candidate for candidate in rows
+                       if wanted and _normalise_attribute_name(candidate.get("name")) == wanted
+                       and int(candidate.get("document_id") or 0)]
+            row = matches[0] if len(matches) == 1 else None
+        else:
+            row = _match_attribute_row(
+                rows, entry.get("name"), entry.get("permille"), entry.get("position"),
+                entry.get("pool_size"), position,
+                allow_fallback_position=bool(entries) and len(entries) == len(rows),
+            )
         if row is None:
             continue
         document_id = int(row["document_id"] or 0)
@@ -567,24 +569,18 @@ def _enrich_traits_documents(
 def _reveal_pool_documents(
     pool: dict[str, Any], documents: dict[str, list[dict[str, Any]]]
 ) -> dict[str, dict[int, int]]:
-    """Document id per candidate slot, so the reveal can play the official animations."""
+    """Use artwork only when its exact candidate name identifies one document."""
     result: dict[str, dict[int, int]] = {"model": {}, "pattern": {}}
     for kind, key in (("model", "models"), ("pattern", "patterns")):
-        rows = documents.get(kind) or []
-        if not rows:
-            continue
-        entries = [item for item in (pool.get(key) or []) if isinstance(item, list) and item]
-        same_size = len(entries) == len(rows)
-        for index, item in enumerate(entries):
-            document_id = _match_attribute_document(
-                rows,
-                item[0],
-                item[1] if len(item) > 1 else 0,
-                index,
-                allow_position=same_size,
-            )
-            if document_id:
-                result[kind][index] = document_id
+        for index, item in enumerate(pool.get(key) or []):
+            if not isinstance(item, list) or not item:
+                continue
+            name = _normalise_attribute_name(item[0])
+            matches = [row for row in documents.get(kind, [])
+                       if name and _normalise_attribute_name(row.get("name")) == name
+                       and int(row.get("document_id") or 0)]
+            if len(matches) == 1:
+                result[kind][index] = int(matches[0]["document_id"])
     return result
 
 
@@ -6610,20 +6606,70 @@ def build_messenger_router(
             "grams_balance": buyer_balance,
         }
 
-    @router.post("/api/gifts/{serial_number}/upgrade")
-    async def upgrade_gift(
+    @router.get("/api/gifts/{serial_number}/upgrade-preview")
+    async def preview_gift_upgrade(
         serial_number: str,
         authorization: str | None = Header(default=None),
-        idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
     ) -> dict[str, Any]:
+        """Read-only candidates, never a roll or a reservation of its outcome."""
         user = await current_user(authorization)
         uid = int(user["telegram_id"])
         serial = serial_number.strip().upper()
         if not GIFT_SERIAL_RE.fullmatch(serial):
             raise HTTPException(status_code=400, detail="Некорректный серийный номер подарка")
+        async with aiosqlite.connect(db_path()) as db:
+            db.row_factory = aiosqlite.Row
+            cur = await db.execute(
+                """SELECT gift_name,telegram_gift_id,upgrade_level,attributes_json
+                   FROM user_gifts WHERE serial_number=? AND owner_telegram_id=?""", (serial, uid),
+            )
+            gift = await cur.fetchone()
+            if gift is None:
+                raise HTTPException(status_code=404, detail="Подарок не найден в вашем инвентаре")
+            try:
+                attributes = json.loads(gift["attributes_json"] or "{}")
+            except (ValueError, TypeError):
+                attributes = {}
+            if int(gift["upgrade_level"] or 0) > 0 or _has_collectible_traits(attributes):
+                raise HTTPException(status_code=409, detail="Подарок уже улучшен")
+            for table, detail in (("gift_market_listings", "Сначала снимите подарок с продажи"),
+                                  ("gift_collectible_auctions", "Сначала отмените аукцион подарка")):
+                cur = await db.execute(
+                    f"SELECT 1 FROM {table} WHERE serial_number=? AND status='active'", (serial,),
+                )
+                if await cur.fetchone():
+                    raise HTTPException(status_code=409, detail=detail)
+            gift_id = str(gift["telegram_gift_id"] or "")
+            _, base = _collectible_trait_pool(gift_id, gift["gift_name"])
+            rows = await _gift_attribute_rows(db, gift_id)
+            pool = gift_upgrades.effective_reveal_pool(base, rows)
+            result = {"serial_number": serial, "telegram_gift_id": gift_id,
+                      "price_stars": UPGRADE_PRICE_STARS,
+                      "candidates": gift_upgrades.reveal_pool(
+                          pool, {}, _reveal_pool_documents(pool, rows))}
+        if gift_id:
+            schedule_attribute_sync(gift_id)
+        return result
+
+    @router.post("/api/gifts/{serial_number}/upgrade")
+    async def upgrade_gift(
+        serial_number: str,
+        payload: dict[str, Any] | None = None,
+        authorization: str | None = Header(default=None),
+        idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+    ) -> dict[str, Any]:
+        user = await current_user(authorization)
+        uid = int(user["telegram_id"])
+        payload = payload or {}
+        keep_original = payload.get("keep_original_details", False)
+        if not isinstance(keep_original, bool) or set(payload) - {"keep_original_details"}:
+            raise HTTPException(status_code=400, detail="Некорректные параметры улучшения")
+        serial = serial_number.strip().upper()
+        if not GIFT_SERIAL_RE.fullmatch(serial):
+            raise HTTPException(status_code=400, detail="Некорректный серийный номер подарка")
         now = int(time.time())
         scope = f"/api/gifts/{serial}/upgrade"
-        descriptor = idempotency_descriptor(scope, {}, idempotency_key)
+        descriptor = idempotency_descriptor(scope, {"keep_original_details": True} if keep_original else {}, idempotency_key)
         # Telegram's own attribute set of the gift is fetched before the write transaction
         # opens: the rolled model and pattern then carry the real document ids.
         async with aiosqlite.connect(db_path()) as attribute_db:
@@ -6700,6 +6746,46 @@ def build_messenger_router(
                 raise HTTPException(status_code=402, detail="Недостаточно Stars")
             new_balance = int(account["stars"]) - price
             new_level = 1
+            if keep_original:
+                cur = await db.execute(
+                    """SELECT t.event_type,t.from_telegram_id,t.to_telegram_id,t.created_at,
+                              t.message_id,m.body,mg.attributes_json AS message_attributes
+                       FROM gift_transactions t
+                       LEFT JOIN message_gifts mg ON mg.serial_number=t.serial_number AND mg.message_id=COALESCE(
+                           t.message_id, CASE WHEN t.event_type IN ('purchase','chat_send') THEN
+                             (SELECT m2.id FROM message_gifts mg2 JOIN messages m2 ON m2.id=mg2.message_id
+                              WHERE mg2.serial_number=t.serial_number
+                                AND m2.sender_telegram_id=CASE WHEN t.event_type='purchase'
+                                    THEN t.to_telegram_id ELSE t.from_telegram_id END
+                                AND m2.recipient_telegram_id=t.to_telegram_id
+                                AND m2.created_at=t.created_at ORDER BY m2.id DESC LIMIT 1)
+                           END)
+                       LEFT JOIN messages m ON m.id=mg.message_id
+                       WHERE t.serial_number=? AND t.to_telegram_id=?
+                         AND t.event_type IN ('purchase','transfer','chat_send','market_sale','auction_sale')
+                       ORDER BY t.id DESC LIMIT 1""", (serial, uid),
+                )
+                origin = await cur.fetchone()
+                if origin:
+                    try:
+                        msg_attributes = json.loads(origin["message_attributes"] or "{}")
+                    except (ValueError, TypeError):
+                        msg_attributes = None
+                    # Purchases sent to another account can be recorded as transfers too.
+                    # Respect hide_name for every event, and fail closed when a receipt
+                    # that could carry anonymity is missing or invalid.
+                    hidden = (isinstance(msg_attributes, dict) and msg_attributes.get("hide_name") is True) or (
+                        (origin["message_id"] is not None or origin["event_type"] == "chat_send")
+                        and (origin["message_attributes"] is None or not isinstance(msg_attributes, dict))
+                    )
+                    sender = uid if origin["event_type"] == "purchase" else int(origin["from_telegram_id"] or 0)
+                    text = str(origin["body"] or "").strip()
+                    attributes["original_details"] = {
+                        "recipient_id": uid,
+                        "sender_id": sender if sender > 0 and not hidden else None,
+                        "date": int(origin["created_at"] or now),
+                        "message": "" if text == "Подарок WaysGram" else text,
+                    }
             attributes.update({
                 "upgrade_level": new_level,
                 "last_upgraded_at": now,
@@ -6720,10 +6806,11 @@ def build_messenger_router(
                 live=attribute_rows or None,
             )
             traits = gift_upgrades.traits_of(attributes) or {}
-            # Whatever the roll could not resolve (older rows without ids, localised names)
-            # is matched once more against the stored set: name, then chance, then position.
-            # A WaysGram-only gift has no Telegram attribute set, so its traits stay as rolled
-            # from the fallback pool.
+            # New rolls never guess artwork by an unrelated row's chance or position.
+            # Older gifts retain the legacy compatibility mapping.
+            traits["strict_artwork"] = True
+            # A static-pool roll may gain artwork only from an unambiguous exact name.
+            # Live rolls already carry the document ID of the selected row.
             attribute_documents = {
                 kind: rows
                 for kind, rows in attribute_rows.items()
@@ -6733,12 +6820,7 @@ def build_messenger_router(
                 traits, gift_pool, attribute_documents, gift_id=str(gift["telegram_gift_id"] or "")
             )
             # The reels of the reveal must name the same set the roll came from.
-            live_pool = gift_upgrades.pool_from_rows(attribute_rows)
-            reveal_base = (
-                live_pool
-                if traits.get("roll_source") == "telegram" and live_pool
-                else gift_pool
-            )
+            reveal_base = gift_upgrades.effective_reveal_pool(gift_pool, attribute_rows)
             unique_num = await _assign_unique_number(
                 db,
                 serial,

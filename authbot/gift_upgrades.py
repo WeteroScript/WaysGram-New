@@ -343,6 +343,15 @@ def pool_from_rows(live: Any) -> dict[str, Any]:
     return {key: value for key, value in result.items() if value}
 
 
+def effective_reveal_pool(base: dict[str, Any], live: Any) -> dict[str, Any]:
+    """Mirror the per-slot live/fallback selection used by roll_traits."""
+    result = dict(base)
+    live_pool = pool_from_rows(live)
+    for kind, slot in (("model", "models"), ("pattern", "patterns"), ("backdrop", "backdrops")):
+        if len(_live_rows(live, kind)) >= MIN_LIVE_ROWS:
+            result[slot] = live_pool[slot]
+    return result
+
 
 def _reel(entries: list[list[Any]], winner: str, limit: int = 40) -> list[list[Any]]:
     """Thins a slot down for the reveal animation, always keeping the winner."""

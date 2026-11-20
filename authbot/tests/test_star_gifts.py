@@ -2325,8 +2325,14 @@ def test_inventory_repairs_documents_by_position_when_names_are_localised(env) -
             rolled = upgraded.json()["traits"]
             assert not int(rolled["model"].get("document_id") or 0)
 
-            # Telegram's rows arrive afterwards, in another language and in the same order.
+            # Simulate a gift rolled before strict artwork matching was introduced.
+            # Legacy rows keep their established localized position repair behavior.
             with db_split.sqlite_connect(path) as db:
+                record = db.execute("SELECT attributes_json FROM user_gifts WHERE serial_number=?", (serial,)).fetchone()
+                old_attributes = json.loads(record[0])
+                old_attributes["collectible_traits"].pop("strict_artwork", None)
+                db.execute("UPDATE user_gifts SET attributes_json=? WHERE serial_number=?",
+                           (json.dumps(old_attributes), serial))
                 for kind, entries, base in (
                     ("model", pool["models"], 4000),
                     ("pattern", pool["patterns"], 5000),
@@ -2834,3 +2840,95 @@ def test_collectible_chat_transfer_concurrent_ownership_and_retry(env) -> None:
                 assert db.execute("SELECT COUNT(*) FROM gift_transactions WHERE serial_number=? AND event_type='chat_send'", (serial,)).fetchone()[0] == 1
                 assert db.execute('SELECT COUNT(*) FROM message_gifts WHERE serial_number=? AND message_id=?', (serial, winner.json()['id'])).fetchone()[0] == 1
     run(scenario())
+
+
+def test_upgrade_preview_is_private_read_only_and_upgrade_keeps_anonymous_origin(env) -> None:
+    path, app = env
+
+    async def scenario() -> None:
+        await bot_module.set_telegram_gift_values("g1", price=1, supply=1)
+        async with await client_for(app) as client:
+            bought = await client.post("/api/telegram/gifts/g1/purchase", headers=headers(101), json={
+                "recipient_id": 102, "message": "Личное пожелание", "hide_name": True,
+            })
+            serial = bought.json()["gift"]["serial_number"]
+            url = f"/api/gifts/{serial}/upgrade-preview"
+            assert (await client.get(url, headers=headers(101))).status_code == 404
+            assert (await client.get(url)).status_code in (401, 403)
+            before = (await client.get("/api/me", headers=headers(102))).json()["stars"]
+            preview = await client.get(url, headers=headers(102))
+            assert preview.status_code == 200, preview.text
+            assert preview.json()["price_stars"] == 25
+            assert all(preview.json()["candidates"][slot] for slot in ("models", "patterns", "backdrops"))
+            assert (await client.get("/api/me", headers=headers(102))).json()["stars"] == before
+            key = {**headers(102), "Idempotency-Key": "wg-preserve-details-001"}
+            upgraded = await client.post(f"/api/gifts/{serial}/upgrade", headers=key,
+                                         json={"keep_original_details": True})
+            assert upgraded.status_code == 200, upgraded.text
+            details = upgraded.json()["attributes"]["original_details"]
+            assert details["sender_id"] is None
+            assert details["recipient_id"] == 102
+            assert details["message"] == "Личное пожелание"
+            assert (await client.post(f"/api/gifts/{serial}/upgrade", headers=key,
+                                      json={"keep_original_details": True})).json() == upgraded.json()
+            assert (await client.post(f"/api/gifts/{serial}/upgrade", headers=key,
+                                      json={"keep_original_details": False})).status_code == 409
+            assert (await client.get(url, headers=headers(102))).status_code == 409
+    run(scenario())
+
+
+def test_effective_reveal_pool_matches_per_slot_roll_source() -> None:
+    import gift_upgrades
+    base = {"models": [["Fallback", 1]], "patterns": [["Pattern", 1]],
+            "backdrops": [["Background", 1, 1, 2, 3, 4]]}
+    rows = {"model": [{"name": "No art", "document_id": 0},
+                      {"name": "Only one with art", "document_id": 1}],
+            "pattern": [{"name": "Live A", "document_id": 1},
+                        {"name": "Live B", "document_id": 2}]}
+    effective = gift_upgrades.effective_reveal_pool(base, rows)
+    assert effective["models"] == base["models"]
+    assert [x[0] for x in effective["patterns"]] == ["Live A", "Live B"]
+    assert effective["backdrops"] == base["backdrops"]
+
+
+def test_upgrade_origin_fails_closed_when_original_receipt_was_lost(env) -> None:
+    path, app = env
+
+    async def scenario() -> None:
+        await bot_module.set_telegram_gift_values("g1", price=1, supply=1)
+        async with await client_for(app) as client:
+            bought = await client.post("/api/telegram/gifts/g1/purchase", headers=headers(101), json={
+                "recipient_id": 102, "hide_name": True,
+            })
+            serial = bought.json()["gift"]["serial_number"]
+            conn = db_split.sqlite_connect(path)
+            try:
+                conn.execute("DELETE FROM message_gifts WHERE serial_number=?", (serial,))
+                conn.commit()
+            finally:
+                conn.close()
+            response = await client.post(f"/api/gifts/{serial}/upgrade", headers=headers(102),
+                                         json={"keep_original_details": True})
+            assert response.status_code == 200, response.text
+            assert response.json()["attributes"]["original_details"]["sender_id"] is None
+    run(scenario())
+
+
+def test_reveal_art_never_matches_by_position_or_chance_alone() -> None:
+    pool = {"models": [["Known", 20], ["Other", 20], ["Ambiguous", 10]]}
+    documents = {"model": [{"name": "Known", "document_id": 10, "permille": 20},
+                           {"name": "Wrong", "document_id": 11, "permille": 20},
+                           {"name": "Ambiguous", "document_id": 12},
+                           {"name": "Ambiguous", "document_id": 13}]}
+    assert messenger_api._reveal_pool_documents(pool, documents)["model"] == {0: 10}
+
+
+def test_new_rolls_never_infer_artwork_from_an_unrelated_row() -> None:
+    traits = {"strict_artwork": True, "model": {"name": "Actual", "permille": 10},
+              "pattern": {"name": "Exact", "permille": 10}}
+    rows = {"model": [{"name": "Unrelated", "permille": 10, "position": 0, "document_id": 1},
+                      {"name": "Other", "permille": 20, "position": 1, "document_id": 2}],
+            "pattern": [{"name": "Exact", "permille": 10, "position": 0, "document_id": 3}]}
+    messenger_api._enrich_traits_documents(traits, {"models": [["Actual", 10], ["Other", 20]]}, rows)
+    assert "document_id" not in traits["model"]
+    assert traits["pattern"]["document_id"] == 3
