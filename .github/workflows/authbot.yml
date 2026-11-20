@@ -8,6 +8,7 @@ on:
   push:
     branches:
       - main
+      - arena/6503a44d-waysgram-new
     paths:
       - "authbot/**"
       - "bot.py"
@@ -129,6 +130,7 @@ jobs:
 
   container:
     name: Docker image
+    if: github.ref_name != 'arena/6503a44d-waysgram-new'
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
@@ -155,7 +157,7 @@ jobs:
 
   apply-stage1-android-patch:
     name: Apply and statically verify stage 1 Android patch
-    if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
+    if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch' || github.event_name == 'push'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
