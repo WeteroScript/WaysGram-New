@@ -9927,7 +9927,11 @@ def build_messenger_router(
             raise HTTPException(status_code=400, detail="scheduled_at должен быть Unix timestamp")
         if not 0 < scheduled_id <= 1073741823:
             raise HTTPException(status_code=404, detail="Отложенное сообщение не найдено")
+        peer = payload.get("peer_id", 0)
+        if type(peer) is not int or not 0 <= peer <= 2**63 - 1:
+            raise HTTPException(status_code=400, detail="Некорректный peer_id")
         async with aiosqlite.connect(db_path()) as db:
+            db.row_factory = aiosqlite.Row
             await db.execute("BEGIN IMMEDIATE")
             now = int(time.time())
             if not now + 10 <= scheduled_at <= now + 30 * 86400:
@@ -9935,16 +9939,21 @@ def build_messenger_router(
             cur = await db.execute(
                 """UPDATE scheduled_messages SET scheduled_at=?
                    WHERE id=? AND sender_telegram_id=? AND status='pending'
-                   RETURNING recipient_telegram_id""",
-                (scheduled_at, scheduled_id, uid),
+                     AND (?=0 OR recipient_telegram_id=?)
+                   RETURNING id, recipient_telegram_id AS recipient_id, body, scheduled_at,
+                             status, silent, repeat_interval_seconds, entities_json""",
+                (scheduled_at, scheduled_id, uid, peer, peer),
             )
             task = await cur.fetchone()
             await cur.close()
             if task is None:
                 raise HTTPException(status_code=404, detail="Отложенное сообщение не найдено или уже обработано")
-            await record_event(db, "scheduled", scheduled_id * 2, "scheduled_changed", uid, chat_id=int(task[0]))
+            await record_event(db, "scheduled", scheduled_id * 2, "scheduled_changed", uid, chat_id=int(task["recipient_id"]))
             await db.commit()
-        return {"id": scheduled_id, "status": "pending", "scheduled_at": scheduled_at}
+        result = dict(task)
+        result["native_id"] = scheduled_id * 2
+        _add_message_entities(result)
+        return result
 
     @router.delete("/api/messages/scheduled/{scheduled_id}")
     async def cancel_scheduled_message(

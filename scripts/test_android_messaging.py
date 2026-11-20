@@ -23,6 +23,18 @@ class NativeMessagingSourceChecks(unittest.TestCase):
     def source(self, path):
         return self.archive.read(BASE + path).decode('utf-8')
 
+    def test_native_reschedule_has_a_separate_request_and_keeps_scheduled_id(self):
+        scheduled = self.source('tgnet/WaysGramScheduled.java')
+        transport = self.source('tgnet/WaysGramTransport.java')
+        chat = self.source('ui/ChatActivity.java')
+        self.assertIn('request instanceof WaysGramScheduled.RescheduleRequest', transport)
+        self.assertIn('WaysGramScheduled.reschedule(account', transport)
+        self.assertIn('"PATCH", "/api/messages/scheduled/" + (req.id / 2)', scheduled)
+        self.assertIn('body.put("peer_id", peer)', scheduled)
+        self.assertIn('row.optInt("native_id") != req.id', scheduled)
+        self.assertIn('TL_updateNewScheduledMessage', scheduled)
+        self.assertIn('new org.telegram.tgnet.WaysGramScheduled.RescheduleRequest()', chat)
+
     def test_pins_bridge_scope_paging_and_refresh(self):
         pins = self.source('tgnet/WaysGramPins.java')
         transport = self.source('tgnet/WaysGramTransport.java')

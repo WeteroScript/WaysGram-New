@@ -703,9 +703,17 @@ def test_scheduled_direct_messages_send_once_and_can_be_cancelled(api_env) -> No
                 for invalid_time in (True, due_at - 120, due_at + 31 * 86400):
                     assert (await client.patch(edit_url, headers=sender,
                                                json={"scheduled_at": invalid_time})).status_code == 400
-                edited = await client.patch(edit_url, headers=sender, json={"scheduled_at": new_time})
+                assert (await client.patch(edit_url, headers=sender, json={
+                    "peer_id": 89201, "scheduled_at": new_time,
+                })).status_code == 404
+                edited = await client.patch(edit_url, headers=sender, json={
+                    "peer_id": 89202, "scheduled_at": new_time,
+                })
                 assert edited.status_code == 200
                 assert edited.json()["scheduled_at"] == new_time
+                assert edited.json()["native_id"] == scheduled_id * 2
+                assert edited.json()["body"] == payload["body"]
+                assert edited.json()["silent"]
                 listing = await client.get(
                     "/api/messages/scheduled?with=89202",
                     headers=sender,
