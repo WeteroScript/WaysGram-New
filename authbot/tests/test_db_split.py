@@ -175,3 +175,21 @@ def test_qualify_ddl_only_touches_messenger_tables():
     assert "IF NOT EXISTS messenger.messages (" in result
     assert "IF NOT EXISTS idx_a ON accounts" in result
     assert "IF NOT EXISTS messenger.idx_m\n        ON messages" in result
+
+
+def test_forward_provenance_upgrade_on_existing_split_database(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    path = tmp_path / 'waysgram.sqlite3'
+    init_all(path, monkeypatch)
+    with db_split.sqlite_connect(path) as conn:
+        conn.execute("INSERT INTO messages(id,sender_telegram_id,recipient_telegram_id,body,created_at) VALUES(42,1,2,'retained',100)")
+        conn.execute('DROP TRIGGER IF EXISTS messenger.cleanup_forward_dm')
+        conn.execute('DROP TRIGGER IF EXISTS messenger.cleanup_forward_group')
+        conn.execute('DROP TRIGGER IF EXISTS messenger.cleanup_forward_channel')
+        conn.execute('DROP TABLE messenger.message_forward_sources')
+    run(init_messenger_storage(path))
+    run(init_messenger_storage(path))  # startup may be repeated
+    with db_split.sqlite_connect(path) as conn:
+        assert conn.execute('SELECT body FROM messages WHERE id=42').fetchone()[0] == 'retained'
+        conn.execute("INSERT INTO message_forward_sources(scope,message_id,from_name,from_date) VALUES('dm',42,'Sender',100)")
+        conn.execute('DELETE FROM messages WHERE id=42')
+        assert conn.execute('SELECT count(*) FROM message_forward_sources').fetchone()[0] == 0

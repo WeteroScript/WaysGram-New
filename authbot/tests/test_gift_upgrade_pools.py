@@ -94,3 +94,78 @@ def test_pools_file_is_valid_json():
     data = json.loads(Path(gift_upgrades.POOLS_FILE).read_text(encoding="utf-8"))
     assert data["version"] == gift_upgrades.TRAITS_VERSION
     assert data["gifts"]
+
+
+def test_repair_does_not_replace_an_existing_model_with_a_preview():
+    traits = {"model": {"name": "Existing", "document_id": 123},
+              "pattern": {"name": "Old pattern"}}
+    rows = {"model": [{"name": "Sample", "document_id": 456, "permille": 1, "position": 0}],
+            "pattern": [{"name": "Pattern sample", "document_id": 789, "permille": 1, "position": 0}]}
+    assert not messenger_api._enrich_traits_documents(traits, {}, rows)
+    assert traits["model"] == {"name": "Existing", "document_id": 123}
+    assert traits["pattern"] == {"name": "Old pattern"}
+
+
+def test_repair_does_not_match_single_sample_by_chance_or_position():
+    traits = {"model": {"name": "Original", "permille": 1, "position": 0, "pool_size": 1}}
+    rows = {"model": [{"name": "Different", "document_id": 456, "permille": 1, "position": 0}]}
+    assert not messenger_api._enrich_traits_documents(traits, {}, rows)
+    assert traits["model"]["name"] == "Original"
+    assert "document_id" not in traits["model"]
+
+
+def test_rare_backdrop_and_other_slots_use_weighted_draws(monkeypatch):
+    # Exercise exact random boundaries, not a flaky statistical assertion.
+    import gift_upgrades as upgrades
+    pool = {
+        "models": [["Rare", 1], ["Common", 9]],
+        "patterns": [["Rare", 2], ["Common", 8]],
+        "backdrops": [["Rare", 1, 1, 2, 3, 4], ["Common", 9, 1, 2, 3, 4]],
+    }
+    monkeypatch.setattr(upgrades.secrets, "randbelow", lambda n: 0)
+    rare = upgrades.roll_traits(pool, 0)
+    assert [rare[slot]["name"] for slot in ("model", "pattern", "backdrop")] == ["Rare"] * 3
+    assert [rare[slot]["permille"] for slot in ("model", "pattern", "backdrop")] == [100, 200, 100]
+    monkeypatch.setattr(upgrades.secrets, "randbelow", lambda n: n - 1)
+    common = upgrades.roll_traits(pool, 0)
+    assert [common[slot]["name"] for slot in ("model", "pattern", "backdrop")] == ["Common"] * 3
+    assert upgrades._slot_weights(pool["backdrops"], colored=True) == [1, 9]
+
+
+def test_reupgrade_is_independent_and_displays_effective_chances(monkeypatch):
+    pool = {"models": [["Rare", 1], ["Common", 999]],
+            "patterns": [["One", 1000]],
+            "backdrops": [["One", 1000, 1, 2, 3, 4]]}
+    monkeypatch.setattr(gift_upgrades.secrets, "randbelow", lambda n: 0)
+    first = gift_upgrades.roll_traits(pool, 1)
+    again = gift_upgrades.roll_traits(pool, 2, previous=first)
+    assert first["model"]["name"] == again["model"]["name"] == "Rare"
+    assert again["model"]["permille"] == 1
+
+
+def test_class_only_and_partial_pool_show_effective_chances(monkeypatch):
+    pool = {"models": [["Known", 10], ["Class only", 0, "rare"]],
+            "patterns": [["Only", 4]],
+            "backdrops": [["Only", 5, 1, 2, 3, 4]]}
+    monkeypatch.setattr(gift_upgrades.secrets, "randbelow", lambda n: n - 1)
+    traits = gift_upgrades.roll_traits(pool, 0)
+    assert traits["model"]["permille"] == 990
+    assert traits["pattern"]["permille"] == 1000
+    assert traits["backdrop"]["permille"] == 1000
+
+
+def test_known_shield_model_never_matches_different_partial_rows_by_chance():
+    traits = {"model": {"name": "Shield of Sun", "permille": 15, "position": 0, "pool_size": 2}}
+    rows = {"model": [
+        {"name": "Other", "document_id": 123, "permille": 15, "position": 0},
+        {"name": "Another", "document_id": 456, "permille": 10, "position": 1},
+    ]}
+    assert not messenger_api._enrich_traits_documents(
+        traits, {}, rows, gift_id="5868455043362980631"
+    )
+    assert "document_id" not in traits["model"]
+    rows["model"].append({"name": "Shield of Sun", "document_id": 789, "permille": 15, "position": 2})
+    assert messenger_api._enrich_traits_documents(
+        traits, {}, rows, gift_id="5868455043362980631"
+    )
+    assert traits["model"]["document_id"] == 789

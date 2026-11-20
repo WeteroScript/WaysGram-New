@@ -1182,12 +1182,6 @@ def test_direct_message_delete_for_me_is_private_and_consistent(api_env) -> None
             )
             assert outsider_delete.status_code == 404
 
-            forbidden_delete_all = await client.delete(
-                f"/api/messages/{message_id}?for=all",
-                headers=recipient,
-            )
-            assert forbidden_delete_all.status_code == 403
-
             invalid_mode = await client.delete(
                 f"/api/messages/{message_id}?for=everyone",
                 headers=recipient,
@@ -1196,7 +1190,7 @@ def test_direct_message_delete_for_me_is_private_and_consistent(api_env) -> None
 
             delete_all = await client.delete(
                 f"/api/messages/{message_id}?for=all",
-                headers=sender,
+                headers=recipient,
             )
             assert delete_all.status_code == 200
             assert delete_all.json()["status"] == "deleted_for_all"
@@ -5675,6 +5669,8 @@ def test_mtproto_sticker_proxy_falls_back_without_catalog_row(api_env) -> None:
     run(scenario())
 
 def test_video_gift_preview_prefers_mtproto_over_bot_api_thumbnail(api_env, monkeypatch) -> None:
+    # Exercise the upstream path when no bundled original is available.
+    monkeypatch.setattr(messenger_api, "_bundled_gift_artwork", lambda gift_id, animated: None)
     path, auth_store, fake_bot, _old_app = api_env
     gift_id = "5936013938331222567"
     add_account(api_env, 88121, "plush_pepe_preview_user")
@@ -5941,8 +5937,9 @@ def test_telegram_gift_prefetch_endpoints_prepare_the_whole_catalog(
     run(scenario())
 
 
-def test_mtproto_sticker_proxy_serves_official_animation_for_a_stale_bot_row(api_env) -> None:
-    """Plush Pepe and other sold-out gifts: the Bot API file_id expired long ago."""
+def test_mtproto_sticker_proxy_serves_official_animation_for_a_stale_bot_row(api_env, monkeypatch) -> None:
+    """Without a bundled original, a stale Bot API row falls back to MTProto."""
+    monkeypatch.setattr(messenger_api, "_bundled_gift_artwork", lambda gift_id, animated: None)
     path, auth_store, fake_bot, _old_app = api_env
     add_account(api_env, 88140, "stale_row_user")
     add_session(path, 88140, "stale-row-session")
@@ -5996,4 +5993,661 @@ def test_mtproto_sticker_proxy_serves_official_animation_for_a_stale_bot_row(api
         assert response.content.startswith(b"\x1f\x8b\x08")
         assert provider.animation_requests == ["5936013938331222567"]
 
+    run(scenario())
+
+
+def test_labels_refresh_visibility_for_owner_and_viewer_after_edit_and_removal(api_env) -> None:
+    path, _auth_store, _fake_bot, app = api_env
+    add_account(api_env, 87901, "refresh_owner")
+    add_account(api_env, 87902, "refresh_viewer")
+    add_session(path, 87901, "refresh-owner-session")
+    add_session(path, 87902, "refresh-viewer-session")
+    with db_split.sqlite_connect(path) as db:
+        label_id = db.execute(
+            "INSERT INTO waysgram_labels(label_text,color,created_by,created_at) VALUES(?,?,?,?)",
+            ("Original", "#1769AA", 87901, 1_800_000_000),
+        ).lastrowid
+        db.execute(
+            "INSERT INTO waysgram_label_assignments(label_id,target_type,target_id,assigned_by,assigned_at) VALUES(?,?,?,?,?)",
+            (label_id, "account", 87901, 87901, 1_800_000_000),
+        )
+        db.commit()
+
+    async def scenario() -> None:
+        async with await client_for(app) as client:
+            async def check(expected):
+                for token in ("refresh-owner-session", "refresh-viewer-session"):
+                    headers = {"Authorization": f"Bearer {token}"}
+                    batch = await client.get("/api/labels?targets=account:87901", headers=headers)
+                    profile = await client.get("/api/users/87901", headers=headers)
+                    assert batch.status_code == profile.status_code == 200
+                    assert batch.json()["labels"]["account:87901"] == expected
+                    assert profile.json()["labels"] == expected
+                own = await client.get("/api/me", headers={"Authorization": "Bearer refresh-owner-session"})
+                assert own.status_code == 200
+                assert own.json()["labels"] == expected
+
+            await check([{"text": "Original", "color": "#1769AA"}])
+            with db_split.sqlite_connect(path) as db:
+                db.execute("UPDATE waysgram_labels SET label_text=?, color=? WHERE id=?", ("Changed", "#22C55E", label_id))
+                db.commit()
+            await check([{"text": "Changed", "color": "#22C55E"}])
+            with db_split.sqlite_connect(path) as db:
+                db.execute("DELETE FROM waysgram_label_assignments WHERE label_id=?", (label_id,))
+                db.commit()
+            await check([])
+
+    run(scenario())
+
+
+def test_push_outbox_is_durable_idempotent_and_does_not_delay_message(api_env, monkeypatch) -> None:
+    path, _store, _bot, app = api_env
+    add_account(api_env, 98701, "queue_sender")
+    add_account(api_env, 98702, "queue_recipient")
+    add_session(path, 98701, "queue-sender-session")
+    add_session(path, 98702, "queue-recipient-session")
+    monkeypatch.setattr(messenger_api, "_firebase_service_account", lambda: {
+        "project_id": "test", "token_uri": "https://oauth.test/token",
+    })
+    monkeypatch.setattr(messenger_api, "_firebase_assertion", lambda credentials, now: "fake")
+    with db_split.sqlite_connect(path) as db:
+        db.execute(
+            "INSERT INTO push_devices(token_hash,token_value,telegram_id,session_token_hash,created_at,updated_at) VALUES(?,?,?,?,?,?)",
+            ("device-test", "token-test", 98702, hashlib.sha256(b"queue-recipient-session").hexdigest(), 1, 1),
+        )
+        db.commit()
+    original_post = httpx.AsyncClient.post
+
+    async def scenario() -> None:
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        async def fake_post(self, url, *args, **kwargs):
+            if str(url) == "https://oauth.test/token":
+                return httpx.Response(200, json={"access_token": "fake", "expires_in": 3600},
+                                      request=httpx.Request("POST", str(url)))
+            if str(url).startswith("https://fcm.googleapis.com/"):
+                started.set()
+                await release.wait()
+                return httpx.Response(200, json={}, request=httpx.Request("POST", str(url)))
+            return await original_post(self, url, *args, **kwargs)
+
+        monkeypatch.setattr(httpx.AsyncClient, "post", fake_post)
+        # Persist while no worker runs, simulating a process restart after committing.
+        async with await client_for(app) as client:
+            headers = {"Authorization": "Bearer queue-sender-session", "Idempotency-Key": "queue-test-key-0001"}
+            sent = await client.post("/api/messages", headers=headers, json={"recipient_id": 98702, "body": "hello"})
+            retry = await client.post("/api/messages", headers=headers, json={"recipient_id": 98702, "body": "hello"})
+            assert sent.status_code == retry.status_code == 201
+            assert retry.json() == sent.json()
+            with db_split.sqlite_connect(path) as db:
+                assert db.execute("SELECT COUNT(*) FROM push_outbox").fetchone()[0] == 1
+            async with app.router.lifespan_context(app):
+                await asyncio.wait_for(started.wait(), timeout=5)
+                # While Firebase is blocked, a different send must still return.
+                sent2 = await asyncio.wait_for(client.post(
+                    "/api/messages", headers={"Authorization": "Bearer queue-sender-session"},
+                    json={"recipient_id": 98702, "body": "second"},
+                ), timeout=2)
+                assert sent2.status_code == 201
+                release.set()
+                for _ in range(100):
+                    with db_split.sqlite_connect(path) as db:
+                        pending = db.execute("SELECT COUNT(*) FROM push_outbox").fetchone()[0]
+                    if not pending:
+                        break
+                    await asyncio.sleep(0.05)
+                assert pending == 0
+    run(scenario())
+
+
+def test_upload_does_not_hold_sqlite_write_lock_during_file_write(api_env, monkeypatch) -> None:
+    import threading
+    path, _store, _bot, app = api_env
+    add_account(api_env, 98711, "upload_owner")
+    add_account(api_env, 98712, "upload_recipient")
+    add_session(path, 98711, "upload-owner-session")
+    add_session(path, 98712, "upload-recipient-session")
+    started, release = threading.Event(), threading.Event()
+    original_write = Path.write_bytes
+
+    def delayed_write(file, data):
+        if file.parent.name == "waysgram_media":
+            started.set()
+            if not release.wait(8):
+                raise RuntimeError("test timed out")
+        return original_write(file, data)
+
+    monkeypatch.setattr(Path, "write_bytes", delayed_write)
+    async def scenario() -> None:
+        async with await client_for(app) as client:
+            owner = {"Authorization": "Bearer upload-owner-session"}
+            image = BytesIO()
+            Image.new("RGB", (4, 4)).save(image, format="PNG")
+            upload = asyncio.create_task(client.post(
+                "/api/media/images", headers={**owner, "Content-Type": "image/png"}, content=image.getvalue(),
+            ))
+            try:
+                assert await asyncio.to_thread(started.wait, 3)
+                message = await asyncio.wait_for(client.post(
+                    "/api/messages", headers=owner, json={"recipient_id": 98712, "body": "not blocked"},
+                ), timeout=3)
+                assert message.status_code == 201
+            finally:
+                release.set()
+            assert (await upload).status_code == 201
+    run(scenario())
+
+
+def test_quota_rejection_removes_file_written_before_transaction(api_env, monkeypatch) -> None:
+    path, _store, _bot, app = api_env
+    add_account(api_env, 98721, "quota_owner")
+    add_session(path, 98721, "quota-owner-session")
+    monkeypatch.setattr(messenger_api, "MAX_USER_MEDIA_BYTES", 1)
+    async def scenario() -> None:
+        image = BytesIO()
+        Image.new("RGB", (4, 4)).save(image, format="PNG")
+        async with await client_for(app) as client:
+            response = await client.post(
+                "/api/media/images", headers={"Authorization": "Bearer quota-owner-session", "Content-Type": "image/png"},
+                content=image.getvalue(),
+            )
+            assert response.status_code == 413
+        assert list((path.parent / "waysgram_media").iterdir()) == []
+        with db_split.sqlite_connect(path) as db:
+            assert db.execute("SELECT COUNT(*) FROM media_assets").fetchone()[0] == 0
+    run(scenario())
+
+
+def test_push_outbox_retries_firebase_failure(api_env, monkeypatch) -> None:
+    path, _store, _bot, app = api_env
+    add_account(api_env, 98731, "retry_sender")
+    add_account(api_env, 98732, "retry_recipient")
+    add_session(path, 98731, "retry-sender-session")
+    add_session(path, 98732, "retry-recipient-session")
+    monkeypatch.setattr(messenger_api, "_firebase_service_account", lambda: {"project_id": "test", "token_uri": "https://oauth.test/token"})
+    monkeypatch.setattr(messenger_api, "_firebase_assertion", lambda credentials, now: "fake")
+    with db_split.sqlite_connect(path) as db:
+        db.execute("INSERT INTO push_devices(token_hash,token_value,telegram_id,session_token_hash,created_at,updated_at) VALUES(?,?,?,?,?,?)",
+                   ("retry-device", "token-test", 98732, hashlib.sha256(b"retry-recipient-session").hexdigest(), 1, 1))
+        db.commit()
+    original_post = httpx.AsyncClient.post
+
+    async def scenario() -> None:
+        attempts = 0
+        async def fake_post(self, url, *args, **kwargs):
+            nonlocal attempts
+            if str(url) == "https://oauth.test/token":
+                return httpx.Response(200, json={"access_token": "fake", "expires_in": 3600}, request=httpx.Request("POST", str(url)))
+            if str(url).startswith("https://fcm.googleapis.com/"):
+                attempts += 1
+                return httpx.Response(503 if attempts == 1 else 200, request=httpx.Request("POST", str(url)))
+            return await original_post(self, url, *args, **kwargs)
+        monkeypatch.setattr(httpx.AsyncClient, "post", fake_post)
+        async with await client_for(app) as client:
+            sent = await client.post("/api/messages", headers={"Authorization": "Bearer retry-sender-session"},
+                                     json={"recipient_id": 98732, "body": "retry"})
+            assert sent.status_code == 201
+            async with app.router.lifespan_context(app):
+                for _ in range(100):
+                    with db_split.sqlite_connect(path) as db:
+                        row = db.execute("SELECT attempts FROM push_outbox").fetchone()
+                    if row and row[0] == 1:
+                        break
+                    await asyncio.sleep(0.05)
+                assert row and row[0] == 1
+                with db_split.sqlite_connect(path) as db:
+                    db.execute("UPDATE push_outbox SET next_attempt_at=0")
+                    db.commit()
+                for _ in range(100):
+                    with db_split.sqlite_connect(path) as db:
+                        remaining = db.execute("SELECT COUNT(*) FROM push_outbox").fetchone()[0]
+                    if remaining == 0:
+                        break
+                    await asyncio.sleep(0.05)
+                assert remaining == 0 and attempts == 2
+    run(scenario())
+
+
+def test_media_full_download_streams_without_path_read_bytes(api_env, monkeypatch) -> None:
+    path, _store, _bot, app = api_env
+    add_account(api_env, 98741, "stream_owner")
+    add_session(path, 98741, "stream-owner-session")
+    async def scenario() -> None:
+        async with await client_for(app) as client:
+            headers = {"Authorization": "Bearer stream-owner-session", "Content-Type": "application/octet-stream", "X-Filename": "notes.txt"}
+            uploaded = await client.post("/api/media/documents", headers=headers, content=b"streaming test")
+            assert uploaded.status_code == 201
+            original = Path.read_bytes
+            def reject_media_read(file):
+                if file.parent.name == "waysgram_media":
+                    raise AssertionError("file should be streamed")
+                return original(file)
+            monkeypatch.setattr(Path, "read_bytes", reject_media_read)
+            downloaded = await client.get(uploaded.json()["url"], headers={"Authorization": "Bearer stream-owner-session"})
+            assert downloaded.status_code == 200 and downloaded.content == b"streaming test"
+    run(scenario())
+
+
+def test_bundled_original_plush_pepe_artwork_and_manual_inventory(api_env) -> None:
+    import gzip
+    import json
+    path, _, _, app = api_env
+    uid = 88159
+    token = "bundled-plush-session"
+    gift_id = "5936013938331222567"
+    add_account(api_env, uid, "bundled_plush")
+    add_account(api_env, 88160, "plush_viewer")
+    add_session(path, uid, token)
+    now = int(time.time())
+    with db_split.sqlite_connect(path) as db:
+        db.execute("UPDATE accounts SET stars=500 WHERE telegram_id=?", (uid,))
+        db.execute("""INSERT INTO telegram_gift_sync_state(id,last_synced_at,gift_count,source)
+                      VALUES(1,?,0,'telegram_bot_api')""", (now,))
+        db.execute("""INSERT INTO telegram_gift_prices(gift_id,price_stars,supply,sold,updated_at)
+                      VALUES(?,100,10,0,?)""", (gift_id, now))
+        db.execute("""INSERT INTO user_gifts(serial_number,gift_name,telegram_gift_id,owner_telegram_id,acquired_at)
+                      VALUES('WG-PLUSH000001','Подарок Telegram',?,?,?)""", (gift_id, uid, now))
+        db.commit()
+
+    async def scenario():
+        async with await client_for(app) as client:
+            base = f"/api/telegram/gifts/{gift_id}/sticker"
+            assert (await client.get(base)).status_code == 401
+            still = await client.get(base, headers={"Authorization": f"Bearer {token}"})
+            assert still.status_code == 200 and still.headers["content-type"].startswith("image/png")
+            image = Image.open(BytesIO(still.content))
+            assert image.size == (256, 256)
+            image.verify()
+            animation = await client.get(base + "?animated=1", headers={"Authorization": f"Bearer {token}"})
+            assert animation.status_code == 200
+            assert animation.headers["content-type"].startswith("application/x-tgsticker")
+            lottie = json.loads(gzip.decompress(animation.content))
+            assert lottie["nm"] == "003_PEPE" and lottie["w"] == 512
+
+            inventory = await client.get("/api/me/gifts", headers={"Authorization": f"Bearer {token}"})
+            assert inventory.status_code == 200
+            item = inventory.json()["gifts"][0]
+            assert item["gift_name"] == "Plush Pepe"
+            assert item["sticker_available"] is True and item["sticker_url"] == base
+
+            catalog = await client.get("/api/telegram/gifts", headers={"Authorization": f"Bearer {token}"})
+            assert catalog.status_code == 200
+            assert catalog.json()["gifts"][0]["title"] == "Plush Pepe"
+            bought = await client.post(f"/api/telegram/gifts/{gift_id}/purchase",
+                                       headers={"Authorization": f"Bearer {token}"},
+                                       json={"recipient_id": 88160})
+            assert bought.status_code == 201
+            public = await client.get("/api/users/88160/gifts", headers={"Authorization": f"Bearer {token}"})
+            assert public.status_code == 200
+            assert public.json()["gifts"][0]["sticker_available"] is True
+            messages = await client.get("/api/messages?with=88160", headers={"Authorization": f"Bearer {token}"})
+            assert messages.status_code == 200
+            gift_message = next(m for m in messages.json()["messages"] if m.get("gift_telegram_gift_id") == gift_id)
+            assert gift_message["gift_telegram_metadata"]["sticker_available"] is True
+            unknown = await client.get("/api/telegram/gifts/unknown/sticker", headers={"Authorization": f"Bearer {token}"})
+            assert unknown.status_code != 200
+    run(scenario())
+
+
+def test_heart_locket_model_fallback_respects_live_provider_and_fails_closed(api_env):
+    import gift_model_fallbacks
+    path, store, bot, _ = api_env
+    add_account(api_env, 88421, 'heart_model_reader')
+    add_session(path, 88421, 'heart-model-reader-session')
+    model = gift_model_fallbacks.model_for_name(gift_model_fallbacks.HEART_LOCKET_ID, 'Mirror')
+    manifest = __import__('json').loads((model['path'].parent / 'manifest.json').read_text())
+    actual_id = next(x['telegram_document_id'] for x in manifest['models'] if x['name'] == 'Mirror')
+
+    class Provider:
+        failing = False
+        async def download_attribute(self, db_path, gift_id, document_id):
+            if self.failing:
+                raise RuntimeError('expired file reference')
+            return b'authoritative-live-document', 'application/x-tgsticker'
+
+    provider = Provider()
+    app = FastAPI()
+    app.include_router(build_messenger_router(path, store, lambda: bot, bot_module.account_is_banned, lambda: provider))
+    async def scenario():
+        headers = {'Authorization': 'Bearer heart-model-reader-session'}
+        base = f"/api/telegram/gifts/{gift_model_fallbacks.HEART_LOCKET_ID}/attributes/"
+        async with await client_for(app) as client:
+            live = await client.get(base + str(actual_id), headers=headers)
+            assert live.status_code == 200 and live.content == b'authoritative-live-document'
+            provider.failing = True
+            offline = await client.get(base + str(actual_id), headers=headers)
+            assert offline.status_code == 200 and offline.content == model['path'].read_bytes()
+            unknown = await client.get(base + '999999', headers=headers)
+            assert unknown.status_code == 502
+            local = await client.get(base + str(model['document_id']), headers=headers)
+            assert local.status_code == 200 and local.content == model['path'].read_bytes()
+    run(scenario())
+
+
+def test_group_channel_history_pages_and_authorization(api_env) -> None:
+    path, _auth_store, _fake_bot, app = api_env
+    for uid, name in ((88001, 'history_owner'), (88002, 'history_outsider')):
+        add_account(api_env, uid, name)
+        add_session(path, uid, f'history-{uid}')
+
+    async def scenario() -> None:
+        owner = {'Authorization': 'Bearer history-88001'}
+        outsider = {'Authorization': 'Bearer history-88002'}
+        async with await client_for(app) as client:
+            group = await client.post('/api/groups', headers=owner, json={'title': 'History'})
+            channel = await client.post('/api/channels', headers=owner,
+                                        json={'title': 'History channel', 'is_public': False})
+            assert group.status_code == channel.status_code == 201
+            gid, cid = group.json()['id'], channel.json()['id']
+            with db_split.sqlite_connect(path) as db:
+                db.executemany('INSERT INTO group_messages(group_id,sender_telegram_id,body,created_at) VALUES(?,?,?,?)',
+                               [(gid, 88001, f'g{i}', i + 1) for i in range(237)])
+                db.executemany('INSERT INTO channel_messages(channel_id,author_telegram_id,body,created_at) VALUES(?,?,?,?)',
+                               [(cid, 88001, f'c{i}', i + 1) for i in range(237)])
+                db.commit()
+            for base in (f'/api/groups/{gid}/messages', f'/api/channels/{cid}/messages'):
+                assert (await client.get(base, headers=outsider)).status_code == 403
+                seen = []
+                before = 0
+                while True:
+                    page = await client.get(base, params={'before_id': before, 'limit': 43}, headers=owner)
+                    assert page.status_code == 200, page.text
+                    ids = [m['id'] for m in page.json()['messages']]
+                    assert ids == sorted(ids)
+                    if not ids:
+                        break
+                    seen = ids + seen
+                    before = ids[0]
+                assert len(seen) == len(set(seen)) == 237
+                first_page = await client.get(base, params={'after_id': seen[0], 'limit': 5}, headers=owner)
+                assert [m['id'] for m in first_page.json()['messages']] == seen[1:6]
+                assert (await client.get(base, params={'after_id': 1, 'before_id': 2}, headers=owner)).status_code == 400
+                assert (await client.get(base, params={'limit': 101}, headers=owner)).status_code == 422
+    run(scenario())
+
+
+def test_exact_username_search_precedes_similar_accounts(api_env) -> None:
+    path, _auth_store, _fake_bot, app = api_env
+    add_account(api_env, 87000, 'target')
+    add_session(path, 87000, 'exact-username-session')
+    for i in range(31):
+        add_account(api_env, 87001 + i, f'target_{i}')
+    async def scenario():
+        async with await client_for(app) as client:
+            result = await client.get('/api/users?q=TARGET', headers={'Authorization': 'Bearer exact-username-session'})
+            assert result.status_code == 200
+            assert result.json()['users'][0]['username'] == 'target'
+    run(scenario())
+
+
+def test_forward_rejects_hidden_and_structured_messages_without_leaking_or_losing_content(api_env) -> None:
+    path, _, _, app = api_env
+    for uid in (87601, 87602, 87603):
+        add_account(api_env, uid, f'forward_safety_{uid}')
+        add_session(path, uid, f'forward-safety-{uid}')
+    async def scenario():
+        a = {'Authorization': 'Bearer forward-safety-87601'}
+        b = {'Authorization': 'Bearer forward-safety-87602'}
+        async with await client_for(app) as client:
+            msg = await client.post('/api/messages', headers=a, json={'recipient_id': 87602, 'body': 'private'})
+            mid = msg.json()['id']
+            assert (await client.delete(f'/api/messages/{mid}?for=me', headers=b)).status_code == 200
+            result = await client.post(f'/api/messages/{mid}/forward', headers=b, json={'recipient_id': 87603})
+            assert result.status_code == 404
+            msg = await client.post('/api/messages', headers=a, json={
+                'recipient_id': 87602, 'contact': {'name': 'Example', 'phone': '+1234567890'}})
+            assert msg.status_code == 201, msg.text
+            result = await client.post(f'/api/messages/{msg.json()["id"]}/forward', headers=b,
+                                       json={'recipient_id': 87603})
+            assert result.status_code == 400
+            received = await client.get('/api/messages?with=87602', headers={
+                'Authorization': 'Bearer forward-safety-87603'})
+            assert received.json()['messages'] == []
+    run(scenario())
+
+
+def test_private_channel_media_requires_channel_access(api_env) -> None:
+    path, _, _, app = api_env
+    for uid in (87701, 87702, 87703):
+        add_account(api_env, uid, f'private_media_{uid}')
+        add_session(path, uid, f'private-media-{uid}')
+    image = BytesIO()
+    Image.new('RGB', (3, 3)).save(image, format='PNG')
+    async def scenario():
+        owner = {'Authorization': 'Bearer private-media-87701'}
+        member = {'Authorization': 'Bearer private-media-87702'}
+        outsider = {'Authorization': 'Bearer private-media-87703'}
+        async with await client_for(app) as client:
+            upload = await client.post('/api/media/images', headers={**owner, 'Content-Type': 'image/png'},
+                                       content=image.getvalue())
+            assert upload.status_code == 201
+            channel = await client.post('/api/channels', headers=owner, json={'title': 'Private', 'is_public': False})
+            assert channel.status_code == 201
+            channel_id = channel.json()['id']
+            post = await client.post(f'/api/channels/{channel_id}/messages', headers=owner,
+                                     json={'media_id': upload.json()['id']})
+            assert post.status_code == 201
+            assert (await client.get(upload.json()['url'], headers=outsider)).status_code == 404
+            joined = await client.post('/api/channels/join', headers=member,
+                                       json={'invite_link': channel.json()['invite_link']})
+            assert joined.status_code == 200, joined.text
+            assert (await client.get(upload.json()['url'], headers=member)).status_code == 200
+            assert (await client.get(upload.json()['url'], headers=outsider)).status_code == 404
+    run(scenario())
+
+
+def test_atomic_forward_across_chats_with_media_album_provenance_and_privacy(api_env) -> None:
+    path, _, _, app = api_env
+    for uid in (87501, 87502, 87503, 87504):
+        add_account(api_env, uid, f'batch_forward_{uid}')
+        add_session(path, uid, f'batch-forward-{uid}')
+    async def scenario():
+        h = lambda n: {'Authorization': f'Bearer batch-forward-{n}'}
+        async with await client_for(app) as client:
+            group = (await client.post('/api/groups', headers=h(87501), json={'title': 'Group'})).json()['id']
+            private = (await client.post('/api/channels', headers=h(87501), json={'title': 'Private Channel', 'is_public': False})).json()
+            channel = private['id']
+            assert (await client.post(f'/api/groups/{group}/members', headers=h(87501), json={'telegram_id': 87502})).status_code == 201
+            image = await client.post('/api/media/images', headers={**h(87502), 'Content-Type': 'image/png'}, content=test_preview_png())
+            image2 = await client.post('/api/media/images', headers={**h(87502), 'Content-Type': 'image/png'}, content=test_preview_png())
+            assert image.status_code == image2.status_code == 201
+            album = await client.post('/api/messages/album', headers=h(87502), json={
+                'recipient_id': 87501, 'body': 'Album caption', 'media_ids': [image.json()['id'], image2.json()['id']]})
+            assert album.status_code == 201, album.text
+            ids = [m['id'] for m in album.json()['messages']]
+            request = {'source_scope': 'dm', 'source_peer_id': 87502, 'target_scope': 'group',
+                       'target_peer_id': group, 'message_ids': ids, 'silent': True}
+            key = {**h(87501), 'Idempotency-Key': 'cross-forward-key-0001'}
+            sent = await client.post('/api/forward', headers=key, json=request)
+            assert sent.status_code == 201, sent.text
+            payload = sent.json()
+            assert payload['count'] == 2
+            assert payload['messages'][0]['body'] == 'Album caption'
+            assert payload['messages'][0]['forwarded_from_display_name'] == 'User 87502'
+            assert payload['messages'][0]['media_album_id'] == payload['messages'][1]['media_album_id']
+            assert payload['messages'][0]['media_album_id'] != album.json()['album_id']
+            assert [m['media_album_index'] for m in payload['messages']] == [0, 1]
+            replay = await client.post('/api/forward', headers=key, json=request)
+            assert replay.status_code == 201 and replay.json() == payload
+            assert (await client.post('/api/forward', headers=key, json={**request, 'silent': False})).status_code == 409
+            history = (await client.get(f'/api/groups/{group}/messages', headers=h(87502))).json()['messages']
+            assert [m['id'] for m in history] == [m['id'] for m in payload['messages']]
+            assert history[0]['forwarded_from_display_name'] == 'User 87502'
+            assert (await client.get(image.json()['url'], headers=h(87503))).status_code == 404
+            assert (await client.get(image.json()['url'], headers=h(87502))).status_code == 200
+
+            # Every source and destination scope, including saved messages.
+            sources = [('dm', 87502, ids[0]), ('group', group, history[0]['id'])]
+            channel_post = await client.post(f'/api/channels/{channel}/messages', headers=h(87501), json={'body': 'Channel post'})
+            sources.append(('channel', channel, channel_post.json()['id']))
+            for scope, peer, mid in sources:
+                for dest, destination in [('dm', 87501), ('dm', 87503), ('group', group), ('channel', channel)]:
+                    body = {'source_scope': scope, 'source_peer_id': peer, 'target_scope': dest,
+                            'target_peer_id': destination, 'message_ids': [mid], 'silent': True}
+                    result = await client.post('/api/forward', headers=h(87501), json=body)
+                    assert result.status_code == 201, (body, result.text)
+                    created = result.json()['messages'][0]
+                    path2 = (f'/api/messages?with={destination}' if dest == 'dm' else f'/api/{"groups" if dest == "group" else "channels"}/{destination}/messages')
+                    restored = (await client.get(path2, headers=h(87501))).json()['messages'][-1]
+                    assert restored['id'] == created['id']
+                    assert restored['forwarded_from_display_name'] == created['forwarded_from_display_name']
+                    if scope == 'channel':
+                        assert created['forwarded_from_display_name'] == 'Private Channel'
+            # Forwarded files become accessible only in the destination, and survive loss of access to source.
+            result = await client.post('/api/forward', headers=h(87501), json={
+                'source_scope': 'group', 'source_peer_id': group, 'target_scope': 'dm',
+                'target_peer_id': 87503, 'message_ids': [history[0]['id']], 'silent': True})
+            assert result.status_code == 201
+            assert (await client.get(image.json()['url'], headers=h(87503))).status_code == 200
+            assert (await client.get(image.json()['url'], headers=h(87504))).status_code == 404
+
+            # Hiding provenance and captions must persist after reloading.
+            stripped = await client.post('/api/forward', headers=h(87501), json={**request, 'message_ids': ids[:1],
+                'target_scope': 'dm', 'target_peer_id': 87504, 'drop_author': True, 'drop_media_captions': True})
+            assert stripped.status_code == 201
+            assert stripped.json()['messages'][0]['body'] == ''
+            saved = (await client.get('/api/messages?with=87501', headers=h(87504))).json()['messages'][-1]
+            assert not saved.get('forwarded_from_display_name') and saved['body'] == ''
+    run(scenario())
+
+
+def test_batch_forward_denies_unauthorized_and_never_partially_writes(api_env) -> None:
+    path, _, _, app = api_env
+    for uid in (87401, 87402, 87403):
+        add_account(api_env, uid, f'batch_denied_{uid}')
+        add_session(path, uid, f'batch-denied-{uid}')
+    async def scenario():
+        h = lambda n: {'Authorization': f'Bearer batch-denied-{n}'}
+        async with await client_for(app) as client:
+            group = (await client.post('/api/groups', headers=h(87401), json={'title': 'Restricted'})).json()['id']
+            private = (await client.post('/api/channels', headers=h(87401), json={'title': 'Private', 'is_public': False})).json()['id']
+            m1 = (await client.post('/api/messages', headers=h(87402), json={'recipient_id': 87401, 'body': 'safe'})).json()['id']
+            base = {'source_scope': 'dm', 'source_peer_id': 87402, 'target_scope': 'group', 'target_peer_id': group, 'message_ids': [m1, 999999]}
+            assert (await client.post('/api/forward', headers=h(87401), json=base)).status_code == 404
+            assert (await client.get(f'/api/groups/{group}/messages', headers=h(87401))).json()['messages'] == []
+            outsider = {**base, 'message_ids': [m1], 'source_peer_id': 87402, 'target_scope': 'dm', 'target_peer_id': 87403}
+            assert (await client.post('/api/forward', headers=h(87403), json=outsider)).status_code == 404
+            assert (await client.post('/api/forward', headers=h(87403), json={**outsider, 'source_scope': 'group', 'source_peer_id': group})).status_code == 403
+            assert (await client.post('/api/forward', headers=h(87403), json={**outsider, 'source_scope': 'channel', 'source_peer_id': private})).status_code == 403
+            assert (await client.post('/api/forward', headers=h(87402), json={**outsider, 'source_peer_id': 87401, 'target_scope': 'channel', 'target_peer_id': private})).status_code == 403
+            assert (await client.delete(f'/api/messages/{m1}?for=me', headers=h(87401))).status_code == 200
+            assert (await client.post('/api/forward', headers=h(87401), json={**base, 'message_ids': [m1]})).status_code == 404
+            contact = await client.post('/api/messages', headers=h(87402), json={'recipient_id': 87401, 'contact': {'name': 'User', 'phone': '+1234567890'}})
+            assert (await client.post('/api/forward', headers=h(87401), json={**base, 'message_ids': [contact.json()['id']]})).status_code == 400
+            assert (await client.get(f'/api/groups/{group}/messages', headers=h(87401))).json()['messages'] == []
+    run(scenario())
+
+
+def test_forward_batch_retry_slow_mode_block_and_cleanup(api_env) -> None:
+    path, _, _, app = api_env
+    for uid in (87301, 87302, 87303):
+        add_account(api_env, uid, f'forward_limit_{uid}')
+        add_session(path, uid, f'forward-limit-{uid}')
+    async def scenario():
+        h = lambda n: {'Authorization': f'Bearer forward-limit-{n}'}
+        async with await client_for(app) as client:
+            group = (await client.post('/api/groups', headers=h(87301), json={'title': 'Slow'})).json()['id']
+            assert (await client.post(f'/api/groups/{group}/members', headers=h(87301), json={'telegram_id': 87302})).status_code == 201
+            assert (await client.put(f'/api/groups/{group}/slow-mode', headers=h(87301), json={'seconds': 10})).status_code == 200
+            ids = []
+            for body in ('one', 'two'):
+                ids.append((await client.post('/api/messages', headers=h(87301), json={'recipient_id': 87302, 'body': body})).json()['id'])
+            req = {'source_scope': 'dm', 'source_peer_id': 87301, 'target_scope': 'group',
+                   'target_peer_id': group, 'message_ids': ids, 'silent': True}
+            assert (await client.post('/api/forward', headers=h(87302), json=req)).status_code == 429
+            req['message_ids'] = ids[:1]
+            key = {**h(87302), 'Idempotency-Key': 'retry-forward-concurrent'}
+            first, second = await asyncio.gather(*(client.post('/api/forward', headers=key, json=req) for _ in range(2)))
+            assert first.status_code == second.status_code == 201
+            assert first.json() == second.json()
+            denied = await client.post('/api/forward', headers=h(87302), json=req)
+            assert denied.status_code == 429 and denied.headers.get('retry-after')
+            result_id = first.json()['messages'][0]['id']
+            with db_split.sqlite_connect(path) as db:
+                assert db.execute("SELECT count(*) FROM group_messages WHERE id=?", (result_id,)).fetchone()[0] == 1
+                db.execute('DELETE FROM group_messages WHERE id=?', (result_id,))
+                assert db.execute("SELECT count(*) FROM message_forward_sources WHERE scope='group' AND message_id=?", (result_id,)).fetchone()[0] == 0
+            assert (await client.post('/api/blocks', headers=h(87303), json={'user_id': 87302})).status_code == 201
+            blocked = await client.post('/api/forward', headers=h(87302), json={**req, 'target_scope': 'dm', 'target_peer_id': 87303})
+            assert blocked.status_code == 403
+    run(scenario())
+
+
+def test_forward_batch_enforces_limits_and_cleans_all_scopes(api_env) -> None:
+    path, _, _, app = api_env
+    for uid in (87201, 87202):
+        add_account(api_env, uid, f'forward_rate_{uid}')
+        add_session(path, uid, f'forward-rate-{uid}')
+    async def scenario():
+        h = lambda n: {'Authorization': f'Bearer forward-rate-{n}'}
+        async with await client_for(app) as client:
+            group = (await client.post('/api/groups', headers=h(87201), json={'title': 'Limits'})).json()['id']
+            channel = (await client.post('/api/channels', headers=h(87201), json={'title': 'Limits channel', 'is_public': False})).json()['id']
+            one = (await client.post('/api/messages', headers=h(87202), json={'recipient_id': 87201, 'body': 'One'})).json()['id']
+            two = (await client.post('/api/messages', headers=h(87202), json={'recipient_id': 87201, 'body': 'Two'})).json()['id']
+            base = {'source_scope': 'dm', 'source_peer_id': 87202, 'target_scope': 'channel', 'target_peer_id': channel, 'message_ids': [one, two], 'silent': True}
+            for malformed in ({**base, 'message_ids': [one, one]}, {**base, 'message_ids': [True]},
+                              {**base, 'message_ids': list(range(1, 22))}, {**base, 'silent': 'false'}):
+                assert (await client.post('/api/forward', headers=h(87201), json=malformed)).status_code == 400
+            with db_split.sqlite_connect(path) as db:
+                for i in range(messenger_api.CHANNEL_POSTS_PER_MINUTE - 1):
+                    db.execute('INSERT INTO channel_messages(channel_id,author_telegram_id,body,created_at) VALUES(?,?,?,?)', (channel, 87201, str(i), int(time.time())))
+            limited = await client.post('/api/forward', headers=h(87201), json=base)
+            assert limited.status_code == 429
+            with db_split.sqlite_connect(path) as db:
+                assert db.execute('SELECT COUNT(*) FROM channel_messages WHERE channel_id=?', (channel,)).fetchone()[0] == messenger_api.CHANNEL_POSTS_PER_MINUTE - 1
+                db.execute('DELETE FROM channel_messages WHERE channel_id=?', (channel,))
+            created = []
+            for scope, peer in [('dm', 87202), ('group', group), ('channel', channel)]:
+                result = await client.post('/api/forward', headers=h(87201), json={**base, 'target_scope': scope, 'target_peer_id': peer, 'message_ids': [one]})
+                assert result.status_code == 201, result.text
+                created.append((scope, result.json()['messages'][0]['id']))
+            with db_split.sqlite_connect(path) as db:
+                for scope, mid in created:
+                    assert db.execute('SELECT count(*) FROM message_forward_sources WHERE scope=? AND message_id=?', (scope, mid)).fetchone()[0] == 1
+                    table = {'dm': 'messages', 'group': 'group_messages', 'channel': 'channel_messages'}[scope]
+                    db.execute(f'DELETE FROM {table} WHERE id=?', (mid,))
+                    assert db.execute('SELECT count(*) FROM message_forward_sources WHERE scope=? AND message_id=?', (scope, mid)).fetchone()[0] == 0
+    run(scenario())
+
+
+def test_static_location_forward_cross_chat_is_a_private_snapshot(api_env) -> None:
+    path, _, _, app = api_env
+    for uid in (87101, 87102, 87103):
+        add_account(api_env, uid, f'geo_forward_{uid}')
+        add_session(path, uid, f'geo-forward-{uid}')
+    async def scenario():
+        h = lambda n: {'Authorization': f'Bearer geo-forward-{n}'}
+        async with await client_for(app) as client:
+            group = (await client.post('/api/groups', headers=h(87101), json={'title': 'Geo group'})).json()['id']
+            channel = (await client.post('/api/channels', headers=h(87101), json={'title': 'Geo channel', 'is_public': False})).json()['id']
+            original = await client.post('/api/messages', headers=h(87102), json={'recipient_id': 87101, 'location': {'latitude': 52.0, 'longitude': 4.2, 'label': 'Place'}})
+            assert original.status_code == 201
+            mid = original.json()['id']
+            base = {'source_scope': 'dm', 'source_peer_id': 87102, 'target_scope': 'group', 'target_peer_id': group, 'message_ids': [mid], 'silent': True}
+            first = await client.post('/api/forward', headers=h(87101), json=base)
+            assert first.status_code == 201, first.text
+            group_msg = first.json()['messages'][0]
+            assert (group_msg['location_latitude'], group_msg['location_longitude'], group_msg['location_label']) == (52.0, 4.2, 'Place')
+            assert (await client.get(f'/api/groups/{group}/messages', headers=h(87103))).status_code == 403
+            history = (await client.get(f'/api/groups/{group}/messages', headers=h(87101))).json()['messages']
+            assert history[0]['location_label'] == 'Place'
+            channel_copy = await client.post('/api/forward', headers=h(87101), json={**base, 'source_scope': 'group', 'source_peer_id': group,
+                    'target_scope': 'channel', 'target_peer_id': channel, 'message_ids': [group_msg['id']]})
+            assert channel_copy.status_code == 201, channel_copy.text
+            channel_mid = channel_copy.json()['messages'][0]['id']
+            assert (await client.get(f'/api/channels/{channel}/messages', headers=h(87103))).status_code == 403
+            assert (await client.get(f'/api/channels/{channel}/messages', headers=h(87101))).json()['messages'][0]['location_longitude'] == 4.2
+            dm_copy = await client.post('/api/forward', headers=h(87101), json={**base, 'source_scope': 'channel', 'source_peer_id': channel,
+                    'target_scope': 'dm', 'target_peer_id': 87103, 'message_ids': [channel_mid]})
+            assert dm_copy.status_code == 201
+            copied = (await client.get('/api/messages?with=87101', headers=h(87103))).json()['messages'][0]
+            assert copied['location_latitude'] == 52.0 and copied['location_label'] == 'Place'
+            # Each copy is independent of deleting the original or the intermediate message.
+            assert (await client.delete(f'/api/messages/{mid}?for=all', headers=h(87101))).status_code == 200
+            with db_split.sqlite_connect(path) as db:
+                db.execute('DELETE FROM group_messages WHERE id=?', (group_msg['id'],))
+                assert db.execute("SELECT COUNT(*) FROM message_forward_locations WHERE scope='group' AND message_id=?", (group_msg['id'],)).fetchone()[0] == 0
+            assert (await client.get('/api/messages?with=87101', headers=h(87103))).json()['messages'][0]['location_latitude'] == 52.0
     run(scenario())

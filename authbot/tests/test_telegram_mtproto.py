@@ -599,3 +599,230 @@ def test_mtproto_prefetch_covers_priced_gifts_outside_the_mtproto_catalog(tmp_pa
         assert (database.parent / "gift_assets" / "7001.bin").is_file()
 
     asyncio.run(scenario())
+
+
+def test_attribute_refresh_never_replaces_full_set_with_preview_or_empty(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        database = tmp_path / "waysgram.sqlite3"
+        await _prepare_database(database)
+        client = FakeAttributeClient()
+        provider = TelegramMTProtoGiftCatalog(client, database)
+        original = await provider.attributes(database, "123456789")
+        assert len(original) == 4
+        client.fail_attributes = True
+        after_preview = await provider.attributes(database, "123456789", refresh=True)
+        assert len(after_preview) == 4
+        state = await provider.attribute_sync_state(database, "123456789")
+        assert state["source"] == "full"
+        client.attributes = []
+        after_empty = await provider.attributes(database, "123456789", refresh=True)
+        assert len(after_empty) == 4
+        assert (await provider.attribute_sync_state(database, "123456789"))["source"] == "full"
+
+    asyncio.run(scenario())
+
+
+def test_attribute_document_survives_restart_and_expired_reference_refresh(tmp_path: Path) -> None:
+    from datetime import datetime, timezone
+    from telethon.tl import types
+
+    async def scenario() -> None:
+        database = tmp_path / "waysgram.sqlite3"
+        await _prepare_database(database)
+        client = FakeAttributeClient()
+        original = types.Document(id=7001, access_hash=123, file_reference=b"old",
+                                  date=datetime.now(timezone.utc), mime_type="application/x-tgsticker",
+                                  size=32, dc_id=2, attributes=[])
+        client.attributes[0].document = original
+        provider = TelegramMTProtoGiftCatalog(client, database)
+        await provider.attributes(database, "123456789")
+
+        # Reconstruct without a new API request after the process loses its memory.
+        restarted = TelegramMTProtoGiftCatalog(client, database)
+        client.requests.clear()
+        restored = await restarted._attribute_document(database, "123456789", 7001)
+        assert restored.id == 7001 and restored.file_reference == b"old"
+        assert client.requests == []
+
+        # If Telegram rejects the old file reference, fetch the full set and retry.
+        fresh = types.Document(id=7001, access_hash=123, file_reference=b"new",
+                               date=datetime.now(timezone.utc), mime_type="application/x-tgsticker",
+                               size=32, dc_id=2, attributes=[])
+        client.attributes[0].document = fresh
+        calls = []
+        async def download(document, file=bytes):
+            calls.append(document.file_reference)
+            if document.file_reference == b"old":
+                raise RuntimeError("expired reference")
+            return b"\x1f\x8b\x08" + b"x" * 32
+        client.download_media = download
+        content, _ = await restarted.download_attribute(database, "123456789", 7001)
+        assert content.startswith(b"\x1f\x8b")
+        assert calls == [b"old", b"new"]
+
+    asyncio.run(scenario())
+
+
+def test_crafted_models_are_not_regular_upgrade_candidates() -> None:
+    from telegram_mtproto import _attribute_payloads
+    crafted = StarGiftAttributeModel("Craft only", _attribute_document(7009), StarGiftAttributeRarity(1))
+    crafted.crafted = True
+    normal = StarGiftAttributeModel("Normal", _attribute_document(7001), StarGiftAttributeRarity(1))
+    assert [row["name"] for row in _attribute_payloads([crafted, normal])] == ["Normal"]
+
+
+def test_sold_out_artwork_works_when_catalog_request_fails(tmp_path: Path) -> None:
+    class CatalogUnavailable(FakeAttributeClient):
+        async def __call__(self, request):
+            if type(request).__name__ == "GetStarGiftsRequest":
+                raise ConnectionError("catalog temporarily unavailable")
+            return await super().__call__(request)
+
+    async def scenario() -> None:
+        database = tmp_path / "waysgram.sqlite3"
+        await _prepare_database(database)
+        client = CatalogUnavailable(gift_id=5936013938331222567)
+        provider = TelegramMTProtoGiftCatalog(client, database)
+        content, mime = await provider.download_sticker("5936013938331222567")
+        assert content.startswith(b"\x1f\x8b")
+        assert mime == "application/x-tgsticker"
+        assert client.downloads[0].id == 7001
+
+    asyncio.run(scenario())
+
+
+def test_preview_set_is_retried_before_full_set_ttl(tmp_path: Path) -> None:
+    from telegram_mtproto import GIFT_ATTRIBUTE_SAMPLE_TTL_SECONDS
+    import time
+
+    async def scenario() -> None:
+        database = tmp_path / "waysgram.sqlite3"
+        await _prepare_database(database)
+        client = FakeAttributeClient()
+        client.fail_attributes = True
+        provider = TelegramMTProtoGiftCatalog(client, database)
+        assert len(await provider.attributes(database, "123456789")) == 1
+        async with aiosqlite.connect(database) as db:
+            await db.execute("UPDATE telegram_mtproto_gift_attribute_sync SET fetched_at=? WHERE gift_id=?",
+                             (int(time.time()) - GIFT_ATTRIBUTE_SAMPLE_TTL_SECONDS - 1, "123456789"))
+            await db.commit()
+        client.fail_attributes = False
+        assert len(await provider.attributes(database, "123456789")) == 4
+        assert (await provider.attribute_sync_state(database, "123456789"))["source"] == "full"
+
+    asyncio.run(scenario())
+
+
+def test_upgrade_attributes_and_files_use_user_not_bot_session(tmp_path: Path) -> None:
+    """Telegram rejects both upgrade methods for bots, even when its catalog works."""
+    class BotCatalog(FakeMTProtoClient):
+        async def __call__(self, request):
+            assert type(request).__name__ == "GetStarGiftsRequest", "attribute request sent to bot"
+            return await super().__call__(request)
+
+    async def scenario() -> None:
+        database = tmp_path / "waysgram.sqlite3"
+        await _prepare_database(database)
+        bot = BotCatalog()
+        user = FakeAttributeClient()
+        provider = TelegramMTProtoGiftCatalog(bot, database, attribute_client=user)
+
+        await provider.sync(database)
+        assert len(bot.requests) == 1
+        rows = await provider.attributes(database, "123456789")
+        assert len(rows) == 4
+        assert [type(request).__name__ for request in user.requests] == [
+            "GetStarGiftUpgradeAttributesRequest"
+        ]
+        content, _ = await provider.download_attribute(database, "123456789", 7001)
+        assert content.startswith(b"\x1f\x8b")
+        assert [doc.id for doc in user.downloads] == [7001]
+        assert not bot.download_calls
+
+        # Ordinary gift artwork is still fetched by the bot, not the user session.
+        await provider.download_sticker("123456789", database)
+        assert len(bot.download_calls) == 1
+        assert [doc.id for doc in user.downloads] == [7001]
+
+    asyncio.run(scenario())
+
+
+def test_sold_out_artwork_used_when_existing_catalog_sticker_download_fails(tmp_path: Path) -> None:
+    class BrokenClient(FakeMTProtoClient):
+        async def download_media(self, document, file=bytes):
+            raise RuntimeError("expired sticker reference")
+
+    async def scenario() -> None:
+        provider = TelegramMTProtoGiftCatalog(BrokenClient(), tmp_path / "gifts.db")
+        provider._gifts["123456789"] = provider.client.gift
+        async def fallback(db_path, gift_id):
+            assert gift_id == "123456789"
+            return b"official model artwork", "application/x-tgsticker"
+        provider.sold_out_artwork = fallback
+        assert await provider.download_sticker("123456789") == (b"official model artwork", "application/x-tgsticker")
+        assert await provider.download_sticker_preview("123456789") == (b"official model artwork", "application/x-tgsticker")
+
+    asyncio.run(scenario())
+
+
+def test_concurrent_attribute_requests_share_one_telegram_download(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        database = tmp_path / "waysgram.sqlite3"
+        await _prepare_database(database)
+        client = FakeAttributeClient()
+        provider = TelegramMTProtoGiftCatalog(client, database)
+        await provider.attributes(database, "123456789")
+        started = asyncio.Event()
+        release = asyncio.Event()
+        original = client.download_media
+
+        async def delayed(document, file=bytes):
+            started.set()
+            await release.wait()
+            return await original(document, file=file)
+
+        client.download_media = delayed
+        tasks = [asyncio.create_task(provider.download_attribute(database, "123456789", 7001)) for _ in range(8)]
+        await asyncio.wait_for(started.wait(), 2)
+        release.set()
+        results = await asyncio.gather(*tasks)
+        assert len(client.downloads) == 1
+        assert len({result[0] for result in results}) == 1
+    asyncio.run(scenario())
+
+
+def test_generic_set_name_never_becomes_a_fake_one_letter_title():
+    assert _gift_display_name("", "TelegramGifts", "123") == "Подарок Telegram"
+    assert _gift_display_name("s", "TelegramGifts", "5167939598143193218") == "Sakura Flower"
+    assert _gift_display_name("Custom Name", "", "5167939598143193218") == "Custom Name"
+
+
+def test_known_heart_model_can_resolve_by_id_when_attribute_set_is_missing(tmp_path):
+    from telethon.tl import types, functions
+    from datetime import datetime, timezone
+    from unittest.mock import AsyncMock
+    document_id = 5226650538359158786
+    gift_id = '5868455043362980631'
+    document = types.Document(id=document_id, access_hash=1, file_reference=b'ref',
+                              date=datetime.now(timezone.utc), mime_type='application/x-tgsticker',
+                              size=32, dc_id=2, attributes=[])
+    class Client:
+        async def __call__(self, request):
+            assert isinstance(request, functions.messages.GetCustomEmojiDocumentsRequest)
+            assert request.document_id == [document_id]
+            return [document]
+        async def download_media(self, doc, file=bytes):
+            assert doc is document
+            return b'\x1f\x8b' + b'a' * 30
+    async def scenario():
+        path = tmp_path / 'gifts.sqlite'
+        await _prepare_database(path)
+        provider = TelegramMTProtoGiftCatalog(Client(), path)
+        provider.attributes = AsyncMock(return_value=[])
+        content, mime = await provider.download_attribute(path, gift_id, document_id)
+        assert content == b'\x1f\x8b' + b'a' * 30 and mime == 'application/x-tgsticker'
+        assert provider._attribute_documents[gift_id][document_id] is document
+        # The known identifier is scoped to Heart Locket only, not an arbitrary gift.
+        assert await provider._known_remote_model('1', document_id) is None
+        assert await provider._known_remote_model(gift_id, document_id + 1) is None
+    asyncio.run(scenario())

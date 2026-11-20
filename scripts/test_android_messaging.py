@@ -1,0 +1,87 @@
+#!/usr/bin/env python3
+"""Static checks for the native WaysGram bridge, not a compiled/device test."""
+import io
+import unittest
+import zipfile
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+BASE = 'WaysGram-Android/TMessagesProj/src/main/java/org/telegram/'
+
+
+class NativeMessagingSourceChecks(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        data = b''.join((ROOT / f'WaysGram-Android.zip.part{i}').read_bytes() for i in range(1, 6))
+        cls.archive = zipfile.ZipFile(io.BytesIO(data))
+        assert len(cls.archive.namelist()) == len(set(cls.archive.namelist()))
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.archive.close()
+
+    def source(self, path):
+        return self.archive.read(BASE + path).decode('utf-8')
+
+    def test_received_and_cached_plain_messages_are_linkified(self):
+        obj = self.source('messenger/MessageObject.java')
+        mapper = self.source('tgnet/WaysGramMapper.java')
+        self.assertIn('WaysGramMapper.applyTextEntities(messageOwner)', obj)
+        self.assertIn('messageOwner.send_state == MESSAGE_SEND_STATE_SENT', obj)
+        self.assertIn('!message.entities.isEmpty()', mapper)
+        self.assertIn('new TLRPC.TL_messageEntityMention()', mapper)
+        self.assertIn('new TLRPC.TL_messageEntityHashtag()', mapper)
+        self.assertIn('new TLRPC.TL_messageEntityUrl()', mapper)
+        self.assertIn('entity.offset = matcher.start()', mapper)
+        self.assertIn('message.flags |= TLRPC.MESSAGE_FLAG_HAS_ENTITIES', mapper)
+
+    def test_group_and_channel_load_old_pages(self):
+        chats = self.source('tgnet/WaysGramChats.java')
+        self.assertIn('serverGroupId(req.offset_id)', chats)
+        self.assertIn('serverGroupId(req.min_id)', chats)
+        self.assertIn('"&before_id=" + before', chats)
+        self.assertIn('"&after_id=" + after', chats)
+        self.assertIn('"/api/groups/" + id + "/messages" + paging', chats)
+        self.assertIn('"/api/channels/" + serverId + "/messages" + paging', chats)
+
+    def test_static_direct_location_has_native_send_and_receive_bridge(self):
+        transport = self.source('tgnet/WaysGramTransport.java')
+        media = self.source('tgnet/WaysGramMedia.java')
+        self.assertIn('send.media instanceof TLRPC.TL_inputMediaGeoPoint', transport)
+        self.assertIn('body.put("location", location)', transport)
+        self.assertIn('send.schedule_date != 0', transport)
+        self.assertIn('TLRPC.TL_inputPeerSelf', transport)
+        self.assertIn('json.optDouble("location_latitude"', media)
+        self.assertIn('json.optJSONObject("location")', media)
+        self.assertIn('new TLRPC.TL_messageMediaGeo()', media)
+        self.assertIn('new TLRPC.TL_messageMediaVenue()', media)
+
+    def test_native_forward_and_private_delete_use_server(self):
+        transport = self.source('tgnet/WaysGramTransport.java')
+        messages = self.source('tgnet/WaysGramMessages.java')
+        poller = self.source('tgnet/WaysGramPoller.java')
+        self.assertIn('request instanceof TLRPC.TL_messages_forwardMessages', transport)
+        self.assertIn('WaysGramMessages.forward(', transport)
+        self.assertIn('WaysGramApi.postIdempotent(account, "/api/forward"', messages)
+        self.assertIn('req.id.size() > 20', messages)
+        self.assertIn('req.id.size() != req.random_id.size()', messages)
+        self.assertIn('WaysGramChats.serverGroupId(id)', messages)
+        self.assertIn('req.drop_author', messages)
+        self.assertIn('req.drop_media_captions', messages)
+        self.assertIn('req.silent', messages)
+        self.assertIn('TL_update.TL_updateNewChannelMessage', messages)
+        self.assertIn('TL_update.TL_updateMessageID', messages)
+        helper = self.source('messenger/SendMessagesHelper.java')
+        self.assertIn('req.from_peer = getMessagesController().getInputPeer(msgObj.getDialogId())', helper)
+        self.assertIn('WaysGramTransport.ENABLED ? 20 : 100', helper)
+        self.assertIn('req.peer instanceof TLRPC.TL_inputPeerSelf', messages)
+        mapper = self.source('tgnet/WaysGramMapper.java')
+        self.assertIn('forwarded_from_date', mapper)
+        self.assertIn('message.grouped_id = Long.parseLong', mapper)
+        self.assertIn('req.revoke ? "?for=all" : "?for=me"', messages)
+        self.assertIn('kind.equals("delete_for_me")', poller)
+        self.assertIn('forwarded_from_telegram_id', self.source('tgnet/WaysGramMapper.java'))
+
+
+if __name__ == '__main__':
+    unittest.main()

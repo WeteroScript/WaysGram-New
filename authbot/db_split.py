@@ -35,11 +35,14 @@ SCHEMA = "messenger"
 MESSENGER_TABLES = frozenset(
     {
         "messages",
+        "push_outbox",
         "message_gifts",
         "message_contacts",
         "message_locations",
         "live_locations",
         "message_reactions",
+        "message_forward_sources",
+        "message_forward_locations",
         "message_hidden_for",
         "message_events",
         "scheduled_messages",
