@@ -155,21 +155,21 @@ jobs:
 
   apply-stage1-android-patch:
     name: Apply and statically verify stage 1 Android patch
-    if: github.event_name == 'pull_request'
+    if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
       contents: write
     steps:
-      - name: Checkout pull request head
+      - name: Checkout target branch
         uses: actions/checkout@v4
         with:
-          repository: ${{ github.event.pull_request.head.repo.full_name }}
-          ref: ${{ github.event.pull_request.head.ref }}
+          repository: ${{ github.event.pull_request.head.repo.full_name || github.repository }}
+          ref: ${{ github.event.pull_request.head.ref || github.ref_name }}
           token: ${{ secrets.GITHUB_TOKEN }}
       - name: Apply Android source patch and rebuild split archive
         env:
-          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          HEAD_REF: ${{ github.event.pull_request.head.ref || github.ref_name }}
         run: |
           set -euo pipefail
           test -s android-stage1.patch
@@ -177,9 +177,9 @@ jobs:
           unzip -tq /tmp/WaysGram-Android.original.zip
           mkdir -p /tmp/waysgram-android-source
           unzip -q /tmp/WaysGram-Android.original.zip -d /tmp/waysgram-android-source
-          ANDROID_MESSAGES=/tmp/waysgram-android-source/WaysGram-Android/TMessagesProj/src/main/java/org/telegram/tgnet/WaysGramMessages.java
-          if grep -Fq 'body.put("remove_media", true)' "$ANDROID_MESSAGES"; then
-            echo "Attachment-removal bridge is already present."
+          ANDROID_MEDIA=/tmp/waysgram-android-source/WaysGram-Android/TMessagesProj/src/main/java/org/telegram/tgnet/WaysGramMedia.java
+          if grep -Fq 'videoCoverThumbnail' "$ANDROID_MEDIA"; then
+            echo "Media spoiler and custom video-cover bridge is already present."
           else
             patch --batch --forward -p1 -d /tmp/waysgram-android-source < android-stage1.patch
           fi
