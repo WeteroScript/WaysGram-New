@@ -8850,3 +8850,83 @@ def test_live_location_block_check_is_part_of_the_read_snapshot(api_env) -> None
                 db.commit()
             assert (await client.get('/api/messages/live-location?with=98501',headers=h(98502))).json() == {'locations':[], 'count':0}
     run(scenario())
+
+def test_edit_message_can_remove_single_attachment_but_not_album_member(api_env) -> None:
+    path, _store, _bot, app = api_env
+    for uid in (98701, 98702, 98703):
+        add_account(api_env, uid, f"remove_media_{uid}")
+        add_session(path, uid, f"remove-media-{uid}")
+
+    image = BytesIO()
+    Image.new("RGB", (5, 4), (30, 90, 150)).save(image, format="PNG")
+    image_bytes = image.getvalue()
+
+    async def scenario() -> None:
+        async with await client_for(app) as client:
+            h = lambda uid: {"Authorization": f"Bearer remove-media-{uid}"}
+            uploaded = await client.post(
+                "/api/media/documents",
+                headers={**h(98701), "Content-Type": "text/plain", "X-Filename": "attachment.txt"},
+                content=b"attachment payload",
+            )
+            assert uploaded.status_code == 201, uploaded.text
+            sent = await client.post("/api/messages", headers=h(98701), json={
+                "recipient_id": 98702, "body": "Keep this caption", "media_id": uploaded.json()["id"],
+            })
+            assert sent.status_code == 201, sent.text
+            message_id = sent.json()["id"]
+
+            removed = await client.put(
+                f"/api/messages/{message_id}/media/v2",
+                headers=h(98701),
+                json={"remove_media": True},
+            )
+            assert removed.status_code == 200, removed.text
+            assert removed.json()["media_removed"] is True
+            history = await client.get("/api/messages?with=98701", headers=h(98702))
+            assert history.status_code == 200, history.text
+            row = next(item for item in history.json()["messages"] if item["id"] == message_id)
+            assert row["media_id"] is None
+            assert row["body"] == "Keep this caption"
+
+            # A recipient may not edit the sender's attachment.
+            second_upload = await client.post(
+                "/api/media/documents",
+                headers={**h(98701), "Content-Type": "text/plain", "X-Filename": "second.txt"},
+                content=b"second attachment",
+            )
+            assert second_upload.status_code == 201, second_upload.text
+            second = await client.post("/api/messages", headers=h(98701), json={
+                "recipient_id": 98702, "body": "Protected attachment", "media_id": second_upload.json()["id"],
+            })
+            assert second.status_code == 201, second.text
+            denied = await client.put(
+                f"/api/messages/{second.json()['id']}/media/v2",
+                headers=h(98702),
+                json={"remove_media": True},
+            )
+            assert denied.status_code == 403, denied.text
+
+            # An album is one logical message group; removing one member would corrupt it.
+            album_ids = []
+            for index in range(2):
+                upload = await client.post(
+                    "/api/media/images",
+                    headers={**h(98701), "Content-Type": "image/png"},
+                    content=image_bytes,
+                )
+                assert upload.status_code == 201, upload.text
+                album_ids.append(upload.json()["id"])
+            album = await client.post("/api/messages/album", headers={
+                **h(98701), "Idempotency-Key": "remove-media-album-0001",
+            }, json={"recipient_id": 98702, "media_ids": album_ids, "body": "Album caption"})
+            assert album.status_code == 201, album.text
+            member_id = album.json()["messages"][0]["id"]
+            album_remove = await client.put(
+                f"/api/messages/{member_id}/media/v2",
+                headers=h(98701),
+                json={"remove_media": True},
+            )
+            assert album_remove.status_code == 409, album_remove.text
+
+    run(scenario())
