@@ -183,36 +183,23 @@ jobs:
           else
             patch --batch --forward -p1 -d /tmp/waysgram-android-source < android-stage1.patch
           fi
-          ANDROID_SEND=/tmp/waysgram-android-source/WaysGram-Android/TMessagesProj/src/main/java/org/telegram/messenger/SendMessagesHelper.java
-          if grep -Fq 'req.id.size() > 100' "$ANDROID_MESSAGES" && grep -Fq 'arr.size() == 100' "$ANDROID_SEND"; then
-            echo "100-message forwarding bridge is already present."
-          else
-            patch --batch --forward -p1 -d /tmp/waysgram-android-source < android-stage1-forward.patch
-          fi
           python3 - <<'PY'
           from pathlib import Path
           import zipfile
 
           original = Path("/tmp/WaysGram-Android.original.zip")
           rebuilt = Path("/tmp/WaysGram-Android.updated.zip")
-          replacements = {
-              "WaysGram-Android/TMessagesProj/src/main/java/org/telegram/tgnet/WaysGramMessages.java":
-                  Path("/tmp/waysgram-android-source/WaysGram-Android/TMessagesProj/src/main/java/org/telegram/tgnet/WaysGramMessages.java"),
-              "WaysGram-Android/TMessagesProj/src/main/java/org/telegram/messenger/SendMessagesHelper.java":
-                  Path("/tmp/waysgram-android-source/WaysGram-Android/TMessagesProj/src/main/java/org/telegram/messenger/SendMessagesHelper.java"),
-          }
+          replacement = Path("/tmp/waysgram-android-source/WaysGram-Android/TMessagesProj/src/main/java/org/telegram/tgnet/WaysGramMessages.java")
+          target = "WaysGram-Android/TMessagesProj/src/main/java/org/telegram/tgnet/WaysGramMessages.java"
           with zipfile.ZipFile(original, "r") as source, zipfile.ZipFile(rebuilt, "w", allowZip64=True) as output:
-              names = set(source.namelist())
-              assert names.issuperset(replacements), "A patched Android source file is missing from the archive"
               for info in source.infolist():
-                  data = replacements[info.filename].read_bytes() if info.filename in replacements else source.read(info.filename)
+                  data = replacement.read_bytes() if info.filename == target else source.read(info.filename)
                   output.writestr(info, data)
           with zipfile.ZipFile(rebuilt, "r") as archive:
               bad = archive.testzip()
               assert bad is None, f"Corrupt ZIP member: {bad}"
-              assert set(replacements).issubset(archive.namelist())
-              assert b'remove_media' in archive.read("WaysGram-Android/TMessagesProj/src/main/java/org/telegram/tgnet/WaysGramMessages.java")
-              assert b'arr.size() == 100' in archive.read("WaysGram-Android/TMessagesProj/src/main/java/org/telegram/messenger/SendMessagesHelper.java")
+              assert target in archive.namelist()
+              assert b'remove_media' in archive.read(target)
           part_size = 23_068_672
           data = rebuilt.read_bytes()
           assert len(data) > part_size * 4
