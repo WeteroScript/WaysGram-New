@@ -132,8 +132,8 @@ class NativeMessagingSourceChecks(unittest.TestCase):
         self.assertIn('WaysGramMessages.clearHistory(', transport)
         clear = messages[messages.index('public static TLObject clearHistory('):messages.index('public static TLObject delete(', messages.index('public static TLObject clearHistory('))]
         for value in ('TL_inputPeerUser', 'TL_inputPeerSelf', 'req.max_id <= 0',
-                      'req.min_date != 0', 'req.max_date != 0', 'req.revoke',
-                      '"/api/conversations/"', '"&max_id=" + req.max_id',
+                      'req.min_date <= 0', 'req.max_date <= 0', 'req.revoke',
+                      '"/api/conversations/"', '"&max_id="', '"&min_date="', '"&max_date="',
                       'TL_messages_affectedHistory', 'result.offset = 0'):
             self.assertIn(value, clear)
         self.assertIn('kind.equals("delete_for_all_sync")', poller)

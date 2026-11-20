@@ -23,6 +23,19 @@ class AndroidGiftSourceChecks(unittest.TestCase):
     def source(self, name):
         return self.archive.read(BASE + name).decode("utf-8")
 
+    def test_profile_nft_showcase_pin_and_emoji_status(self):
+        showcase = self.source("messenger/waysgram/WaysGramProfileShowcase.java")
+        self.assertIn('"/api/me/gifts/showcase"', showcase)
+        self.assertIn('"pinned_serial"', showcase)
+        self.assertIn('"emoji_serial"', showcase)
+        sheet = self.source("ui/Stars/StarGiftSheet.java")
+        self.assertIn("WaysGramProfileShowcase.setPinned", sheet)
+        self.assertIn("WaysGramProfileShowcase.setEmojiStatus", sheet)
+        controller = self.source("messenger/waysgram/WaysGramProfileGiftsController.java")
+        self.assertIn("WaysGramProfileShowcase.remember(currentAccount, serial, item)", controller)
+        self.assertIn("📌 Закреплён в профиле", controller)
+        self.assertIn("✨ Эмодзи статуса", controller)
+
     def test_profile_uses_actual_owner_and_supports_nested_scrolling(self):
         layout = self.source("ui/Components/SharedMediaLayout.java")
         self.assertIn('getArguments().getLong("user_id", 0)', layout)

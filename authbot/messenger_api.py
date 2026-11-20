@@ -1430,18 +1430,23 @@ async def init_messenger_storage(database_path: Path) -> None:
             BEGIN UPDATE user_gifts SET profile_order=NULL WHERE id=NEW.id; END""")
         # One pinned / one emoji-status gift per owner, enforced by the storage
         # itself so concurrent showcase updates cannot leave two of either.
-        await db.execute(
-            f"""CREATE UNIQUE INDEX IF NOT EXISTS {db_split.SCHEMA}.user_gifts_one_profile_pin
-                ON user_gifts(owner_telegram_id) WHERE profile_pinned=1""")
-        await db.execute(
-            f"""CREATE UNIQUE INDEX IF NOT EXISTS {db_split.SCHEMA}.user_gifts_one_profile_emoji
-                ON user_gifts(owner_telegram_id) WHERE profile_emoji=1""")
-        # A transferred NFT must not stay pinned or worn as an emoji status on
-        # the previous owner's profile.
-        await db.execute(f"""CREATE TRIGGER IF NOT EXISTS {db_split.SCHEMA}.reset_gift_profile_showcase
-            AFTER UPDATE OF owner_telegram_id ON user_gifts
-            WHEN OLD.owner_telegram_id != NEW.owner_telegram_id
-            BEGIN UPDATE user_gifts SET profile_pinned=0, profile_emoji=0 WHERE id=NEW.id; END""")
+        # Minimal gift tables (unit fixtures) may lack the owner column; the
+        # showcase simply stays unavailable there instead of failing storage init.
+        cur = await db.execute(f"PRAGMA {db_split.SCHEMA}.table_info(user_gifts)")
+        showcase_columns = {str(row[1]) for row in await cur.fetchall()}
+        if {"owner_telegram_id", "profile_pinned", "profile_emoji"} <= showcase_columns:
+            await db.execute(
+                f"""CREATE UNIQUE INDEX IF NOT EXISTS {db_split.SCHEMA}.user_gifts_one_profile_pin
+                    ON user_gifts(owner_telegram_id) WHERE profile_pinned=1""")
+            await db.execute(
+                f"""CREATE UNIQUE INDEX IF NOT EXISTS {db_split.SCHEMA}.user_gifts_one_profile_emoji
+                    ON user_gifts(owner_telegram_id) WHERE profile_emoji=1""")
+            # A transferred NFT must not stay pinned or worn as an emoji status on
+            # the previous owner's profile.
+            await db.execute(f"""CREATE TRIGGER IF NOT EXISTS {db_split.SCHEMA}.reset_gift_profile_showcase
+                AFTER UPDATE OF owner_telegram_id ON user_gifts
+                WHEN OLD.owner_telegram_id != NEW.owner_telegram_id
+                BEGIN UPDATE user_gifts SET profile_pinned=0, profile_emoji=0 WHERE id=NEW.id; END""")
         # Gifts bought before the price was stored take it from their saved receipt, so the
         # refund can be calculated for them as well.
         cur = await db.execute(
