@@ -1213,6 +1213,28 @@ def test_mtproto_metadata_falls_back_to_bot_api_emoji_for_owned_gifts(env) -> No
     run(scenario())
 
 
+def test_regular_gift_transfer_message_stays_unupgraded(env) -> None:
+    _path, app = env
+
+    async def scenario() -> None:
+        await bot_module.set_telegram_gift_values("g1", price=40, supply=1)
+        async with await client_for(app) as client:
+            purchase = await client.post("/api/telegram/gifts/g1/purchase", headers=headers(101), json={})
+            serial = purchase.json()["gift"]["serial_number"]
+            sent = await client.post("/api/messages/gift", headers=headers(101), json={"recipient_id": 102, "serial_number": serial})
+            assert sent.status_code == 201
+            assert sent.json()["gift_upgrade_level"] == 0
+            assert sent.json()["gift_unique_num"] == 0
+            for viewer, peer in ((101, 102), (102, 101)):
+                history = (await client.get(f"/api/messages?with={peer}", headers=headers(viewer))).json()["messages"]
+                card = next(item for item in history if item["id"] == sent.json()["id"])
+                assert card["gift_upgrade_level"] == 0 and card["gift_unique_num"] is None
+                assert not card["gift_attributes"].get("collectible_traits")
+                assert card["gift_instance_id"] == sent.json()["gift_instance_id"]
+
+    run(scenario())
+
+
 def test_gift_can_be_sent_as_a_dm_message_with_snapshot_and_atomic_ownership(env) -> None:
     path, app = env
 
@@ -1274,6 +1296,8 @@ def test_gift_can_be_sent_as_a_dm_message_with_snapshot_and_atomic_ownership(env
             assert sent.json()["type"] == "gift"
             assert sent.json()["gift_serial_number"] == serial
             assert sent.json()["gift_upgrade_level"] == 1
+            assert sent.json()["gift_unique_num"] == upgraded.json()["unique_num"] > 0
+            assert sent.json()["gift_instance_id"] > 0
             assert sent.json()["gift_attributes"]["upgrade_source"] == "waysgram_internal"
             traits = upgraded.json()["attributes"]["collectible_traits"]
             assert sent.json()["gift_attributes"]["collectible_traits"] == traits
@@ -1292,6 +1316,8 @@ def test_gift_can_be_sent_as_a_dm_message_with_snapshot_and_atomic_ownership(env
                 assert item["gift_serial_number"] == serial
                 assert item["gift_name"] == "Подарок Telegram"
                 assert item["gift_upgrade_level"] == 1
+                assert item["gift_unique_num"] == sent.json()["gift_unique_num"]
+                assert item["gift_instance_id"] == sent.json()["gift_instance_id"]
                 assert item["gift_emoji"] == "🎁"
                 assert item["gift_telegram_metadata"]["emoji"] == "🎁"
                 assert item["gift_telegram_metadata"]["upgrade_star_count"] == 10
@@ -1306,6 +1332,26 @@ def test_gift_can_be_sent_as_a_dm_message_with_snapshot_and_atomic_ownership(env
             assert public_gift["attributes"]["collectible_traits"] == traits
             assert public_gift["can_upgrade"] is False
             assert public_gift["is_listed"] == 0
+            # A later transfer must not reroll the old message or change its number.
+            onward = await client.post(
+                "/api/messages/gift", headers=headers(102),
+                json={"recipient_id": ADMIN, "serial_number": serial},
+            )
+            assert onward.status_code == 201
+            assert onward.json()["gift_unique_num"] == sent.json()["gift_unique_num"]
+            assert onward.json()["gift_instance_id"] == sent.json()["gift_instance_id"]
+            previous = (await client.get("/api/messages?with=102", headers=headers(101))).json()["messages"]
+            old_card = next(item for item in previous if item["id"] == sent.json()["id"])
+            assert old_card["gift_unique_num"] == sent.json()["gift_unique_num"]
+            assert old_card["gift_attributes"]["collectible_traits"] == traits
+            # Legacy data with no assigned collection number must not invent one.
+            with db_split.sqlite_connect(path) as db:
+                db.execute("DELETE FROM gift_unique_numbers WHERE serial_number=?", (serial,))
+                db.commit()
+            legacy_history = (await client.get("/api/messages?with=102", headers=headers(101))).json()["messages"]
+            legacy_card = next(item for item in legacy_history if item["id"] == sent.json()["id"])
+            assert legacy_card["gift_unique_num"] is None
+            assert legacy_card["gift_attributes"]["collectible_traits"] == traits
 
     run(scenario())
 

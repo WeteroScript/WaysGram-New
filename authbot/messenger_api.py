@@ -7657,7 +7657,11 @@ def build_messenger_router(
                    gift_attachment.gift_name AS gift_name,
                    gift_attachment.telegram_gift_id AS gift_telegram_gift_id,
                    gift_attachment.upgrade_level AS gift_upgrade_level,
-                   gift_attachment.attributes_json AS gift_attributes_json
+                   gift_attachment.attributes_json AS gift_attributes_json,
+                   (SELECT unique_num FROM gift_unique_numbers n
+                    WHERE n.serial_number=gift_attachment.serial_number) AS gift_unique_num,
+                   (SELECT id FROM user_gifts ug
+                    WHERE ug.serial_number=gift_attachment.serial_number) AS gift_instance_id
             FROM messages
             LEFT JOIN message_gifts gift_attachment ON gift_attachment.message_id=messages.id
             WHERE
@@ -8763,7 +8767,9 @@ def build_messenger_router(
                 await db.rollback()
                 raise HTTPException(status_code=403, detail="Нельзя отправить подарок: пользователь находится в чёрном списке")
             cur = await db.execute(
-                """SELECT id,gift_name,telegram_gift_id,upgrade_level,attributes_json
+                """SELECT id,gift_name,telegram_gift_id,upgrade_level,attributes_json,
+                          (SELECT unique_num FROM gift_unique_numbers n
+                           WHERE n.serial_number=user_gifts.serial_number) AS unique_num
                    FROM user_gifts WHERE serial_number=? AND owner_telegram_id=?""",
                 (serial, uid),
             )
@@ -8843,6 +8849,8 @@ def build_messenger_router(
                 "gift_name": gift_name,
                 "gift_telegram_gift_id": telegram_gift_id,
                 "gift_upgrade_level": upgrade_level,
+                "gift_unique_num": int(gift["unique_num"] or 0),
+                "gift_instance_id": int(gift["id"]),
                 "gift_attributes": attributes,
                 "created_at": now,
             }
