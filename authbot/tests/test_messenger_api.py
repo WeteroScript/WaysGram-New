@@ -8168,3 +8168,55 @@ def test_typing_snapshot_does_not_outlive_authenticated_session(api_env) -> None
             legacy = await client.get('/api/typing', headers=observer, params={'scope': 'dm', 'peer_id': 86951})
             assert legacy.json()['count'] == 0
     run(scenario())
+
+
+def test_pin_visibility_and_private_channel_access(api_env) -> None:
+    path, _, _, app = api_env
+    for uid, token in ((98101, "pin-visible-owner"), (98102, "pin-hidden-peer"), (98103, "pin-private-guest")):
+        add_account(api_env, uid, f"pin_visibility_{uid}")
+        add_session(path, uid, token)
+
+    async def scenario() -> None:
+        async with await client_for(app) as client:
+            owner = {"Authorization": "Bearer pin-visible-owner"}
+            peer = {"Authorization": "Bearer pin-hidden-peer"}
+            guest = {"Authorization": "Bearer pin-private-guest"}
+            sent = await client.post("/api/messages", headers=owner,
+                                     json={"recipient_id": 98102, "body": "hidden pin"})
+            assert sent.status_code == 201
+            message_id = sent.json()["id"]
+            owner_args = {"scope": "dm", "peer_id": 98102, "message_id": message_id}
+            peer_args = {"scope": "dm", "peer_id": 98101, "message_id": message_id}
+            assert (await client.post("/api/pins", headers=owner, json=owner_args)).status_code == 200
+            assert (await client.delete(f"/api/messages/{message_id}?for=me", headers=peer)).status_code == 200
+            cursor = (await client.get("/api/events", headers=owner)).json()["latest_id"]
+            assert (await client.delete("/api/pins", headers=peer, params=peer_args)).status_code == 404
+            assert (await client.post("/api/pins", headers=peer, json=peer_args)).status_code == 404
+            assert (await client.get(f"/api/events?after_id={cursor}", headers=owner)).json()["events"] == []
+            assert (await client.get("/api/pins", headers=owner, params={"scope": "dm", "peer_id": 98102})).json()["count"] == 1
+            assert (await client.delete("/api/pins", headers=owner, params=owner_args)).status_code == 200
+            assert (await client.post("/api/pins", headers=peer, json=peer_args)).status_code == 404
+
+            created = await client.post("/api/channels", headers=owner,
+                                        json={"title": "Private pins", "is_public": False})
+            assert created.status_code == 201
+            channel_id = created.json()["id"]
+            post = await client.post(f"/api/channels/{channel_id}/messages", headers=owner,
+                                     json={"body": "private pinned post"})
+            assert post.status_code == 201
+            assert (await client.post("/api/pins", headers=owner,
+                                     json={"scope": "channel", "peer_id": channel_id,
+                                           "message_id": post.json()["id"]})).status_code == 200
+            params = {"scope": "channel", "peer_id": channel_id}
+            assert (await client.get("/api/pins", headers=guest, params=params)).status_code == 403
+            assert (await client.post("/api/channels/join", headers=guest,
+                                      json={"invite_link": created.json()["invite_link"]})).status_code == 200
+            listed = await client.get("/api/pins", headers=guest, params=params)
+            assert listed.status_code == 200 and listed.json()["count"] == 1
+            with db_split.sqlite_connect(path) as db:
+                db.execute("DELETE FROM channel_members WHERE channel_id=? AND telegram_id=?", (channel_id, 98103))
+            assert (await client.get("/api/pins", headers=guest, params=params)).status_code == 403
+            assert (await client.get("/api/pins", headers=owner, params=params)).json()["count"] == 1
+            assert (await client.get("/api/pins", headers=owner,
+                                     params={"scope": "channel", "peer_id": 999999})).status_code == 404
+    run(scenario())

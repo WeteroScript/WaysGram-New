@@ -10203,8 +10203,10 @@ def build_messenger_router(
                 cur = await db.execute(
                     """SELECT sender_telegram_id,recipient_telegram_id FROM messages
                        WHERE id=? AND ((sender_telegram_id=? AND recipient_telegram_id=?)
-                                      OR (sender_telegram_id=? AND recipient_telegram_id=?))""",
-                    (message_id, user_id, chat_id, chat_id, user_id),
+                                      OR (sender_telegram_id=? AND recipient_telegram_id=?))
+                         AND NOT EXISTS (SELECT 1 FROM message_hidden_for h
+                                         WHERE h.message_id=messages.id AND h.telegram_id=?)""",
+                    (message_id, user_id, chat_id, chat_id, user_id, user_id),
                 )
                 message = await cur.fetchone()
                 if message is None:
@@ -10278,18 +10280,30 @@ def build_messenger_router(
         uid = int(user["telegram_id"])
         if scope not in ("dm", "group", "channel"):
             raise HTTPException(status_code=400, detail="scope: dm, group или channel")
-        if scope == "dm":
-            async with aiosqlite.connect(db_path()) as db:
+        async with aiosqlite.connect(db_path()) as db:
+            db.row_factory = aiosqlite.Row
+            # Authorize and read from the same SQLite snapshot. A membership or
+            # privacy change between separate connections must not expose pins.
+            await db.execute("BEGIN")
+            if scope == "dm":
                 cur = await db.execute("SELECT 1 FROM accounts WHERE telegram_id=?", (peer_id,))
                 if await cur.fetchone() is None:
                     raise HTTPException(status_code=404, detail="Собеседник не найден")
-        elif scope == "group":
-            async with aiosqlite.connect(db_path()) as db:
+            elif scope == "group":
                 await require_group_member(db, peer_id, uid)
-        else:
-            await require_channel_access(peer_id, uid)
-        async with aiosqlite.connect(db_path()) as db:
-            db.row_factory = aiosqlite.Row
+            else:
+                cur = await db.execute(
+                    """SELECT ch.is_public,ch.owner_telegram_id,
+                              EXISTS(SELECT 1 FROM channel_admins ca WHERE ca.channel_id=ch.id AND ca.telegram_id=?) AS is_admin,
+                              EXISTS(SELECT 1 FROM channel_members cm WHERE cm.channel_id=ch.id AND cm.telegram_id=?) AS is_member
+                       FROM channels ch WHERE ch.id=?""", (uid, uid, peer_id)
+                )
+                channel = await cur.fetchone()
+                if channel is None:
+                    raise HTTPException(status_code=404, detail="Канал не найден")
+                if not (channel["is_public"] or channel["owner_telegram_id"] == uid
+                        or channel["is_admin"] or channel["is_member"]):
+                    raise HTTPException(status_code=403, detail="Это приватный канал. Нужна ссылка-приглашение.")
             if scope == "dm":
                 cur = await db.execute(
                     """SELECT p.message_id,p.pinned_by,p.created_at AS pinned_at,
