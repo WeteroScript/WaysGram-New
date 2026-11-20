@@ -239,6 +239,11 @@ jobs:
               "if (arr.size() == (org.telegram.tgnet.WaysGramTransport.ENABLED ? 20 : 100) || a == messages.size() - 1",
           )
           send_helper.write_text(helper_text, encoding="utf-8")
+          chat_text = chat_fragment.read_text(encoding="utf-8")
+          assert "apiClient.post(\"/api/forward\", payload, idempotencyKey" in chat_text
+          assert "pendingForwardIdempotencyKey(keyScope)" in chat_text
+          assert "clearPendingForwardIdempotencyKey(keyScope)" in chat_text
+          assert "preferences.edit().putString(keyScope, key).putLong(keyScope + \"_created\", now).apply()" in chat_text
           assert "req.id.size() > 20" in message_text
           assert "arr.size() == (org.telegram.tgnet.WaysGramTransport.ENABLED ? 20 : 100)" in helper_text
 
