@@ -1756,6 +1756,7 @@ def test_uncompressed_image_attachment_preserves_original_bytes(api_env) -> None
                 assert uploaded.status_code == 201, filename
                 media = uploaded.json()
                 assert media["mime_type"] == mime_type
+                assert media["media_kind"] == "document"
                 assert media["size_bytes"] == len(original_bytes)
                 downloaded = await client.get(media["url"], headers=sender)
                 assert downloaded.status_code == 200
@@ -1775,6 +1776,74 @@ def test_uncompressed_image_attachment_preserves_original_bytes(api_env) -> None
             denied = await client.get(media["url"], headers=intruder)
             assert denied.status_code == 404
 
+    run(scenario())
+
+
+def test_image_documents_keep_identity_in_chats_forwards_and_shared_media(api_env) -> None:
+    path, _, _, app = api_env
+    for uid in (96701, 96702, 96703):
+        add_account(api_env, uid, f"image_file_{uid}")
+        add_session(path, uid, f"image-file-{uid}")
+    buf = BytesIO()
+    Image.new("RGB", (13, 7), (14, 45, 81)).save(buf, format="PNG", compress_level=0)
+    original = buf.getvalue()
+
+    async def scenario() -> None:
+        headers = lambda uid: {"Authorization": f"Bearer image-file-{uid}"}
+        async with await client_for(app) as client:
+            upload = await client.post("/api/media/documents", headers={**headers(96701),
+                                       "Content-Type": "image/png", "X-Filename": "original.png"}, content=original)
+            assert upload.status_code == 201, upload.text
+            media = upload.json()
+            assert media["media_kind"] == "document" and media["size_bytes"] == len(original)
+            media_id = media["id"]
+            photo = await client.post("/api/media/images", headers={**headers(96701),
+                                      "Content-Type": "image/png"}, content=original)
+            assert photo.status_code == 201
+            photo_id = photo.json()["id"]
+            assert (await client.get(media["url"], headers=headers(96703))).status_code == 404
+
+            group = await client.post("/api/groups", headers=headers(96701), json={"title": "File group"})
+            gid = group.json()["id"]
+            assert (await client.post(f"/api/groups/{gid}/members", headers=headers(96701),
+                                      json={"telegram_id": 96702})).status_code == 201
+            channel = await client.post("/api/channels", headers=headers(96701), json={"title": "File channel", "is_public": False})
+            cid = channel.json()["id"]
+            assert (await client.post("/api/channels/join", headers=headers(96702),
+                                      json={"invite_link": channel.json()["invite_link"]})).status_code == 200
+            paths = [("dm", 96702, "/api/messages", {"recipient_id": 96702}),
+                     ("group", gid, f"/api/groups/{gid}/messages", {}),
+                     ("channel", cid, f"/api/channels/{cid}/messages", {})]
+            for scope, peer, path, params in paths:
+                result = await client.post(path, headers=headers(96701), json={**params, "media_id": media_id, "silent": True})
+                assert result.status_code == 201, result.text
+                assert result.json()["media_kind"] == "document" and result.json()["body"] == "Документ: original.png"
+                mid = result.json()["id"]
+                history_path = "/api/messages?with=96701" if scope == "dm" else path
+                history = await client.get(history_path, headers=headers(96702))
+                row = next(m for m in history.json()["messages"] if m["id"] == mid)
+                assert row["media_kind"] == "document" and row["media_name"] == "original.png"
+                assert (await client.get(media["url"], headers=headers(96702))).content == original
+                for kind, expected in (("document", 1), ("image", 0)):
+                    filtered = await client.get("/api/media/shared", headers=headers(96701),
+                                                params={"scope": scope, "peer_id": peer, "kind": kind})
+                    assert filtered.status_code == 200 and filtered.json()["count"] == expected
+                    if expected:
+                        assert filtered.json()["media"][0]["media_kind"] == "document"
+                forward = await client.post("/api/forward", headers=headers(96701), json={
+                    "source_scope": scope, "source_peer_id": peer, "target_scope": "dm", "target_peer_id": 96703,
+                    "message_ids": [mid], "silent": True})
+                assert forward.status_code == 201, forward.text
+                assert forward.json()["messages"][0]["media_kind"] == "document"
+                assert (await client.get(media["url"], headers=headers(96703))).content == original
+            control = await client.post("/api/messages", headers=headers(96701),
+                                        json={"recipient_id": 96702, "media_id": photo_id, "silent": True})
+            assert control.status_code == 201 and control.json()["media_kind"] == ""
+            assert control.json()["body"] == "Изображение"
+            for kind in ("image", "document"):
+                filtered = await client.get("/api/media/shared", headers=headers(96701),
+                                            params={"scope": "dm", "peer_id": 96702, "kind": kind})
+                assert filtered.json()["count"] == 1
     run(scenario())
 
 

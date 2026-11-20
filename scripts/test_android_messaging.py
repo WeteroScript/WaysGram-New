@@ -159,6 +159,13 @@ class NativeMessagingSourceChecks(unittest.TestCase):
         self.assertIn('media.user_id = 0', media)
         self.assertIn('message.flags |= TLObject.FLAG_9', media)
 
+    def test_uncompressed_image_documents_stay_documents(self):
+        media = self.source('tgnet/WaysGramMedia.java')
+        self.assertIn('!forceDocument && !"document".equals(kind)', media)
+        self.assertIn('json.optString("media_kind", "")', media)
+        self.assertIn('buildMedia(account, mediaId, mime, name, kind, metadata, false)', media)
+        self.assertIn('input instanceof TLRPC.TL_inputMediaUploadedDocument', media)
+
     def test_native_recordings_and_album_bridges(self):
         transport = self.source('tgnet/WaysGramTransport.java')
         media = self.source('tgnet/WaysGramMedia.java')

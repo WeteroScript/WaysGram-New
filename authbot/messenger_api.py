@@ -2828,7 +2828,7 @@ def build_messenger_router(
 
     async def default_media_message_body(db: Any, media_id: str) -> str:
         fields = await media_message_fields(db, media_id)
-        if str(fields["media_type"] or "").startswith("image/"):
+        if str(fields["media_type"] or "").startswith("image/") and fields["media_kind"] != "document":
             return "Изображение"
         return "Документ: " + str(fields["media_name"] or "document")
 
@@ -3005,6 +3005,11 @@ def build_messenger_router(
                 status_code=415,
                 detail="Голосовые сообщения должны быть аудиофайлами",
             )
+        # Image documents retain their original bytes and their document identity
+        # in histories, forwards and other clients. Legacy rows are ambiguous and
+        # must not be guessed from their filenames.
+        if not media_kind and mime_type.startswith("image/"):
+            media_kind = "document"
 
         now = int(time.time())
         media_id = secrets.token_hex(16)
@@ -3069,15 +3074,16 @@ def build_messenger_router(
             raise HTTPException(status_code=400, detail="kind: image, video, audio, document или без фильтра")
         mime_clause = ""
         if kind == "image":
-            mime_clause = "AND lower(a.mime_type) LIKE 'image/%'"
+            mime_clause = "AND lower(a.mime_type) LIKE 'image/%' AND COALESCE(a.media_kind,'') <> 'document'"
         elif kind == "video":
             mime_clause = "AND lower(a.mime_type) LIKE 'video/%'"
         elif kind == "audio":
             mime_clause = "AND lower(a.mime_type) LIKE 'audio/%'"
         elif kind == "document":
-            mime_clause = """AND lower(a.mime_type) NOT LIKE 'image/%'
+            mime_clause = """AND (COALESCE(a.media_kind,'') = 'document' OR (
+                             lower(a.mime_type) NOT LIKE 'image/%'
                              AND lower(a.mime_type) NOT LIKE 'video/%'
-                             AND lower(a.mime_type) NOT LIKE 'audio/%'"""
+                             AND lower(a.mime_type) NOT LIKE 'audio/%'))"""
 
         async with aiosqlite.connect(db_path()) as db:
             db.row_factory = aiosqlite.Row
@@ -3095,7 +3101,7 @@ def build_messenger_router(
                 cur = await db.execute(
                     f"""SELECT m.id AS message_id,m.sender_telegram_id AS sender_id,
                                m.recipient_telegram_id AS recipient_id,m.body,m.media_id,
-                               a.mime_type AS media_type,a.original_name AS media_name,m.created_at
+                               a.mime_type AS media_type,a.original_name AS media_name,a.media_kind,m.created_at
                         FROM messages m JOIN media_assets a ON a.id=m.media_id
                         WHERE ((m.sender_telegram_id=? AND m.recipient_telegram_id=?) OR
                                (m.sender_telegram_id=? AND m.recipient_telegram_id=?))
@@ -3113,7 +3119,7 @@ def build_messenger_router(
                 cur = await db.execute(
                     f"""SELECT m.id AS message_id,m.sender_telegram_id AS sender_id,
                                m.body,m.media_id,a.mime_type AS media_type,
-                               a.original_name AS media_name,m.created_at
+                               a.original_name AS media_name,a.media_kind,m.created_at
                         FROM group_messages m JOIN media_assets a ON a.id=m.media_id
                         WHERE m.group_id=? AND m.media_id IS NOT NULL
                           AND (?=0 OR m.id<?) {mime_clause}
@@ -3141,7 +3147,7 @@ def build_messenger_router(
                 cur = await db.execute(
                     f"""SELECT m.id AS message_id,m.author_telegram_id AS sender_id,
                                m.body,m.media_id,a.mime_type AS media_type,
-                               a.original_name AS media_name,m.created_at
+                               a.original_name AS media_name,a.media_kind,m.created_at
                         FROM channel_messages m JOIN media_assets a ON a.id=m.media_id
                         WHERE m.channel_id=? AND m.media_id IS NOT NULL
                           AND (?=0 OR m.id<?) {mime_clause}
