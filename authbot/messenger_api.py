@@ -10249,7 +10249,7 @@ def build_messenger_router(
         if (isinstance(source_peer, bool) or not isinstance(source_peer, int) or source_peer <= 0
                 or isinstance(target_peer, bool) or not isinstance(target_peer, int) or target_peer <= 0):
             raise HTTPException(status_code=400, detail="Некорректный идентификатор чата")
-        if (not isinstance(ids, list) or not 1 <= len(ids) <= 100
+        if (not isinstance(ids, list) or not 1 <= len(ids) <= 20
                 or any(isinstance(v, bool) or not isinstance(v, int) or v <= 0 for v in ids)
                 or len(set(ids)) != len(ids)):
             raise HTTPException(status_code=400, detail="Выберите от 1 до 20 разных сообщений")
