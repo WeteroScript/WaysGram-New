@@ -318,11 +318,19 @@ jobs:
           else
             patch --batch --forward -p1 -d /tmp/waysgram-android-source < android-stage1-forward-chat.patch
           fi
+          ANDROID_MESSAGES=/tmp/waysgram-android-source/WaysGram-Android/TMessagesProj/src/main/java/org/telegram/tgnet/WaysGramMessages.java
+          ANDROID_MAPPER=/tmp/waysgram-android-source/WaysGram-Android/TMessagesProj/src/main/java/org/telegram/tgnet/WaysGramMapper.java
+          if grep -Fq 'body.put("big", req.big)' "$ANDROID_MESSAGES" && grep -Fq 'private static void addRecentReactions' "$ANDROID_MAPPER"; then
+            echo "Big reaction animation bridge is already present."
+          else
+            patch --batch --forward -p1 -d /tmp/waysgram-android-source < android-stage1-reactions-big.patch
+          fi
           python3 - <<'PY'
           from pathlib import Path
           import zipfile
 
           messages = Path("/tmp/waysgram-android-source/WaysGram-Android/TMessagesProj/src/main/java/org/telegram/tgnet/WaysGramMessages.java")
+          mapper = Path("/tmp/waysgram-android-source/WaysGram-Android/TMessagesProj/src/main/java/org/telegram/tgnet/WaysGramMapper.java")
           media = Path("/tmp/waysgram-android-source/WaysGram-Android/TMessagesProj/src/main/java/org/telegram/tgnet/WaysGramMedia.java")
           transport = Path("/tmp/waysgram-android-source/WaysGram-Android/TMessagesProj/src/main/java/org/telegram/tgnet/WaysGramTransport.java")
           chat_fragment = Path("/tmp/waysgram-android-source/WaysGram-Android/TMessagesProj/src/main/java/org/telegram/messenger/waysgram/WaysGramChatFragment.java")
@@ -337,6 +345,10 @@ jobs:
           )
           send_helper.write_text(helper_text, encoding="utf-8")
           chat_text = chat_fragment.read_text(encoding="utf-8")
+          mapper_text = mapper.read_text(encoding="utf-8")
+          assert 'body.put("big", req.big)' in message_text
+          assert 'private static void addRecentReactions' in mapper_text
+          assert 'addRecentReactions(reactions, json.optJSONArray("recent_reactions"))' in mapper_text
           assert "apiClient.post(\"/api/forward\", payload, idempotencyKey" in chat_text
           assert "pendingForwardIdempotencyKey(keyScope)" in chat_text
           assert "clearPendingForwardIdempotencyKey(keyScope)" in chat_text
@@ -349,6 +361,8 @@ jobs:
           replacements = {
               "WaysGram-Android/TMessagesProj/src/main/java/org/telegram/tgnet/WaysGramMessages.java":
                   messages,
+              "WaysGram-Android/TMessagesProj/src/main/java/org/telegram/tgnet/WaysGramMapper.java":
+                  mapper,
               "WaysGram-Android/TMessagesProj/src/main/java/org/telegram/tgnet/WaysGramMedia.java":
                   media,
               "WaysGram-Android/TMessagesProj/src/main/java/org/telegram/tgnet/WaysGramTransport.java":
