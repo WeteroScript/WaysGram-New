@@ -1,0 +1,37 @@
+--- a/WaysGram-Android/TMessagesProj/src/main/java/org/telegram/messenger/waysgram/WaysGramChatFragment.java
++++ b/WaysGram-Android/TMessagesProj/src/main/java/org/telegram/messenger/waysgram/WaysGramChatFragment.java
+@@ -4141,7 +4141,16 @@
+     private void forwardMessage(long messageId, long recipientId, String recipientLabel) {
+         JSONObject payload = new JSONObject();
+         try {
+-            payload.put("recipient_id", recipientId);
++            // Use the same atomic forwarding API as the native multi-message bridge.
++            // It preserves media metadata, contacts, static locations and provenance.
++            payload.put("source_scope", "dm");
++            payload.put("source_peer_id", peerId);
++            payload.put("target_scope", "dm");
++            payload.put("target_peer_id", recipientId);
++            JSONArray messageIds = new JSONArray();
++            messageIds.put(messageId);
++            payload.put("message_ids", messageIds);
++            payload.put("silent", false);
+         } catch (Exception exception) {
+             statusView.setText("Не удалось подготовить пересылку");
+             return;
+@@ -4151,7 +4160,7 @@
+                 keyScope, ignored -> "wg-forward-" + UUID.randomUUID()
+         );
+         statusView.setText("Пересылаю сообщение…");
+-        apiClient.post("/api/messages/" + messageId + "/forward", payload, idempotencyKey,
++        apiClient.post("/api/forward", payload, idempotencyKey,
+                 new WaysGramApiClient.Callback() {
+                     @Override
+                     public void onSuccess(JSONObject response) {
+@@ -4161,6 +4170,7 @@
+ 
+                     @Override
+                     public void onError(String message, int statusCode) {
++                        // Keep the same key so a retry after a timeout cannot duplicate it.
+                         statusView.setText(message);
+                     }
+                 });
