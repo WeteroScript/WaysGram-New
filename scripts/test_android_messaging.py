@@ -50,6 +50,28 @@ class NativeMessagingSourceChecks(unittest.TestCase):
         self.assertIn('chat.admin_rights.pin_messages = true', chats)
         self.assertIn('channel.admin_rights.pin_messages = true', chats)
 
+    def test_pin_refresh_retry_and_pinned_screen_reconcile(self):
+        media = self.source('messenger/MediaDataController.java')
+        chat = self.source('ui/ChatActivity.java')
+        controller = self.source('messenger/MessagesController.java')
+        for marker in ('pinnedLoadTokens', 'pinnedRetries', 'pinnedRetryAttempts',
+                       'schedulePinnedRetry(dialogId, pinToken, error != null && error.code == 420)', 'error.code == -1000',
+                       'error.code >= 500', 'PINS_CHANGED_RETRY', 'Math.min(60000L',
+                       'AndroidUtilities.cancelRunOnUIThread', 'pinnedRetries.size() >= 128',
+                       'if (floodWait) delay = Math.max(delay, 30000L)',
+                       'TextUtils.equals(pinToken, org.telegram.tgnet.WaysGramApi.getToken(currentAccount))'):
+            self.assertIn(marker, media)
+        for marker in ('maxPinnedMessageId = pinnedMessageIds.isEmpty()',
+                       'oldPinned.keySet()', 'if (!pinnedMessageObjects.containsKey(oldId))',
+                       'processDeletedMessages(removed, ChatObject.isChannel(currentChat) ? -dialog_id : 0, false, false)',
+                       'messagesDict[0].get(mid) == null', 'MessageObject copy = new MessageObject(object.currentAccount',
+                       'processNewMessages(added, false)'):
+            self.assertIn(marker, chat)
+        segment = controller[controller.index('    public void unpinAllMessages('):controller.index('    public void deleteAllReactionsFrom(')]
+        self.assertIn('final String pinToken', segment)
+        self.assertIn('else if (org.telegram.tgnet.WaysGramTransport.ENABLED)', segment)
+        self.assertIn('getMediaDataController().loadPinnedMessages(pinnedDialogId, 0, 0)', segment)
+
     def test_local_reaction_picker_and_bubble_fallback(self):
         import xml.etree.ElementTree as ET
         chat = self.source('ui/ChatActivity.java')
