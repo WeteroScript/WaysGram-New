@@ -195,16 +195,24 @@ jobs:
 
           original = Path("/tmp/WaysGram-Android.original.zip")
           rebuilt = Path("/tmp/WaysGram-Android.updated.zip")
-          replacement = Path("/tmp/waysgram-android-source/WaysGram-Android/TMessagesProj/src/main/java/org/telegram/tgnet/WaysGramMessages.java")
-          target = "WaysGram-Android/TMessagesProj/src/main/java/org/telegram/tgnet/WaysGramMessages.java"
+          replacements = {
+              "WaysGram-Android/TMessagesProj/src/main/java/org/telegram/tgnet/WaysGramMessages.java":
+                  Path("/tmp/waysgram-android-source/WaysGram-Android/TMessagesProj/src/main/java/org/telegram/tgnet/WaysGramMessages.java"),
+              "WaysGram-Android/TMessagesProj/src/main/java/org/telegram/messenger/SendMessagesHelper.java":
+                  Path("/tmp/waysgram-android-source/WaysGram-Android/TMessagesProj/src/main/java/org/telegram/messenger/SendMessagesHelper.java"),
+          }
           with zipfile.ZipFile(original, "r") as source, zipfile.ZipFile(rebuilt, "w", allowZip64=True) as output:
+              names = set(source.namelist())
+              assert names.issuperset(replacements), "A patched Android source file is missing from the archive"
               for info in source.infolist():
-                  data = replacement.read_bytes() if info.filename == target else source.read(info.filename)
+                  data = replacements[info.filename].read_bytes() if info.filename in replacements else source.read(info.filename)
                   output.writestr(info, data)
           with zipfile.ZipFile(rebuilt, "r") as archive:
               bad = archive.testzip()
               assert bad is None, f"Corrupt ZIP member: {bad}"
-              assert target in archive.namelist()
+              assert set(replacements).issubset(archive.namelist())
+              assert b'remove_media' in archive.read("WaysGram-Android/TMessagesProj/src/main/java/org/telegram/tgnet/WaysGramMessages.java")
+              assert b'arr.size() == 100' in archive.read("WaysGram-Android/TMessagesProj/src/main/java/org/telegram/messenger/SendMessagesHelper.java")
           part_size = 23_068_672
           data = rebuilt.read_bytes()
           assert len(data) > part_size * 4
