@@ -9094,7 +9094,7 @@ def build_messenger_router(
                 result["entities"] = entities
             await idempotency_store(db, uid, "/api/messages", descriptor, result, now)
             queued_push = False
-            if recipient_id != uid:
+            if recipient_id != uid and not silent:
                 queued_push = await enqueue_push(
                     db, uid, recipient_id, str(user.get("display_name") or user.get("username") or "Новое сообщение"),
                     body, {"scope": "dm", "chat_id": str(uid), "message_id": str(message_id), "silent": "1" if silent else "0"}, now,
@@ -9853,7 +9853,7 @@ def build_messenger_router(
         peer, ids = payload.get("peer_id"), payload.get("ids")
         if isinstance(peer, bool) or not isinstance(peer, int) or not 0 < peer <= 9223372036854775807:
             raise HTTPException(status_code=400, detail="Некорректный собеседник")
-        if not isinstance(ids, list) or not 1 <= len(ids) <= 1000 or any(
+        if not isinstance(ids, list) or not 1 <= len(ids) <= 200 or any(
             isinstance(i, bool) or not isinstance(i, int) or i < 2 or i > 2147483647 for i in ids
         ) or len(set(ids)) != len(ids):
             raise HTTPException(status_code=400, detail="Некорректный список сообщений")
@@ -10405,12 +10405,12 @@ def build_messenger_router(
                 created.append(result_item)
             result = {"status": "forwarded", "messages": created, "count": len(created)}
             await idempotency_store(db, uid, scope, descriptor, result, now)
-            if target_scope == "dm" and target_peer != uid:
+            if target_scope == "dm" and target_peer != uid and not silent:
                 queued_push = await enqueue_push(db, uid, target_peer,
                     str(user.get("display_name") or user.get("username") or "Новое сообщение"),
                     "Переслано сообщений: " + str(len(created)),
                     {"scope": "dm", "chat_id": str(uid), "message_id": str(created[-1]["id"]), "silent": "1" if silent else "0"}, now)
-            elif target_scope in ("group", "channel"):
+            elif target_scope in ("group", "channel") and not silent:
                 member_table, id_column = ("group_members", "group_id") if target_scope == "group" else ("channel_members", "channel_id")
                 cur = await db.execute(f"SELECT telegram_id FROM {member_table} WHERE {id_column}=? AND telegram_id<>? LIMIT 500", (target_peer, uid))
                 notifications = [int(row[0]) for row in await cur.fetchall()]
