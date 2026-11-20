@@ -1,0 +1,33 @@
+--- a/WaysGram-Android/TMessagesProj/src/main/java/org/telegram/tgnet/WaysGramMedia.java
++++ b/WaysGram-Android/TMessagesProj/src/main/java/org/telegram/tgnet/WaysGramMedia.java
+@@ -274,19 +274,20 @@
+             video.duration = Math.max(0, duration);
+             video.w = width > 0 ? width : 384;
+             video.h = height > 0 ? height : 384;
+             doc.attributes.add(video);
+             String coverMediaId = info.optString("video_cover_media_id", "");
+             if (!TextUtils.isEmpty(coverMediaId) && kind.equals("video")) {
+-                TLRPC.MessageMedia cover = buildMedia(account, coverMediaId, "image/jpeg",
+-                        "video_cover.jpg", "", new JSONObject(), false);
+-                if (cover instanceof TLRPC.TL_messageMediaPhoto) {
+-                    videoCoverPhoto = ((TLRPC.TL_messageMediaPhoto) cover).photo;
+-                    File customThumb = videoCoverThumbnail(account, coverMediaId, mediaId);
+-                    if (customThumb == null) {
+-                        throw new WaysGramApi.ApiException(422, "VIDEO_COVER_INVALID");
+-                    }
+-                } else {
+-                    throw new WaysGramApi.ApiException(422, "VIDEO_COVER_INVALID");
++                try {
++                    TLRPC.MessageMedia cover = buildMedia(account, coverMediaId, "image/jpeg",
++                            "video_cover.jpg", "", new JSONObject(), false);
++                    if (cover instanceof TLRPC.TL_messageMediaPhoto) {
++                        File customThumb = videoCoverThumbnail(account, coverMediaId, mediaId);
++                        if (customThumb != null) {
++                            videoCoverPhoto = ((TLRPC.TL_messageMediaPhoto) cover).photo;
++                        }
++                    }
++                } catch (WaysGramApi.ApiException coverError) {
++                    FileLog.e(coverError);
+                 }
+             }
+             File thumb = videoThumbnail(mediaId, file);
