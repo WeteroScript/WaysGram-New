@@ -6537,8 +6537,11 @@ def test_batch_forward_denies_unauthorized_and_never_partially_writes(api_env) -
             assert (await client.delete(f'/api/messages/{m1}?for=me', headers=h(87401))).status_code == 200
             assert (await client.post('/api/forward', headers=h(87401), json={**base, 'message_ids': [m1]})).status_code == 404
             contact = await client.post('/api/messages', headers=h(87402), json={'recipient_id': 87401, 'contact': {'name': 'User', 'phone': '+1234567890'}})
-            assert (await client.post('/api/forward', headers=h(87401), json={**base, 'message_ids': [contact.json()['id']]})).status_code == 400
-            assert (await client.get(f'/api/groups/{group}/messages', headers=h(87401))).json()['messages'] == []
+            copied = await client.post('/api/forward', headers=h(87401), json={**base, 'message_ids': [contact.json()['id']]})
+            assert copied.status_code == 201
+            assert copied.json()['messages'][0]['contact_phone'] == '+1234567890'
+            history = (await client.get(f'/api/groups/{group}/messages', headers=h(87401))).json()['messages']
+            assert len(history) == 1 and history[0]['contact_name'] == 'User'
     run(scenario())
 
 
@@ -7028,8 +7031,9 @@ def test_native_contact_fields_are_private_persistent_and_idempotent(api_env) ->
                 assert response.status_code == 400, response.text
             forward = await client.post('/api/forward', headers=h(87902), json={'source_scope':'dm', 'source_peer_id':87901,
                 'target_scope':'dm', 'target_peer_id':87903, 'message_ids':[first.json()['id']]})
-            assert forward.status_code == 400
-            assert (await client.get('/api/messages?with=87902', headers=h(87903))).json()['messages'] == []
+            assert forward.status_code == 201, forward.text
+            forwarded = (await client.get('/api/messages?with=87902', headers=h(87903))).json()['messages']
+            assert len(forwarded) == 1 and forwarded[0]['contact_vcard'] == vcard
             saved = await client.post('/api/messages', headers=h(87901), json={**request, 'recipient_id': 87901})
             assert saved.status_code == 201
             saved_history = (await client.get('/api/messages?with=87901', headers=h(87901))).json()['messages']
@@ -7041,7 +7045,7 @@ def test_native_contact_fields_are_private_persistent_and_idempotent(api_env) ->
     run(scenario())
 
 
-def test_contact_schema_migrates_old_rows_and_rejects_unsupported_group_cards(api_env) -> None:
+def test_contact_schema_migrates_old_rows_and_supports_group_cards(api_env) -> None:
     path, _, _, app = api_env
     for uid in (87801, 87802):
         add_account(api_env, uid, f'old_contact_{uid}')
@@ -7065,7 +7069,110 @@ def test_contact_schema_migrates_old_rows_and_rejects_unsupported_group_cards(ap
             group = (await client.post('/api/groups', headers=h(87801), json={'title': 'Contacts'})).json()['id']
             channel = (await client.post('/api/channels', headers=h(87801), json={'title': 'Contacts', 'is_public': False})).json()['id']
             for url in (f'/api/groups/{group}/messages', f'/api/channels/{channel}/messages'):
-                response = await client.post(url, headers=h(87801), json={'body': 'should not degrade to text', 'contact': {'name':'Example','phone':'+31 6 12345678'}})
-                assert response.status_code == 400
-                assert (await client.get(url, headers=h(87801))).json()['messages'] == []
+                response = await client.post(url, headers=h(87801), json={'body': 'Contact card', 'contact': {'name':'Example','phone':'+31 6 12345678'}})
+                assert response.status_code == 201, response.text
+                history = (await client.get(url, headers=h(87801))).json()['messages']
+                assert len(history) == 1 and history[0]['contact_name'] == 'Example'
+    run(scenario())
+
+
+def test_contacts_in_all_chats_and_cross_scope_forwarding(api_env, monkeypatch) -> None:
+    path, _, _, app = api_env
+    for uid in (86901, 86902, 86903):
+        add_account(api_env, uid, f'contact_all_{uid}')
+        add_session(path, uid, f'contact-all-{uid}')
+    checks = []
+    monkeypatch.setattr(messenger_api, '_firebase_service_account', lambda: checks.append(True) or None)
+    async def scenario():
+        h = lambda uid: {'Authorization': f'Bearer contact-all-{uid}'}
+        async with await client_for(app) as client:
+            group = (await client.post('/api/groups', headers=h(86901), json={'title': 'Cards'})).json()['id']
+            assert (await client.post(f'/api/groups/{group}/members', headers=h(86901), json={'telegram_id': 86902})).status_code == 201
+            channel_data = (await client.post('/api/channels', headers=h(86901), json={'title': 'Cards private', 'is_public': False})).json()
+            channel = channel_data['id']
+            assert (await client.post('/api/channels/join', headers=h(86902), json={'invite_link': channel_data['invite_link']})).status_code == 200
+            card = {'first_name': 'Ada', 'last_name': 'Lovelace', 'phone': '+31 6 12345678', 'email': 'a@example.com', 'vcard': 'BEGIN:VCARD\r\nVERSION:3.0\r\nFN:Ada Lovelace\r\nEND:VCARD\r\n'}
+            checks.clear()
+            paths = [('dm', '/api/messages', {'recipient_id': 86902, 'contact':card, 'silent':True}),
+                     ('group', f'/api/groups/{group}/messages', {'contact':card, 'silent':True}),
+                     ('channel', f'/api/channels/{channel}/messages', {'contact':card, 'silent':True})]
+            mids = {}
+            for scope, url, payload in paths:
+                key = {**h(86901), 'Idempotency-Key': f'contact-native-{scope}-key-001'}
+                first = await client.post(url, headers=key, json=payload)
+                retry = await client.post(url, headers=key, json=payload)
+                assert first.status_code == retry.status_code == 201, first.text
+                assert first.json() == retry.json()
+                assert first.json()['body'] == 'Контакт: Ada Lovelace'
+                assert first.json()['contact']['vcard'] == card['vcard']
+                mids[scope] = first.json()['id']
+                assert checks == []
+                target_url = f'/api/messages?with=86901' if scope == 'dm' else url
+                history = (await client.get(target_url, headers=h(86902))).json()['messages']
+                found = next(m for m in history if m['id'] == mids[scope])
+                assert (found['contact_name'], found['contact_phone'], found['contact_email'], found['contact_vcard']) == ('Ada Lovelace', card['phone'], card['email'], card['vcard'])
+                if scope != 'dm':
+                    assert (await client.get(url, headers=h(86903))).status_code == 403
+                    assert (await client.post(url, headers=h(86903), json=payload)).status_code == 403
+                    if scope == 'channel':
+                        assert (await client.post(url, headers=h(86902), json=payload)).status_code == 403
+                    bads = [{'contact':card,'location':{'latitude':0,'longitude':0}},
+                            {'contact':card,'media_id':'a'*32}, {'contact':{**card,'phone':'invalid'}}]
+                    for bad in bads:
+                        assert (await client.post(url, headers=h(86901), json=bad)).status_code == 400
+            sources = [('dm', 86902, mids['dm']), ('group', group, mids['group']), ('channel', channel, mids['channel'])]
+            for scope, peer, mid in sources:
+                for target_scope, target_id in (('dm',86903), ('dm',86901), ('group',group), ('channel',channel)):
+                    req = {'source_scope':scope, 'source_peer_id':peer, 'target_scope':target_scope,
+                           'target_peer_id':target_id, 'message_ids':[mid], 'silent':True}
+                    result = await client.post('/api/forward', headers=h(86901), json=req)
+                    assert result.status_code == 201, (req, result.text)
+                    copy = result.json()['messages'][0]
+                    assert (copy['contact_name'], copy['contact_phone'], copy['contact_vcard']) == ('Ada Lovelace', card['phone'], card['vcard'])
+                    url = f'/api/messages?with={target_id}' if target_scope == 'dm' else f'/api/{target_scope}s/{target_id}/messages'
+                    history = (await client.get(url, headers=h(86901))).json()['messages']
+                    restored = next(m for m in history if m['id'] == copy['id'])
+                    assert restored['contact_vcard'] == card['vcard']
+            # Failed batches create no partial copies.
+            before = len((await client.get(f'/api/groups/{group}/messages', headers=h(86901))).json()['messages'])
+            denied = await client.post('/api/forward', headers=h(86901), json={'source_scope':'channel','source_peer_id':channel,
+                'target_scope':'group','target_peer_id':group,'message_ids':[mids['channel'], 999999], 'silent':True})
+            assert denied.status_code == 404
+            assert len((await client.get(f'/api/groups/{group}/messages', headers=h(86901))).json()['messages']) == before
+            # Cleanup one source does not remove its channel twin or forwarded copies.
+            assert (await client.delete(f'/api/group-messages/{mids["group"]}', headers=h(86901))).status_code == 200
+            with db_split.sqlite_connect(path) as db:
+                assert db.execute("SELECT COUNT(*) FROM message_scoped_contacts WHERE scope='group' AND message_id=?", (mids['group'],)).fetchone()[0] == 0
+                assert db.execute("SELECT COUNT(*) FROM message_scoped_contacts WHERE scope='channel' AND message_id=?", (mids['channel'],)).fetchone()[0] == 1
+            assert any(m.get('contact_vcard') == card['vcard'] for m in (await client.get('/api/messages?with=86901', headers=h(86903))).json()['messages'])
+    run(scenario())
+
+
+def test_forward_idempotency_rechecks_revoked_access_and_hidden_sources(api_env) -> None:
+    path, _, _, app = api_env
+    for uid in (86801, 86802, 86803):
+        add_account(api_env, uid, f'contact_revoke_{uid}')
+        add_session(path, uid, f'contact-revoke-{uid}')
+    async def scenario():
+        h = lambda uid: {'Authorization': f'Bearer contact-revoke-{uid}'}
+        async with await client_for(app) as client:
+            group = (await client.post('/api/groups', headers=h(86801), json={'title':'Revocation'})).json()['id']
+            assert (await client.post(f'/api/groups/{group}/members', headers=h(86801), json={'telegram_id':86802})).status_code == 201
+            card = {'name':'Private', 'phone':'+1234567890', 'vcard':'BEGIN:VCARD\r\nEND:VCARD'}
+            source = await client.post(f'/api/groups/{group}/messages', headers=h(86801), json={'contact':card, 'silent':True})
+            assert source.status_code == 201
+            req = {'source_scope':'group','source_peer_id':group,'target_scope':'dm','target_peer_id':86803,'message_ids':[source.json()['id']], 'silent':True}
+            key = {**h(86802), 'Idempotency-Key':'contact-forward-revocation-001'}
+            first = await client.post('/api/forward', headers=key, json=req)
+            assert first.status_code == 201
+            assert (await client.post('/api/forward', headers=key, json=req)).json() == first.json()
+            assert (await client.delete(f'/api/groups/{group}/members/86802', headers=h(86801))).status_code == 200
+            assert (await client.post('/api/forward', headers=key, json=req)).status_code == 403
+            dm = await client.post('/api/messages', headers=h(86801), json={'recipient_id':86802,'contact':card,'silent':True})
+            assert dm.status_code == 201
+            req = {'source_scope':'dm','source_peer_id':86801,'target_scope':'dm','target_peer_id':86803,'message_ids':[dm.json()['id']], 'silent':True}
+            key = {**h(86802), 'Idempotency-Key':'contact-forward-hidden-001'}
+            assert (await client.post('/api/forward', headers=key, json=req)).status_code == 201
+            assert (await client.delete(f'/api/messages/{dm.json()["id"]}?for=me', headers=h(86802))).status_code == 200
+            assert (await client.post('/api/forward', headers=key, json=req)).status_code == 404
     run(scenario())

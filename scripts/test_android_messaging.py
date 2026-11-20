@@ -115,7 +115,7 @@ class NativeMessagingSourceChecks(unittest.TestCase):
             self.assertIn('send.silent', section)
         self.assertLess(media.index('SCHEDULE_NOT_SUPPORTED'), media.index('WaysGramMedia.uploadFor'))
         direct = transport[transport.index('private static TLObject sendTo('):transport.index('private static TLRPC.TL_error mapError')]
-        self.assertIn('nextPts(account), silent, location)', direct)
+        self.assertIn('nextPts(account), silent, location, contact)', direct)
         self.assertIn('body.put("silent", silent)', direct)
         self.assertGreater(direct.index('body.put("silent", silent)'), direct.index('body.put("location", location)'))
         group = chats[chats.index('public static TLObject send('):chats.index('// ----------------------------------------------------------------', chats.index('public static TLObject send('))]
@@ -140,7 +140,7 @@ class NativeMessagingSourceChecks(unittest.TestCase):
         self.assertIn('kind.equals("delete_for_me")', poller)
         self.assertIn('u.messages.add(messageId)', poller)
 
-    def test_native_private_contact_round_trip_and_scope_guards(self):
+    def test_native_contact_round_trip_and_scope_guards(self):
         transport = self.source('tgnet/WaysGramTransport.java')
         media = self.source('tgnet/WaysGramMedia.java')
         self.assertIn('send.media instanceof TLRPC.TL_inputMediaContact', transport)
@@ -150,6 +150,8 @@ class NativeMessagingSourceChecks(unittest.TestCase):
         self.assertIn('media.vcard', transport)
         self.assertIn('CONTACT_NOT_SUPPORTED', transport)
         self.assertIn('body.put("contact", contact)', transport)
+        chats = self.source('tgnet/WaysGramChats.java')
+        self.assertIn('body.put("contact", contact)', chats)
         self.assertIn('location != null || contact != null', transport)
         self.assertIn('new TLRPC.TL_messageMediaContact()', media)
         for name in ('contact_name', 'contact_first_name', 'contact_last_name', 'contact_phone', 'contact_vcard'):

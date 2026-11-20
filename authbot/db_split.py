@@ -38,6 +38,7 @@ MESSENGER_TABLES = frozenset(
         "push_outbox",
         "message_gifts",
         "message_contacts",
+        "message_scoped_contacts",
         "message_locations",
         "live_locations",
         "message_reactions",

@@ -735,6 +735,17 @@ async def init_messenger_storage(database_path: Path) -> None:
                 contact_last_name TEXT NOT NULL DEFAULT '',
                 contact_vcard TEXT NOT NULL DEFAULT ''
             );
+            CREATE TABLE IF NOT EXISTS message_scoped_contacts (
+                scope TEXT NOT NULL CHECK(scope IN ('group','channel')),
+                message_id INTEGER NOT NULL,
+                contact_name TEXT NOT NULL,
+                contact_phone TEXT NOT NULL,
+                contact_email TEXT NOT NULL DEFAULT '',
+                contact_first_name TEXT NOT NULL DEFAULT '',
+                contact_last_name TEXT NOT NULL DEFAULT '',
+                contact_vcard TEXT NOT NULL DEFAULT '',
+                PRIMARY KEY(scope,message_id)
+            );
             CREATE TABLE IF NOT EXISTS message_locations (
                 message_id INTEGER PRIMARY KEY REFERENCES messages(id) ON DELETE CASCADE,
                 latitude REAL NOT NULL CHECK(latitude >= -90 AND latitude <= 90),
@@ -1570,6 +1581,12 @@ async def init_messenger_storage(database_path: Path) -> None:
                 DELETE FROM message_forward_locations WHERE scope='{scope}' AND message_id=OLD.id;
                 END""")
 
+        for table, scope in (("group_messages", "group"), ("channel_messages", "channel")):
+            await db.execute(f"""CREATE TRIGGER IF NOT EXISTS {db_split.SCHEMA}.cleanup_scoped_contact_{scope}
+                AFTER DELETE ON {table} BEGIN
+                DELETE FROM message_scoped_contacts WHERE scope='{scope}' AND message_id=OLD.id;
+                END""")
+
         # Collectibles are numbered inside their own collection ("Plush Pepe #1"),
         # exactly like Telegram numbers unique gifts.
         await db.executescript(
@@ -2109,6 +2126,43 @@ def _message_body(value: str) -> str:
     if not body or len(body) > MAX_MESSAGE_LENGTH:
         raise HTTPException(status_code=400, detail="Текст сообщения должен содержать 1–4000 символов")
     return body
+
+
+def _parse_message_contact(contact_value: Any) -> dict[str, str] | None:
+    """Validate a shareable contact snapshot without inventing account identity."""
+    if contact_value is None:
+        return None
+    if not isinstance(contact_value, dict):
+        raise HTTPException(status_code=400, detail="Контакт должен быть объектом")
+    native_fields = any(key in contact_value for key in ("first_name", "last_name", "vcard"))
+    for key in ("first_name", "last_name", "vcard"):
+        if key in contact_value and not isinstance(contact_value[key], str):
+            raise HTTPException(status_code=400, detail="Поля имени и vCard должны быть строками")
+    first_name = contact_value.get("first_name", "").strip()
+    last_name = contact_value.get("last_name", "").strip()
+    vcard = contact_value.get("vcard", "")
+    contact_name = str(contact_value.get("name") or "").strip()
+    parts_name = " ".join(part for part in (first_name, last_name) if part)
+    if parts_name:
+        if contact_name and contact_name != parts_name:
+            raise HTTPException(status_code=400, detail="Имя контакта не соответствует его частям")
+        contact_name = parts_name
+    contact_phone = str(contact_value.get("phone") or "").strip()
+    contact_email = str(contact_value.get("email") or "").strip()
+    if not contact_name or len(contact_name) > 120:
+        raise HTTPException(status_code=400, detail="Укажите имя контакта до 120 символов")
+    if len(vcard) > 16384 or "\x00" in vcard:
+        raise HTTPException(status_code=400, detail="vCard должен содержать не более 16384 символов без NUL")
+    if not re.fullmatch(r"[+0-9(). -]{5,32}", contact_phone):
+        raise HTTPException(status_code=400, detail="Некорректный номер телефона контакта")
+    if len(contact_email) > 254 or (
+        contact_email and not re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", contact_email)
+    ):
+        raise HTTPException(status_code=400, detail="Некорректный адрес электронной почты контакта")
+    contact_payload = {"name": contact_name, "phone": contact_phone, "email": contact_email}
+    if native_fields:
+        contact_payload.update(first_name=first_name, last_name=last_name, vcard=vcard)
+    return contact_payload
 
 
 def _parse_message_location(value: Any) -> dict[str, float | str] | None:
@@ -7375,12 +7429,18 @@ def build_messenger_router(
             )
             sources = {int(row[0]): (str(row[1]), int(row[2])) for row in await cur.fetchall()}
             locations = {}
+            contacts = {}
             if scope in ("group", "channel"):
                 cur = await db.execute(
                     f"SELECT message_id,latitude,longitude,label FROM message_forward_locations WHERE scope=? AND message_id IN ({placeholders})",
                     (scope, *message_ids),
                 )
                 locations = {int(row[0]): (row[1], row[2], row[3]) for row in await cur.fetchall()}
+                cur = await db.execute(
+                    f"SELECT message_id,contact_name,contact_phone,contact_email,contact_first_name,contact_last_name,contact_vcard FROM message_scoped_contacts WHERE scope=? AND message_id IN ({placeholders})",
+                    (scope, *message_ids),
+                )
+                contacts = {int(row[0]): tuple(row[1:]) for row in await cur.fetchall()}
         mine: dict[int, list[str]] = {}
         for message_id, reaction in rows:
             mine.setdefault(int(message_id), []).append(str(reaction))
@@ -7393,6 +7453,9 @@ def build_messenger_router(
             location = locations.get(int(item["id"]))
             if location:
                 item.update(location_latitude=location[0], location_longitude=location[1], location_label=location[2])
+            contact = contacts.get(int(item["id"]))
+            if contact:
+                item.update(zip(("contact_name", "contact_phone", "contact_email", "contact_first_name", "contact_last_name", "contact_vcard"), contact))
 
     @router.get("/api/channels/{channel_id}/messages")
     async def list_channel_messages(
@@ -7534,13 +7597,16 @@ def build_messenger_router(
         if not isinstance(silent, bool):
             raise HTTPException(status_code=400, detail="silent должен быть логическим значением")
         media_id = str(payload.get("media_id") or "").strip() or None
-        if payload.get("contact") is not None:
-            raise HTTPException(status_code=400, detail="Контакты в группах и каналах пока не поддерживаются")
+        contact_payload = _parse_message_contact(payload.get("contact"))
         location_payload = _parse_message_location(payload.get("location"))
+        if contact_payload and (media_id or location_payload):
+            raise HTTPException(status_code=400, detail="Нельзя объединять контакт с файлом или геолокацией")
         if location_payload and media_id:
             raise HTTPException(status_code=400, detail="Нельзя отправлять геолокацию вместе с файлом")
         body_value = str(payload.get("body") or "")
-        if location_payload and not body_value.strip():
+        if contact_payload and not body_value.strip():
+            body_value = "Контакт: " + contact_payload["name"]
+        elif location_payload and not body_value.strip():
             body_value = str(location_payload["label"] or "Местоположение")
         body = _message_body(body_value) if body_value.strip() or not media_id else ""
         if not await can_manage_channel(channel_id, uid):
@@ -7550,6 +7616,13 @@ def build_messenger_router(
         descriptor = idempotency_descriptor(scope, payload, idempotency_key)
         async with aiosqlite.connect(db_path()) as db:
             await db.execute("BEGIN IMMEDIATE")
+            # Verify posting rights under the same lock used for the message
+            # and contact snapshot; demotion cannot race this write or replay.
+            cur = await db.execute("""SELECT 1 FROM channels c WHERE c.id=? AND
+                (c.owner_telegram_id=? OR EXISTS(SELECT 1 FROM channel_admins a
+                WHERE a.channel_id=c.id AND a.telegram_id=?))""", (channel_id, uid, uid))
+            if await cur.fetchone() is None:
+                raise HTTPException(status_code=403, detail="Публиковать в канале может только владелец или администратор")
             previous = await idempotency_lookup(db, uid, scope, descriptor, now)
             if previous is not None:
                 await db.rollback()
@@ -7577,6 +7650,14 @@ def build_messenger_router(
                 (channel_id, uid, body, media_id, reply_to_id, now),
             )
             message_id = int(cur.lastrowid)
+            if contact_payload:
+                await db.execute(
+                    """INSERT INTO message_scoped_contacts(scope,message_id,contact_name,contact_phone,contact_email,
+                       contact_first_name,contact_last_name,contact_vcard) VALUES(?,?,?,?,?,?,?,?)""",
+                    ("channel", message_id, contact_payload["name"], contact_payload["phone"],
+                     contact_payload["email"], contact_payload.get("first_name", ""),
+                     contact_payload.get("last_name", ""), contact_payload.get("vcard", "")),
+                )
             if location_payload:
                 await db.execute(
                     """INSERT INTO message_forward_locations(scope,message_id,latitude,longitude,label)
@@ -7590,6 +7671,8 @@ def build_messenger_router(
             result = {"id": message_id, "status": "published", "channel_id": channel_id, "author_id": uid, "body": body, "media_id": media_id, "reply_to_id": reply_to_id, **media_fields, "created_at": now}
             if location_payload:
                 result["location"] = location_payload
+            if contact_payload:
+                result["contact"] = contact_payload
             await idempotency_store(db, uid, scope, descriptor, result, now)
             await db.commit()
         if not silent:
@@ -8132,39 +8215,9 @@ def build_messenger_router(
         contact_value = payload.get("contact")
         contact_payload: dict[str, str] | None = None
         location_payload = _parse_message_location(payload.get("location"))
-        if contact_value is not None:
-            if not isinstance(contact_value, dict):
-                raise HTTPException(status_code=400, detail="Контакт должен быть объектом")
-            native_fields = any(key in contact_value for key in ("first_name", "last_name", "vcard"))
-            for key in ("first_name", "last_name", "vcard"):
-                if key in contact_value and not isinstance(contact_value[key], str):
-                    raise HTTPException(status_code=400, detail="Поля имени и vCard должны быть строками")
-            first_name = contact_value.get("first_name", "").strip()
-            last_name = contact_value.get("last_name", "").strip()
-            vcard = contact_value.get("vcard", "")
-            contact_name = str(contact_value.get("name") or "").strip()
-            parts_name = " ".join(part for part in (first_name, last_name) if part)
-            if parts_name:
-                if contact_name and contact_name != parts_name:
-                    raise HTTPException(status_code=400, detail="Имя контакта не соответствует его частям")
-                contact_name = parts_name
-            contact_phone = str(contact_value.get("phone") or "").strip()
-            contact_email = str(contact_value.get("email") or "").strip()
-            if not contact_name or len(contact_name) > 120:
-                raise HTTPException(status_code=400, detail="Укажите имя контакта до 120 символов")
-            if len(vcard) > 16384 or "\x00" in vcard:
-                raise HTTPException(status_code=400, detail="vCard должен содержать не более 16384 символов без NUL")
-            if not re.fullmatch(r"[+0-9(). -]{5,32}", contact_phone):
-                raise HTTPException(status_code=400, detail="Некорректный номер телефона контакта")
-            if len(contact_email) > 254 or (
-                contact_email and not re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", contact_email)
-            ):
-                raise HTTPException(status_code=400, detail="Некорректный адрес электронной почты контакта")
-            if media_id or location_payload:
-                raise HTTPException(status_code=400, detail="Нельзя объединять контакт с файлом или геолокацией")
-            contact_payload = {"name": contact_name, "phone": contact_phone, "email": contact_email}
-            if native_fields:
-                contact_payload.update(first_name=first_name, last_name=last_name, vcard=vcard)
+        contact_payload = _parse_message_contact(contact_value)
+        if contact_payload and (media_id or location_payload):
+            raise HTTPException(status_code=400, detail="Нельзя объединять контакт с файлом или геолокацией")
         if location_payload and media_id:
             raise HTTPException(status_code=400, detail="Нельзя отправлять геолокацию вместе с файлом")
         body_value = str(payload.get("body") or "")
@@ -9103,6 +9156,50 @@ def build_messenger_router(
             await db.execute("BEGIN IMMEDIATE")
             prior = await idempotency_lookup(db, uid, scope, descriptor, now)
             if prior is not None:
+                # Cached responses may contain private contact cards: do not reveal
+                # them after source access or destination rights were revoked.
+                if source_scope == "group":
+                    await require_group_member(db, source_peer, uid)
+                elif source_scope == "channel":
+                    cur = await db.execute("""SELECT 1 FROM channels c WHERE c.id=? AND
+                        (c.is_public=1 OR c.owner_telegram_id=? OR EXISTS(SELECT 1 FROM channel_admins a
+                        WHERE a.channel_id=c.id AND a.telegram_id=?) OR EXISTS(SELECT 1 FROM channel_members m
+                        WHERE m.channel_id=c.id AND m.telegram_id=?))""", (source_peer, uid, uid, uid))
+                    if await cur.fetchone() is None:
+                        raise HTTPException(status_code=403, detail="Нет доступа к исходному каналу")
+                for source_id in ids:
+                    if source_scope == "dm":
+                        cur = await db.execute("""SELECT 1 FROM messages m WHERE m.id=? AND
+                            ((m.sender_telegram_id=? AND m.recipient_telegram_id=?) OR
+                             (m.sender_telegram_id=? AND m.recipient_telegram_id=?)) AND NOT EXISTS
+                            (SELECT 1 FROM message_hidden_for h WHERE h.message_id=m.id AND h.telegram_id=?)""",
+                            (source_id, uid, source_peer, source_peer, uid, uid))
+                    elif source_scope == "group":
+                        cur = await db.execute("SELECT 1 FROM group_messages WHERE id=? AND group_id=?", (source_id, source_peer))
+                    else:
+                        cur = await db.execute("SELECT 1 FROM channel_messages WHERE id=? AND channel_id=?", (source_id, source_peer))
+                    if await cur.fetchone() is None:
+                        raise HTTPException(status_code=404, detail="Исходное сообщение не найдено")
+                if target_scope == "group":
+                    await require_group_member(db, target_peer, uid)
+                elif target_scope == "channel":
+                    cur = await db.execute("""SELECT 1 FROM channels c WHERE c.id=? AND
+                        (c.owner_telegram_id=? OR EXISTS(SELECT 1 FROM channel_admins a
+                        WHERE a.channel_id=c.id AND a.telegram_id=?))""", (target_peer, uid, uid))
+                    if await cur.fetchone() is None:
+                        raise HTTPException(status_code=403, detail="Публиковать может только администратор канала")
+                else:
+                    cur = await db.execute("SELECT is_banned FROM accounts WHERE telegram_id=?", (target_peer,))
+                    target = await cur.fetchone()
+                    if target is None:
+                        raise HTTPException(status_code=404, detail="Получатель не найден")
+                    if target[0]:
+                        raise HTTPException(status_code=403, detail="Получатель заблокирован")
+                    cur = await db.execute("""SELECT 1 FROM blocked_users WHERE
+                        (owner_telegram_id=? AND blocked_telegram_id=?) OR
+                        (owner_telegram_id=? AND blocked_telegram_id=?) LIMIT 1""", (uid, target_peer, target_peer, uid))
+                    if await cur.fetchone():
+                        raise HTTPException(status_code=403, detail="Пересылка заблокирована")
                 await db.rollback()
                 return prior
 
@@ -9176,15 +9273,23 @@ def build_messenger_router(
                     raise HTTPException(status_code=404, detail="Исходное сообщение не найдено")
                 item = dict(row)
                 if source_scope == "dm":
-                    cur = await db.execute("""SELECT EXISTS(SELECT 1 FROM message_gifts WHERE message_id=?) OR
-                        EXISTS(SELECT 1 FROM message_contacts WHERE message_id=?)""", (mid, mid))
-                    if (await cur.fetchone())[0]:
+                    cur = await db.execute("SELECT 1 FROM message_gifts WHERE message_id=?", (mid,))
+                    if await cur.fetchone():
                         raise HTTPException(status_code=400, detail="Этот тип вложения пока нельзя переслать")
                     cur = await db.execute("SELECT latitude,longitude,label FROM message_locations WHERE message_id=?", (mid,))
                 else:
                     cur = await db.execute("SELECT latitude,longitude,label FROM message_forward_locations WHERE scope=? AND message_id=?", (source_scope, mid))
                 location = await cur.fetchone()
                 item["forward_location"] = tuple(location) if location else None
+                contact_columns = "contact_name,contact_phone,contact_email,contact_first_name,contact_last_name,contact_vcard"
+                if source_scope == "dm":
+                    cur = await db.execute(f"SELECT {contact_columns} FROM message_contacts WHERE message_id=?", (mid,))
+                else:
+                    cur = await db.execute(f"SELECT {contact_columns} FROM message_scoped_contacts WHERE scope=? AND message_id=?", (source_scope, mid))
+                contact = await cur.fetchone()
+                item["forward_contact"] = tuple(contact) if contact else None
+                if contact and (location or item.get("media_id")):
+                    raise HTTPException(status_code=400, detail="Нельзя переслать несовместимые вложения")
                 cur = await db.execute("SELECT from_name,from_date FROM message_forward_sources WHERE scope=? AND message_id=?", (source_scope, mid))
                 prior_source = await cur.fetchone()
                 if prior_source:
@@ -9239,6 +9344,14 @@ def build_messenger_router(
                         await db.execute("INSERT INTO message_locations(message_id,latitude,longitude,label) VALUES(?,?,?,?)", (mid, *location))
                     else:
                         await db.execute("INSERT INTO message_forward_locations(scope,message_id,latitude,longitude,label) VALUES(?,?,?,?,?)", (target_scope, mid, *location))
+                contact = item["forward_contact"]
+                if contact:
+                    if target_scope == "dm":
+                        await db.execute("""INSERT INTO message_contacts(message_id,contact_name,contact_phone,contact_email,
+                            contact_first_name,contact_last_name,contact_vcard) VALUES(?,?,?,?,?,?,?)""", (mid, *contact))
+                    else:
+                        await db.execute("""INSERT INTO message_scoped_contacts(scope,message_id,contact_name,contact_phone,contact_email,
+                            contact_first_name,contact_last_name,contact_vcard) VALUES(?,?,?,?,?,?,?,?)""", (target_scope, mid, *contact))
                 if not drop_author:
                     await db.execute("INSERT INTO message_forward_sources(scope,message_id,from_name,from_date) VALUES(?,?,?,?)",
                                      (target_scope, mid, item["forward_name"], item["forward_date"]))
@@ -9251,6 +9364,8 @@ def build_messenger_router(
                     **item["media_fields"]}
                 if location:
                     result_item.update(location_latitude=location[0], location_longitude=location[1], location_label=location[2])
+                if contact:
+                    result_item.update(zip(("contact_name", "contact_phone", "contact_email", "contact_first_name", "contact_last_name", "contact_vcard"), contact))
                 if target_scope == "dm":
                     result_item.update(sender_id=uid, recipient_id=target_peer)
                 elif target_scope == "group":
@@ -11269,13 +11384,16 @@ def build_messenger_router(
         if not isinstance(silent, bool):
             raise HTTPException(status_code=400, detail="silent должен быть логическим значением")
         media_id = str(payload.get("media_id") or "").strip() or None
-        if payload.get("contact") is not None:
-            raise HTTPException(status_code=400, detail="Контакты в группах и каналах пока не поддерживаются")
+        contact_payload = _parse_message_contact(payload.get("contact"))
         location_payload = _parse_message_location(payload.get("location"))
+        if contact_payload and (media_id or location_payload):
+            raise HTTPException(status_code=400, detail="Нельзя объединять контакт с файлом или геолокацией")
         if location_payload and media_id:
             raise HTTPException(status_code=400, detail="Нельзя отправлять геолокацию вместе с файлом")
         body_value = str(payload.get("body") or "")
-        if location_payload and not body_value.strip():
+        if contact_payload and not body_value.strip():
+            body_value = "Контакт: " + contact_payload["name"]
+        elif location_payload and not body_value.strip():
             body_value = str(location_payload["label"] or "Местоположение")
         body = _message_body(body_value) if body_value.strip() or not media_id else ""
         now = int(time.time())
@@ -11335,6 +11453,14 @@ def build_messenger_router(
                 (group_id, uid, body, media_id, reply_to_id, now),
             )
             message_id = int(cur.lastrowid)
+            if contact_payload:
+                await db.execute(
+                    """INSERT INTO message_scoped_contacts(scope,message_id,contact_name,contact_phone,contact_email,
+                       contact_first_name,contact_last_name,contact_vcard) VALUES(?,?,?,?,?,?,?,?)""",
+                    ("group", message_id, contact_payload["name"], contact_payload["phone"],
+                     contact_payload["email"], contact_payload.get("first_name", ""),
+                     contact_payload.get("last_name", ""), contact_payload.get("vcard", "")),
+                )
             if location_payload:
                 await db.execute(
                     """INSERT INTO message_forward_locations(scope,message_id,latitude,longitude,label)
@@ -11352,6 +11478,8 @@ def build_messenger_router(
             }
             if location_payload:
                 result["location"] = location_payload
+            if contact_payload:
+                result["contact"] = contact_payload
             await idempotency_store(db, uid, scope, descriptor, result, now)
             await db.commit()
         if not silent:
