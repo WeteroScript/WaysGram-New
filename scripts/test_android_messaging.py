@@ -23,6 +23,35 @@ class NativeMessagingSourceChecks(unittest.TestCase):
     def source(self, path):
         return self.archive.read(BASE + path).decode('utf-8')
 
+    def test_file_completion_and_cancellation_use_stage_queue(self):
+        conn = self.source('tgnet/ConnectionsManager.java')
+        loader = self.source('messenger/FileLoadOperation.java')
+        sync = conn.split('public int sendRequestSync(', 1)[1].split('public int sendRequest(', 1)[0]
+        self.assertIn('-> Utilities.stageQueue.postRunnable', sync)
+        self.assertIn('response.freeResources()', sync)
+        cancel = conn.split('boolean notifyServer, Runnable onCancelled)', 1)[1]
+        self.assertLess(cancel.index('stageQueue.postRunnable(onCancelled)'), cancel.index('native_cancelRequest'))
+        self.assertIn('info != null && info.requestToken != 0', loader)
+        self.assertIn('requestInfo != null && requestInfo.requestToken != 0', loader)
+        self.assertIn('waitingForCancelledCount[0] == 0 && fullyCancelled != null', loader)
+
+    def test_inbox_catchup_and_empty_history(self):
+        poller = self.source('tgnet/WaysGramPoller.java')
+        self.assertIn('first && c.optInt("unread_count") == 0', poller)
+        self.assertIn('known = first ? c.optInt("my_read_id", 0) : 0', poller)
+        controller = self.source('messenger/MessagesController.java')
+        self.assertIn('WaysGramTransport.ENABLED && isCache && dialogId < 0', controller)
+        self.assertIn('NotificationCenter.loadingMessagesFailed, classGuid, req, error, loadIndex', controller)
+        self.assertIn('waitingForLoad.remove((Integer) args[3])', self.source('ui/ChatActivity.java'))
+
+    def test_native_photo_orientation_and_complete_binary_downloads(self):
+        loader = self.source('messenger/ImageLoader.java')
+        self.assertIn('if (waysGramPhoto ||', loader)
+        self.assertIn('rotation == 90 || rotation == 270', self.source('tgnet/WaysGramMedia.java'))
+        api = self.source('tgnet/WaysGramApi.java')
+        self.assertIn('"Accept-Encoding", "identity"', api)
+        self.assertIn('expected != out.size()', api)
+
     def test_native_reschedule_has_a_separate_request_and_keeps_scheduled_id(self):
         scheduled = self.source('tgnet/WaysGramScheduled.java')
         transport = self.source('tgnet/WaysGramTransport.java')

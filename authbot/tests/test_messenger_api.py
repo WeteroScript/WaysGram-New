@@ -1327,6 +1327,18 @@ def test_direct_messages_and_channel_permissions(api_env) -> None:
             assert sent.json()["sender_id"] == 82001
             assert replay.json()["id"] == sent.json()["id"]
 
+            inbox = await client.get("/api/conversations", headers=recipient)
+            assert inbox.status_code == 200
+            conversation = inbox.json()["conversations"][0]
+            assert conversation["id"] == 82001
+            assert conversation["last_message_id"] == sent.json()["id"]
+            assert conversation["unread_count"] == 1
+            catchup = await client.get(
+                f"/api/messages?with=82001&after_id={conversation['my_read_id']}", headers=recipient,
+            )
+            assert catchup.status_code == 200
+            assert [m["id"] for m in catchup.json()["messages"]] == [sent.json()["id"]]
+
             changed_replay = await client.post(
                 "/api/messages",
                 headers=dm_headers,
@@ -2334,6 +2346,10 @@ def test_group_and_channel_long_poll_return_incremental_messages(api_env) -> Non
             )
             assert joined.status_code == 201
 
+            empty_group = await client.get(f"/api/groups/{group_id}/messages", headers=member)
+            assert empty_group.status_code == 200
+            assert empty_group.json()["messages"] == []
+
             group_initial = await client.post(
                 f"/api/groups/{group_id}/messages",
                 headers=owner,
@@ -2382,6 +2398,10 @@ def test_group_and_channel_long_poll_return_incremental_messages(api_env) -> Non
             )
             assert channel.status_code == 201
             channel_id = channel.json()["id"]
+
+            empty_channel = await client.get(f"/api/channels/{channel_id}/messages", headers=owner)
+            assert empty_channel.status_code == 200
+            assert empty_channel.json()["messages"] == []
 
             channel_initial = await client.post(
                 f"/api/channels/{channel_id}/messages",
