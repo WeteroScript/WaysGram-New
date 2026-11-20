@@ -8413,3 +8413,74 @@ def test_pin_overrides_survive_storage_reinitialization(api_env) -> None:
     with db_split.sqlite_connect(path) as db:
         assert tuple(db.execute('SELECT message_id,user_telegram_id,is_pinned FROM dm_pin_overrides').fetchone()) == (mid,98601,1)
         assert db.execute("SELECT count(*) FROM messenger.sqlite_master WHERE name='dm_pin_overrides'").fetchone()[0] == 1
+
+
+def test_pin_clear_snapshot_protects_concurrent_changes_and_private_pins(api_env) -> None:
+    path, _, _, app = api_env
+    for uid, token in ((98701, 'snapshot-owner'), (98702, 'snapshot-peer')):
+        add_account(api_env, uid, f'snapshot_pin_{uid}')
+        add_session(path, uid, token)
+
+    async def scenario() -> None:
+        async with await client_for(app) as client:
+            a = {'Authorization': 'Bearer snapshot-owner'}
+            b = {'Authorization': 'Bearer snapshot-peer'}
+            ids = []
+            for body in ('unchanged', 'repinned', 'private peer', 'new private'):
+                r = await client.post('/api/messages', headers=a, json={'recipient_id': 98702, 'body': body})
+                assert r.status_code == 201
+                ids.append(r.json()['id'])
+            def args(mid, peer=98702):
+                return {'scope': 'dm', 'peer_id': peer, 'message_id': mid}
+            for mid in ids[:3]:
+                assert (await client.post('/api/pins/v2', headers=a, json=args(mid))).status_code == 200
+            page = (await client.get('/api/pins/v2', headers=a, params={
+                'scope': 'dm', 'peer_id': 98702, 'order_by_id': True, 'limit': 1})).json()
+            snapshot = page['snapshot_event_id']
+            assert (await client.delete('/api/pins/v2', headers=b, params=args(ids[1], 98701))).status_code == 200
+            assert (await client.post('/api/pins/v2', headers=b, json=args(ids[1], 98701))).status_code == 200
+            # The peer's private change must not influence or leak through this clear.
+            assert (await client.delete('/api/pins/v2', headers=b, params={**args(ids[2], 98701), 'one_side': True})).status_code == 200
+            assert (await client.post('/api/pins/v2', headers=a, json={**args(ids[3]), 'one_side': True})).status_code == 200
+            payload = {'scope': 'dm', 'peer_id': 98702, 'max_id': ids[3], 'snapshot_event_id': snapshot}
+            h = {**a, 'Idempotency-Key': 'snapshot-clear-123456'}
+            assert (await client.post('/api/pins/clear/v2', headers=h, json={k:v for k,v in payload.items() if k != 'snapshot_event_id'})).status_code == 400
+            assert (await client.post('/api/pins/clear', headers=h, json=payload)).status_code == 400
+            assert (await client.post('/api/pins/clear/v2', headers=h, json={**payload, 'snapshot_event_id': True})).status_code == 400
+            assert (await client.post('/api/pins/clear/v2', headers=h, json={**payload, 'snapshot_event_id': 2**63-1})).status_code == 400
+            result = await client.post('/api/pins/clear/v2', headers=h, json=payload)
+            assert result.status_code == 200 and result.json()['count'] == 2
+            listed = (await client.get('/api/pins/v2', headers=a, params={'scope':'dm','peer_id':98702, 'order_by_id':True})).json()
+            assert [p['message_id'] for p in listed['pinned_messages']] == [ids[3], ids[1]]
+            assert (await client.post('/api/pins/clear/v2', headers=h, json=payload)).json() == result.json()
+            assert (await client.post('/api/pins/clear/v2', headers=h, json={**payload, 'max_id':ids[1]})).status_code == 409
+            group = await client.post('/api/groups', headers=a, json={'title':'snapshot pins group'})
+            gid = group.json()['id']
+            assert (await client.post(f'/api/groups/{gid}/members', headers=a, json={'telegram_id':98702})).status_code == 201
+            gm = (await client.post(f'/api/groups/{gid}/messages', headers=b, json={'body':'group pin'})).json()['id']
+            gp = {'scope':'group', 'peer_id':gid, 'message_id':gm}
+            assert (await client.post('/api/pins/v2', headers=a, json=gp)).status_code == 200
+            watermark = (await client.get('/api/pins/v2', headers=a, params={'scope':'group','peer_id':gid})).json()['snapshot_event_id']
+            assert (await client.delete('/api/pins/v2', headers=a, params=gp)).status_code == 200
+            assert (await client.post('/api/pins/v2', headers=a, json=gp)).status_code == 200
+            payload = {'scope':'group', 'peer_id':gid, 'max_id':gm, 'snapshot_event_id':watermark}
+            assert (await client.post('/api/pins/clear/v2', headers={**b, 'Idempotency-Key':'snapshot-member-123'}, json=payload)).status_code == 403
+            cleared = await client.post('/api/pins/clear/v2', headers={**a, 'Idempotency-Key':'snapshot-group-123'}, json=payload)
+            assert cleared.status_code == 200 and cleared.json()['count'] == 0
+            assert (await client.get('/api/pins/v2', headers=a, params={'scope':'group','peer_id':gid})).json()['total_count'] == 1
+            channel = await client.post('/api/channels', headers=a, json={'title':'snapshot channel', 'username':'snapshot_channel'})
+            assert channel.status_code == 201
+            cid = channel.json()['id']
+            post = await client.post(f'/api/channels/{cid}/messages', headers=a, json={'body':'channel pin'})
+            assert post.status_code == 201
+            cp = {'scope':'channel', 'peer_id':cid, 'message_id':post.json()['id']}
+            assert (await client.post('/api/pins/v2', headers=a, json=cp)).status_code == 200
+            watermark = (await client.get('/api/pins/v2', headers=a, params={'scope':'channel','peer_id':cid})).json()['snapshot_event_id']
+            assert (await client.delete('/api/pins/v2', headers=a, params=cp)).status_code == 200
+            assert (await client.post('/api/pins/v2', headers=a, json=cp)).status_code == 200
+            payload = {'scope':'channel', 'peer_id':cid, 'max_id':cp['message_id'], 'snapshot_event_id':watermark}
+            assert (await client.post('/api/pins/clear/v2', headers={**b,'Idempotency-Key':'snapshot-channel-member'}, json=payload)).status_code == 403
+            cleared = await client.post('/api/pins/clear/v2', headers={**a,'Idempotency-Key':'snapshot-channel-owner'}, json=payload)
+            assert cleared.status_code == 200 and cleared.json()['count'] == 0
+            assert (await client.get('/api/pins/v2', headers=a, params={'scope':'channel','peer_id':cid})).json()['total_count'] == 1
+    run(scenario())

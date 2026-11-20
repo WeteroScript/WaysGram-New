@@ -65,12 +65,36 @@ class NativeMessagingSourceChecks(unittest.TestCase):
                        'oldPinned.keySet()', 'if (!pinnedMessageObjects.containsKey(oldId))',
                        'processDeletedMessages(removed, ChatObject.isChannel(currentChat) ? -dialog_id : 0, false, false)',
                        'messagesDict[0].get(mid) == null', 'MessageObject copy = new MessageObject(object.currentAccount',
+                       'replaceMessageObjects(replacements, 0, false)',
                        'processNewMessages(added, false)'):
             self.assertIn(marker, chat)
         segment = controller[controller.index('    public void unpinAllMessages('):controller.index('    public void deleteAllReactionsFrom(')]
         self.assertIn('final String pinToken', segment)
         self.assertIn('else if (org.telegram.tgnet.WaysGramTransport.ENABLED)', segment)
         self.assertIn('getMediaDataController().loadPinnedMessages(pinnedDialogId, 0, 0)', segment)
+
+    def test_pin_clear_snapshot_and_durable_retry(self):
+        pins = self.source('tgnet/WaysGramPins.java')
+        for marker in ('clear_snapshot', '/api/pins/clear/v2', 'snapshot_event_id',
+                       '"SHA-256"', 'waysgram_pin_clear', 'pending.optString("session")',
+                       'PIN_CLEAR_PENDING_EXPIRED', '6L * 24 * 60 * 60 * 1000',
+                       'prefs.edit().putString(prefKey, pending.toString()).commit()',
+                       'prefs.edit().remove(prefKey).commit()', 'body, token, 30000, key'):
+            self.assertIn(marker, pins)
+        self.assertLess(pins.index('putString(prefKey, pending.toString()).commit()'),
+                        pins.index('"POST", "/api/pins/clear/v2"'))
+        chat = self.source('ui/ChatActivity.java')
+        controller = self.source('messenger/MessagesController.java')
+        notifications = self.source('messenger/NotificationCenter.java')
+        self.assertIn('waysGramPinError = totalEvents++', notifications)
+        self.assertIn('NotificationCenter.waysGramPinError', controller)
+        self.assertIn('LaunchActivity.getSafeLastFragment() == this', chat)
+        self.assertIn('R.string.WaysGramPinClearExpired', chat)
+        self.assertIn('processDeletedMessages(ids, ChatObject.isChannel(currentChat) ? -dialog_id : 0, false)', chat)
+        for lang in ('values', 'values-ru'):
+            strings = self.archive.read(f'WaysGram-Android/TMessagesProj/src/main/res/{lang}/strings.xml').decode('utf-8')
+            for name in ('WaysGramPinActionFailed', 'WaysGramPinClearExpired', 'WaysGramPinUpdateRequired'):
+                self.assertIn('name="' + name + '"', strings)
 
     def test_local_reaction_picker_and_bubble_fallback(self):
         import xml.etree.ElementTree as ET

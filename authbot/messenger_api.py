@@ -803,6 +803,9 @@ async def init_messenger_storage(database_path: Path) -> None:
             );
             CREATE INDEX IF NOT EXISTS idx_message_events_scope
                 ON message_events(scope, chat_id, id);
+            CREATE INDEX IF NOT EXISTS idx_message_events_pin_snapshot
+                ON message_events(scope,chat_id,message_id,id)
+                WHERE kind IN ('pin','unpin','pin_local','unpin_local');
             CREATE TABLE IF NOT EXISTS read_markers (
                 telegram_id INTEGER NOT NULL,
                 scope TEXT NOT NULL,
@@ -10341,7 +10344,8 @@ def build_messenger_router(
     @router.get("/api/pins/capabilities")
     async def pin_capabilities(authorization: str | None = Header(default=None)) -> dict[str, Any]:
         await current_user(authorization)
-        return {"version": 2, "one_side": True, "keyset_paging": True, "clear_bounded": True}
+        return {"version": 2, "one_side": True, "keyset_paging": True, "clear_bounded": True,
+                "clear_snapshot": True}
 
     @router.get("/api/pins")
     @router.get("/api/pins/v2")
@@ -10418,7 +10422,12 @@ def build_messenger_router(
             ordering = "message_id DESC" if order_by_id else "pinned_at DESC,message_id DESC"
             cur = await db.execute("SELECT * FROM (" + base + ") ORDER BY " + ordering + " LIMIT ?", params + (limit,))
             rows = [dict(row) for row in await cur.fetchall()]
-        return {"scope": scope, "peer_id": peer_id, "pinned_messages": rows, "count": len(rows), "total_count": total}
+            # This watermark and the page are read in the same transaction. A
+            # later clear must not remove a pin changed after this snapshot.
+            cur = await db.execute("SELECT COALESCE(MAX(id),0) FROM message_events")
+            snapshot_event_id = int((await cur.fetchone())[0])
+        return {"scope": scope, "peer_id": peer_id, "pinned_messages": rows, "count": len(rows),
+                "total_count": total, "snapshot_event_id": snapshot_event_id}
 
     @router.post("/api/pins")
     @router.post("/api/pins/v2")
@@ -10455,7 +10464,9 @@ def build_messenger_router(
         return await change_pinned_message(scope, peer_id, message_id, int(user["telegram_id"]), False, one_side)
 
     @router.post("/api/pins/clear")
+    @router.post("/api/pins/clear/v2")
     async def clear_pins(
+        request: Request,
         payload: dict[str, Any],
         authorization: str | None = Header(default=None),
         idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
@@ -10467,7 +10478,14 @@ def build_messenger_router(
             raise HTTPException(status_code=400, detail="scope: dm, group или channel")
         if any(isinstance(v, bool) or not isinstance(v, int) or v <= 0 for v in (peer_id, max_id)):
             raise HTTPException(status_code=400, detail="peer_id и max_id должны быть положительными целыми числами")
-        descriptor = idempotency_descriptor("/api/pins/clear", payload, idempotency_key)
+        snapshot = payload.get("snapshot_event_id")
+        snapshot_required = request.url.path.endswith("/v2")
+        if snapshot_required and (isinstance(snapshot, bool) or not isinstance(snapshot, int)
+                                  or snapshot < 0 or snapshot > 9223372036854775807):
+            raise HTTPException(status_code=400, detail="Необходим корректный snapshot_event_id")
+        if not snapshot_required and "snapshot_event_id" in payload:
+            raise HTTPException(status_code=400, detail="Используйте /api/pins/clear/v2 для снимка")
+        descriptor = idempotency_descriptor("/api/pins/clear/v2" if snapshot_required else "/api/pins/clear", payload, idempotency_key)
         if descriptor is None:
             raise HTTPException(status_code=400, detail="Необходим Idempotency-Key")
         now = int(time.time())
@@ -10509,7 +10527,6 @@ def build_messenger_router(
                          AND m.id<=? AND NOT EXISTS(SELECT 1 FROM message_hidden_for h
                                                    WHERE h.message_id=m.id AND h.telegram_id=?)""",
                     (uid, uid, peer_id, peer_id, uid, max_id, uid))
-                await db.execute("DELETE FROM dm_pin_overrides WHERE message_id IN (SELECT id FROM pin_clear_ids) AND (is_pinned=0 OR user_telegram_id=?)", (uid,))
                 stored_chat = 0
             elif scope == "group":
                 await db.execute("""INSERT INTO pin_clear_ids SELECT p.message_id,0,0,'unpin' FROM pinned_messages p
@@ -10521,8 +10538,23 @@ def build_messenger_router(
                                     JOIN channel_messages m ON m.id=p.message_id AND m.channel_id=p.chat_id
                                     WHERE p.scope='channel' AND p.chat_id=? AND p.message_id<=?""", (peer_id, max_id))
                 stored_chat = peer_id
+            if snapshot_required:
+                cur = await db.execute("SELECT COALESCE(MAX(id),0) FROM message_events")
+                if snapshot > int((await cur.fetchone())[0]):
+                    raise HTTPException(status_code=400, detail="snapshot_event_id находится в будущем")
+                # Do not let another account's private override influence the
+                # caller's clear or leak the existence of that private pin.
+                await db.execute(
+                    """DELETE FROM pin_clear_ids WHERE EXISTS (
+                           SELECT 1 FROM message_events e
+                           WHERE e.scope=? AND e.chat_id=? AND e.message_id=pin_clear_ids.id
+                             AND e.id>? AND e.kind IN ('pin','unpin','pin_local','unpin_local')
+                             AND (e.kind IN ('pin','unpin') OR e.actor_id=?))""",
+                    (scope, stored_chat, snapshot, uid))
             cur = await db.execute("SELECT COUNT(*) FROM pin_clear_ids")
             count = int((await cur.fetchone())[0])
+            if scope == "dm":
+                await db.execute("DELETE FROM dm_pin_overrides WHERE message_id IN (SELECT id FROM pin_clear_ids) AND (is_pinned=0 OR user_telegram_id=?)", (uid,))
             await db.execute("DELETE FROM pinned_messages WHERE scope=? AND chat_id=? AND message_id IN (SELECT id FROM pin_clear_ids)", (scope, stored_chat))
             await db.execute(
                 """INSERT INTO message_events(scope,chat_id,user_a,user_b,message_id,kind,actor_id,created_at)
