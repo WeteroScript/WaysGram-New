@@ -517,5 +517,14 @@ class NativeMessagingSourceChecks(unittest.TestCase):
             self.assertIn(value, album)
 
 
+    def test_native_edit_can_remove_single_attachment(self):
+        messages = self.source('tgnet/WaysGramMessages.java')
+        edit = messages[messages.index('public static TLObject edit('):
+                        messages.index('// ---------------------------------------------------------------- deleting')]
+        self.assertIn('req.media instanceof TLRPC.TL_inputMediaEmpty', edit)
+        self.assertIn('body.put("remove_media", true)', edit)
+        self.assertIn('replacingMedia ? "/media/v2" : ""', edit)
+
+
 if __name__ == '__main__':
     unittest.main()
