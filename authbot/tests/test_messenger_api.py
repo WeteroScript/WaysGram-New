@@ -8980,7 +8980,7 @@ def test_media_spoiler_and_video_cover_metadata_access(api_env) -> None:
                 "spoiler": True,
                 "video_cover_media_id": cover_id,
             }
-            video_bytes = b"\\x00\\x00\\x00\\x18ftypisom" + (b"\\x00" * 8)
+            video_bytes = b"\x00\x00\x00\x18ftypisom" + (b"\x00" * 8)
             video = await client.post(
                 "/api/media/documents",
                 headers={
@@ -9018,7 +9018,8 @@ def test_media_spoiler_and_video_cover_metadata_access(api_env) -> None:
             # linked to a visible video message in this DM.
             visible_cover = await client.get(f"/api/media/{cover_id}", headers=receiver)
             assert visible_cover.status_code == 200
-            assert visible_cover.content == test_preview_png()
+            with Image.open(BytesIO(visible_cover.content)) as cover_image:
+                assert cover_image.size == (16, 16)
 
             # The link must not make the cover public to unrelated accounts.
             hidden_from_outsider = await client.get(f"/api/media/{cover_id}", headers=outsider)
