@@ -96,6 +96,25 @@ class NativeMessagingSourceChecks(unittest.TestCase):
             for name in ('WaysGramPinActionFailed', 'WaysGramPinClearExpired', 'WaysGramPinUpdateRequired'):
                 self.assertIn('name="' + name + '"', strings)
 
+    def test_pin_recovery_uses_session_bound_serial_queue(self):
+        pins = self.source('tgnet/WaysGramPins.java')
+        transport = self.source('tgnet/WaysGramTransport.java')
+        poller = self.source('tgnet/WaysGramPoller.java')
+        for marker in ('static String recoverPendingClear(', 'prefs.getAll().entrySet()',
+                       'TextUtils.equals(digest, pending.optString("session"))',
+                       'age > 6L * 24 * 60 * 60 * 1000', 'eligible.higherKey(afterKey)',
+                       'sendPendingClear(account, token, t, prefs, name, pending)',
+                       'e.status != 401 && e.status != 429', 'refreshAfterRecovery(account, token, dialogId, null)',
+                       'WaysGramPoller.isRunning(account)'):
+            self.assertIn(marker, pins)
+        for marker in ('recoveringPins[account]', 'lastPinRecovery[account] < 30000',
+                       'pinQueue(account).execute', 'WaysGramPins.recoverPendingClear',
+                       'TextUtils.equals(token, WaysGramApi.getToken(account))'):
+            self.assertIn(marker, transport)
+        self.assertIn('WaysGramTransport.schedulePendingPinRecovery(account)', poller)
+        connections = self.source('tgnet/ConnectionsManager.java')
+        self.assertIn('WaysGramPoller.start(currentAccount)', connections)
+
     def test_pins_use_batched_history_when_available_and_keep_service_messages(self):
         pins = self.source('tgnet/WaysGramPins.java')
         media = self.source('messenger/MediaDataController.java')
