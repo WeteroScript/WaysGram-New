@@ -11553,8 +11553,14 @@ def build_messenger_router(
                                     payload: dict[str, Any], authorization: str | None) -> dict[str, Any]:
         user = await current_user(authorization)
         uid = int(user["telegram_id"])
+        remove_media = payload.get("remove_media", False)
+        if not isinstance(remove_media, bool):
+            raise HTTPException(status_code=400, detail="remove_media должен быть логическим значением")
         requested_id = payload.get("media_id")
-        if not isinstance(requested_id, str) or not requested_id:
+        if remove_media:
+            if requested_id not in (None, ""):
+                raise HTTPException(status_code=400, detail="Нельзя одновременно удалить и заменить вложение")
+        elif not isinstance(requested_id, str) or not requested_id:
             raise HTTPException(status_code=400, detail="Не указан новый файл")
         if "body" in payload:
             body, entities = edited_content(payload)
@@ -11592,26 +11598,46 @@ def build_messenger_router(
             old_media = row[2]
             if not old_media:
                 raise HTTPException(status_code=400, detail="В сообщении нет файла для замены")
-            new_media = await require_owned_media(db, requested_id, uid)
-            if row[5]:
-                old_class = album_media_class(await media_message_fields(db, old_media))
-                new_class = album_media_class(await media_message_fields(db, new_media))
-                if new_class != old_class or new_class == "unsupported":
-                    raise HTTPException(status_code=400, detail="В альбоме заменяйте файл на медиа того же типа")
-            if body is None:
-                body, entity_json = str(row[3] or ""), str(row[4] or "[]")
-                # Old captionless uploads used synthetic display labels.
-                if entity_json == "[]" and (body == await default_media_message_body(db, old_media)
-                        or row[5] and body == "Медиаальбом"):
-                    body = ""
-            await db.execute(f"UPDATE {table} SET media_id=?,body=?,entities_json=?,edited_at=? WHERE id=?",
-                             (new_media, body, entity_json, now, message_id))
+            if remove_media:
+                if row[5]:
+                    await db.rollback()
+                    raise HTTPException(status_code=409, detail="Удаление отдельного файла из медиаальбома пока не поддерживается")
+                if body is None:
+                    body, entity_json = str(row[3] or ""), str(row[4] or "[]")
+                if not str(body or "").strip():
+                    body = "Вложение удалено"
+                    entity_json = "[]"
+                elif entity_json == "[]" and body == await default_media_message_body(db, old_media):
+                    body = "Вложение удалено"
+                await db.execute(f"UPDATE {table} SET media_id=NULL,body=?,entities_json=?,edited_at=? WHERE id=?",
+                                 (body, entity_json, now, message_id))
+                new_media = None
+            else:
+                new_media = await require_owned_media(db, requested_id, uid)
+                if row[5]:
+                    old_class = album_media_class(await media_message_fields(db, old_media))
+                    new_class = album_media_class(await media_message_fields(db, new_media))
+                    if new_class != old_class or new_class == "unsupported":
+                        raise HTTPException(status_code=400, detail="В альбоме заменяйте файл на медиа того же типа")
+                if body is None:
+                    body, entity_json = str(row[3] or ""), str(row[4] or "[]")
+                    # Old captionless uploads used synthetic display labels.
+                    if entity_json == "[]" and (body == await default_media_message_body(db, old_media)
+                            or row[5] and body == "Медиаальбом"):
+                        body = ""
+                await db.execute(f"UPDATE {table} SET media_id=?,body=?,entities_json=?,edited_at=? WHERE id=?",
+                                 (new_media, body, entity_json, now, message_id))
             if scope == "dm":
                 await record_event(db, "dm", message_id, "edit", uid, user_a=int(row[0]), user_b=int(row[1]))
             else:
                 await record_event(db, scope, message_id, "edit", uid, chat_id=chat_id)
             await db.commit()
-        return {"id": message_id, "media_id": new_media, "edited_at": now}
+        result = {"id": message_id, "edited_at": now}
+        if remove_media:
+            result["media_removed"] = True
+        else:
+            result["media_id"] = new_media
+        return result
 
     @router.put("/api/messages/{message_id}/media/v2")
     async def replace_dm_media(message_id: int, payload: dict[str, Any],
