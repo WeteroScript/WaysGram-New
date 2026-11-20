@@ -1609,6 +1609,11 @@ async def init_messenger_storage(database_path: Path) -> None:
                 f"ALTER TABLE {db_split.SCHEMA}.scheduled_messages "
                 "ADD COLUMN time_zone TEXT NOT NULL DEFAULT 'UTC'"
             )
+        for table_name in ("scheduled_messages", "online_scheduled_messages"):
+            cur = await db.execute(f"PRAGMA {db_split.SCHEMA}.table_info({table_name})")
+            columns = {str(row[1]) for row in await cur.fetchall()}
+            if "entities_json" not in columns:
+                await db.execute(f"ALTER TABLE {db_split.SCHEMA}.{table_name} ADD COLUMN entities_json TEXT NOT NULL DEFAULT '[]'")
         cur = await db.execute("PRAGMA main.table_info(push_devices)")
         push_columns = await cur.fetchall()
         if "quiet_push" not in {str(row[1]) for row in push_columns}:
@@ -9497,16 +9502,18 @@ def build_messenger_router(
         return result
 
 
+    @router.post("/api/messages/schedule/v2", status_code=201)
     @router.post("/api/messages/schedule", status_code=201)
     async def schedule_direct_message(
         payload: dict[str, Any],
+        request: Request,
         authorization: str | None = Header(default=None),
         idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
     ) -> dict[str, Any]:
         user = await current_user(authorization)
         uid = int(user["telegram_id"])
-        if "entities" in payload:
-            raise HTTPException(status_code=400, detail="Форматирование отложенных сообщений пока не поддерживается")
+        if "entities" in payload and not request.url.path.endswith("/v2"):
+            raise HTTPException(status_code=400, detail="Используйте версию v2 для форматирования")
         try:
             recipient_id = int(payload.get("recipient_id", 0))
         except (TypeError, ValueError):
@@ -9516,7 +9523,8 @@ def build_messenger_router(
         body_value = payload.get("body")
         if not isinstance(body_value, str):
             raise HTTPException(status_code=400, detail="Укажите текст сообщения")
-        body = _message_body(body_value)
+        body, entities = (_message_body_and_entities({"body": body_value, "entities": payload.get("entities", [])})
+                          if request.url.path.endswith("/v2") else (_message_body(body_value), []))
         scheduled_at = payload.get("scheduled_at")
         if isinstance(scheduled_at, bool) or not isinstance(scheduled_at, int):
             raise HTTPException(status_code=400, detail="scheduled_at должен быть Unix timestamp")
@@ -9546,7 +9554,7 @@ def build_messenger_router(
             raise HTTPException(status_code=400, detail="Отправка должна быть запланирована минимум через 10 секунд")
         if scheduled_at > now + 30 * 24 * 60 * 60:
             raise HTTPException(status_code=400, detail="Нельзя запланировать отправку более чем на 30 дней")
-        scope = "/api/messages/schedule"
+        scope = request.url.path
         descriptor = idempotency_descriptor(scope, payload, idempotency_key)
         async with aiosqlite.connect(db_path()) as db:
             await db.execute("BEGIN IMMEDIATE")
@@ -9579,9 +9587,9 @@ def build_messenger_router(
             cur = await db.execute(
                 """INSERT INTO scheduled_messages
                    (sender_telegram_id,recipient_telegram_id,body,scheduled_at,
-                    repeat_interval_seconds,created_at,silent,time_zone)
-                   VALUES(?,?,?,?,?,?,?,?)""",
-                (uid, recipient_id, body, scheduled_at, repeat_interval, now, int(silent), time_zone),
+                    repeat_interval_seconds,created_at,silent,time_zone,entities_json)
+                   VALUES(?,?,?,?,?,?,?,?,?)""",
+                (uid, recipient_id, body, scheduled_at, repeat_interval, now, int(silent), time_zone, _message_entities_json(entities)),
             )
             scheduled_id = int(cur.lastrowid)
             result = {
@@ -9596,20 +9604,24 @@ def build_messenger_router(
                 "time_zone": time_zone,
                 "created_at": now,
             }
+            if request.url.path.endswith("/v2"):
+                result["entities"] = entities
             await idempotency_store(db, uid, scope, descriptor, result, now)
             await db.commit()
         return result
 
+    @router.post("/api/messages/when-online/v2", status_code=201)
     @router.post("/api/messages/when-online", status_code=201)
     async def schedule_message_when_online(
         payload: dict[str, Any],
+        request: Request,
         authorization: str | None = Header(default=None),
         idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
     ) -> dict[str, Any]:
         user = await current_user(authorization)
         uid = int(user["telegram_id"])
-        if "entities" in payload:
-            raise HTTPException(status_code=400, detail="Форматирование отложенных сообщений пока не поддерживается")
+        if "entities" in payload and not request.url.path.endswith("/v2"):
+            raise HTTPException(status_code=400, detail="Используйте версию v2 для форматирования")
         try:
             recipient_id = int(payload.get("recipient_id", 0))
         except (TypeError, ValueError):
@@ -9619,12 +9631,13 @@ def build_messenger_router(
         body_value = payload.get("body")
         if not isinstance(body_value, str):
             raise HTTPException(status_code=400, detail="Укажите текст сообщения")
-        body = _message_body(body_value)
+        body, entities = (_message_body_and_entities({"body": body_value, "entities": payload.get("entities", [])})
+                          if request.url.path.endswith("/v2") else (_message_body(body_value), []))
         silent = payload.get("silent", False)
         if not isinstance(silent, bool):
             raise HTTPException(status_code=400, detail="silent должен быть логическим значением")
         now = int(time.time())
-        scope = "/api/messages/when-online"
+        scope = request.url.path
         descriptor = idempotency_descriptor(scope, payload, idempotency_key)
         async with aiosqlite.connect(db_path()) as db:
             await db.execute("BEGIN IMMEDIATE")
@@ -9660,9 +9673,9 @@ def build_messenger_router(
                 raise HTTPException(status_code=429, detail="Слишком много сообщений ожидают появления получателей онлайн")
             cur = await db.execute(
                 """INSERT INTO online_scheduled_messages
-                   (sender_telegram_id,recipient_telegram_id,body,silent,created_at)
-                   VALUES(?,?,?,?,?)""",
-                (uid, recipient_id, body, int(silent), now),
+                   (sender_telegram_id,recipient_telegram_id,body,silent,created_at,entities_json)
+                   VALUES(?,?,?,?,?,?)""",
+                (uid, recipient_id, body, int(silent), now, _message_entities_json(entities)),
             )
             scheduled_id = int(cur.lastrowid)
             result = {
@@ -9675,12 +9688,16 @@ def build_messenger_router(
                 "silent": silent,
                 "created_at": now,
             }
+            if request.url.path.endswith("/v2"):
+                result["entities"] = entities
             await idempotency_store(db, uid, scope, descriptor, result, now)
             await db.commit()
         return result
 
+    @router.get("/api/messages/when-online/v2")
     @router.get("/api/messages/when-online")
     async def list_messages_waiting_for_online(
+        request: Request,
         peer: int = Query(alias="with", gt=0),
         authorization: str | None = Header(default=None),
     ) -> dict[str, Any]:
@@ -9689,7 +9706,7 @@ def build_messenger_router(
         async with aiosqlite.connect(db_path()) as db:
             db.row_factory = aiosqlite.Row
             cur = await db.execute(
-                """SELECT id,recipient_telegram_id AS recipient_id,body,silent,created_at,status,message_id,error
+                """SELECT id,recipient_telegram_id AS recipient_id,body,silent,created_at,status,message_id,error,entities_json
                    FROM online_scheduled_messages
                    WHERE sender_telegram_id=? AND recipient_telegram_id=?
                      AND status IN ('pending','failed')
@@ -9697,6 +9714,11 @@ def build_messenger_router(
                 (uid, peer),
             )
             rows = [dict(row) for row in await cur.fetchall()]
+        for row in rows:
+            if request.url.path.endswith("/v2"):
+                _add_message_entities(row)
+            else:
+                row.pop("entities_json", None)
         return {"scheduled_messages": rows, "count": len(rows)}
 
     @router.delete("/api/messages/when-online/{scheduled_id}")
@@ -9719,8 +9741,10 @@ def build_messenger_router(
             await db.commit()
         return {"id": scheduled_id, "status": "cancelled"}
 
+    @router.get("/api/messages/scheduled/v2")
     @router.get("/api/messages/scheduled")
     async def list_scheduled_messages(
+        request: Request,
         peer: int = Query(alias="with", gt=0),
         authorization: str | None = Header(default=None),
     ) -> dict[str, Any]:
@@ -9736,7 +9760,7 @@ def build_messenger_router(
                 raise HTTPException(status_code=404, detail="Собеседник не найден")
             cur = await db.execute(
                 """SELECT id,recipient_telegram_id AS recipient_id,body,scheduled_at,
-                          repeat_interval_seconds,created_at,silent,time_zone,status,message_id,error
+                          repeat_interval_seconds,created_at,silent,time_zone,status,message_id,error,entities_json
                    FROM scheduled_messages
                    WHERE sender_telegram_id=? AND recipient_telegram_id=?
                      AND status IN ('pending','failed')
@@ -9744,6 +9768,11 @@ def build_messenger_router(
                 (uid, peer),
             )
             rows = [dict(row) for row in await cur.fetchall()]
+        for row in rows:
+            if request.url.path.endswith("/v2"):
+                _add_message_entities(row)
+            else:
+                row.pop("entities_json", None)
         return {"scheduled_messages": rows, "count": len(rows)}
 
     @router.delete("/api/messages/scheduled/{scheduled_id}")
@@ -10350,7 +10379,7 @@ def build_messenger_router(
             await db.execute("BEGIN IMMEDIATE")
             cur = await db.execute(
                 """SELECT id,sender_telegram_id,recipient_telegram_id,body,silent,
-                          scheduled_at,repeat_interval_seconds,time_zone
+                          scheduled_at,repeat_interval_seconds,time_zone,entities_json
                    FROM scheduled_messages
                    WHERE status='pending' AND scheduled_at<=?
                    ORDER BY scheduled_at ASC,id ASC LIMIT 100""",
@@ -10358,7 +10387,7 @@ def build_messenger_router(
             )
             due = await cur.fetchall()
             for scheduled in due:
-                scheduled_id, sender_id, recipient_id, body, silent, scheduled_at, repeat_interval, time_zone = scheduled
+                scheduled_id, sender_id, recipient_id, body, silent, scheduled_at, repeat_interval, time_zone, entities_json = scheduled
                 cur = await db.execute(
                     "SELECT is_banned FROM accounts WHERE telegram_id=?",
                     (sender_id,),
@@ -10402,6 +10431,8 @@ def build_messenger_router(
                     (sender_id, recipient_id, body, now),
                 )
                 message_id = int(cur.lastrowid)
+                if entities_json and entities_json != "[]":
+                    await db.execute("UPDATE messages SET entities_json=? WHERE id=?", (entities_json, message_id))
                 if silent:
                     await db.execute("UPDATE messages SET silent=1 WHERE id=?", (message_id,))
                 await record_event(
@@ -10451,7 +10482,7 @@ def build_messenger_router(
             await db.execute("BEGIN IMMEDIATE")
             cur = await db.execute(
                 """SELECT queued.id,queued.sender_telegram_id,queued.recipient_telegram_id,
-                          queued.body,queued.silent
+                          queued.body,queued.silent,queued.entities_json
                    FROM online_scheduled_messages queued
                    JOIN api_user_presence presence
                      ON presence.telegram_id=queued.recipient_telegram_id
@@ -10463,7 +10494,7 @@ def build_messenger_router(
             )
             due = await cur.fetchall()
             for queued in due:
-                scheduled_id, sender_id, recipient_id, body, silent = queued
+                scheduled_id, sender_id, recipient_id, body, silent, entities_json = queued
                 cur = await db.execute(
                     "SELECT is_banned FROM accounts WHERE telegram_id=?", (sender_id,)
                 )
@@ -10504,6 +10535,8 @@ def build_messenger_router(
                     (sender_id, recipient_id, body, now),
                 )
                 message_id = int(cur.lastrowid)
+                if entities_json and entities_json != "[]":
+                    await db.execute("UPDATE messages SET entities_json=? WHERE id=?", (entities_json, message_id))
                 if silent:
                     await db.execute("UPDATE messages SET silent=1 WHERE id=?", (message_id,))
                 await record_event(
