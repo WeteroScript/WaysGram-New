@@ -952,6 +952,7 @@ async def init_messenger_storage(database_path: Path) -> None:
                 peer_id INTEGER NOT NULL CHECK(peer_id > 0),
                 body TEXT NOT NULL,
                 updated_at INTEGER NOT NULL,
+                entities_json TEXT NOT NULL DEFAULT '[]',
                 PRIMARY KEY(owner_telegram_id,scope,peer_id)
             );
             CREATE INDEX IF NOT EXISTS idx_cloud_drafts_updated
@@ -1440,6 +1441,10 @@ async def init_messenger_storage(database_path: Path) -> None:
                 await db.execute(
                     f"ALTER TABLE {db_split.SCHEMA}.user_gifts ADD COLUMN {column} {definition}"
                 )
+        cur = await db.execute(f"PRAGMA {db_split.SCHEMA}.table_info(cloud_drafts)")
+        draft_columns = {str(row[1]) for row in await cur.fetchall()}
+        if "entities_json" not in draft_columns:
+            await db.execute(f"ALTER TABLE {db_split.SCHEMA}.cloud_drafts ADD COLUMN entities_json TEXT NOT NULL DEFAULT '[]'")
         # Database triggers cover all writers, including older API processes and
         # administrative deletes. Existing rows start at revision zero on upgrade.
         for action, ref in (("INSERT", "NEW"), ("UPDATE", "NEW"), ("DELETE", "OLD")):
@@ -11450,8 +11455,10 @@ def build_messenger_router(
             await db.commit()
         return {"last_read_id": value}
 
+    @router.get("/api/drafts/v2")
     @router.get("/api/drafts")
     async def get_cloud_draft(
+        request: Request,
         scope: str = Query(...),
         peer_id: int = Query(..., gt=0),
         authorization: str | None = Header(default=None),
@@ -11467,7 +11474,7 @@ def build_messenger_router(
             # Single statement provides a consistent text/version pair, even
             # when the draft was deleted and only its version remains.
             cur = await db.execute(
-                """SELECT d.scope,d.peer_id,d.body,d.updated_at,COALESCE(v.revision,0) AS revision
+                """SELECT d.scope,d.peer_id,d.body,d.updated_at,d.entities_json,COALESCE(v.revision,0) AS revision
                    FROM (SELECT ? AS owner,? AS scope,? AS peer) key
                    LEFT JOIN cloud_drafts d ON d.owner_telegram_id=key.owner
                        AND d.scope=key.scope AND d.peer_id=key.peer
@@ -11477,10 +11484,15 @@ def build_messenger_router(
             )
             row = await cur.fetchone()
         draft = {key: row[key] for key in ("scope", "peer_id", "body", "updated_at")} if row["scope"] is not None else None
+        if draft is not None and request.url.path.endswith("/v2"):
+            draft["entities_json"] = row["entities_json"]
+            _add_message_entities(draft)
         return {"draft": draft, "revision": row["revision"]}
 
+    @router.get("/api/drafts/list/v2")
     @router.get("/api/drafts/list")
     async def list_cloud_drafts(
+        request: Request,
         limit: int = Query(default=100, ge=1, le=200),
         after_scope: str | None = Query(default=None),
         after_peer_id: int | None = Query(default=None, gt=0),
@@ -11501,7 +11513,7 @@ def build_messenger_router(
             db.row_factory = aiosqlite.Row
             # Filtering and page selection use the same SQLite read snapshot.
             cur = await db.execute(
-                """SELECT d.scope,d.peer_id,d.body,d.updated_at,COALESCE(v.revision,0) AS revision
+                """SELECT d.scope,d.peer_id,d.body,d.updated_at,d.entities_json,COALESCE(v.revision,0) AS revision
                    FROM cloud_drafts d LEFT JOIN cloud_draft_versions v
                      ON v.owner_telegram_id=d.owner_telegram_id AND v.scope=d.scope AND v.peer_id=d.peer_id
                    WHERE d.owner_telegram_id=?
@@ -11534,6 +11546,11 @@ def build_messenger_router(
             )
             rows = await cur.fetchall()
         drafts = [dict(row) for row in rows[:limit]]
+        for draft in drafts:
+            if request.url.path.endswith("/v2"):
+                _add_message_entities(draft)
+            else:
+                draft.pop("entities_json", None)
         next_cursor = None
         if len(rows) > limit:
             last = drafts[-1]
@@ -11607,9 +11624,11 @@ def build_messenger_router(
         row = await cur.fetchone()
         return int(row[0]) if row else 0
 
+    @router.put("/api/drafts/v2")
     @router.put("/api/drafts")
     async def save_cloud_draft(
         payload: dict[str, Any],
+        request: Request,
         authorization: str | None = Header(default=None),
     ) -> dict[str, Any]:
         user = await current_user(authorization)
@@ -11623,6 +11642,10 @@ def build_messenger_router(
             raise HTTPException(status_code=400, detail="peer_id должен быть положительным целым числом")
         if not isinstance(body, str) or not body.strip() or len(body) > MAX_MESSAGE_LENGTH:
             raise HTTPException(status_code=400, detail=f"Черновик должен содержать 1–{MAX_MESSAGE_LENGTH} символов")
+        if request.url.path.endswith("/v2"):
+            body, entities = _message_body_and_entities({"body": body, "entities": payload.get("entities", [])})
+        else:
+            entities = []
         if "expected_revision" in payload and (isinstance(expected, bool) or not isinstance(expected, int) or not 0 <= expected <= 9223372036854775807):
             raise HTTPException(status_code=400, detail="expected_revision должен быть неотрицательным целым числом")
         uid = int(user["telegram_id"])
@@ -11635,11 +11658,11 @@ def build_messenger_router(
                 await db.rollback()
                 raise HTTPException(status_code=409, detail={"code": "DRAFT_CONFLICT", "revision": current_revision})
             await db.execute(
-                """INSERT INTO cloud_drafts(owner_telegram_id,scope,peer_id,body,updated_at)
-                   VALUES(?,?,?,?,?)
+                """INSERT INTO cloud_drafts(owner_telegram_id,scope,peer_id,body,updated_at,entities_json)
+                   VALUES(?,?,?,?,?,?)
                    ON CONFLICT(owner_telegram_id,scope,peer_id) DO UPDATE SET
-                       body=excluded.body,updated_at=excluded.updated_at""",
-                (uid, str(scope), peer_id, body, now),
+                       body=excluded.body,updated_at=excluded.updated_at,entities_json=excluded.entities_json""",
+                (uid, str(scope), peer_id, body, now, _message_entities_json(entities)),
             )
             revision = await cloud_draft_revision(db, uid, str(scope), peer_id)
             await db.commit()
