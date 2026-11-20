@@ -23,6 +23,33 @@ class NativeMessagingSourceChecks(unittest.TestCase):
     def source(self, path):
         return self.archive.read(BASE + path).decode('utf-8')
 
+    def test_pins_bridge_scope_paging_and_refresh(self):
+        pins = self.source('tgnet/WaysGramPins.java')
+        transport = self.source('tgnet/WaysGramTransport.java')
+        poller = self.source('tgnet/WaysGramPoller.java')
+        media = self.source('messenger/MediaDataController.java')
+        chat = self.source('ui/ChatActivity.java')
+        profile = self.source('tgnet/WaysGramProfile.java')
+        chats = self.source('tgnet/WaysGramChats.java')
+        for value in ('/api/pins/capabilities', '/api/pins/v2', '"one_side", req.pm_oneside',
+                      '"notify", !req.silent', 'WaysGramChats.serverGroupId', 'order_by_id=true',
+                      '"total_count"', 'TL_messages_messagesSlice', 'PINS_CHANGED_RETRY',
+                      '/api/pins/clear', 'java.util.UUID.randomUUID()', 'null, token, 30000'):
+            self.assertIn(value, pins)
+        for value in ('TL_messages_updatePinnedMessage', 'TL_messages_unpinAllMessages',
+                      'TL_inputMessagesFilterPinned', 'pinQueue(account)',
+                      'pinReadRequest', 'WaysGramPins.change', 'WaysGramPins.clear', 'WaysGramPins.search'):
+            self.assertIn(value, transport)
+        for kind in ('pin', 'unpin', 'pin_local', 'unpin_local'):
+            self.assertIn('kind.equals("' + kind + '")', poller)
+        self.assertIn('loadPinnedMessages(dialogId, 0, 0)', poller)
+        self.assertIn('pendingPinnedRefresh', media)
+        self.assertIn('Never erase a good local snapshot', media)
+        self.assertIn('loadPinnedMessages(dialog_id, 0, 0)', chat)
+        self.assertIn('full.can_pin_message = !WaysGramBotFather.is(userId)', profile)
+        self.assertIn('chat.admin_rights.pin_messages = true', chats)
+        self.assertIn('channel.admin_rights.pin_messages = true', chats)
+
     def test_local_reaction_picker_and_bubble_fallback(self):
         import xml.etree.ElementTree as ET
         chat = self.source('ui/ChatActivity.java')

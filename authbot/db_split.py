@@ -67,6 +67,7 @@ MESSENGER_TABLES = frozenset(
         "cloud_draft_changes",
         "contact_notes",
         "pinned_messages",
+        "dm_pin_overrides",
         "typing_indicators",
         "typing_indicator_sessions",
         "bots",

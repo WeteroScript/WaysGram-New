@@ -4980,6 +4980,11 @@ def test_pinned_messages_cover_direct_group_and_channel_permissions(api_env) -> 
                 json={"telegram_id": 95303},
             )
             assert appointed.status_code == 201
+            channel_admin_details = await client.get(f"/api/channels/{channel_id}", headers=admin)
+            assert channel_admin_details.json()["is_admin"] is True
+            channel_admin_list = await client.get("/api/channels", headers=admin)
+            assert any(c["id"] == channel_id and c["is_admin"] for c in channel_admin_list.json()["channels"])
+            assert not (await client.get(f"/api/channels/{channel_id}", headers=member)).json()["is_admin"]
             denied_channel = await client.post(
                 "/api/pins", headers=member,
                 json={"scope": "channel", "peer_id": channel_id, "message_id": channel_message_id},
@@ -8220,3 +8225,191 @@ def test_pin_visibility_and_private_channel_access(api_env) -> None:
             assert (await client.get("/api/pins", headers=owner,
                                      params={"scope": "channel", "peer_id": 999999})).status_code == 404
     run(scenario())
+
+
+def test_personal_pins_and_keyset_paging(api_env) -> None:
+    path, _, _, app = api_env
+    for uid, token in ((98201, "pins-a"), (98202, "pins-b"), (98203, "pins-x")):
+        add_account(api_env, uid, f"pins_user_{uid}")
+        add_session(path, uid, token)
+    async def scenario() -> None:
+        async with await client_for(app) as client:
+            a, b, x = ({"Authorization": f"Bearer pins-{token}"} for token in ("a", "b", "x"))
+            sent = await client.post("/api/messages", headers=a, json={"recipient_id": 98202, "body": "first"})
+            assert sent.status_code == 201
+            mid = sent.json()["id"]
+            args_a = {"scope": "dm", "peer_id": 98202, "message_id": mid}
+            args_b = {"scope": "dm", "peer_id": 98201, "message_id": mid}
+            ca = (await client.get('/api/events', headers=a)).json()['latest_id']
+            cb = (await client.get('/api/events', headers=b)).json()['latest_id']
+            assert (await client.post('/api/pins/v2', headers=a, json={**args_a, 'one_side': True})).json()['status'] == 'pinned'
+            assert (await client.post('/api/pins', headers=a, json={**args_a, 'one_side': True})).json()['status'] == 'already_pinned'
+            assert [e['kind'] for e in (await client.get(f'/api/events?after_id={ca}', headers=a)).json()['events']] == ['pin_local']
+            assert (await client.get(f'/api/events?after_id={cb}', headers=b)).json()['events'] == []
+            async def ids(h, peer):
+                result = await client.get('/api/pins', headers=h, params={'scope':'dm','peer_id':peer,'order_by_id':True})
+                assert result.status_code == 200
+                return [m['message_id'] for m in result.json()['pinned_messages']]
+            assert await ids(a, 98202) == [mid]
+            assert await ids(b, 98201) == []
+            assert (await client.post('/api/pins', headers=b, json=args_b)).json()['status'] == 'pinned'
+            assert await ids(a, 98202) == [mid] and await ids(b, 98201) == [mid]
+            assert (await client.delete('/api/pins', headers=b, params={**args_b, 'one_side': True})).json()['status'] == 'unpinned'
+            assert await ids(a, 98202) == [mid] and await ids(b, 98201) == []
+            assert (await client.post('/api/pins', headers=a, json=args_a)).json()['status'] == 'pinned'
+            assert await ids(b, 98201) == [mid]
+            assert (await client.delete('/api/pins', headers=a, params=args_a)).json()['status'] == 'unpinned'
+            assert await ids(a, 98202) == await ids(b, 98201) == []
+            assert (await client.post('/api/pins', headers=x, json={**args_b, 'one_side': True})).status_code == 404
+            assert (await client.post('/api/pins/v2', headers=a, json={**args_a, 'one_side': 'yes'})).status_code == 400
+            assert (await client.post('/api/pins/v2', headers=a, json={**args_a, 'notify': 'yes'})).status_code == 400
+            assert (await client.get('/api/pins', headers=a, params={'scope':'dm','peer_id':98202,'before_id':mid})).status_code == 400
+            # Seed >100 messages without hitting the send rate limit.
+            with db_split.sqlite_connect(path) as db:
+                for i in range(105):
+                    cur = db.execute('INSERT INTO messages(sender_telegram_id,recipient_telegram_id,body,created_at) VALUES(98201,98202,?,?)', (f'p{i}', 1000+i))
+                    db.execute("INSERT INTO pinned_messages(scope,chat_id,message_id,pinned_by,created_at) VALUES('dm',0,?,98201,?)", (cur.lastrowid, 1000+i))
+            seen = []
+            before = 0
+            while True:
+                response = await client.get('/api/pins', headers=a, params={'scope':'dm','peer_id':98202, 'order_by_id':True, 'limit':17, 'before_id':before})
+                assert response.status_code == 200
+                data = response.json()
+                assert data['total_count'] == 105
+                page = [r['message_id'] for r in data['pinned_messages']]
+                assert page == sorted(page, reverse=True)
+                seen.extend(page)
+                if len(page) < 17: break
+                before = page[-1]
+            assert len(seen) == len(set(seen)) == 105
+            # Per-user overrides are cleaned up when a message is deleted for all.
+            assert (await client.post('/api/pins', headers=a, json={**args_a, 'one_side': True})).status_code == 200
+            assert (await client.delete(f'/api/messages/{mid}?for=all', headers=b)).status_code == 200
+            with db_split.sqlite_connect(path) as db:
+                assert db.execute('SELECT COUNT(*) FROM dm_pin_overrides WHERE message_id=?', (mid,)).fetchone()[0] == 0
+    run(scenario())
+
+
+def test_clear_pins_is_bounded_authorized_and_idempotent(api_env) -> None:
+    path, _, _, app = api_env
+    for uid, token in ((98301, 'clear-pin-a'), (98302, 'clear-pin-b'), (98303, 'clear-pin-x')):
+        add_account(api_env, uid, f'clear_pin_{uid}')
+        add_session(path, uid, token)
+    async def scenario() -> None:
+        async with await client_for(app) as client:
+            a = {'Authorization':'Bearer clear-pin-a'}
+            b = {'Authorization':'Bearer clear-pin-b'}
+            x = {'Authorization':'Bearer clear-pin-x'}
+            ids = []
+            for body in ('one', 'two', 'three'):
+                r = await client.post('/api/messages', headers=a, json={'recipient_id':98302,'body':body})
+                ids.append(r.json()['id'])
+                assert (await client.post('/api/pins', headers=a, json={'scope':'dm','peer_id':98302,'message_id':ids[-1]})).status_code == 200
+            cursor = (await client.get('/api/events', headers=b)).json()['latest_id']
+            payload = {'scope':'dm','peer_id':98302,'max_id':ids[1]}
+            assert (await client.post('/api/pins/clear', headers=a, json=payload)).status_code == 400
+            key = {**a, 'Idempotency-Key':'clear-pins-key-123456'}
+            result = await client.post('/api/pins/clear', headers=key, json=payload)
+            assert result.status_code == 200 and result.json()['count'] == 2
+            events = (await client.get(f'/api/events?after_id={cursor}', headers=b)).json()['events']
+            assert [e['message_id'] for e in events if e['kind']=='unpin'] == ids[:2]
+            assert (await client.post('/api/pins', headers=a, json={'scope':'dm','peer_id':98302,'message_id':ids[0]})).status_code == 200
+            assert (await client.post('/api/pins/clear', headers=key, json=payload)).json() == result.json()
+            listed = await client.get('/api/pins', headers=a, params={'scope':'dm','peer_id':98302,'order_by_id':True})
+            assert [v['message_id'] for v in listed.json()['pinned_messages']] == [ids[2],ids[0]]
+            assert (await client.post('/api/pins/clear', headers=key, json={**payload,'max_id':ids[2]})).status_code == 409
+            outsider = await client.post('/api/pins/clear', headers={**x,'Idempotency-Key':'outsider-key-123456'}, json={'scope':'dm','peer_id':98302,'max_id':ids[2]})
+            assert outsider.status_code == 200 and outsider.json()['count'] == 0
+            assert (await client.get('/api/pins', headers=a, params={'scope':'dm','peer_id':98302})).json()['count'] == 2
+            group = await client.post('/api/groups', headers=a, json={'title':'clear pins group'})
+            gid = group.json()['id']
+            assert (await client.post(f'/api/groups/{gid}/members', headers=a, json={'telegram_id':98302})).status_code == 201
+            msg = await client.post(f'/api/groups/{gid}/messages', headers=b, json={'body':'group pin'})
+            gm = msg.json()['id']
+            assert (await client.post('/api/pins', headers=a, json={'scope':'group','peer_id':gid,'message_id':gm})).status_code == 200
+            gp = {'scope':'group','peer_id':gid,'max_id':gm}
+            assert (await client.post('/api/pins/clear', headers={**b,'Idempotency-Key':'clear-group-pin-123'}, json=gp)).status_code == 403
+            assert (await client.post('/api/pins/clear', headers={**a,'Idempotency-Key':'clear-group-pin-123'}, json=gp)).json()['count'] == 1
+            assert (await client.get('/api/pins/capabilities', headers=a)).json()['one_side'] is True
+    run(scenario())
+
+
+def test_personal_pins_are_not_disclosed_or_cleared_by_peer(api_env) -> None:
+    path, _, _, app = api_env
+    for uid, token in ((98401, 'personal-owner'), (98402, 'personal-peer')):
+        add_account(api_env, uid, f'personal_pin_{uid}')
+        add_session(path, uid, token)
+    async def scenario() -> None:
+        async with await client_for(app) as client:
+            a = {'Authorization':'Bearer personal-owner'}
+            b = {'Authorization':'Bearer personal-peer'}
+            m = await client.post('/api/messages', headers=a, json={'recipient_id':98402,'body':'private pin'})
+            mid = m.json()['id']
+            pa = {'scope':'dm','peer_id':98402,'message_id':mid}
+            pb = {'scope':'dm','peer_id':98401,'message_id':mid}
+            cursor = (await client.get('/api/events', headers=b)).json()['latest_id']
+            assert (await client.post('/api/pins', headers=a, json={**pa,'one_side':True})).status_code == 200
+            assert (await client.delete('/api/pins', headers=a, params=pa)).json()['status'] == 'unpinned'
+            assert (await client.get(f'/api/events?after_id={cursor}', headers=b)).json()['events'] == []
+            assert (await client.post('/api/pins', headers=b, json={**pb,'one_side':True})).status_code == 200
+            assert (await client.post('/api/pins', headers=a, json=pa)).status_code == 200
+            assert (await client.delete('/api/pins', headers=a, params=pa)).status_code == 200
+            listed = await client.get('/api/pins', headers=b, params={'scope':'dm','peer_id':98401})
+            assert listed.json()['count'] == 1
+            assert (await client.get('/api/pins', headers=a, params={'scope':'dm','peer_id':98402})).json()['count'] == 0
+            assert (await client.post('/api/pins', headers=a, json={**pa,'one_side':True})).status_code == 200
+            cursor = (await client.get('/api/events', headers=b)).json()['latest_id']
+            clear = await client.post('/api/pins/clear', headers={**a,'Idempotency-Key':'private-clear-test-123'}, json={'scope':'dm','peer_id':98402,'max_id':mid})
+            assert clear.status_code == 200 and clear.json()['count'] == 1
+            assert (await client.get(f'/api/events?after_id={cursor}', headers=b)).json()['events'] == []
+            assert (await client.get('/api/pins', headers=b, params={'scope':'dm','peer_id':98401})).json()['count'] == 1
+    run(scenario())
+
+
+def test_pin_notifications_only_for_requested_shared_changes(api_env, monkeypatch) -> None:
+    path, _, _, app = api_env
+    for uid, token in ((98501, 'pin-notify-a'), (98502, 'pin-notify-b')):
+        add_account(api_env, uid, f'pin_notify_{uid}')
+        add_session(path, uid, token)
+    calls = []
+    def unavailable_firebase():
+        calls.append('attempted')
+        return None
+    monkeypatch.setattr(messenger_api, '_firebase_service_account', unavailable_firebase)
+    async def scenario() -> None:
+        async with await client_for(app) as client:
+            a = {'Authorization':'Bearer pin-notify-a'}
+            sent = await client.post('/api/messages', headers=a, json={'recipient_id':98502,'body':'message','silent':True})
+            mid = sent.json()['id']
+            p = {'scope':'dm','peer_id':98502,'message_id':mid}
+            calls.clear()
+            assert (await client.post('/api/pins/v2', headers=a, json={**p,'one_side':True,'notify':True})).status_code == 200
+            assert calls == []
+            assert (await client.post('/api/pins/v2', headers=a, json={**p,'notify':True})).status_code == 200
+            assert calls == ['attempted']
+            assert (await client.post('/api/pins/v2', headers=a, json={**p,'notify':True})).status_code == 200
+            assert calls == ['attempted']
+            assert (await client.delete('/api/pins/v2', headers=a, params=p)).status_code == 200
+            assert (await client.post('/api/pins/v2', headers=a, json={**p,'notify':False})).status_code == 200
+            assert calls == ['attempted']
+    run(scenario())
+
+
+def test_pin_overrides_survive_storage_reinitialization(api_env) -> None:
+    path, _, _, app = api_env
+    add_account(api_env, 98601, 'pin_migration_a')
+    add_account(api_env, 98602, 'pin_migration_b')
+    add_session(path, 98601, 'pin-migration-session')
+    async def create() -> int:
+        async with await client_for(app) as client:
+            h = {'Authorization':'Bearer pin-migration-session'}
+            sent = await client.post('/api/messages', headers=h, json={'recipient_id':98602,'body':'migrate pin'})
+            mid = sent.json()['id']
+            assert (await client.post('/api/pins/v2', headers=h, json={'scope':'dm','peer_id':98602,'message_id':mid,'one_side':True})).status_code == 200
+            return mid
+    mid = run(create())
+    run(init_messenger_storage(path))
+    run(init_messenger_storage(path))
+    with db_split.sqlite_connect(path) as db:
+        assert tuple(db.execute('SELECT message_id,user_telegram_id,is_pinned FROM dm_pin_overrides').fetchone()) == (mid,98601,1)
+        assert db.execute("SELECT count(*) FROM messenger.sqlite_master WHERE name='dm_pin_overrides'").fetchone()[0] == 1

@@ -870,6 +870,17 @@ async def init_messenger_storage(database_path: Path) -> None:
             );
             CREATE INDEX IF NOT EXISTS idx_pinned_messages_created
                 ON pinned_messages(scope,chat_id,created_at DESC);
+            -- Per-account overrides over the legacy shared DM pin. A zero hides
+            -- a shared pin locally; a one pins even if there is no shared pin.
+            CREATE TABLE IF NOT EXISTS dm_pin_overrides (
+                message_id INTEGER NOT NULL,
+                user_telegram_id INTEGER NOT NULL,
+                is_pinned INTEGER NOT NULL CHECK(is_pinned IN (0,1)),
+                updated_at INTEGER NOT NULL,
+                PRIMARY KEY(message_id,user_telegram_id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_dm_pin_overrides_user
+                ON dm_pin_overrides(user_telegram_id,message_id);
             CREATE TABLE IF NOT EXISTS channels (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 username TEXT NOT NULL UNIQUE,
@@ -7374,6 +7385,7 @@ def build_messenger_router(
                           CASE WHEN ch.is_public=1 THEN ch.username ELSE '' END AS username,
                           ch.title,ch.owner_telegram_id,ch.is_public,
                           owner.username AS owner_username,
+                          EXISTS(SELECT 1 FROM channel_admins ca WHERE ca.channel_id=ch.id AND ca.telegram_id=?) AS is_admin,
                           COALESCE((SELECT rm.last_read_id FROM read_markers rm
                                     WHERE rm.telegram_id=? AND rm.scope='channel' AND rm.peer_id=ch.id),0) AS last_read_id,
                           (SELECT COUNT(*) FROM channel_messages z
@@ -7389,7 +7401,7 @@ def build_messenger_router(
                       OR EXISTS(SELECT 1 FROM channel_members cm
                                 WHERE cm.channel_id=ch.id AND cm.telegram_id=?)
                    ORDER BY ch.id DESC""",
-                (uid, uid, uid, uid, uid, uid),
+                (uid, uid, uid, uid, uid, uid, uid),
             )
             rows = await cur.fetchall()
         channels = []
@@ -7515,6 +7527,7 @@ def build_messenger_router(
         user = await current_user(authorization)
         await require_channel_access(channel_id, int(user["telegram_id"]))
         channel = await channel_row(channel_id)
+        channel["is_admin"] = await can_manage_channel(channel_id, int(user["telegram_id"]))
         channel["labels"] = await entity_labels("channel", channel_id)
         return channel
 
@@ -10189,10 +10202,13 @@ def build_messenger_router(
                 "message_id": message_id, "reactions": summary, "my_reactions": mine}
 
     async def change_pinned_message(
-        scope: str, chat_id: int, message_id: int, user_id: int, pin: bool
+        scope: str, chat_id: int, message_id: int, user_id: int, pin: bool,
+        one_side: bool = False, notify: bool = False,
     ) -> dict[str, Any]:
         if scope not in ("dm", "group", "channel") or chat_id <= 0 or message_id <= 0:
             raise HTTPException(status_code=400, detail="Некорректные параметры закрепления")
+        if one_side and scope != "dm":
+            raise HTTPException(status_code=400, detail="Личное закрепление доступно только в ЛС")
         now = int(time.time())
         async with aiosqlite.connect(db_path()) as db:
             db.row_factory = aiosqlite.Row
@@ -10247,39 +10263,102 @@ def build_messenger_router(
                     await db.rollback()
                     raise HTTPException(status_code=404, detail="Публикация не найдена")
             stored_chat_id = chat_id if scope != "dm" else 0
-            if pin:
+            if one_side:
                 cur = await db.execute(
-                    """INSERT OR IGNORE INTO pinned_messages(scope,chat_id,message_id,pinned_by,created_at)
-                       VALUES(?,?,?,?,?)""",
-                    (scope, stored_chat_id, message_id, user_id, now),
+                    """SELECT COALESCE((SELECT is_pinned FROM dm_pin_overrides
+                                         WHERE message_id=? AND user_telegram_id=?),
+                                        EXISTS(SELECT 1 FROM pinned_messages
+                                               WHERE scope='dm' AND chat_id=0 AND message_id=?))""",
+                    (message_id, user_id, message_id),
                 )
-                status = "pinned" if cur.rowcount == 1 else "already_pinned"
-                event_kind = "pin" if cur.rowcount == 1 else ""
+                was_pinned = bool((await cur.fetchone())[0])
+                changed = was_pinned != pin
+                if changed:
+                    await db.execute(
+                        """INSERT INTO dm_pin_overrides(message_id,user_telegram_id,is_pinned,updated_at)
+                           VALUES(?,?,?,?) ON CONFLICT(message_id,user_telegram_id)
+                           DO UPDATE SET is_pinned=excluded.is_pinned,updated_at=excluded.updated_at""",
+                        (message_id, user_id, int(pin), now),
+                    )
+                status = ("pinned" if changed else "already_pinned") if pin else ("unpinned" if changed else "not_pinned")
+                event_kind = ("pin_local" if pin else "unpin_local") if changed else ""
             else:
-                cur = await db.execute(
-                    "DELETE FROM pinned_messages WHERE scope=? AND chat_id=? AND message_id=?",
-                    (scope, stored_chat_id, message_id),
-                )
-                status = "unpinned" if cur.rowcount == 1 else "not_pinned"
-                event_kind = "unpin" if cur.rowcount == 1 else ""
+                if pin:
+                    cur = await db.execute(
+                        """INSERT OR IGNORE INTO pinned_messages(scope,chat_id,message_id,pinned_by,created_at)
+                           VALUES(?,?,?,?,?)""",
+                        (scope, stored_chat_id, message_id, user_id, now),
+                    )
+                else:
+                    cur = await db.execute(
+                        "DELETE FROM pinned_messages WHERE scope=? AND chat_id=? AND message_id=?",
+                        (scope, stored_chat_id, message_id),
+                    )
+                shared_changed = cur.rowcount == 1
+                changed = shared_changed
+                event_kind = ("pin" if pin else "unpin") if shared_changed else ""
+                if scope == "dm":
+                    if pin:
+                        # A shared pin removes hidden overrides but preserves
+                        # each participant's independent personal pin.
+                        cur = await db.execute("DELETE FROM dm_pin_overrides WHERE message_id=? AND is_pinned=0", (message_id,))
+                        if cur.rowcount:
+                            changed = True
+                            event_kind = "pin"
+                    else:
+                        # Removing only an actor's private pin is a private
+                        # event, not evidence to the peer of that pin's existence.
+                        cur = await db.execute("DELETE FROM dm_pin_overrides WHERE message_id=? AND user_telegram_id=? AND is_pinned=1", (message_id, user_id))
+                        if cur.rowcount:
+                            changed = True
+                            if not shared_changed:
+                                event_kind = "unpin_local"
+                        await db.execute("DELETE FROM dm_pin_overrides WHERE message_id=? AND is_pinned=0", (message_id,))
+                status = ("pinned" if changed else "already_pinned") if pin else ("unpinned" if changed else "not_pinned")
             if event_kind:
                 await record_event(
                     db, scope, message_id, event_kind, user_id,
                     chat_id=stored_chat_id, user_a=event_user_a, user_b=event_user_b,
                 )
             await db.commit()
+        if event_kind == "pin" and notify and not one_side:
+            async with aiosqlite.connect(db_path()) as notify_db:
+                if scope == "dm":
+                    cur = await notify_db.execute(
+                        """SELECT telegram_id FROM accounts WHERE telegram_id=? AND telegram_id<>?
+                           AND NOT EXISTS(SELECT 1 FROM message_hidden_for WHERE message_id=? AND telegram_id=?)""",
+                        (chat_id, user_id, message_id, chat_id))
+                elif scope == "group":
+                    cur = await notify_db.execute("SELECT telegram_id FROM group_members WHERE group_id=? AND telegram_id<>?", (chat_id, user_id))
+                else:
+                    cur = await notify_db.execute("SELECT telegram_id FROM channel_members WHERE channel_id=? AND telegram_id<>?", (chat_id, user_id))
+                recipients = [int(row[0]) for row in await cur.fetchall()]
+            await deliver_push_notifications(recipients, "WaysGram", "Закреплено сообщение",
+                                             {"scope": scope, "chat_id": str(user_id if scope == "dm" else chat_id),
+                                              "message_id": str(message_id), "event": "pin"})
         return {"status": status, "scope": scope, "peer_id": chat_id, "message_id": message_id}
 
+    @router.get("/api/pins/capabilities")
+    async def pin_capabilities(authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        await current_user(authorization)
+        return {"version": 2, "one_side": True, "keyset_paging": True, "clear_bounded": True}
+
     @router.get("/api/pins")
+    @router.get("/api/pins/v2")
     async def list_pinned_messages(
         scope: str = Query(...),
         peer_id: int = Query(..., gt=0),
+        limit: int = Query(default=100, ge=1, le=100),
+        before_id: int = Query(default=0, ge=0),
+        order_by_id: bool = Query(default=False),
         authorization: str | None = Header(default=None),
     ) -> dict[str, Any]:
         user = await current_user(authorization)
         uid = int(user["telegram_id"])
         if scope not in ("dm", "group", "channel"):
             raise HTTPException(status_code=400, detail="scope: dm, group или channel")
+        if before_id and not order_by_id:
+            raise HTTPException(status_code=400, detail="before_id requires order_by_id")
         async with aiosqlite.connect(db_path()) as db:
             db.row_factory = aiosqlite.Row
             # Authorize and read from the same SQLite snapshot. A membership or
@@ -10305,43 +10384,44 @@ def build_messenger_router(
                         or channel["is_admin"] or channel["is_member"]):
                     raise HTTPException(status_code=403, detail="Это приватный канал. Нужна ссылка-приглашение.")
             if scope == "dm":
-                cur = await db.execute(
-                    """SELECT p.message_id,p.pinned_by,p.created_at AS pinned_at,
+                base = """SELECT m.id AS message_id,
+                              CASE WHEN o.is_pinned=1 THEN o.user_telegram_id ELSE p.pinned_by END AS pinned_by,
+                              CASE WHEN o.is_pinned=1 THEN o.updated_at ELSE p.created_at END AS pinned_at,
                               m.body,m.created_at,m.sender_telegram_id AS sender_id,
                               m.recipient_telegram_id AS recipient_id
-                       FROM pinned_messages p JOIN messages m ON m.id=p.message_id
-                       WHERE p.scope='dm' AND p.chat_id=0 AND
+                       FROM messages m
+                       LEFT JOIN pinned_messages p ON p.scope='dm' AND p.chat_id=0 AND p.message_id=m.id
+                       LEFT JOIN dm_pin_overrides o ON o.message_id=m.id AND o.user_telegram_id=?
+                       WHERE COALESCE(o.is_pinned, p.message_id IS NOT NULL)=1 AND
                          ((m.sender_telegram_id=? AND m.recipient_telegram_id=?) OR
                           (m.sender_telegram_id=? AND m.recipient_telegram_id=?))
-                         AND NOT EXISTS (
-                             SELECT 1 FROM message_hidden_for hidden
-                             WHERE hidden.message_id=m.id AND hidden.telegram_id=?
-                         )
-                       ORDER BY p.created_at DESC,p.message_id DESC LIMIT 100""",
-                    (uid, peer_id, peer_id, uid, uid),
-                )
+                         AND NOT EXISTS (SELECT 1 FROM message_hidden_for hidden
+                                         WHERE hidden.message_id=m.id AND hidden.telegram_id=?)"""
+                params = (uid, uid, peer_id, peer_id, uid, uid)
             elif scope == "group":
-                cur = await db.execute(
-                    """SELECT p.message_id,p.pinned_by,p.created_at AS pinned_at,
+                base = """SELECT p.message_id,p.pinned_by,p.created_at AS pinned_at,
                               m.body,m.created_at,m.sender_telegram_id AS sender_id
                        FROM pinned_messages p JOIN group_messages m ON m.id=p.message_id
-                       WHERE p.scope='group' AND p.chat_id=? AND m.group_id=p.chat_id
-                       ORDER BY p.created_at DESC,p.message_id DESC LIMIT 100""",
-                    (peer_id,),
-                )
+                       WHERE p.scope='group' AND p.chat_id=? AND m.group_id=p.chat_id"""
+                params = (peer_id,)
             else:
-                cur = await db.execute(
-                    """SELECT p.message_id,p.pinned_by,p.created_at AS pinned_at,
+                base = """SELECT p.message_id,p.pinned_by,p.created_at AS pinned_at,
                               m.body,m.created_at,m.author_telegram_id AS sender_id
                        FROM pinned_messages p JOIN channel_messages m ON m.id=p.message_id
-                       WHERE p.scope='channel' AND p.chat_id=? AND m.channel_id=p.chat_id
-                       ORDER BY p.created_at DESC,p.message_id DESC LIMIT 100""",
-                    (peer_id,),
-                )
+                       WHERE p.scope='channel' AND p.chat_id=? AND m.channel_id=p.chat_id"""
+                params = (peer_id,)
+            cur = await db.execute("SELECT COUNT(*) FROM (" + base + ")", params)
+            total = int((await cur.fetchone())[0])
+            if before_id:
+                base = "SELECT * FROM (" + base + ") WHERE message_id<?"
+                params += (before_id,)
+            ordering = "message_id DESC" if order_by_id else "pinned_at DESC,message_id DESC"
+            cur = await db.execute("SELECT * FROM (" + base + ") ORDER BY " + ordering + " LIMIT ?", params + (limit,))
             rows = [dict(row) for row in await cur.fetchall()]
-        return {"scope": scope, "peer_id": peer_id, "pinned_messages": rows, "count": len(rows)}
+        return {"scope": scope, "peer_id": peer_id, "pinned_messages": rows, "count": len(rows), "total_count": total}
 
     @router.post("/api/pins")
+    @router.post("/api/pins/v2")
     async def pin_message(
         payload: dict[str, Any],
         authorization: str | None = Header(default=None),
@@ -10350,23 +10430,108 @@ def build_messenger_router(
         scope = payload.get("scope")
         peer_id = payload.get("peer_id")
         message_id = payload.get("message_id")
+        one_side = payload.get("one_side", False)
+        notify = payload.get("notify", False)
         if scope not in ("dm", "group", "channel"):
             raise HTTPException(status_code=400, detail="scope: dm, group или channel")
+        if not isinstance(one_side, bool) or not isinstance(notify, bool):
+            raise HTTPException(status_code=400, detail="one_side и notify должны быть логическими значениями")
         if any(isinstance(value, bool) or not isinstance(value, int) or value <= 0 for value in (peer_id, message_id)):
             raise HTTPException(status_code=400, detail="peer_id и message_id должны быть положительными целыми числами")
-        return await change_pinned_message(str(scope), peer_id, message_id, int(user["telegram_id"]), True)
+        return await change_pinned_message(str(scope), peer_id, message_id, int(user["telegram_id"]), True, one_side, notify)
 
     @router.delete("/api/pins")
+    @router.delete("/api/pins/v2")
     async def unpin_message(
         scope: str = Query(...),
         peer_id: int = Query(..., gt=0),
         message_id: int = Query(..., gt=0),
+        one_side: bool = Query(default=False),
         authorization: str | None = Header(default=None),
     ) -> dict[str, Any]:
         user = await current_user(authorization)
         if scope not in ("dm", "group", "channel"):
             raise HTTPException(status_code=400, detail="scope: dm, group или channel")
-        return await change_pinned_message(scope, peer_id, message_id, int(user["telegram_id"]), False)
+        return await change_pinned_message(scope, peer_id, message_id, int(user["telegram_id"]), False, one_side)
+
+    @router.post("/api/pins/clear")
+    async def clear_pins(
+        payload: dict[str, Any],
+        authorization: str | None = Header(default=None),
+        idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+    ) -> dict[str, Any]:
+        user = await current_user(authorization)
+        uid = int(user["telegram_id"])
+        scope, peer_id, max_id = payload.get("scope"), payload.get("peer_id"), payload.get("max_id")
+        if scope not in ("dm", "group", "channel"):
+            raise HTTPException(status_code=400, detail="scope: dm, group или channel")
+        if any(isinstance(v, bool) or not isinstance(v, int) or v <= 0 for v in (peer_id, max_id)):
+            raise HTTPException(status_code=400, detail="peer_id и max_id должны быть положительными целыми числами")
+        descriptor = idempotency_descriptor("/api/pins/clear", payload, idempotency_key)
+        if descriptor is None:
+            raise HTTPException(status_code=400, detail="Необходим Idempotency-Key")
+        now = int(time.time())
+        async with aiosqlite.connect(db_path()) as db:
+            db.row_factory = aiosqlite.Row
+            await db.execute("BEGIN IMMEDIATE")
+            if scope == "dm":
+                cur = await db.execute("SELECT 1 FROM accounts WHERE telegram_id=?", (peer_id,))
+                if await cur.fetchone() is None:
+                    raise HTTPException(status_code=404, detail="Собеседник не найден")
+            elif scope == "group":
+                member = await require_group_member(db, peer_id, uid)
+                if member["role"] not in ("owner", "admin"):
+                    raise HTTPException(status_code=403, detail="Закреплять сообщения могут только администраторы группы")
+            else:
+                cur = await db.execute(
+                    """SELECT owner_telegram_id,EXISTS(SELECT 1 FROM channel_admins a
+                           WHERE a.channel_id=channels.id AND a.telegram_id=?) AS is_admin
+                       FROM channels WHERE id=?""", (uid, peer_id))
+                channel = await cur.fetchone()
+                if channel is None:
+                    raise HTTPException(status_code=404, detail="Канал не найден")
+                if channel["owner_telegram_id"] != uid and not channel["is_admin"]:
+                    raise HTTPException(status_code=403, detail="Закреплять публикации могут только администраторы канала")
+            prior = await idempotency_lookup(db, uid, "pins_clear", descriptor, now)
+            if prior is not None:
+                return prior
+            await db.execute("CREATE TEMP TABLE pin_clear_ids(id INTEGER PRIMARY KEY, user_a INTEGER, user_b INTEGER, event_kind TEXT NOT NULL)")
+            if scope == "dm":
+                await db.execute(
+                    """INSERT INTO pin_clear_ids
+                       SELECT m.id,m.sender_telegram_id,m.recipient_telegram_id,
+                              CASE WHEN p.message_id IS NULL THEN 'unpin_local' ELSE 'unpin' END FROM messages m
+                       LEFT JOIN pinned_messages p ON p.scope='dm' AND p.chat_id=0 AND p.message_id=m.id
+                       LEFT JOIN dm_pin_overrides o ON o.message_id=m.id AND o.user_telegram_id=?
+                       WHERE COALESCE(o.is_pinned,p.message_id IS NOT NULL)=1
+                         AND ((m.sender_telegram_id=? AND m.recipient_telegram_id=?)
+                           OR (m.sender_telegram_id=? AND m.recipient_telegram_id=?))
+                         AND m.id<=? AND NOT EXISTS(SELECT 1 FROM message_hidden_for h
+                                                   WHERE h.message_id=m.id AND h.telegram_id=?)""",
+                    (uid, uid, peer_id, peer_id, uid, max_id, uid))
+                await db.execute("DELETE FROM dm_pin_overrides WHERE message_id IN (SELECT id FROM pin_clear_ids) AND (is_pinned=0 OR user_telegram_id=?)", (uid,))
+                stored_chat = 0
+            elif scope == "group":
+                await db.execute("""INSERT INTO pin_clear_ids SELECT p.message_id,0,0,'unpin' FROM pinned_messages p
+                                    JOIN group_messages m ON m.id=p.message_id AND m.group_id=p.chat_id
+                                    WHERE p.scope='group' AND p.chat_id=? AND p.message_id<=?""", (peer_id, max_id))
+                stored_chat = peer_id
+            else:
+                await db.execute("""INSERT INTO pin_clear_ids SELECT p.message_id,0,0,'unpin' FROM pinned_messages p
+                                    JOIN channel_messages m ON m.id=p.message_id AND m.channel_id=p.chat_id
+                                    WHERE p.scope='channel' AND p.chat_id=? AND p.message_id<=?""", (peer_id, max_id))
+                stored_chat = peer_id
+            cur = await db.execute("SELECT COUNT(*) FROM pin_clear_ids")
+            count = int((await cur.fetchone())[0])
+            await db.execute("DELETE FROM pinned_messages WHERE scope=? AND chat_id=? AND message_id IN (SELECT id FROM pin_clear_ids)", (scope, stored_chat))
+            await db.execute(
+                """INSERT INTO message_events(scope,chat_id,user_a,user_b,message_id,kind,actor_id,created_at)
+                   SELECT ?,?,user_a,user_b,id,event_kind,?,? FROM pin_clear_ids ORDER BY id""",
+                (scope, stored_chat, uid, now))
+            result = {"status": "cleared", "scope": scope, "peer_id": peer_id, "max_id": max_id, "count": count}
+            await idempotency_store(db, uid, "pins_clear", descriptor, result, now)
+            await db.commit()
+            return result
 
     @router.post("/api/messages/{message_id}/reactions")
     async def react_to_direct_message(
@@ -10496,7 +10661,7 @@ def build_messenger_router(
                 else:
                     # These tables do not all have foreign keys and SQLite
                     # connections may have FK enforcement disabled.
-                    for table in ("message_hidden_for", "message_gifts", "message_contacts", "message_locations"):
+                    for table in ("message_hidden_for", "message_gifts", "message_contacts", "message_locations", "dm_pin_overrides"):
                         await db.execute(f"DELETE FROM {table} WHERE message_id IN (SELECT id FROM clear_message_ids)")
                     for table in ("message_forward_sources", "message_reactions", "pinned_messages"):
                         await db.execute(f"DELETE FROM {table} WHERE scope='dm' AND message_id IN (SELECT id FROM clear_message_ids)")
@@ -10588,6 +10753,8 @@ def build_messenger_router(
                 )
                 await db.commit()
                 return {"id": message_id, "status": "hidden_for_me"}
+            await db.execute("DELETE FROM dm_pin_overrides WHERE message_id=?", (message_id,))
+            await db.execute("DELETE FROM pinned_messages WHERE scope='dm' AND chat_id=0 AND message_id=?", (message_id,))
             await db.execute("DELETE FROM messages WHERE id=?", (message_id,))
             await record_event(
                 db, "dm", message_id, "delete", uid,
@@ -11246,9 +11413,9 @@ def build_messenger_router(
                     """SELECT id,scope,chat_id,user_a,user_b,message_id,kind,actor_id,created_at
                        FROM message_events
                        WHERE id>? AND (
-                           (kind IN ('delete_for_me','clear_for_me') AND actor_id=?)
-                           OR kind IN ('delete_for_all_sync','reaction')
-                           OR (kind NOT IN ('delete_for_me','clear_for_me','delete_for_all_sync','reaction') AND actor_id<>?)
+                           (kind IN ('delete_for_me','clear_for_me','pin_local','unpin_local') AND actor_id=?)
+                           OR kind IN ('delete_for_all_sync','reaction','pin','unpin')
+                           OR (kind NOT IN ('delete_for_me','clear_for_me','pin_local','unpin_local','delete_for_all_sync','reaction','pin','unpin') AND actor_id<>?)
                        ) AND (
                            (scope='dm' AND (user_a=? OR user_b=?))
                            OR (scope='group' AND chat_id IN (SELECT group_id FROM group_members WHERE telegram_id=?))
