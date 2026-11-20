@@ -9816,7 +9816,7 @@ def build_messenger_router(
         peer, ids = payload.get("peer_id"), payload.get("ids")
         if isinstance(peer, bool) or not isinstance(peer, int) or not 0 < peer <= 9223372036854775807:
             raise HTTPException(status_code=400, detail="Некорректный собеседник")
-        if not isinstance(ids, list) or not 1 <= len(ids) <= 1000 or any(
+        if not isinstance(ids, list) or not 1 <= len(ids) <= 200 or any(
             isinstance(i, bool) or not isinstance(i, int) or i < 2 or i > 2147483647 for i in ids
         ) or len(set(ids)) != len(ids):
             raise HTTPException(status_code=400, detail="Некорректный список сообщений")
@@ -10153,7 +10153,7 @@ def build_messenger_router(
         if (not isinstance(ids, list) or not 1 <= len(ids) <= 100
                 or any(isinstance(v, bool) or not isinstance(v, int) or v <= 0 for v in ids)
                 or len(set(ids)) != len(ids)):
-            raise HTTPException(status_code=400, detail="Выберите от 1 до 100 разных сообщений")
+            raise HTTPException(status_code=400, detail="Выберите от 1 до 20 разных сообщений")
         for key in ("silent", "drop_author", "drop_media_captions"):
             if not isinstance(payload.get(key, False), bool):
                 raise HTTPException(status_code=400, detail=f"{key} должен быть логическим значением")
