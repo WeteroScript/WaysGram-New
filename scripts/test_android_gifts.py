@@ -237,6 +237,16 @@ class AndroidGiftSourceChecks(unittest.TestCase):
         prefetch_end = attributes.index('public static void retryFailed()', prefetch_start)
         self.assertIn('WaysGramApi.NETWORK.execute', attributes[prefetch_start:prefetch_end])
 
+    def test_waysgram_profile_keeps_media_and_gifts_as_separate_tabs(self):
+        layout = self.source("ui/Components/SharedMediaLayout.java")
+        tabs = layout.split("public void updateTabs(boolean animated)", 1)[1].split("private void startStopVisibleGifs", 1)[0]
+        self.assertIn("hasMedia[0] > 0", tabs)
+        self.assertIn("hasWaysGramGifts && org.telegram.tgnet.WaysGramTransport.ENABLED", tabs)
+        self.assertIn("hasPhotoVideoTab != scrollSlidingTextTabStrip.hasTab(TAB_PHOTOVIDEO)", tabs)
+        self.assertIn("if (hasPhotoVideoTab)", tabs)
+        self.assertLess(tabs.index("tabs.add(new Pair(TAB_PHOTOVIDEO"),
+                        tabs.index("tabs.add(new Pair(TAB_WAYSGRAM_GIFTS"))
+
     def test_profile_labels_refresh_does_not_reload_gifts(self):
         profile = self.source("messenger/waysgram/WaysGramUserProfileFragment.java")
         start = profile.index("private final Runnable waysGramLabelsTick")
