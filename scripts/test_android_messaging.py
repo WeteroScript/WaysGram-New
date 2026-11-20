@@ -525,6 +525,15 @@ class NativeMessagingSourceChecks(unittest.TestCase):
         self.assertIn('body.put("remove_media", true)', edit)
         self.assertIn('replacingMedia ? "/media/v2" : ""', edit)
 
+    def test_big_reaction_animation_round_trip(self):
+        messages = self.source('tgnet/WaysGramMessages.java')
+        mapper = self.source('tgnet/WaysGramMapper.java')
+        self.assertIn('body.put("big", req.big)', messages)
+        self.assertIn('addRecentReactions(reactions, json.optJSONArray("recent_reactions"))', mapper)
+        self.assertIn('peerReaction.big = item.optBoolean("big", false)', mapper)
+        self.assertIn('peerReaction.unread = item.optBoolean("unread", false)', mapper)
+        self.assertIn('reactions.flags |= TLObject.FLAG_1', mapper)
+
     def test_private_chat_forward_uses_atomic_message_api(self):
         chat = self.source('messenger/waysgram/WaysGramChatFragment.java')
         start = chat.index('private void forwardMessage(')
