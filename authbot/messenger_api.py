@@ -1383,6 +1383,10 @@ async def init_messenger_storage(database_path: Path) -> None:
             ("purchase_asset", "TEXT NOT NULL DEFAULT 'stars'"),
             ("purchase_price", "INTEGER NOT NULL DEFAULT 0"),
             ("profile_order", "INTEGER"),
+            # NFT showcase: at most one gift is pinned on the profile and at
+            # most one is worn as the premium emoji status next to the name.
+            ("profile_pinned", "INTEGER NOT NULL DEFAULT 0"),
+            ("profile_emoji", "INTEGER NOT NULL DEFAULT 0"),
         ):
             if column not in user_gift_columns:
                 await db.execute(
@@ -1424,6 +1428,20 @@ async def init_messenger_storage(database_path: Path) -> None:
             AFTER UPDATE OF owner_telegram_id ON user_gifts
             WHEN OLD.owner_telegram_id != NEW.owner_telegram_id
             BEGIN UPDATE user_gifts SET profile_order=NULL WHERE id=NEW.id; END""")
+        # One pinned / one emoji-status gift per owner, enforced by the storage
+        # itself so concurrent showcase updates cannot leave two of either.
+        await db.execute(
+            f"""CREATE UNIQUE INDEX IF NOT EXISTS {db_split.SCHEMA}.user_gifts_one_profile_pin
+                ON user_gifts(owner_telegram_id) WHERE profile_pinned=1""")
+        await db.execute(
+            f"""CREATE UNIQUE INDEX IF NOT EXISTS {db_split.SCHEMA}.user_gifts_one_profile_emoji
+                ON user_gifts(owner_telegram_id) WHERE profile_emoji=1""")
+        # A transferred NFT must not stay pinned or worn as an emoji status on
+        # the previous owner's profile.
+        await db.execute(f"""CREATE TRIGGER IF NOT EXISTS {db_split.SCHEMA}.reset_gift_profile_showcase
+            AFTER UPDATE OF owner_telegram_id ON user_gifts
+            WHEN OLD.owner_telegram_id != NEW.owner_telegram_id
+            BEGIN UPDATE user_gifts SET profile_pinned=0, profile_emoji=0 WHERE id=NEW.id; END""")
         # Gifts bought before the price was stored take it from their saved receipt, so the
         # refund can be calculated for them as well.
         cur = await db.execute(
@@ -2561,6 +2579,11 @@ def build_messenger_router(
     async def push_worker() -> None:
         while True:
             try:
+                # Clear BEFORE the queue check: a producer that commits a row and
+                # calls push_wakeup.set() while the SELECT below is running must
+                # not have its signal wiped by a clear() after the check, or the
+                # push would sleep through the whole 2s poll timeout.
+                push_wakeup.clear()
                 now = int(time.time())
                 lease = secrets.token_hex(16)
                 async with aiosqlite.connect(db_path()) as db:
@@ -2584,7 +2607,6 @@ def build_messenger_router(
                                              (now + 60, lease, item["id"]))
                         await db.commit()
                 if item is None:
-                    push_wakeup.clear()
                     try:
                         await asyncio.wait_for(push_wakeup.wait(), timeout=2.0)
                     except asyncio.TimeoutError:
@@ -2795,6 +2817,26 @@ def build_messenger_router(
             labels.setdefault(key, []).append(
                 {"text": str(row["text"]), "color": str(row["color"])}
             )
+        # NFT emoji status: a gift worn as the premium emoji next to the name
+        # rides the same pill pipeline, so it shows in the dialog list, the
+        # chat header and profiles without extra requests.
+        nft_account_ids = [tid for kind, tid in wanted if kind == "account"]
+        if nft_account_ids:
+            try:
+                placeholders = ",".join("?" for _ in nft_account_ids)
+                async with aiosqlite.connect(db_path()) as db:
+                    db.row_factory = aiosqlite.Row
+                    cur = await db.execute(
+                        f"""SELECT owner_telegram_id,gift_name,gift_emoji FROM user_gifts
+                            WHERE profile_emoji=1 AND owner_telegram_id IN ({placeholders})""",
+                        nft_account_ids,
+                    )
+                    for row in await cur.fetchall():
+                        emoji = str(row["gift_emoji"] or "").strip() or "💎"
+                        labels.setdefault(f"account:{int(row['owner_telegram_id'])}", []).append(
+                            {"text": f"{emoji} NFT", "color": "#7B61FF"})
+            except Exception:
+                pass
         # «Огонёк»: the mutual DM streak rides the same pill pipeline as admin marks,
         # so it appears in the chat header and the dialog list with no extra requests.
         account_ids = [tid for kind, tid in wanted if kind == "account" and tid != _viewer_id]
@@ -4177,8 +4219,8 @@ def build_messenger_router(
             )
             total = int((await cur.fetchone())[0] or 0)
             query = """SELECT id,serial_number,gift_id,telegram_gift_id,gift_name,gift_emoji,
-                          telegram_gift_metadata_json,acquired_at,upgrade_level,attributes_json,
-                          purchase_asset,purchase_price,
+                         telegram_gift_metadata_json,acquired_at,upgrade_level,attributes_json,
+                         purchase_asset,purchase_price,profile_pinned,profile_emoji,
                           EXISTS(SELECT 1 FROM gift_market_listings l
                                  WHERE l.serial_number=user_gifts.serial_number
                                    AND l.status='active') AS is_listed,
@@ -4199,7 +4241,7 @@ def build_messenger_router(
                           (SELECT n.unique_num FROM gift_unique_numbers n
                             WHERE n.serial_number=user_gifts.serial_number) AS unique_num
                    FROM user_gifts WHERE owner_telegram_id=?
-                   ORDER BY profile_order IS NOT NULL, profile_order ASC, id DESC"""
+                   ORDER BY profile_pinned DESC, profile_order IS NOT NULL, profile_order ASC, id DESC"""
             query_params: tuple[Any, ...] = (owner_id,)
             if limit is not None:
                 query += " LIMIT ? OFFSET ?"
@@ -4341,6 +4383,8 @@ def build_messenger_router(
                         "upgrade_star_count": UPGRADE_PRICE_STARS,
                     }
                 item["unique_num"] = int(item.get("unique_num") or 0)
+                item["is_pinned"] = bool(item.pop("profile_pinned", 0))
+                item["is_emoji_status"] = bool(item.pop("profile_emoji", 0))
                 item["sticker_available"] = bool(
                     item.get("sticker_available")
                     or (telegram_gift and telegram_gift.get("sticker_available"))
@@ -4428,7 +4472,7 @@ def build_messenger_router(
             await db.execute("BEGIN IMMEDIATE")
             cursor = await db.execute(
                 """SELECT id FROM user_gifts WHERE owner_telegram_id=?
-                   ORDER BY profile_order IS NOT NULL, profile_order ASC, id DESC""", (uid,))
+                   ORDER BY profile_pinned DESC, profile_order IS NOT NULL, profile_order ASC, id DESC""", (uid,))
             current = [int(row[0]) for row in await cursor.fetchall()]
             if current != expected:
                 await db.rollback()
@@ -4439,6 +4483,80 @@ def build_messenger_router(
             )
             await db.commit()
         return {"ok": True}
+
+    async def profile_showcase_serials(db: Any, owner_id: int) -> dict[str, Any]:
+        cur = await db.execute(
+            """SELECT serial_number,profile_pinned,profile_emoji FROM user_gifts
+               WHERE owner_telegram_id=? AND (profile_pinned=1 OR profile_emoji=1)""",
+            (owner_id,),
+        )
+        pinned: str | None = None
+        emoji: str | None = None
+        for serial, is_pinned, is_emoji in await cur.fetchall():
+            if is_pinned:
+                pinned = str(serial)
+            if is_emoji:
+                emoji = str(serial)
+        return {"pinned_serial": pinned, "emoji_serial": emoji}
+
+    @router.get("/api/me/gifts/showcase")
+    async def my_gift_showcase(authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        user = await current_user(authorization)
+        async with aiosqlite.connect(db_path()) as db:
+            return await profile_showcase_serials(db, int(user["telegram_id"]))
+
+    @router.put("/api/me/gifts/showcase")
+    async def set_my_gift_showcase(request: Request, authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        """Pin an owned NFT on the profile and/or wear one as the emoji status.
+
+        Body keys are optional; a present key with a serial sets that slot, a
+        present key with null clears it, an absent key leaves it untouched.
+        Only gifts the caller currently owns can be showcased: a transferred
+        gift also loses both slots automatically (storage trigger).
+        """
+        user = await current_user(authorization)
+        uid = int(user["telegram_id"])
+        try:
+            body = await request.json()
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Некорректная витрина профиля")
+        if not isinstance(body, dict):
+            raise HTTPException(status_code=400, detail="Некорректная витрина профиля")
+        updates: dict[str, str | None] = {}
+        for key, column in (("pinned_serial", "profile_pinned"), ("emoji_serial", "profile_emoji")):
+            if key not in body:
+                continue
+            value = body.get(key)
+            if value is None:
+                updates[column] = None
+                continue
+            serial = str(value).strip()
+            if not serial or len(serial) > 64:
+                raise HTTPException(status_code=400, detail="Некорректный серийный номер подарка")
+            updates[column] = serial
+        async with aiosqlite.connect(db_path()) as db:
+            await db.execute("BEGIN IMMEDIATE")
+            for column, serial in updates.items():
+                if serial is None:
+                    await db.execute(
+                        f"UPDATE user_gifts SET {column}=0 WHERE owner_telegram_id=?", (uid,))
+                    continue
+                cur = await db.execute(
+                    "SELECT 1 FROM user_gifts WHERE serial_number=? AND owner_telegram_id=?",
+                    (serial, uid),
+                )
+                if await cur.fetchone() is None:
+                    await db.rollback()
+                    raise HTTPException(status_code=404, detail="Подарок не найден у вас")
+                await db.execute(
+                    f"UPDATE user_gifts SET {column}=0 WHERE owner_telegram_id=?", (uid,))
+                await db.execute(
+                    f"UPDATE user_gifts SET {column}=1 WHERE serial_number=? AND owner_telegram_id=?",
+                    (serial, uid),
+                )
+            result = await profile_showcase_serials(db, uid)
+            await db.commit()
+        return {"ok": True, **result}
 
     @router.get("/api/me/gifts")
     async def my_gifts(
@@ -4753,6 +4871,28 @@ def build_messenger_router(
         for contact in common_contacts:
             contact["labels"] = await entity_labels("account", int(contact["id"]))
         profile["gifts"] = (await gift_inventory(user_id, None, 0, public=user_id != viewer_id))["gifts"]
+        # NFT showcase: the pinned gift leads the profile, and the emoji-status
+        # gift is what other clients render next to the name (premium emoji).
+        pinned_gift = next((g for g in profile["gifts"] if g.get("is_pinned")), None)
+        emoji_gift = next((g for g in profile["gifts"] if g.get("is_emoji_status")), None)
+        profile["pinned_gift"] = pinned_gift
+        profile["emoji_status"] = (
+            {
+                "serial_number": emoji_gift["serial_number"],
+                "gift_name": emoji_gift.get("gift_name") or "",
+                "gift_emoji": emoji_gift.get("gift_emoji") or "",
+                "telegram_gift_id": emoji_gift.get("telegram_gift_id") or "",
+                "upgrade_level": int(emoji_gift.get("upgrade_level") or 0),
+                "unique_num": int(emoji_gift.get("unique_num") or 0),
+            }
+            if emoji_gift else None
+        )
+        if emoji_gift:
+            emoji = str(emoji_gift.get("gift_emoji") or "").strip() or "💎"
+            profile["labels"] = [
+                *profile["labels"],
+                {"text": f"{emoji} NFT", "color": "#7B61FF"},
+            ]
         profile["common_groups"] = common_groups
         profile["common_contacts"] = common_contacts
         return profile
@@ -10296,8 +10436,14 @@ def build_messenger_router(
         peer_id: int,
         delete_for: str = Query(default="me", alias="for"),
         max_id: int | None = Query(default=None, ge=1),
+        min_date: int = Query(default=0, ge=0),
+        max_date: int = Query(default=0, ge=0),
         authorization: str | None = Header(default=None),
     ) -> dict[str, Any]:
+        # min_date/max_date bound the clear to a date range (unix seconds,
+        # [min_date, max_date) — the Android calendar passes end+86400), which
+        # is what Telegram's deleteMessagesRange needs. Without them the whole
+        # history up to max_id is cleared, as before.
         user = await current_user(authorization)
         uid = int(user["telegram_id"])
         if peer_id <= 0:
@@ -10316,11 +10462,16 @@ def build_messenger_router(
             visible_clause = ("AND NOT EXISTS (SELECT 1 FROM message_hidden_for h "
                               "WHERE h.message_id=m.id AND h.telegram_id=?)") if delete_for == "me" else ""
             params: list[Any] = [uid, peer_id, peer_id, uid]
+            bound_clause = ""
             if max_id is not None:
-                bound_clause = "AND m.id<=?"
+                bound_clause += " AND m.id<=?"
                 params.append(max_id)
-            else:
-                bound_clause = ""
+            if min_date > 0:
+                bound_clause += " AND m.created_at>=?"
+                params.append(min_date)
+            if max_date > 0:
+                bound_clause += " AND m.created_at<?"
+                params.append(max_date)
             if delete_for == "me":
                 params.append(uid)
             await db.execute(

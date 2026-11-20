@@ -1,4 +1,7 @@
-aiogram>=3.13,<4.0
+# aiogram 3.21+ currently crashes at import on Python 3.11
+# (TypeError: unhashable type: 'FailFast' in aiogram/types/rich_text_union.py),
+# which breaks even test collection. 3.20.0 is the verified ceiling.
+aiogram>=3.13,<3.21
 aiosqlite>=0.20,<1.0
 fastapi>=0.115,<1.0
 httpx>=0.27,<1.0
