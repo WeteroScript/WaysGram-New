@@ -9835,6 +9835,85 @@ def build_messenger_router(
             await db.commit()
         return {"cancelled": ids}
 
+    @router.post("/api/messages/scheduled/send-now/native/v1")
+    async def native_send_scheduled_now(payload: dict[str, Any], authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        """Send selected private text jobs exactly once, including after an HTTP retry.
+
+        Sending a recurring job now terminates that job rather than leaving a
+        surprising future recurrence behind. The entire batch is transactional.
+        """
+        user = await current_user(authorization)
+        uid = int(user["telegram_id"])
+        peer, ids = payload.get("peer_id"), payload.get("ids")
+        if isinstance(peer, bool) or not isinstance(peer, int) or not 0 < peer <= 9223372036854775807:
+            raise HTTPException(status_code=400, detail="Некорректный собеседник")
+        if not isinstance(ids, list) or not 1 <= len(ids) <= 1000 or any(
+            isinstance(i, bool) or not isinstance(i, int) or i < 2 or i > 2147483647 for i in ids
+        ) or len(set(ids)) != len(ids):
+            raise HTTPException(status_code=400, detail="Некорректный список сообщений")
+        now = int(time.time())
+        queued_push = False
+        results: list[dict[str, Any]] = []
+        async with aiosqlite.connect(db_path()) as db:
+            db.row_factory = aiosqlite.Row
+            await db.execute("BEGIN IMMEDIATE")
+            jobs = []
+            for native_id in ids:
+                table = "online_scheduled_messages" if native_id % 2 else "scheduled_messages"
+                cur = await db.execute(f"""SELECT status,message_id,body,silent,entities_json
+                    FROM {table} WHERE id=? AND sender_telegram_id=? AND recipient_telegram_id=?""",
+                    (native_id // 2, uid, peer))
+                row = await cur.fetchone()
+                if row is None or row["status"] not in ("pending", "failed", "sent"):
+                    raise HTTPException(status_code=409, detail="Сообщение отменено или недоступно")
+                jobs.append((native_id, table, row))
+            pending = sum(1 for _, _, row in jobs if row["status"] != "sent")
+            if pending:
+                cur = await db.execute("SELECT is_banned FROM accounts WHERE telegram_id=?", (peer,))
+                recipient = await cur.fetchone()
+                if recipient is None or recipient[0]:
+                    raise HTTPException(status_code=403, detail="Получатель недоступен")
+                if peer != uid:
+                    cur = await db.execute("""SELECT 1 FROM blocked_users
+                        WHERE (owner_telegram_id=? AND blocked_telegram_id=?)
+                           OR (owner_telegram_id=? AND blocked_telegram_id=?) LIMIT 1""", (uid, peer, peer, uid))
+                    if await cur.fetchone():
+                        raise HTTPException(status_code=403, detail="Пользователь находится в чёрном списке")
+                cur = await db.execute("SELECT COUNT(*) FROM messages WHERE sender_telegram_id=? AND created_at>?", (uid, now - 60))
+                if int((await cur.fetchone())[0]) + pending > DM_MESSAGES_PER_MINUTE:
+                    raise HTTPException(status_code=429, detail="Превышен лимит отправки сообщений")
+            for native_id, table, row in jobs:
+                if row["status"] == "sent":
+                    # Do not recreate a message if it was deleted after delivery.
+                    cur = await db.execute("""SELECT id,body,created_at,silent,entities_json FROM messages
+                        WHERE id=? AND sender_telegram_id=? AND recipient_telegram_id=?""", (row["message_id"], uid, peer))
+                    message = await cur.fetchone()
+                    if message is None:
+                        raise HTTPException(status_code=409, detail="Отправленное сообщение больше недоступно")
+                    result = dict(message)
+                else:
+                    cur = await db.execute("""INSERT INTO messages(sender_telegram_id,recipient_telegram_id,body,created_at,silent,entities_json)
+                        VALUES(?,?,?,?,?,?)""", (uid, peer, row["body"], now, row["silent"], row["entities_json"]))
+                    message_id = int(cur.lastrowid)
+                    await db.execute(f"UPDATE {table} SET status='sent',message_id=?,error='' WHERE id=?", (message_id, native_id // 2))
+                    await record_event(db, "dm", message_id, "new_message", uid, user_a=uid, user_b=peer)
+                    await record_event(db, "scheduled", native_id, "scheduled_removed", uid, chat_id=peer)
+                    if peer != uid:
+                        queued_push |= await enqueue_push(db, uid, peer, str(user.get("display_name") or user.get("username") or "Новое сообщение"),
+                            str(row["body"]), {"scope": "dm", "chat_id": str(uid), "message_id": str(message_id),
+                            "silent": "1" if row["silent"] else "0"}, now)
+                    result = {"id": message_id, "body": str(row["body"]), "created_at": now,
+                              "silent": int(row["silent"]), "entities_json": row["entities_json"]}
+                result["sender_id"] = uid
+                result["recipient_id"] = peer
+                result["scheduled_native_id"] = native_id
+                _add_message_entities(result)
+                results.append(result)
+            await db.commit()
+        if queued_push:
+            push_wakeup.set()
+        return {"messages": results}
+
     @router.delete("/api/messages/scheduled/{scheduled_id}")
     async def cancel_scheduled_message(
         scheduled_id: int,
