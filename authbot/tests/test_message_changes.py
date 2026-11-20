@@ -71,6 +71,23 @@ def test_edit_and_delete_private_messages_with_events(env) -> None:
     run(scenario())
 
 
+def test_edit_saved_message_via_put_and_lookup(env) -> None:
+    _path, app = env
+
+    async def scenario() -> None:
+        async with await client_for(app) as client:
+            sent = await client.post("/api/messages", headers=headers(101), json={"recipient_id": 101, "body": "saved"})
+            assert sent.status_code == 201
+            mid = sent.json()["id"]
+            assert (await client.put(f"/api/messages/{mid}", headers=headers(102), json={"body": "not mine"})).status_code == 403
+            assert (await client.put(f"/api/messages/{mid}", headers=headers(101), json={"body": "edited"})).status_code == 200
+            found = await client.get(f"/api/messages?with=101&after_id={max(mid - 1, 0)}", headers=headers(101))
+            assert found.status_code == 200
+            assert any(item["id"] == mid and item["body"] == "edited" for item in found.json()["messages"])
+
+    run(scenario())
+
+
 def test_group_edit_delete_and_admin_rights(env) -> None:
     path, app = env
 

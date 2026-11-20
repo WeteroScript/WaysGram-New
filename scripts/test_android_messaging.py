@@ -56,6 +56,22 @@ class NativeMessagingSourceChecks(unittest.TestCase):
         self.assertIn('new TLRPC.TL_messageMediaGeo()', media)
         self.assertIn('new TLRPC.TL_messageMediaVenue()', media)
 
+    def test_native_text_edit_uses_supported_put_and_shows_actual_error(self):
+        api = self.source('tgnet/WaysGramApi.java')
+        bridge = self.source('tgnet/WaysGramMessages.java')
+        self.assertIn('return request("PUT", path, body, getToken(account), 30000)', api)
+        start = bridge.index('public static TLObject edit(')
+        end = bridge.index('// ---------------------------------------------------------------- deleting', start)
+        edit = bridge[start:end]
+        for route in ('/api/messages/', '/api/groups/', '/api/channels/'):
+            self.assertIn('WaysGramApi.put(account, "' + route, edit)
+        self.assertNotIn('WaysGramApi.patch(', edit)
+        self.assertIn('req.peer instanceof TLRPC.TL_inputPeerSelf', edit)
+        helper = self.source('messenger/SendMessagesHelper.java')
+        start = helper.index('public int editMessage(MessageObject messageObject, String message,')
+        end = helper.index('public int editRichMessage(', start)
+        self.assertIn('AlertsCreator.showSimpleAlert(fragment, detail)', helper[start:end])
+
     def test_native_forward_and_private_delete_use_server(self):
         transport = self.source('tgnet/WaysGramTransport.java')
         messages = self.source('tgnet/WaysGramMessages.java')
