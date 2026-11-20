@@ -10843,8 +10843,8 @@ def build_messenger_router(
                        FROM message_events
                        WHERE id>? AND (
                            (kind IN ('delete_for_me','clear_for_me') AND actor_id=?)
-                           OR kind='delete_for_all_sync'
-                           OR (kind NOT IN ('delete_for_me','clear_for_me','delete_for_all_sync') AND actor_id<>?)
+                           OR kind IN ('delete_for_all_sync','reaction')
+                           OR (kind NOT IN ('delete_for_me','clear_for_me','delete_for_all_sync','reaction') AND actor_id<>?)
                        ) AND (
                            (scope='dm' AND (user_a=? OR user_b=?))
                            OR (scope='group' AND chat_id IN (SELECT group_id FROM group_members WHERE telegram_id=?))

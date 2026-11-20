@@ -159,6 +159,27 @@ class NativeMessagingSourceChecks(unittest.TestCase):
         self.assertIn('media.user_id = 0', media)
         self.assertIn('message.flags |= TLObject.FLAG_9', media)
 
+    def test_existing_reactions_map_to_history_and_updates(self):
+        mapper = self.source('tgnet/WaysGramMapper.java')
+        media = self.source('tgnet/WaysGramMedia.java')
+        poller = self.source('tgnet/WaysGramPoller.java')
+        messages = self.source('tgnet/WaysGramMessages.java')
+        for value in ('json.optString("reaction_summary", "")', 'json.optJSONArray("my_reactions")',
+                      'TLRPC.TL_reactionEmoji', 'TLRPC.TL_reactionCount', 'result.chosen = true',
+                      'result.chosen_order = i', 'message.flags |= TLObject.FLAG_20'):
+            self.assertIn(value, mapper)
+        self.assertIn('WaysGramMapper.applyExtras(message, json', media)
+        self.assertEqual(poller.count('kind.equals("reaction")'), 4)
+        for value in ('e.optLong("user_a")', 'e.optLong("user_b")',
+                      'WaysGramMapper.peerUser(other)', 'fetchPrivate(account, other, messageId, selfId)',
+                      'fetchGroup(account, groupId, messageId, selfId)',
+                      'fetchChannel(account, serverId, messageId, selfId)',
+                      'TL_update.TL_updateMessageReactions', 'new TLRPC.TL_messageReactions()',
+                      'update.updateUnreadState = false', 'update.msg_id = message.id'):
+            self.assertIn(value, poller)
+        self.assertIn('"&before_id=" + ((long) id + 1)', messages)
+        self.assertIn('"/messages?limit=1&before_id=" + ((long) serverId + 1)', messages)
+
     def test_uncompressed_image_documents_stay_documents(self):
         media = self.source('tgnet/WaysGramMedia.java')
         self.assertIn('!forceDocument && !"document".equals(kind)', media)

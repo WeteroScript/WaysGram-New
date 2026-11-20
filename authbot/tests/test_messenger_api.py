@@ -4257,6 +4257,55 @@ def test_profile_avatar_upload_set_remove_and_owner_isolation(api_env) -> None:
     run(scenario())
 
 
+def test_reaction_events_reach_all_account_sessions_and_preserve_visibility(api_env) -> None:
+    path, _, _, app = api_env
+    for uid in (96901, 96902, 96903):
+        add_account(api_env, uid, f"reaction_read_{uid}")
+        add_session(path, uid, f"reaction-read-{uid}")
+    add_session(path, 96902, "reaction-read-second-session")
+
+    async def scenario() -> None:
+        h = lambda uid: {"Authorization": f"Bearer reaction-read-{uid}"}
+        other_session = {"Authorization": "Bearer reaction-read-second-session"}
+        async with await client_for(app) as client:
+            group = await client.post("/api/groups", headers=h(96901), json={"title": "Reaction read group"})
+            gid = group.json()["id"]
+            assert (await client.post(f"/api/groups/{gid}/members", headers=h(96901), json={"telegram_id": 96902})).status_code == 201
+            channel = await client.post("/api/channels", headers=h(96901), json={"title": "Reaction read channel", "is_public": False})
+            cid = channel.json()["id"]
+            assert (await client.post("/api/channels/join", headers=h(96902), json={"invite_link": channel.json()["invite_link"]})).status_code == 200
+            paths = [("dm", 0, "/api/messages", {"recipient_id": 96902}, "/api/messages?with=96901"),
+                     ("group", gid, f"/api/groups/{gid}/messages", {}, f"/api/groups/{gid}/messages"),
+                     ("channel", cid, f"/api/channels/{cid}/messages", {}, f"/api/channels/{cid}/messages")]
+            for scope, chat_id, path, payload, history in paths:
+                result = await client.post(path, headers=h(96901), json={**payload, "body": "react here", "silent": True})
+                assert result.status_code == 201, result.text
+                mid = result.json()["id"]
+                reaction_url = f"/api/messages/{mid}/reactions" if scope == "dm" else f"/api/{scope}s/{chat_id}/messages/{mid}/reactions"
+                cursor = (await client.get("/api/events", headers=h(96902))).json()["latest_id"]
+                assert (await client.post(reaction_url, headers=h(96902), json={"reaction": "👍"})).status_code == 200
+                for recipient in (h(96902), other_session, h(96901)):
+                    events = (await client.get("/api/events", headers=recipient, params={"after_id": cursor})).json()["events"]
+                    event = next(e for e in events if e["scope"] == scope and e["kind"] == "reaction" and e["message_id"] == mid)
+                    assert event["actor_id"] == 96902 and event["chat_id"] == chat_id
+                    if scope == "dm":
+                        assert {event["user_a"], event["user_b"]} == {96901, 96902}
+                outsider = (await client.get("/api/events", headers=h(96903), params={"after_id": cursor})).json()["events"]
+                assert not any(e["scope"] == scope and e["kind"] == "reaction" and e["message_id"] == mid for e in outsider)
+                mine = (await client.get(history, headers=other_session)).json()["messages"]
+                row = next(m for m in mine if m["id"] == mid)
+                assert row["reaction_summary"] == "👍:1" and row["my_reactions"] == ["👍"]
+                # Removing the final reaction is observable, including to another
+                # session of the same account, and must clear the native UI.
+                cursor = (await client.get("/api/events", headers=other_session)).json()["latest_id"]
+                assert (await client.post(reaction_url, headers=h(96902), json={"reaction": "👍"})).json()["status"] == "removed"
+                events = (await client.get("/api/events", headers=other_session, params={"after_id": cursor})).json()["events"]
+                assert any(e["kind"] == "reaction" and e["scope"] == scope and e["message_id"] == mid for e in events)
+                row = next(m for m in (await client.get(history, headers=other_session)).json()["messages"] if m["id"] == mid)
+                assert row["reaction_summary"] is None and row["my_reactions"] == []
+    run(scenario())
+
+
 def test_cloud_drafts_sync_and_enforce_chat_access(api_env) -> None:
     path, _auth_store, _fake_bot, app = api_env
     add_account(api_env, 95101, "draft_owner")
