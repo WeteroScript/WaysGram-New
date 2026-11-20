@@ -11042,13 +11042,15 @@ def build_messenger_router(
 
     async def set_message_reactions(
         scope: str, chat_id: int, message_id: int, user_id: int,
-        requested: Any, peer_id: Any = None, extended: bool = False,
+        requested: Any, peer_id: Any = None, extended: bool = False, big: Any = False,
     ) -> dict[str, Any]:
         """Atomically replace this account's emoji set, never toggle on retry."""
         basic = {"👍", "❤️", "😂", "😮", "😢", "🎉", "🙏"}
         allowed = {"👍", "❤️", "😂", "😮", "😢", "🎉", "🙏", "👎", "🔥", "🥰", "👏", "😁", "🤔", "🤯", "😱", "🤬", "😡", "🤩", "😎", "💯", "❤️‍🔥", "💔", "💩", "🤮", "🤝", "👀", "🙌", "😍", "🥳", "😭", "😘", "🤣", "🤗", "🫡", "🕊️", "⚡", "🏆", "🍾", "🎄", "🤡"} if extended else basic
         if not isinstance(requested, list) or len(requested) > 3:
             raise HTTPException(status_code=400, detail="Можно выбрать не более трёх реакций")
+        if not isinstance(big, bool) or (big and len(requested) != 1):
+            raise HTTPException(status_code=400, detail="Большая анимация доступна для одной реакции")
         if any(not isinstance(value, str) or value not in allowed for value in requested) or len(set(requested)) != len(requested):
             raise HTTPException(status_code=400, detail="Недопустимый набор реакций")
         if not 0 < message_id <= 9223372036854775807 or (
@@ -11105,11 +11107,19 @@ def build_messenger_router(
                 raise HTTPException(status_code=409, detail="Обновите приложение для изменения расширенных реакций")
             desired = set(requested)
             changed = previous != desired
+            recent_reactions: list[dict[str, Any]] = []
             if changed:
+                now = int(time.time())
+                newly_added = desired - previous
+                if big and len(newly_added) == 1:
+                    value = next(iter(newly_added))
+                    recent_reactions.append({
+                        "user_id": user_id, "reaction": value,
+                        "big": True, "unread": True, "date": now,
+                    })
                 for value in previous - desired:
                     await db.execute("""DELETE FROM message_reactions WHERE scope=? AND chat_id=? AND message_id=?
                                         AND user_telegram_id=? AND reaction=?""", (scope, chat_id, message_id, user_id, value))
-                now = int(time.time())
                 for value in requested:
                     if value not in previous:
                         await db.execute("""INSERT INTO message_reactions(scope,chat_id,message_id,user_telegram_id,reaction,created_at)
@@ -11125,7 +11135,8 @@ def build_messenger_router(
             mine = [str(row[0]) for row in await cur.fetchall()]
             await db.commit()
         return {"status": "updated" if changed else "unchanged", "scope": scope, "chat_id": chat_id,
-                "message_id": message_id, "reactions": summary, "my_reactions": mine}
+                "message_id": message_id, "reactions": summary, "my_reactions": mine,
+                "recent_reactions": recent_reactions}
 
     async def change_pinned_message(
         scope: str, chat_id: int, message_id: int, user_id: int, pin: bool,
@@ -11529,19 +11540,19 @@ def build_messenger_router(
                                       authorization: str | None = Header(default=None)) -> dict[str, Any]:
         user = await current_user(authorization)
         return await set_message_reactions("dm", 0, message_id, int(user["telegram_id"]),
-                                           payload.get("reactions"), payload.get("peer_id"), True)
+                                           payload.get("reactions"), payload.get("peer_id"), True, payload.get("big", False))
 
     @router.put("/api/groups/{group_id}/messages/{message_id}/reactions/v2")
     async def set_group_reactions_v2(group_id: int, message_id: int, payload: dict[str, Any],
                                      authorization: str | None = Header(default=None)) -> dict[str, Any]:
         user = await current_user(authorization)
-        return await set_message_reactions("group", group_id, message_id, int(user["telegram_id"]), payload.get("reactions"), extended=True)
+        return await set_message_reactions("group", group_id, message_id, int(user["telegram_id"]), payload.get("reactions"), extended=True, big=payload.get("big", False))
 
     @router.put("/api/channels/{channel_id}/messages/{message_id}/reactions/v2")
     async def set_channel_reactions_v2(channel_id: int, message_id: int, payload: dict[str, Any],
                                        authorization: str | None = Header(default=None)) -> dict[str, Any]:
         user = await current_user(authorization)
-        return await set_message_reactions("channel", channel_id, message_id, int(user["telegram_id"]), payload.get("reactions"), extended=True)
+        return await set_message_reactions("channel", channel_id, message_id, int(user["telegram_id"]), payload.get("reactions"), extended=True, big=payload.get("big", False))
 
     @router.put("/api/messages/{message_id}/reactions")
     async def set_direct_reactions(message_id: int, payload: dict[str, Any],
