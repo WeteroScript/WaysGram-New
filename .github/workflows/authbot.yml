@@ -181,7 +181,37 @@ jobs:
           if grep -Fq 'catch (WaysGramApi.ApiException coverError)' "$ANDROID_MEDIA"; then
             echo "Resilient custom video-cover fallback is already present."
           elif grep -Fq 'videoCoverThumbnail' "$ANDROID_MEDIA"; then
-            patch --batch --forward -p1 -d /tmp/waysgram-android-source < android-stage1-media-cover-fallback.patch
+            python3 - <<'PY'
+          from pathlib import Path
+          source = Path("/tmp/waysgram-android-source/WaysGram-Android/TMessagesProj/src/main/java/org/telegram/tgnet/WaysGramMedia.java")
+          current = source.read_text(encoding="utf-8")
+          start_marker = '            String coverMediaId = info.optString("video_cover_media_id", "");'
+          end_marker = '            File thumb = videoThumbnail(mediaId, file);'
+          start = current.find(start_marker)
+          end = current.find(end_marker, start + len(start_marker)) if start >= 0 else -1
+          if start < 0 or end < 0:
+              raise SystemExit("Could not locate the existing video-cover bridge block")
+          old_block = current[start:end]
+          if "VIDEO_COVER_INVALID" not in old_block:
+              raise SystemExit("Unexpected video-cover bridge block; refusing a blind rewrite")
+          replacement = """            String coverMediaId = info.optString("video_cover_media_id", "");
+          if (!TextUtils.isEmpty(coverMediaId) && kind.equals("video")) {
+              try {
+                  TLRPC.MessageMedia cover = buildMedia(account, coverMediaId, "image/jpeg",
+                          "video_cover.jpg", "", new JSONObject(), false);
+                  if (cover instanceof TLRPC.TL_messageMediaPhoto) {
+                      File customThumb = videoCoverThumbnail(account, coverMediaId, mediaId);
+                      if (customThumb != null) {
+                          videoCoverPhoto = ((TLRPC.TL_messageMediaPhoto) cover).photo;
+                      }
+                  }
+              } catch (WaysGramApi.ApiException coverError) {
+                  FileLog.e(coverError);
+              }
+          }
+          """
+          source.write_text(current[:start] + replacement + current[end:], encoding="utf-8")
+          PY
           else
             patch --batch --forward -p1 -d /tmp/waysgram-android-source < android-stage1.patch
           fi
