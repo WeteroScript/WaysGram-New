@@ -919,6 +919,19 @@ async def init_messenger_storage(database_path: Path) -> None:
                 revision INTEGER NOT NULL CHECK(revision > 0),
                 PRIMARY KEY(owner_telegram_id,scope,peer_id)
             );
+            -- Coalesced change index: at most one key per draft, without text.
+            CREATE TABLE IF NOT EXISTS cloud_draft_change_counters (
+                owner_telegram_id INTEGER PRIMARY KEY,
+                last_seq INTEGER NOT NULL CHECK(last_seq > 0)
+            );
+            CREATE TABLE IF NOT EXISTS cloud_draft_changes (
+                owner_telegram_id INTEGER NOT NULL,
+                scope TEXT NOT NULL CHECK(scope IN ('dm','group','channel')),
+                peer_id INTEGER NOT NULL CHECK(peer_id > 0),
+                seq INTEGER NOT NULL CHECK(seq > 0),
+                PRIMARY KEY(owner_telegram_id,scope,peer_id),
+                UNIQUE(owner_telegram_id,seq)
+            );
             CREATE TABLE IF NOT EXISTS scheduled_messages (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 sender_telegram_id INTEGER NOT NULL,
@@ -1385,6 +1398,20 @@ async def init_messenger_storage(database_path: Path) -> None:
                     VALUES({ref}.owner_telegram_id,{ref}.scope,{ref}.peer_id,1)
                     ON CONFLICT(owner_telegram_id,scope,peer_id)
                     DO UPDATE SET revision=revision+1;
+                END""")
+        # One latest change per key, with a monotonic counter per owner. No
+        # body is copied into the index, including on DELETE or admin cleanup.
+        for action, ref in (("INSERT", "NEW"), ("UPDATE", "NEW"), ("DELETE", "OLD")):
+            await db.execute(f"""CREATE TRIGGER IF NOT EXISTS {db_split.SCHEMA}.draft_change_{action.lower()}
+                AFTER {action} ON cloud_drafts
+                BEGIN
+                    INSERT INTO cloud_draft_change_counters(owner_telegram_id,last_seq)
+                    VALUES({ref}.owner_telegram_id,1)
+                    ON CONFLICT(owner_telegram_id) DO UPDATE SET last_seq=last_seq+1;
+                    INSERT INTO cloud_draft_changes(owner_telegram_id,scope,peer_id,seq)
+                    VALUES({ref}.owner_telegram_id,{ref}.scope,{ref}.peer_id,
+                        (SELECT last_seq FROM cloud_draft_change_counters WHERE owner_telegram_id={ref}.owner_telegram_id))
+                    ON CONFLICT(owner_telegram_id,scope,peer_id) DO UPDATE SET seq=excluded.seq;
                 END""")
         await db.execute(f"""CREATE TRIGGER IF NOT EXISTS {db_split.SCHEMA}.draft_key_immutable
             BEFORE UPDATE OF owner_telegram_id,scope,peer_id ON cloud_drafts
@@ -10528,6 +10555,65 @@ def build_messenger_router(
             last = drafts[-1]
             next_cursor = {"after_scope": last["scope"], "after_peer_id": last["peer_id"]}
         return {"drafts": drafts, "next_cursor": next_cursor}
+
+    @router.get("/api/drafts/changes")
+    async def cloud_draft_changes(
+        after: int = Query(default=0, ge=0, le=9223372036854775807),
+        limit: int = Query(default=100, ge=1, le=200),
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        """Return latest changed keys, not a history; callers must bootstrap from the list."""
+        user = await current_user(authorization)
+        uid = int(user["telegram_id"])
+        async with aiosqlite.connect(db_path()) as db:
+            db.row_factory = aiosqlite.Row
+            await db.execute("BEGIN")
+            cur = await db.execute(
+                "SELECT last_seq FROM cloud_draft_change_counters WHERE owner_telegram_id=?", (uid,)
+            )
+            counter = await cur.fetchone()
+            latest = int(counter[0]) if counter else 0
+            if after > latest:
+                raise HTTPException(status_code=400, detail="Курсор черновиков больше текущей версии; требуется повторная синхронизация")
+            # The counter and accessible keys come from the same read transaction.
+            cur = await db.execute(
+                """SELECT c.scope,c.peer_id,c.seq,COALESCE(v.revision,0) AS revision,
+                          NOT EXISTS(SELECT 1 FROM cloud_drafts d WHERE d.owner_telegram_id=c.owner_telegram_id
+                                     AND d.scope=c.scope AND d.peer_id=c.peer_id) AS deleted
+                   FROM cloud_draft_changes c LEFT JOIN cloud_draft_versions v
+                     ON v.owner_telegram_id=c.owner_telegram_id AND v.scope=c.scope AND v.peer_id=c.peer_id
+                   WHERE c.owner_telegram_id=? AND c.seq>?
+                     AND (
+                       (c.scope='dm' AND EXISTS (
+                          SELECT 1 FROM accounts a WHERE a.telegram_id=c.peer_id AND a.is_banned=0
+                       ) AND (c.peer_id=? OR NOT EXISTS (
+                          SELECT 1 FROM blocked_users b
+                          WHERE (b.owner_telegram_id=? AND b.blocked_telegram_id=c.peer_id)
+                             OR (b.owner_telegram_id=c.peer_id AND b.blocked_telegram_id=?)
+                       )))
+                       OR (c.scope='group' AND EXISTS (
+                          SELECT 1 FROM group_members gm JOIN chat_groups g ON g.id=gm.group_id
+                          WHERE gm.group_id=c.peer_id AND gm.telegram_id=?
+                       ))
+                       OR (c.scope='channel' AND EXISTS (
+                          SELECT 1 FROM channels ch WHERE ch.id=c.peer_id AND (
+                             ch.is_public=1 OR ch.owner_telegram_id=?
+                             OR EXISTS (SELECT 1 FROM channel_admins ca
+                                        WHERE ca.channel_id=ch.id AND ca.telegram_id=?)
+                             OR EXISTS (SELECT 1 FROM channel_members cm
+                                        WHERE cm.channel_id=ch.id AND cm.telegram_id=?)
+                          )
+                       ))
+                     )
+                   ORDER BY c.seq LIMIT ?""",
+                (uid, after, uid, uid, uid, uid, uid, uid, uid, limit + 1),
+            )
+            rows = await cur.fetchall()
+        changes = [dict(row) for row in rows[:limit]]
+        for change in changes:
+            change["deleted"] = bool(change["deleted"])
+        cursor = changes[-1]["seq"] if len(rows) > limit else latest
+        return {"changes": changes, "cursor": cursor, "latest_cursor": latest}
 
     async def cloud_draft_revision(db: Any, uid: int, scope: str, peer_id: int) -> int:
         cur = await db.execute(

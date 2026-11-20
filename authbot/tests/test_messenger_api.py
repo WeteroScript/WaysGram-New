@@ -4390,6 +4390,8 @@ def test_cloud_draft_versions_removed_with_account(api_env) -> None:
     with db_split.sqlite_connect(path) as db:
         assert db.execute("SELECT count(*) FROM cloud_draft_versions WHERE owner_telegram_id=96301").fetchone()[0] == 0
         assert db.execute("SELECT count(*) FROM cloud_drafts WHERE owner_telegram_id=96301").fetchone()[0] == 0
+        assert db.execute("SELECT count(*) FROM cloud_draft_changes WHERE owner_telegram_id=96301").fetchone()[0] == 0
+        assert db.execute("SELECT count(*) FROM cloud_draft_change_counters WHERE owner_telegram_id=96301").fetchone()[0] == 0
 
 
 def test_cloud_draft_version_upgrade_preserves_old_rows(api_env) -> None:
@@ -4418,6 +4420,153 @@ def test_cloud_draft_version_upgrade_preserves_old_rows(api_env) -> None:
     run(init_messenger_storage(path))
     with db_split.sqlite_connect(path) as db:
         assert db.execute("SELECT revision FROM cloud_draft_versions WHERE owner_telegram_id=96201").fetchone()[0] == 1
+
+
+def test_cloud_draft_changes_pagination_coalescing_and_deletions(api_env) -> None:
+    path, _store, _bot, app = api_env
+    for uid in (96401, 96402, 96403):
+        add_account(api_env, uid, f"changes_{uid}")
+        add_session(path, uid, f"changes-session-{uid}")
+
+    async def scenario() -> None:
+        async with await client_for(app) as client:
+            owner = {"Authorization": "Bearer changes-session-96401"}
+            other = {"Authorization": "Bearer changes-session-96402"}
+            assert (await client.get("/api/drafts/changes")).status_code == 401
+            assert (await client.get("/api/drafts/changes", headers=owner)).json() == {
+                "changes": [], "cursor": 0, "latest_cursor": 0}
+            assert (await client.get("/api/drafts/changes", headers=owner, params={"after": 1})).status_code == 400
+            for params in ({"after": -1}, {"after": 2**63}, {"limit": 0}, {"limit": 201}):
+                assert (await client.get("/api/drafts/changes", headers=owner, params=params)).status_code == 422
+
+            async def put(peer_id, body):
+                r = await client.put("/api/drafts", headers=owner,
+                                     json={"scope": "dm", "peer_id": peer_id, "body": body})
+                assert r.status_code == 200, r.text
+            async def feed(after=0, limit=100):
+                r = await client.get("/api/drafts/changes", headers=owner,
+                                     params={"after": after, "limit": limit})
+                assert r.status_code == 200, r.text
+                return r.json()
+
+            # Sequence is owner-specific, coalesced and excludes draft contents.
+            await put(96401, "saved secret")
+            await put(96402, "peer secret")
+            await put(96403, "third secret")
+            page = await feed(limit=1)
+            assert page == {"changes": [{"scope": "dm", "peer_id": 96401, "seq": 1,
+                                          "revision": 1, "deleted": False}],
+                            "cursor": 1, "latest_cursor": 3}
+            # Update an already paged key and delete a not-yet-paged key.
+            await put(96401, "updated secret")
+            r = await client.delete("/api/drafts", headers=owner, params={"scope": "dm", "peer_id": 96402})
+            assert r.json()["revision"] == 2
+            page2 = await feed(after=page["cursor"], limit=1)
+            assert page2["changes"][0]["peer_id"] == 96403 and page2["cursor"] == 3
+            page3 = await feed(after=page2["cursor"], limit=1)
+            assert page3["changes"][0] == {"scope": "dm", "peer_id": 96401, "seq": 4,
+                                           "revision": 2, "deleted": False}
+            page4 = await feed(after=page3["cursor"], limit=1)
+            assert page4["changes"][0] == {"scope": "dm", "peer_id": 96402, "seq": 5,
+                                           "revision": 2, "deleted": True}
+            assert page4["cursor"] == page4["latest_cursor"] == 5
+            assert (await feed(after=5))["changes"] == []
+            # An idempotent deletion or failed CAS does not create a change.
+            await client.delete("/api/drafts", headers=owner, params={"scope": "dm", "peer_id": 96402})
+            assert (await client.put("/api/drafts", headers=owner, json={"scope": "dm", "peer_id": 96402,
+                      "body": "stale", "expected_revision": 0})).status_code == 409
+            assert (await feed(after=5))["cursor"] == 5
+            assert (await client.get("/api/drafts/changes", headers=other)).json() == {
+                "changes": [], "cursor": 0, "latest_cursor": 0}
+            # Direct older database writers are included and do not leak text.
+            with db_split.sqlite_connect(path) as db:
+                db.execute("UPDATE cloud_drafts SET body='direct secret' WHERE owner_telegram_id=? AND peer_id=?", (96401, 96403))
+                db.commit()
+                assert db.execute("SELECT count(*) FROM cloud_draft_changes WHERE owner_telegram_id=96401").fetchone()[0] == 3
+                assert [r[1] for r in db.execute("PRAGMA messenger.table_info(cloud_draft_changes)")] == [
+                    "owner_telegram_id", "scope", "peer_id", "seq"]
+            changed = await feed(after=5)
+            assert changed["changes"][0] == {"scope": "dm", "peer_id": 96403, "seq": 6,
+                                             "revision": 2, "deleted": False}
+            assert "secret" not in str(changed)
+            run_again = await feed(after=5)
+            assert run_again == changed  # failed/lost response can safely be retried
+
+    run(scenario())
+
+
+def test_cloud_draft_changes_filter_revoked_access_and_advance(api_env) -> None:
+    path, _store, _bot, app = api_env
+    add_account(api_env, 96501, "changes_creator")
+    add_account(api_env, 96502, "changes_member")
+    add_session(path, 96501, "changes-creator")
+    add_session(path, 96502, "changes-member")
+
+    async def scenario() -> None:
+        async with await client_for(app) as client:
+            owner = {"Authorization": "Bearer changes-creator"}
+            member = {"Authorization": "Bearer changes-member"}
+            group = await client.post("/api/groups", headers=owner, json={
+                "title": "Changes group", "username": "changesgroup", "description": ""})
+            gid = group.json()["id"]
+            assert (await client.post(f"/api/groups/{gid}/members", headers=owner,
+                                      json={"username": "changes_member"})).status_code == 201
+            channel = await client.post("/api/channels", headers=owner, json={"title": "Changes channel", "is_public": False})
+            cid = channel.json()["id"]
+            assert (await client.post("/api/channels/join", headers=member,
+                                      json={"invite_link": channel.json()["invite_link"]})).status_code == 200
+            for scope, peer in (("dm", 96501), ("group", gid), ("channel", cid)):
+                assert (await client.put("/api/drafts", headers=member, json={"scope": scope, "peer_id": peer, "body": "private"})).status_code == 200
+            with db_split.sqlite_connect(path) as db:
+                db.execute("INSERT INTO blocked_users(owner_telegram_id,blocked_telegram_id,created_at) VALUES(96501,96502,1)")
+                db.execute("DELETE FROM group_members WHERE group_id=? AND telegram_id=96502", (gid,))
+                db.execute("DELETE FROM channel_members WHERE channel_id=? AND telegram_id=96502", (cid,))
+                db.commit()
+            filtered = (await client.get("/api/drafts/changes", headers=member)).json()
+            assert filtered == {"changes": [], "cursor": 3, "latest_cursor": 3}
+            # Hidden entries remain stored; access regain requires list rescan.
+            with db_split.sqlite_connect(path) as db:
+                assert db.execute("SELECT count(*) FROM cloud_draft_changes WHERE owner_telegram_id=96502").fetchone()[0] == 3
+                db.execute("DELETE FROM blocked_users WHERE owner_telegram_id=96501 AND blocked_telegram_id=96502")
+                db.commit()
+            assert (await client.get("/api/drafts/changes", headers=member, params={"after": 3})).json()["changes"] == []
+            assert (await client.get("/api/drafts/list", headers=member)).json()["drafts"][0]["scope"] == "dm"
+
+    run(scenario())
+
+
+def test_cloud_draft_changes_upgrade_requires_initial_list(api_env) -> None:
+    path, _store, _bot, app = api_env
+    add_account(api_env, 96601, "changes_old_owner")
+    add_account(api_env, 96602, "changes_old_peer")
+    add_session(path, 96601, "changes-old-owner")
+    with db_split.sqlite_connect(path) as db:
+        for name in ("draft_change_insert", "draft_change_update", "draft_change_delete"):
+            db.execute(f"DROP TRIGGER messenger.{name}")
+        db.execute("DROP TABLE messenger.cloud_draft_changes")
+        db.execute("DROP TABLE messenger.cloud_draft_change_counters")
+        db.execute("INSERT INTO cloud_drafts(owner_telegram_id,scope,peer_id,body,updated_at) VALUES(96601,'dm',96602,'old',1)")
+        db.commit()
+    run(init_messenger_storage(path))
+    run(init_messenger_storage(path))
+
+    async def scenario() -> None:
+        async with await client_for(app) as client:
+            headers = {"Authorization": "Bearer changes-old-owner"}
+            # Capture before snapshot: the pre-upgrade row has no change entry.
+            feed = (await client.get("/api/drafts/changes", headers=headers)).json()
+            assert feed == {"changes": [], "cursor": 0, "latest_cursor": 0}
+            listed = (await client.get("/api/drafts/list", headers=headers)).json()["drafts"]
+            assert len(listed) == 1 and listed[0]["body"] == "old"
+            result = await client.put("/api/drafts", headers=headers,
+                                      json={"scope": "dm", "peer_id": 96602, "body": "new"})
+            assert result.status_code == 200
+            after = (await client.get("/api/drafts/changes", headers=headers, params={"after": feed["latest_cursor"]})).json()
+            assert after["changes"][0]["peer_id"] == 96602 and after["changes"][0]["revision"] == 2
+    run(scenario())
+    run(init_messenger_storage(path))
+    with db_split.sqlite_connect(path) as db:
+        assert db.execute("SELECT last_seq FROM cloud_draft_change_counters WHERE owner_telegram_id=96601").fetchone()[0] == 1
 
 
 def test_contact_notes_are_private_and_removed_with_contact(api_env) -> None:
