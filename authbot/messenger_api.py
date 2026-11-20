@@ -2586,9 +2586,6 @@ def build_messenger_router(
         data: dict[str, str],
     ) -> bool:
         """Send best-effort FCM notifications only to devices with a live WaysGram session."""
-        credentials = _firebase_service_account()
-        if not credentials:
-            return False
         recipients = sorted({int(value) for value in account_ids if int(value) > 0})
         if not recipients:
             return True
@@ -2609,8 +2606,14 @@ def build_messenger_router(
                     (int(time.time()), *recipients),
                 )
                 devices = await cur.fetchall()
+            quiet = data.get("silent") == "1"
+            if quiet:
+                devices = [device for device in devices if bool(device[2])]
             if not devices:
                 return True
+            credentials = _firebase_service_account()
+            if not credentials:
+                return False
             project_id, access_token = await get_fcm_access_token(credentials)
             notification_data = {
                 "waysgram": "1",
@@ -2631,7 +2634,6 @@ def build_messenger_router(
                     "notification": {"channel_id": "waysgram_messages"},
                 },
             }
-            quiet = data.get("silent") == "1"
             if quiet:
                 # Data-only pushes are displayed by a compatible client on its
                 # quiet channel. Older clients receive no push rather than sound.
@@ -2942,17 +2944,15 @@ def build_messenger_router(
         session_hash = _token_hash(authorization[7:].strip())
         token_hash = _token_hash(device_token)
         async with aiosqlite.connect(db_path()) as db:
+            await db.execute("BEGIN IMMEDIATE")
+            # An FCM token identifies one app installation. Moving it to a
+            # different account/session must revoke every previous association.
+            await db.execute("DELETE FROM push_devices WHERE token_hash=?", (token_hash,))
             await db.execute(
                 """INSERT INTO push_devices(
                        token_hash,token_value,telegram_id,session_token_hash,
                        platform,created_at,updated_at,quiet_push
-                   ) VALUES(?,?,?,?,?,?,?,?)
-                   ON CONFLICT(token_hash,telegram_id) DO UPDATE SET
-                       token_value=excluded.token_value,
-                       session_token_hash=excluded.session_token_hash,
-                       platform=excluded.platform,
-                       updated_at=excluded.updated_at,
-                       quiet_push=excluded.quiet_push""",
+                   ) VALUES(?,?,?,?,?,?,?,?)""",
                 (token_hash, device_token, uid, session_hash, platform, now, now, int(quiet_push)),
             )
             await db.commit()
