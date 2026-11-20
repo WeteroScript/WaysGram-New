@@ -3096,7 +3096,7 @@ def build_messenger_router(
         media_kind = str(request.headers.get("x-media-kind", "")).strip().lower()
         if original_document and (declared_type != "application/octet-stream" or media_kind or request.headers.get("x-media-metadata")):
             raise HTTPException(status_code=400, detail="Некорректные параметры исходного файла")
-        if media_kind not in {"", "video_note", "voice", "video", "audio"}:
+        if media_kind not in {"", "video_note", "voice", "video", "audio", "gif"}:
             raise HTTPException(status_code=400, detail="Неизвестный тип медиафайла")
         metadata_header = request.headers.get("x-media-metadata", "")
         metadata: dict[str, Any] = {}
@@ -3187,6 +3187,11 @@ def build_messenger_router(
                 status_code=415,
                 detail="Видеосообщения-кружочки должны быть в формате MP4",
             )
+        if media_kind == "gif":
+            if mime_type != "video/mp4":
+                raise HTTPException(status_code=415, detail="Анимация должна быть в формате MP4")
+            if metadata.get("width", 0) > 1280 or metadata.get("height", 0) > 1280:
+                raise HTTPException(status_code=400, detail="Размер анимации не поддерживается")
         if media_kind == "video" and not mime_type.startswith("video/"):
             raise HTTPException(status_code=415, detail="Видео должно быть видеофайлом")
         if media_kind == "audio" and not mime_type.startswith("audio/"):
@@ -7968,7 +7973,7 @@ def build_messenger_router(
         mime = str(fields.get("media_type") or "").lower()
         kind = str(fields.get("media_kind") or "").lower()
         name = str(fields.get("media_name") or "").lower()
-        if kind in ("voice", "video_note") or (not kind and (
+        if kind in ("voice", "video_note", "gif") or (not kind and (
             (mime.startswith("video/") and name.startswith("round_video_")) or
             (mime.startswith("audio/") and name.startswith("audio_recording_voice_"))
         )):
