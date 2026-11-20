@@ -93,6 +93,28 @@ class NativeMessagingSourceChecks(unittest.TestCase):
         self.assertIn('new TLRPC.TL_messageMediaGeo()', media)
         self.assertIn('new TLRPC.TL_messageMediaVenue()', media)
 
+    def test_waysgram_address_search_uses_device_geocoder_without_bot(self):
+        adapter = self.source('ui/Adapters/BaseLocationAdapter.java')
+        search = adapter[adapter.index('    private void searchWaysGramAddresses('):
+                         adapter.index('    protected void update(boolean animated)')]
+        self.assertIn('Geocoder.isPresent()', search)
+        self.assertIn('Utilities.globalQueue.postRunnable', search)
+        self.assertIn('geocoder.getFromLocationName(query, 5)', search)
+        self.assertIn('generation == waysGramSearchGeneration', search)
+        self.assertIn('generation != waysGramSearchGeneration', search)
+        self.assertIn('AndroidUtilities.runOnUIThread', search)
+        self.assertIn('locations.addAll(found)', search)
+        self.assertIn('venue.provider = "android-geocoder"', search)
+        self.assertIn('venue.icon = "pin"', search)
+        self.assertNotIn('TL_messages_getInlineBotResults', search)
+        start = adapter.index('    public void searchPlacesWithQuery(final String query, final Location coordinate, boolean searchUser, boolean animated)')
+        end = adapter.index('        TLObject object =', start)
+        entry = adapter[start:end]
+        self.assertIn('WaysGramTransport.ENABLED && !stories && !biz', entry)
+        self.assertLess(entry.index('searchWaysGramAddresses('), entry.index('return;'))
+        self.assertIn('Utilities.searchQueue.cancelRunnable(searchRunnable)', adapter)
+        self.assertIn('codePointCount', search)
+
     def test_venue_send_receive_and_metadata(self):
         transport = self.source('tgnet/WaysGramTransport.java')
         media = self.source('tgnet/WaysGramMedia.java')
