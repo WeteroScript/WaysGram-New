@@ -1588,6 +1588,9 @@ async def init_messenger_storage(database_path: Path) -> None:
                 f"ALTER TABLE {db_split.SCHEMA}.scheduled_messages "
                 "ADD COLUMN time_zone TEXT NOT NULL DEFAULT 'UTC'"
             )
+        cur = await db.execute("PRAGMA main.table_info(push_devices)")
+        if "quiet_push" not in {str(row[1]) for row in await cur.fetchall()}:
+            await db.execute("ALTER TABLE main.push_devices ADD COLUMN quiet_push INTEGER NOT NULL DEFAULT 0")
         for table_name in ("messages", "group_messages", "channel_messages"):
             cur = await db.execute(f"PRAGMA {db_split.SCHEMA}.table_info({table_name})")
             columns = {str(row[1]) for row in await cur.fetchall()}
@@ -2536,7 +2539,7 @@ def build_messenger_router(
         try:
             async with aiosqlite.connect(db_path()) as db:
                 cur = await db.execute(
-                    f"""SELECT DISTINCT d.token_hash,d.token_value
+                    f"""SELECT DISTINCT d.token_hash,d.token_value,d.quiet_push
                         FROM push_devices d
                         JOIN api_sessions s
                           ON s.token_hash=d.session_token_hash
@@ -2570,9 +2573,18 @@ def build_messenger_router(
                     "notification": {"channel_id": "waysgram_messages"},
                 },
             }
+            quiet = data.get("silent") == "1"
+            if quiet:
+                # Data-only pushes are displayed by a compatible client on its
+                # quiet channel. Older clients receive no push rather than sound.
+                notification_data["title"] = str(title or "WaysGram")[:80]
+                notification_data["body"] = str(body or "Новое сообщение")[:180]
+                notification_message = {"data": notification_data, "android": {"priority": "NORMAL"}}
             delivered = True
             async with httpx.AsyncClient(timeout=httpx.Timeout(8.0)) as client:
-                for token_hash, token_value in devices:
+                for token_hash, token_value, quiet_push in devices:
+                    if quiet and not quiet_push:
+                        continue
                     response = await client.post(
                         f"https://fcm.googleapis.com/v1/projects/{quote(project_id, safe='')}/messages:send",
                         headers={"Authorization": f"Bearer {access_token}"},
@@ -2861,6 +2873,9 @@ def build_messenger_router(
             or any(ord(char) < 33 or ord(char) > 126 for char in device_token)
         ):
             raise HTTPException(status_code=400, detail="Некорректный FCM token")
+        quiet_push = payload.get("quiet_push", False)
+        if not isinstance(quiet_push, bool):
+            raise HTTPException(status_code=400, detail="quiet_push должен быть логическим значением")
         platform = str(payload.get("platform") or "android").strip().lower()
         if platform != "android":
             raise HTTPException(status_code=400, detail="Поддерживается только Android")
@@ -2872,15 +2887,16 @@ def build_messenger_router(
             await db.execute(
                 """INSERT INTO push_devices(
                        token_hash,token_value,telegram_id,session_token_hash,
-                       platform,created_at,updated_at
-                   ) VALUES(?,?,?,?,?,?,?)
+                       platform,created_at,updated_at,quiet_push
+                   ) VALUES(?,?,?,?,?,?,?,?)
                    ON CONFLICT(token_hash) DO UPDATE SET
                        token_value=excluded.token_value,
                        telegram_id=excluded.telegram_id,
                        session_token_hash=excluded.session_token_hash,
                        platform=excluded.platform,
-                       updated_at=excluded.updated_at""",
-                (token_hash, device_token, uid, session_hash, platform, now, now),
+                       updated_at=excluded.updated_at,
+                       quiet_push=excluded.quiet_push""",
+                (token_hash, device_token, uid, session_hash, platform, now, now, int(quiet_push)),
             )
             await db.commit()
         return {"status": "registered", "platform": platform}
@@ -8269,19 +8285,18 @@ def build_messenger_router(
                 result["entities"] = entities
             await idempotency_store(db, uid, scope, descriptor, result, now)
             await db.commit()
-        if not silent:
-            async with aiosqlite.connect(db_path()) as db:
-                cur = await db.execute(
-                    "SELECT telegram_id FROM channel_members WHERE channel_id=? AND telegram_id<>?",
-                    (channel_id, uid),
-                )
-                channel_recipients = [int(row[0]) for row in await cur.fetchall()]
-            await deliver_push_notifications(
-                channel_recipients,
-                str(user.get("display_name") or user.get("username") or "Новая публикация"),
-                body,
-                {"scope": "channel", "chat_id": str(channel_id), "message_id": str(message_id)},
+        async with aiosqlite.connect(db_path()) as db:
+            cur = await db.execute(
+                "SELECT telegram_id FROM channel_members WHERE channel_id=? AND telegram_id<>?",
+                (channel_id, uid),
             )
+            channel_recipients = [int(row[0]) for row in await cur.fetchall()]
+        await deliver_push_notifications(
+            channel_recipients,
+            str(user.get("display_name") or user.get("username") or "Новая публикация"),
+            body,
+            {"scope": "channel", "chat_id": str(channel_id), "message_id": str(message_id), "silent": "1" if silent else "0"},
+        )
         return result
 
     @router.post("/api/channels/{channel_id}/messages/album/files/v2", status_code=201)
@@ -8426,24 +8441,24 @@ def build_messenger_router(
             await idempotency_store(db, uid, scope, descriptor, result, now)
             await db.commit()
 
-        if not silent:
-            async with aiosqlite.connect(db_path()) as db:
-                cur = await db.execute(
-                    "SELECT telegram_id FROM channel_members WHERE channel_id=? AND telegram_id<>?",
-                    (channel_id, uid),
-                )
-                recipients = [int(row[0]) for row in await cur.fetchall()]
-            await deliver_push_notifications(
-                recipients,
-                str(user.get("display_name") or user.get("username") or "Новая публикация"),
-                f"{'Файлы' if batch_classes == {'document'} else 'Медиаальбом'} · {len(created_messages)} вложений",
-                {
-                    "scope": "channel",
-                    "chat_id": str(channel_id),
-                    "message_id": str(created_messages[-1]["id"]),
-                    "media_album_id": album_id,
-                },
+        async with aiosqlite.connect(db_path()) as db:
+            cur = await db.execute(
+                "SELECT telegram_id FROM channel_members WHERE channel_id=? AND telegram_id<>?",
+                (channel_id, uid),
             )
+            recipients = [int(row[0]) for row in await cur.fetchall()]
+        await deliver_push_notifications(
+            recipients,
+            str(user.get("display_name") or user.get("username") or "Новая публикация"),
+            f"{'Файлы' if batch_classes == {'document'} else 'Медиаальбом'} · {len(created_messages)} вложений",
+            {
+                "scope": "channel",
+                "chat_id": str(channel_id),
+                "message_id": str(created_messages[-1]["id"]),
+                "media_album_id": album_id,
+                "silent": "1" if silent else "0",
+            },
+        )
         return result
 
     @router.post("/api/channels/{channel_id}/admins", status_code=201)
@@ -8978,10 +8993,10 @@ def build_messenger_router(
                 result["entities"] = entities
             await idempotency_store(db, uid, "/api/messages", descriptor, result, now)
             queued_push = False
-            if not silent and recipient_id != uid:
+            if recipient_id != uid:
                 queued_push = await enqueue_push(
                     db, uid, recipient_id, str(user.get("display_name") or user.get("username") or "Новое сообщение"),
-                    body, {"scope": "dm", "chat_id": str(uid), "message_id": str(message_id)}, now,
+                    body, {"scope": "dm", "chat_id": str(uid), "message_id": str(message_id), "silent": "1" if silent else "0"}, now,
                 )
             await db.commit()
         if queued_push:
@@ -9370,7 +9385,7 @@ def build_messenger_router(
             await idempotency_store(db, uid, scope, descriptor, result, now)
             await db.commit()
 
-        if not silent and recipient_id != uid:
+        if recipient_id != uid:
             await deliver_push_notifications(
                 [recipient_id],
                 str(user.get("display_name") or user.get("username") or "Новое сообщение"),
@@ -9380,6 +9395,7 @@ def build_messenger_router(
                     "chat_id": str(uid),
                     "message_id": str(created_messages[-1]["id"]),
                     "media_album_id": album_id,
+                    "silent": "1" if silent else "0",
                 },
             )
         return result
@@ -10071,12 +10087,12 @@ def build_messenger_router(
                 created.append(result_item)
             result = {"status": "forwarded", "messages": created, "count": len(created)}
             await idempotency_store(db, uid, scope, descriptor, result, now)
-            if not silent and target_scope == "dm" and target_peer != uid:
+            if target_scope == "dm" and target_peer != uid:
                 queued_push = await enqueue_push(db, uid, target_peer,
                     str(user.get("display_name") or user.get("username") or "Новое сообщение"),
                     "Переслано сообщений: " + str(len(created)),
-                    {"scope": "dm", "chat_id": str(uid), "message_id": str(created[-1]["id"])}, now)
-            elif not silent and target_scope in ("group", "channel"):
+                    {"scope": "dm", "chat_id": str(uid), "message_id": str(created[-1]["id"]), "silent": "1" if silent else "0"}, now)
+            elif target_scope in ("group", "channel"):
                 member_table, id_column = ("group_members", "group_id") if target_scope == "group" else ("channel_members", "channel_id")
                 cur = await db.execute(f"SELECT telegram_id FROM {member_table} WHERE {id_column}=? AND telegram_id<>? LIMIT 500", (target_peer, uid))
                 notifications = [int(row[0]) for row in await cur.fetchall()]
@@ -10086,7 +10102,7 @@ def build_messenger_router(
         if notifications:
             await deliver_push_notifications(notifications, str(user.get("display_name") or "Новое сообщение"),
                 "Переслано сообщений: " + str(len(created)),
-                {"scope": target_scope, "chat_id": str(target_peer), "message_id": str(created[-1]["id"])})
+                {"scope": target_scope, "chat_id": str(target_peer), "message_id": str(created[-1]["id"]), "silent": "1" if silent else "0"})
         return result
 
     @router.post("/api/messages/{message_id}/forward", status_code=201)
@@ -10233,7 +10249,7 @@ def build_messenger_router(
 
     async def process_due_scheduled_messages() -> None:
         now = int(time.time())
-        notifications: list[tuple[int, int, str, str, int]] = []
+        notifications: list[tuple[int, int, str, str, int, bool]] = []
         async with aiosqlite.connect(db_path()) as db:
             await db.execute("BEGIN IMMEDIATE")
             cur = await db.execute(
@@ -10313,13 +10329,12 @@ def build_messenger_router(
                            WHERE id=? AND status='pending'""",
                         (message_id, scheduled_id),
                     )
-                if not bool(silent):
-                    notifications.append((
-                        int(recipient_id), int(sender_id),
-                        str(body), str(scheduled_id), message_id,
-                    ))
+                notifications.append((
+                    int(recipient_id), int(sender_id),
+                    str(body), str(scheduled_id), message_id, bool(silent),
+                ))
             await db.commit()
-        for recipient_id, sender_id, body, scheduled_id, message_id in notifications:
+        for recipient_id, sender_id, body, scheduled_id, message_id, silent in notifications:
             await deliver_push_notifications(
                 [recipient_id],
                 "Отложенное сообщение",
@@ -10329,12 +10344,13 @@ def build_messenger_router(
                     "chat_id": str(sender_id),
                     "message_id": str(message_id),
                     "scheduled_message_id": scheduled_id,
+                    "silent": "1" if silent else "0",
                 },
             )
 
     async def process_messages_waiting_for_online() -> None:
         now = int(time.time())
-        notifications: list[tuple[int, int, str, int]] = []
+        notifications: list[tuple[int, int, str, int, bool]] = []
         async with aiosqlite.connect(db_path()) as db:
             await db.execute("BEGIN IMMEDIATE")
             cur = await db.execute(
@@ -10404,15 +10420,14 @@ def build_messenger_router(
                        WHERE id=? AND status='pending'""",
                     (message_id, scheduled_id),
                 )
-                if not bool(silent):
-                    notifications.append((int(recipient_id), int(sender_id), str(body), message_id))
+                notifications.append((int(recipient_id), int(sender_id), str(body), message_id, bool(silent)))
             await db.commit()
-        for recipient_id, sender_id, body, message_id in notifications:
+        for recipient_id, sender_id, body, message_id, silent in notifications:
             await deliver_push_notifications(
                 [recipient_id],
                 "Отложенное сообщение",
                 body,
-                {"scope": "dm", "chat_id": str(sender_id), "message_id": str(message_id)},
+                {"scope": "dm", "chat_id": str(sender_id), "message_id": str(message_id), "silent": "1" if silent else "0"},
             )
 
     scheduled_worker_task: asyncio.Task | None = None
@@ -12897,19 +12912,18 @@ def build_messenger_router(
                 result["entities"] = entities
             await idempotency_store(db, uid, scope, descriptor, result, now)
             await db.commit()
-        if not silent:
-            async with aiosqlite.connect(db_path()) as db:
-                cur = await db.execute(
-                    "SELECT telegram_id FROM group_members WHERE group_id=? AND telegram_id<>?",
-                    (group_id, uid),
-                )
-                group_recipients = [int(row[0]) for row in await cur.fetchall()]
-            await deliver_push_notifications(
-                group_recipients,
-                str(user.get("display_name") or user.get("username") or "Новое сообщение"),
-                body,
-                {"scope": "group", "chat_id": str(group_id), "message_id": str(message_id)},
+        async with aiosqlite.connect(db_path()) as db:
+            cur = await db.execute(
+                "SELECT telegram_id FROM group_members WHERE group_id=? AND telegram_id<>?",
+                (group_id, uid),
             )
+            group_recipients = [int(row[0]) for row in await cur.fetchall()]
+        await deliver_push_notifications(
+            group_recipients,
+            str(user.get("display_name") or user.get("username") or "Новое сообщение"),
+            body,
+            {"scope": "group", "chat_id": str(group_id), "message_id": str(message_id), "silent": "1" if silent else "0"},
+        )
         return result
 
     @router.post("/api/groups/{group_id}/messages/album/files/v2", status_code=201)
@@ -13068,24 +13082,24 @@ def build_messenger_router(
             await idempotency_store(db, uid, scope, descriptor, result, now)
             await db.commit()
 
-        if not silent:
-            async with aiosqlite.connect(db_path()) as db:
-                cur = await db.execute(
-                    "SELECT telegram_id FROM group_members WHERE group_id=? AND telegram_id<>?",
-                    (group_id, uid),
-                )
-                recipients = [int(row[0]) for row in await cur.fetchall()]
-            await deliver_push_notifications(
-                recipients,
-                str(user.get("display_name") or user.get("username") or "Новое сообщение"),
-                f"{'Файлы' if batch_classes == {'document'} else 'Медиаальбом'} · {len(created_messages)} вложений",
-                {
-                    "scope": "group",
-                    "chat_id": str(group_id),
-                    "message_id": str(created_messages[-1]["id"]),
-                    "media_album_id": album_id,
-                },
+        async with aiosqlite.connect(db_path()) as db:
+            cur = await db.execute(
+                "SELECT telegram_id FROM group_members WHERE group_id=? AND telegram_id<>?",
+                (group_id, uid),
             )
+            recipients = [int(row[0]) for row in await cur.fetchall()]
+        await deliver_push_notifications(
+            recipients,
+            str(user.get("display_name") or user.get("username") or "Новое сообщение"),
+            f"{'Файлы' if batch_classes == {'document'} else 'Медиаальбом'} · {len(created_messages)} вложений",
+            {
+                "scope": "group",
+                "chat_id": str(group_id),
+                "message_id": str(created_messages[-1]["id"]),
+                "media_album_id": album_id,
+                "silent": "1" if silent else "0",
+            },
+        )
         return result
 
     # Internal BotFather registry and chat API for bots created inside WaysGram.
