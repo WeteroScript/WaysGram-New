@@ -1,19 +1,238 @@
+--- a/WaysGram-Android/TMessagesProj/src/main/java/org/telegram/tgnet/WaysGramMedia.java
++++ b/WaysGram-Android/TMessagesProj/src/main/java/org/telegram/tgnet/WaysGramMedia.java
+@@ -131,6 +131,51 @@
+         }
+     }
+ 
++    // A custom video cover is a separately uploaded image. Keep a bounded JPEG
++    // thumbnail in the video's normal cache location so Telegram's existing
++    // document-thumbnail request path can serve it without special UI code.
++    private static File videoCoverThumbnail(int account, String coverMediaId, String videoMediaId)
++            throws WaysGramApi.ApiException {
++        File source = ensure(account, coverMediaId);
++        Bitmap decoded = null;
++        Bitmap scaled = null;
++        File target = new File(cacheDir(), videoMediaId + ".video-thumb.jpg");
++        try {
++            BitmapFactory.Options bounds = new BitmapFactory.Options();
++            bounds.inJustDecodeBounds = true;
++            BitmapFactory.decodeFile(source.getAbsolutePath(), bounds);
++            if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return null;
++            int sample = 1;
++            while (Math.max(bounds.outWidth / sample, bounds.outHeight / sample) > 640 && sample < 64) {
++                sample *= 2;
++            }
++            BitmapFactory.Options options = new BitmapFactory.Options();
++            options.inSampleSize = sample;
++            decoded = BitmapFactory.decodeFile(source.getAbsolutePath(), options);
++            if (decoded == null) return null;
++            int max = Math.max(decoded.getWidth(), decoded.getHeight());
++            if (max > 320) {
++                float factor = 320f / max;
++                scaled = Bitmap.createScaledBitmap(decoded,
++                        Math.max(1, Math.round(decoded.getWidth() * factor)),
++                        Math.max(1, Math.round(decoded.getHeight() * factor)), true);
++            } else {
++                scaled = decoded;
++            }
++            ByteArrayOutputStream output = new ByteArrayOutputStream();
++            if (!scaled.compress(Bitmap.CompressFormat.JPEG, 84, output) || output.size() == 0) return null;
++            if (target.exists() && !target.delete()) return null;
++            writeFile(target, output.toByteArray());
++            return target;
++        } catch (Exception e) {
++            FileLog.e(e);
++            return null;
++        } finally {
++            if (scaled != null && scaled != decoded) scaled.recycle();
++            if (decoded != null) decoded.recycle();
++        }
++    }
++
+     // ---------------------------------------------------------------- TL objects
+ 
+     public static TLRPC.MessageMedia buildMedia(int account, String mediaId, String mime, String name) throws WaysGramApi.ApiException {
+@@ -166,6 +211,7 @@
+             photo.sizes.add(size);
+             TLRPC.TL_messageMediaPhoto media = new TLRPC.TL_messageMediaPhoto();
+             media.photo = photo;
++            media.spoiler = info != null && info.optBoolean("spoiler", false);
+             media.flags |= TLObject.FLAG_0;
+             return media;
+         }
+@@ -204,6 +250,7 @@
+                 try { retriever.release(); } catch (Exception ignored) { }
+             }
+         }
++        TLRPC.Photo videoCoverPhoto = null;
+         if ((kind.equals("voice") || kind.equals("audio")) && mime != null && mime.startsWith("audio/")) {
+             TLRPC.TL_documentAttributeAudio audio = new TLRPC.TL_documentAttributeAudio();
+             audio.voice = kind.equals("voice");
+@@ -228,6 +275,20 @@
+             video.w = width > 0 ? width : 384;
+             video.h = height > 0 ? height : 384;
+             doc.attributes.add(video);
++            String coverMediaId = info.optString("video_cover_media_id", "");
++            if (!TextUtils.isEmpty(coverMediaId) && kind.equals("video")) {
++                TLRPC.MessageMedia cover = buildMedia(account, coverMediaId, "image/jpeg",
++                        "video_cover.jpg", "", new JSONObject(), false);
++                if (cover instanceof TLRPC.TL_messageMediaPhoto) {
++                    videoCoverPhoto = ((TLRPC.TL_messageMediaPhoto) cover).photo;
++                    File customThumb = videoCoverThumbnail(account, coverMediaId, mediaId);
++                    if (customThumb == null) {
++                        throw new WaysGramApi.ApiException(422, "VIDEO_COVER_INVALID");
++                    }
++                } else {
++                    throw new WaysGramApi.ApiException(422, "VIDEO_COVER_INVALID");
++                }
++            }
+             File thumb = videoThumbnail(mediaId, file);
+             if (thumb != null) {
+                 BitmapFactory.Options bounds = new BitmapFactory.Options();
+@@ -249,6 +310,11 @@
+         }
+         TLRPC.TL_messageMediaDocument media = new TLRPC.TL_messageMediaDocument();
+         media.document = doc;
++        media.spoiler = info.optBoolean("spoiler", false);
++        if (videoCoverPhoto != null) {
++            media.video_cover = videoCoverPhoto;
++            media.flags |= TLObject.FLAG_9;
++        }
+         media.flags |= TLObject.FLAG_0;
+         return media;
+     }
+@@ -525,33 +591,48 @@
+         }
+     }
+ 
+-    // WaysGram does not persist a media spoiler. Reject it, including on the
+-    // uploadMedia preflight used by albums, before an attachment can be sent unhidden.
+-    static void requireVisibleMedia(TLRPC.InputMedia media) throws WaysGramApi.ApiException {
+-        if (media != null && media.spoiler) {
+-            throw new WaysGramApi.ApiException(400, "Скрытие медиа спойлером пока не поддерживается WaysGram");
+-        }
+-    }
+-
+-    // Custom covers are not represented by the current WaysGram media API.
++    // Covers are stored as a separate image asset and linked from video metadata.
++    // Refuse an unmapped photo ID rather than silently sending video without its cover.
+     static void requireSupportedVideoCover(TLRPC.InputMedia media) throws WaysGramApi.ApiException {
+-        if (media != null && media.video_cover != null) {
+-            throw new WaysGramApi.ApiException(400, "Обложки видео пока не поддерживаются WaysGram");
++        if (media == null || media.video_cover == null) return;
++        if (media.video_cover.id <= 0 || TextUtils.isEmpty(mediaIdFor(media.video_cover.id))) {
++            throw new WaysGramApi.ApiException(400, "VIDEO_COVER_NOT_UPLOADED");
++        }
++    }
++
++    static JSONObject metadataForInput(TLRPC.InputMedia media) throws WaysGramApi.ApiException {
++        JSONObject info = new JSONObject();
++        if (media == null) return info;
++        try {
++            info.put("spoiler", media.spoiler);
++            if (media.video_cover != null) {
++                requireSupportedVideoCover(media);
++                info.put("video_cover_media_id", mediaIdFor(media.video_cover.id));
++            }
++            return info;
++        } catch (WaysGramApi.ApiException e) {
++            throw e;
++        } catch (Exception e) {
++            throw new WaysGramApi.ApiException(400, "MEDIA_METADATA_INVALID");
+         }
+     }
+ 
+     /** Uploads a native attachment and persists its actual type and playback metadata. */
+     public static JSONObject uploadFor(int account, TLRPC.InputMedia media) throws WaysGramApi.ApiException {
+         requirePersistentMedia(media);
+-        requireVisibleMedia(media);
+         requireSupportedVideoCover(media);
+         boolean photo = media instanceof TLRPC.TL_inputMediaUploadedPhoto;
+         boolean document = media instanceof TLRPC.TL_inputMediaUploadedDocument;
+         if (!photo && !document) return null;
+         if (media.file == null) throw new WaysGramApi.ApiException(400, "FILE_PARTS_INVALID");
+         boolean original = document && media.force_file;
++        String coverMediaId = media.video_cover == null ? "" : mediaIdFor(media.video_cover.id);
++        if (media.video_cover != null && TextUtils.isEmpty(coverMediaId)) {
++            throw new WaysGramApi.ApiException(400, "VIDEO_COVER_NOT_UPLOADED");
++        }
+         String uploadKey = "uploaded_" + account + "_" + media.file.id + "_" + media.file.parts
+-                + (original ? "_original" : "");
++                + (original ? "_original" : "") + "_s" + (media.spoiler ? "1" : "0")
++                + "_c" + (TextUtils.isEmpty(coverMediaId) ? "none" : coverMediaId);
+         String previous = prefs().getString(uploadKey, null);
+         if (previous != null) {
+             try { return new JSONObject(previous); } catch (Exception ignored) { }
+@@ -560,6 +641,12 @@
+         String kind = "";
+         String originalName = null;
+         JSONObject info = new JSONObject();
++        try {
++            info.put("spoiler", media.spoiler);
++            if (!TextUtils.isEmpty(coverMediaId)) info.put("video_cover_media_id", coverMediaId);
++        } catch (Exception e) {
++            throw new WaysGramApi.ApiException(400, "MEDIA_METADATA_INVALID");
++        }
+         boolean animated = false;
+         boolean sticker = false;
+         boolean roundVideo = false;
+@@ -589,6 +676,9 @@
+                 }
+             } catch (Exception e) { throw new WaysGramApi.ApiException(400, "MEDIA_METADATA_INVALID"); }
+         }
++        if (media.video_cover != null && (!document || original || !"video".equals(kind))) {
++            throw new WaysGramApi.ApiException(400, "VIDEO_COVER_NOT_SUPPORTED_FOR_MEDIA_TYPE");
++        }
+         if (document && animated && !original) {
+             // Do not silently convert stickers, non-MP4 GIFs or round videos into another media type.
+             if (sticker || roundVideo || audioAttribute || !"video/mp4".equalsIgnoreCase(media.mime_type))
+
 --- a/WaysGram-Android/TMessagesProj/src/main/java/org/telegram/tgnet/WaysGramMessages.java
 +++ b/WaysGram-Android/TMessagesProj/src/main/java/org/telegram/tgnet/WaysGramMessages.java
-@@ -390,8 +390,15 @@
-             throw new WaysGramApi.ApiException(400, "EDIT_NOT_SUPPORTED");
+@@ -288,7 +288,7 @@
+         StringBuilder randoms = new StringBuilder();
+         java.util.HashSet<Long> seenRandomIds = new java.util.HashSet<>();
+         for (TLRPC.TL_inputSingleMedia item : req.multi_media) {
+-            if (item == null || item.media == null || !seenRandomIds.add(item.random_id) || item.media.spoiler || item.media.live_photo) {
++            if (item == null || item.media == null || !seenRandomIds.add(item.random_id) || item.media.live_photo) {
+                 throw new WaysGramApi.ApiException(400, "ALBUM_MEDIA_NOT_SUPPORTED");
+             }
+             WaysGramMedia.requirePersistentMedia(item.media);
+@@ -383,7 +383,6 @@
+         if (req.media instanceof TLRPC.TL_inputMediaGeoLive) {
+             throw new WaysGramApi.ApiException(400, "Трансляция геолокации пока не поддерживается в этом клиенте");
          }
-         JSONObject body = new JSONObject();
-+        boolean removingMedia = req.media instanceof TLRPC.TL_inputMediaEmpty;
-         boolean replacingMedia = req.media != null;
--        if (replacingMedia) {
-+        if (removingMedia) {
-+            // Telegram's edit composer sends InputMediaEmpty when an existing
-+            // attachment is removed. Preserve the caption unless the user also
-+            // changed the text in the same edit request.
-+            try { body.put("remove_media", true); }
-+            catch (Exception e) { throw new WaysGramApi.ApiException(400, "MEDIA_NOT_SUPPORTED"); }
-+        } else if (replacingMedia) {
-             WaysGramMedia.requirePersistentMedia(req.media);
-             WaysGramMedia.requireSupportedVideoCover(req.media);
+-        WaysGramMedia.requireVisibleMedia(req.media);
+         TLRPC.TL_updates updates = new TLRPC.TL_updates();
+         updates.date = (int) (System.currentTimeMillis() / 1000);
+         if (req.schedule_date != 0 || req.schedule_repeat_period != 0 || req.rich_message != null) {
+@@ -404,8 +403,16 @@
              JSONObject uploaded = WaysGramMedia.uploadFor(account, req.media);
+             String mediaId = uploaded != null ? uploaded.optString("id", "") : WaysGramMedia.existingMediaId(req.media);
+             if (TextUtils.isEmpty(mediaId)) throw new WaysGramApi.ApiException(400, "MEDIA_NOT_SUPPORTED");
+-            try { body.put("media_id", mediaId); }
+-            catch (Exception e) { throw new WaysGramApi.ApiException(400, "MEDIA_NOT_SUPPORTED"); }
++            try {
++                body.put("media_id", mediaId);
++                // Editing an already uploaded attachment can change only its spoiler
++                // or custom video cover. Carry those flags even when no new bytes exist.
++                if (uploaded == null) body.put("media_metadata", WaysGramMedia.metadataForInput(req.media));
++            } catch (WaysGramApi.ApiException e) {
++                throw e;
++            } catch (Exception e) {
++                throw new WaysGramApi.ApiException(400, "MEDIA_NOT_SUPPORTED");
++            }
+         }
+         try {
+             // Media-only edits leave the existing caption and entities intact.
+
+--- a/WaysGram-Android/TMessagesProj/src/main/java/org/telegram/tgnet/WaysGramTransport.java
++++ b/WaysGram-Android/TMessagesProj/src/main/java/org/telegram/tgnet/WaysGramTransport.java
+@@ -443,7 +443,6 @@
+         } else if (request instanceof TLRPC.TL_messages_sendMedia) {
+             TLRPC.TL_messages_sendMedia send = (TLRPC.TL_messages_sendMedia) request;
+             WaysGramMedia.requirePersistentMedia(send.media);
+-            WaysGramMedia.requireVisibleMedia(send.media);
+             WaysGramMedia.requireSupportedVideoCover(send.media);
+             // Do not pretend a one-time point is an ongoing live broadcast.
+             if (send.media instanceof TLRPC.TL_inputMediaGeoLive) {
