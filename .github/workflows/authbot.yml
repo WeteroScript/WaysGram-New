@@ -187,19 +187,41 @@ jobs:
           from pathlib import Path
           import zipfile
 
+          messages = Path("/tmp/waysgram-android-source/WaysGram-Android/TMessagesProj/src/main/java/org/telegram/tgnet/WaysGramMessages.java")
+          send_helper = Path("/tmp/waysgram-android-source/WaysGram-Android/TMessagesProj/src/main/java/org/telegram/messenger/SendMessagesHelper.java")
+          message_text = messages.read_text(encoding="utf-8")
+          message_text = message_text.replace("req.id.size() > 100", "req.id.size() > 20")
+          messages.write_text(message_text, encoding="utf-8")
+          helper_text = send_helper.read_text(encoding="utf-8")
+          helper_text = helper_text.replace(
+              "if (arr.size() == 100 || a == messages.size() - 1",
+              "if (arr.size() == (org.telegram.tgnet.WaysGramTransport.ENABLED ? 20 : 100) || a == messages.size() - 1",
+          )
+          send_helper.write_text(helper_text, encoding="utf-8")
+          assert "req.id.size() > 20" in message_text
+          assert "arr.size() == (org.telegram.tgnet.WaysGramTransport.ENABLED ? 20 : 100)" in helper_text
+
           original = Path("/tmp/WaysGram-Android.original.zip")
           rebuilt = Path("/tmp/WaysGram-Android.updated.zip")
-          replacement = Path("/tmp/waysgram-android-source/WaysGram-Android/TMessagesProj/src/main/java/org/telegram/tgnet/WaysGramMessages.java")
-          target = "WaysGram-Android/TMessagesProj/src/main/java/org/telegram/tgnet/WaysGramMessages.java"
+          replacements = {
+              "WaysGram-Android/TMessagesProj/src/main/java/org/telegram/tgnet/WaysGramMessages.java":
+                  messages,
+              "WaysGram-Android/TMessagesProj/src/main/java/org/telegram/messenger/SendMessagesHelper.java":
+                  send_helper,
+          }
           with zipfile.ZipFile(original, "r") as source, zipfile.ZipFile(rebuilt, "w", allowZip64=True) as output:
+              names = set(source.namelist())
+              assert names.issuperset(replacements), "A patched Android source file is missing from the archive"
               for info in source.infolist():
-                  data = replacement.read_bytes() if info.filename == target else source.read(info.filename)
+                  data = replacements[info.filename].read_bytes() if info.filename in replacements else source.read(info.filename)
                   output.writestr(info, data)
           with zipfile.ZipFile(rebuilt, "r") as archive:
               bad = archive.testzip()
               assert bad is None, f"Corrupt ZIP member: {bad}"
-              assert target in archive.namelist()
-              assert b'remove_media' in archive.read(target)
+              assert set(replacements).issubset(archive.namelist())
+              assert b'remove_media' in archive.read("WaysGram-Android/TMessagesProj/src/main/java/org/telegram/tgnet/WaysGramMessages.java")
+              assert b'req.id.size() > 20' in archive.read("WaysGram-Android/TMessagesProj/src/main/java/org/telegram/tgnet/WaysGramMessages.java")
+              assert b'WaysGramTransport.ENABLED ? 20 : 100' in archive.read("WaysGram-Android/TMessagesProj/src/main/java/org/telegram/messenger/SendMessagesHelper.java")
           part_size = 23_068_672
           data = rebuilt.read_bytes()
           assert len(data) > part_size * 4
