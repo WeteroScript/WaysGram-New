@@ -1,0 +1,19 @@
+--- a/WaysGram-Android/TMessagesProj/src/main/java/org/telegram/tgnet/WaysGramMessages.java
++++ b/WaysGram-Android/TMessagesProj/src/main/java/org/telegram/tgnet/WaysGramMessages.java
+@@ -390,8 +390,15 @@
+             throw new WaysGramApi.ApiException(400, "EDIT_NOT_SUPPORTED");
+         }
+         JSONObject body = new JSONObject();
++        boolean removingMedia = req.media instanceof TLRPC.TL_inputMediaEmpty;
+         boolean replacingMedia = req.media != null;
+-        if (replacingMedia) {
++        if (removingMedia) {
++            // Telegram's edit composer sends InputMediaEmpty when an existing
++            // attachment is removed. Preserve the caption unless the user also
++            // changed the text in the same edit request.
++            try { body.put("remove_media", true); }
++            catch (Exception e) { throw new WaysGramApi.ApiException(400, "MEDIA_NOT_SUPPORTED"); }
++        } else if (replacingMedia) {
+             WaysGramMedia.requirePersistentMedia(req.media);
+             WaysGramMedia.requireSupportedVideoCover(req.media);
+             JSONObject uploaded = WaysGramMedia.uploadFor(account, req.media);
