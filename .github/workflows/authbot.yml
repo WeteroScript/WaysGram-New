@@ -215,6 +215,12 @@ jobs:
           else
             patch --batch --forward -p1 -d /tmp/waysgram-android-source < android-stage1.patch
           fi
+          ANDROID_CHAT=/tmp/waysgram-android-source/WaysGram-Android/TMessagesProj/src/main/java/org/telegram/messenger/waysgram/WaysGramChatFragment.java
+          if grep -Fq 'Use the same atomic forwarding API as the native multi-message bridge.' "$ANDROID_CHAT"; then
+            echo "Private chat forwarding already uses the atomic batch API."
+          else
+            patch --batch --forward -p1 -d /tmp/waysgram-android-source < android-stage1-forward-chat.patch
+          fi
           python3 - <<'PY'
           from pathlib import Path
           import zipfile
@@ -222,6 +228,7 @@ jobs:
           messages = Path("/tmp/waysgram-android-source/WaysGram-Android/TMessagesProj/src/main/java/org/telegram/tgnet/WaysGramMessages.java")
           media = Path("/tmp/waysgram-android-source/WaysGram-Android/TMessagesProj/src/main/java/org/telegram/tgnet/WaysGramMedia.java")
           transport = Path("/tmp/waysgram-android-source/WaysGram-Android/TMessagesProj/src/main/java/org/telegram/tgnet/WaysGramTransport.java")
+          chat_fragment = Path("/tmp/waysgram-android-source/WaysGram-Android/TMessagesProj/src/main/java/org/telegram/messenger/waysgram/WaysGramChatFragment.java")
           send_helper = Path("/tmp/waysgram-android-source/WaysGram-Android/TMessagesProj/src/main/java/org/telegram/messenger/SendMessagesHelper.java")
           message_text = messages.read_text(encoding="utf-8")
           message_text = message_text.replace("req.id.size() > 100", "req.id.size() > 20")
@@ -244,6 +251,8 @@ jobs:
                   media,
               "WaysGram-Android/TMessagesProj/src/main/java/org/telegram/tgnet/WaysGramTransport.java":
                   transport,
+              "WaysGram-Android/TMessagesProj/src/main/java/org/telegram/messenger/waysgram/WaysGramChatFragment.java":
+                  chat_fragment,
               "WaysGram-Android/TMessagesProj/src/main/java/org/telegram/messenger/SendMessagesHelper.java":
                   send_helper,
           }
