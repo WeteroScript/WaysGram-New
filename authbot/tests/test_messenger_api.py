@@ -695,6 +695,17 @@ def test_scheduled_direct_messages_send_once_and_can_be_cancelled(api_env) -> No
                 assert replay.json()["id"] == scheduled.json()["id"]
 
                 scheduled_id = scheduled.json()["id"]
+                edit_url = f"/api/messages/scheduled/{scheduled_id}"
+                new_time = due_at + 60
+                assert (await client.patch(edit_url, headers={
+                    "Authorization": "Bearer schedule-recipient-session",
+                }, json={"scheduled_at": new_time})).status_code == 404
+                for invalid_time in (True, due_at - 120, due_at + 31 * 86400):
+                    assert (await client.patch(edit_url, headers=sender,
+                                               json={"scheduled_at": invalid_time})).status_code == 400
+                edited = await client.patch(edit_url, headers=sender, json={"scheduled_at": new_time})
+                assert edited.status_code == 200
+                assert edited.json()["scheduled_at"] == new_time
                 listing = await client.get(
                     "/api/messages/scheduled?with=89202",
                     headers=sender,
@@ -702,6 +713,8 @@ def test_scheduled_direct_messages_send_once_and_can_be_cancelled(api_env) -> No
                 assert listing.status_code == 200
                 assert listing.json()["count"] == 1
                 assert listing.json()["scheduled_messages"][0]["id"] == scheduled_id
+                assert listing.json()["scheduled_messages"][0]["scheduled_at"] == new_time
+                assert listing.json()["scheduled_messages"][0]["silent"]
 
                 with db_split.sqlite_connect(path) as db:
                     db.execute(

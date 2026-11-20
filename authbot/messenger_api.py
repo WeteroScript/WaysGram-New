@@ -9914,6 +9914,38 @@ def build_messenger_router(
             push_wakeup.set()
         return {"messages": results}
 
+    @router.patch("/api/messages/scheduled/{scheduled_id}")
+    async def reschedule_message(
+        scheduled_id: int,
+        payload: dict[str, Any],
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        user = await current_user(authorization)
+        uid = int(user["telegram_id"])
+        scheduled_at = payload.get("scheduled_at")
+        if type(scheduled_at) is not int:
+            raise HTTPException(status_code=400, detail="scheduled_at должен быть Unix timestamp")
+        if not 0 < scheduled_id <= 1073741823:
+            raise HTTPException(status_code=404, detail="Отложенное сообщение не найдено")
+        async with aiosqlite.connect(db_path()) as db:
+            await db.execute("BEGIN IMMEDIATE")
+            now = int(time.time())
+            if not now + 10 <= scheduled_at <= now + 30 * 86400:
+                raise HTTPException(status_code=400, detail="Укажите время отправки от 10 секунд до 30 дней вперёд")
+            cur = await db.execute(
+                """UPDATE scheduled_messages SET scheduled_at=?
+                   WHERE id=? AND sender_telegram_id=? AND status='pending'
+                   RETURNING recipient_telegram_id""",
+                (scheduled_at, scheduled_id, uid),
+            )
+            task = await cur.fetchone()
+            await cur.close()
+            if task is None:
+                raise HTTPException(status_code=404, detail="Отложенное сообщение не найдено или уже обработано")
+            await record_event(db, "scheduled", scheduled_id * 2, "scheduled_changed", uid, chat_id=int(task[0]))
+            await db.commit()
+        return {"id": scheduled_id, "status": "pending", "scheduled_at": scheduled_at}
+
     @router.delete("/api/messages/scheduled/{scheduled_id}")
     async def cancel_scheduled_message(
         scheduled_id: int,
