@@ -183,6 +183,12 @@ jobs:
           else
             patch --batch --forward -p1 -d /tmp/waysgram-android-source < android-stage1.patch
           fi
+          ANDROID_SEND=/tmp/waysgram-android-source/WaysGram-Android/TMessagesProj/src/main/java/org/telegram/messenger/SendMessagesHelper.java
+          if grep -Fq 'req.id.size() > 100' "$ANDROID_MESSAGES" && grep -Fq 'arr.size() == 100' "$ANDROID_SEND"; then
+            echo "100-message forwarding bridge is already present."
+          else
+            patch --batch --forward -p1 -d /tmp/waysgram-android-source < android-stage1-forward.patch
+          fi
           python3 - <<'PY'
           from pathlib import Path
           import zipfile
