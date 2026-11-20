@@ -695,6 +695,13 @@ async def init_messenger_storage(database_path: Path) -> None:
             );
             CREATE INDEX IF NOT EXISTS idx_media_transcriptions_created
                 ON media_transcriptions(created_at);
+            CREATE TABLE IF NOT EXISTS media_transcription_requests (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                telegram_id INTEGER NOT NULL,
+                created_at INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_media_transcription_requests_user_time
+                ON media_transcription_requests(telegram_id,created_at);
             CREATE INDEX IF NOT EXISTS idx_api_sessions_user
                 ON api_sessions(telegram_id, expires_at);
             CREATE TABLE IF NOT EXISTS api_login_request_log (
@@ -3440,6 +3447,36 @@ def build_messenger_router(
             await db.commit()
         return {"ids": ids, "total": total, "batch_message_ids": True}
 
+    async def transcribable_media(db: Any, media_id: str, uid: int) -> Any:
+        """Resolve current access in the same transaction as the media lookup."""
+        cur = await db.execute(
+            """SELECT a.id,a.owner_telegram_id,a.storage_name,a.mime_type,a.size_bytes,a.original_name,a.media_kind,
+                (a.owner_telegram_id=? OR EXISTS(
+                    SELECT 1 FROM messages m WHERE m.media_id=a.id
+                      AND (m.sender_telegram_id=? OR m.recipient_telegram_id=?)
+                      AND NOT EXISTS (SELECT 1 FROM message_hidden_for h WHERE h.message_id=m.id AND h.telegram_id=?)
+                ) OR EXISTS(
+                    SELECT 1 FROM group_messages gm JOIN group_members member ON member.group_id=gm.group_id
+                    WHERE gm.media_id=a.id AND member.telegram_id=?
+                ) OR EXISTS(
+                    SELECT 1 FROM channel_messages cm JOIN channels c ON c.id=cm.channel_id
+                    WHERE cm.media_id=a.id AND (c.is_public=1 OR c.owner_telegram_id=?
+                        OR EXISTS(SELECT 1 FROM channel_admins ca WHERE ca.channel_id=c.id AND ca.telegram_id=?)
+                        OR EXISTS(SELECT 1 FROM channel_members member WHERE member.channel_id=c.id AND member.telegram_id=?))
+                )) AS allowed FROM media_assets a WHERE a.id=?""",
+            (uid, uid, uid, uid, uid, uid, uid, uid, media_id),
+        )
+        media = await cur.fetchone()
+        if media is None or not media["allowed"]:
+            raise HTTPException(status_code=404, detail="Аудиофайл не найден")
+        mime = str(media["mime_type"] or "").lower()
+        name = str(media["original_name"] or "").lower()
+        is_round = mime == "video/mp4" and (media["media_kind"] == "video_note"
+                    or not media["media_kind"] and name.startswith("round_video_"))
+        if not mime.startswith("audio/") and not is_round:
+            raise HTTPException(status_code=415, detail="Расшифровка доступна только для аудио и видеокружков")
+        return media
+
     @router.post("/api/media/{media_id}/transcription")
     async def transcribe_media(
         media_id: str,
@@ -3452,39 +3489,22 @@ def build_messenger_router(
 
         async with aiosqlite.connect(db_path()) as db:
             db.row_factory = aiosqlite.Row
-            cur = await db.execute(
-                """SELECT id,owner_telegram_id,storage_name,mime_type,size_bytes,original_name
-                   FROM media_assets WHERE id=?""",
-                (media_id,),
-            )
-            media = await cur.fetchone()
-            if media is None:
-                raise HTTPException(status_code=404, detail="Аудиофайл не найден")
+            await db.execute("BEGIN IMMEDIATE")
+            media = await transcribable_media(db, media_id, uid)
             mime_type = str(media["mime_type"] or "").lower()
-            if not mime_type.startswith("audio/"):
-                raise HTTPException(status_code=415, detail="Расшифровка доступна только для аудиофайлов")
-            allowed = int(media["owner_telegram_id"]) == uid
-            if not allowed:
-                cur = await db.execute(
-                    """SELECT 1 FROM messages
-                       WHERE media_id=? AND
-                         (sender_telegram_id=? OR recipient_telegram_id=?)
-                         AND NOT EXISTS (
-                             SELECT 1 FROM message_hidden_for hidden
-                             WHERE hidden.message_id=messages.id AND hidden.telegram_id=?
-                         )
-                       LIMIT 1""",
-                    (media_id, uid, uid, uid),
-                )
-                allowed = await cur.fetchone() is not None
-            if not allowed:
-                raise HTTPException(status_code=404, detail="Аудиофайл не найден")
             cur = await db.execute(
-                """SELECT transcript,model,created_at
-                   FROM media_transcriptions WHERE media_id=?""",
-                (media_id,),
-            )
+                "SELECT transcript,model,created_at FROM media_transcriptions WHERE media_id=?", (media_id,))
             cached = await cur.fetchone()
+            if cached is None:
+                if not os.getenv("OPENAI_API_KEY", "").strip():
+                    raise HTTPException(status_code=503, detail="Расшифровка пока не настроена на сервере WaysGram")
+                now = int(time.time())
+                await db.execute("DELETE FROM media_transcription_requests WHERE id IN (SELECT id FROM media_transcription_requests WHERE created_at<? LIMIT 500)", (now - 3600,))
+                cur = await db.execute("SELECT COUNT(*) FROM media_transcription_requests WHERE telegram_id=? AND created_at>?", (uid, now - 3600))
+                if int((await cur.fetchone())[0]) >= 10:
+                    raise HTTPException(status_code=429, detail="Превышен лимит расшифровок за час")
+                await db.execute("INSERT INTO media_transcription_requests(telegram_id,created_at) VALUES(?,?)", (uid, now))
+            await db.commit()
 
         if cached is not None:
             return {
@@ -3512,15 +3532,21 @@ def build_messenger_router(
         if not audio_bytes:
             raise HTTPException(status_code=422, detail="Аудиофайл пуст")
 
-        filename = str(media["original_name"] or (media_id + ".m4a"))
-        if not Path(filename).suffix:
+        filename = str(media["original_name"] or media_id)
+        # Preserve the bytes; choose a container suffix accepted by the provider.
+        if mime_type == "audio/ogg" and filename.lower().endswith(".opus"):
+            filename = filename[:-5] + ".ogg"
+        elif mime_type == "video/mp4" and not filename.lower().endswith(".mp4"):
+            filename = filename + ".mp4"
+        elif not Path(filename).suffix:
             filename += ".m4a"
+        model = os.getenv("WAYSGRAM_TRANSCRIPTION_MODEL", "gpt-transcribe").strip() or "gpt-transcribe"
         try:
             async with httpx.AsyncClient(timeout=httpx.Timeout(120.0, connect=15.0)) as client:
                 response = await client.post(
                     "https://api.openai.com/v1/audio/transcriptions",
                     headers={"Authorization": "Bearer " + api_key},
-                    data={"model": "gpt-transcribe", "response_format": "json"},
+                    data={"model": model, "response_format": "json"},
                     files={"file": (filename, audio_bytes, mime_type)},
                 )
         except httpx.TimeoutException as exc:
@@ -3547,19 +3573,24 @@ def build_messenger_router(
         if len(transcript) > 50000:
             transcript = transcript[:50000]
 
+        # A long provider call must not deliver a transcript to a revoked session.
+        await current_user(authorization)
         now = int(time.time())
         async with aiosqlite.connect(db_path()) as db:
+            db.row_factory = aiosqlite.Row
+            await db.execute("BEGIN IMMEDIATE")
+            await transcribable_media(db, media_id, uid)
             await db.execute(
                 """INSERT OR REPLACE INTO media_transcriptions
                    (media_id,transcript,model,requested_by_telegram_id,created_at)
                    VALUES(?,?,?,?,?)""",
-                (media_id, transcript, "gpt-transcribe", uid, now),
+                (media_id, transcript, model, uid, now),
             )
             await db.commit()
         return {
             "media_id": media_id,
             "text": transcript,
-            "model": "gpt-transcribe",
+            "model": model,
             "cached": False,
             "created_at": now,
         }
