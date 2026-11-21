@@ -3066,3 +3066,27 @@ def test_gift_autosave_keeps_hidden_gifts_in_owner_inventory(env):
             assert (await client.get('/api/users/102/gifts', headers=sender)).json()['total'] == 1
 
     run(scenario())
+
+
+def test_blocked_sender_cannot_deliver_gifts_through_any_route(env):
+    _, app = env
+
+    async def scenario():
+        await bot_module.set_telegram_gift_values('g1', price=1, supply=2)
+        async with await client_for(app) as client:
+            sender, recipient = headers(101), headers(102)
+            buy = '/api/telegram/gifts/g1/purchase'
+            assert (await client.post('/api/blocks', headers=recipient, json={'user_id': 101})).status_code == 201
+            assert (await client.post(buy, headers=sender, json={'recipient_id': 102, 'hide_name': True})).status_code == 403
+            serial = (await client.post(buy, headers=sender, json={})).json()['gift']['serial_number']
+            delivery = {'recipient_id': 102, 'serial_number': serial}
+            for route in ('/api/gifts/transfer', '/api/messages/gift'):
+                assert (await client.post(route, headers=sender, json=delivery)).status_code == 403
+            mine = (await client.get('/api/me/gifts', headers=sender)).json()['gifts']
+            assert [gift['serial_number'] for gift in mine] == [serial]
+            assert (await client.get('/api/me/gifts', headers=recipient)).json()['total'] == 0
+            assert (await client.delete('/api/blocks/101', headers=recipient)).status_code == 200
+            assert (await client.post('/api/gifts/transfer', headers=sender, json=delivery)).status_code == 200
+            assert (await client.post(buy, headers=sender, json={'recipient_id': 102})).status_code in (200, 201)
+
+    run(scenario())

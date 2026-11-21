@@ -5356,6 +5356,18 @@ def build_messenger_router(
             await db.commit()
         return {"visible": visible}
 
+    async def require_gift_delivery_allowed(db: Any, sender: int, recipient: int) -> None:
+        if sender == recipient:
+            return
+        cur = await db.execute(
+            """SELECT 1 FROM blocked_users
+               WHERE (owner_telegram_id=? AND blocked_telegram_id=?)
+                  OR (owner_telegram_id=? AND blocked_telegram_id=?)""",
+            (sender, recipient, recipient, sender),
+        )
+        if await cur.fetchone():
+            raise HTTPException(403, "Нельзя отправить подарок: пользователь находится в чёрном списке")
+
     async def apply_gift_autosave(db: Any, serial: str, owner: int, sender: int) -> None:
         visible = await privacy_allows(db, owner, sender, "gift-autosave")
         await db.execute("UPDATE user_gifts SET profile_hidden=? WHERE serial_number=? AND owner_telegram_id=?",
@@ -6078,6 +6090,7 @@ def build_messenger_router(
                     await db.rollback()
                     raise HTTPException(status_code=404, detail="Получатель не найден")
                 owner = int(recipient)
+                await require_gift_delivery_allowed(db, uid, owner)
             cur = await db.execute(
                 "UPDATE accounts SET stars=stars-?,updated_at=? WHERE telegram_id=? AND stars>=?",
                 (price, now, uid, price),
@@ -7219,6 +7232,7 @@ def build_messenger_router(
             if target_id == uid:
                 await db.rollback()
                 raise HTTPException(status_code=400, detail="Нельзя передать подарок самому себе")
+            await require_gift_delivery_allowed(db, uid, target_id)
             cur = await db.execute(
                 """SELECT id,gift_name FROM user_gifts
                    WHERE serial_number=? AND owner_telegram_id=?""",
@@ -11326,16 +11340,7 @@ def build_messenger_router(
             if recipient["is_banned"]:
                 await db.rollback()
                 raise HTTPException(status_code=403, detail="Получатель заблокирован")
-            cur = await db.execute(
-                """SELECT 1 FROM blocked_users
-                   WHERE (owner_telegram_id=? AND blocked_telegram_id=?)
-                      OR (owner_telegram_id=? AND blocked_telegram_id=?)
-                   LIMIT 1""",
-                (uid, recipient_id, recipient_id, uid),
-            )
-            if await cur.fetchone():
-                await db.rollback()
-                raise HTTPException(status_code=403, detail="Нельзя отправить подарок: пользователь находится в чёрном списке")
+            await require_gift_delivery_allowed(db, uid, recipient_id)
             cur = await db.execute(
                 """SELECT id,gift_name,telegram_gift_id,upgrade_level,attributes_json,
                           (SELECT unique_num FROM gift_unique_numbers n
