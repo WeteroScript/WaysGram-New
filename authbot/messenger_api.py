@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any, Literal, Callable
 
 import aiosqlite
+from virtual_numbers import is_virtual_number
 import gift_names
 import gift_model_fallbacks
 import db_split  # noqa: F401  # two-file database layout
@@ -46,7 +47,6 @@ MAX_DOCUMENT_UPLOAD_BYTES = 25 * 1024 * 1024
 MAX_IMAGE_PIXELS = 40_000_000
 MAX_USER_MEDIA_BYTES = 100 * 1024 * 1024
 MAX_USER_IMAGE_UPLOADS_PER_HOUR = 30
-PHONE_RE = re.compile(r"^\+[1-9]\d{7,14}$")
 GIFT_SERIAL_RE = re.compile(r"^WG-[A-F0-9]{12}$")
 # WaysGram upgrades cost a fixed amount of internal Stars. The Telegram catalog price is
 # informational only: the client shows exactly this number and the endpoint charges it.
@@ -2021,7 +2021,7 @@ def _public_account(row: Any, include_phone: bool = False) -> dict[str, Any]:
     }
     if include_phone:
         phone = str(row["virtual_number"] or "").strip()
-        result["phone"] = phone if re.fullmatch(r"\+[1-9]\d{7,14}", phone) else ""
+        result["phone"] = phone if is_virtual_number(phone) else ""
     result["stars"] = int(row["stars"])
     result["grams"] = int(row["grams"])
     result["is_premium"] = True  # every WaysGram account has Premium, permanently
@@ -4647,7 +4647,7 @@ def build_messenger_router(
     @router.post("/api/auth/request-code")
     async def request_login_code(payload: dict[str, Any], request: Request) -> dict[str, str]:
         phone = str(payload.get("phone", payload.get("number", ""))).strip()
-        if not PHONE_RE.fullmatch(phone):
+        if not is_virtual_number(phone):
             raise HTTPException(status_code=400, detail="Номер должен быть в международном формате E.164: +код страны и номер")
         owner = await auth_store.resolve_number(phone)
         if not owner:
@@ -4890,7 +4890,7 @@ def build_messenger_router(
     async def verify_login_code(payload: dict[str, Any]) -> dict[str, Any]:
         phone = str(payload.get("phone", payload.get("number", ""))).strip()
         code = str(payload.get("code", "")).strip()
-        if not PHONE_RE.fullmatch(phone) or not re.fullmatch(r"[0-9]{6}", code):
+        if not is_virtual_number(phone) or not re.fullmatch(r"[0-9]{6}", code):
             raise HTTPException(status_code=400, detail="Проверьте виртуальный номер и шестизначный код")
         owner = await auth_store.resolve_number(phone)
         if not owner or not owner.get("verified"):
@@ -5231,7 +5231,7 @@ def build_messenger_router(
                 )
                 number_row = await cur.fetchone()
             number = str(number_row[0] or "").strip() if number_row else ""
-            if re.fullmatch(r"\+[1-9]\d{7,14}", number):
+            if is_virtual_number(number):
                 result["phone"] = number
         async with aiosqlite.connect(db_path()) as db:
             result["birthday"] = await profile_birthday(db, int(user["telegram_id"]))
@@ -5808,7 +5808,7 @@ def build_messenger_router(
     async def resolve_contact_phone(payload: dict[str, Any], authorization: str | None = Header(default=None)):
         uid = int((await current_user(authorization))["telegram_id"])
         phone = payload.get("phone")
-        if not isinstance(phone, str) or not re.fullmatch(r"\+?[1-9]\d{7,14}", phone):
+        if not isinstance(phone, str) or not is_virtual_number(phone if phone.startswith("+") else "+" + phone):
             raise HTTPException(400, "PHONE_NUMBER_INVALID")
         phone = "+" + phone.lstrip("+")
         minute = int(time.time()) // 60
@@ -6093,11 +6093,11 @@ def build_messenger_router(
             if await privacy_allows(db, user_id, viewer_id, "phone"):
                 cur = await db.execute("SELECT virtual_number FROM accounts WHERE telegram_id=?", (user_id,))
                 phone = str((await cur.fetchone())[0] or "").strip()
-                if not re.fullmatch(r"\+[1-9]\d{7,14}", phone):
+                if not is_virtual_number(phone):
                     cur = await db.execute("SELECT number FROM numbers WHERE telegram_id=?", (user_id,))
                     number = await cur.fetchone()
                     phone = str(number[0] or "").strip() if number else ""
-                if re.fullmatch(r"\+[1-9]\d{7,14}", phone):
+                if is_virtual_number(phone):
                     visible["phone"] = phone
             if await privacy_allows(db, user_id, viewer_id, "last-seen"):
                 cur = await db.execute("SELECT last_seen_at FROM api_user_presence WHERE telegram_id=?", (user_id,))

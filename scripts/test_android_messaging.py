@@ -49,6 +49,16 @@ class NativeMessagingSourceChecks(unittest.TestCase):
         self.assertIn('getUserConfig().saveConfig(true)', intro)
         self.assertIn('NotificationCenter.mainUserInfoChanged', intro)
 
+    def test_secret_numbers_are_grouped_and_valid_at_login(self):
+        login = self.source('ui/LoginActivity.java')
+        picker = self.source('ui/CountrySelectActivity.java')
+        mapper = self.source('tgnet/WaysGramMapper.java')
+        self.assertIn('{"111", "999", "0", "333", "666"}', mapper)
+        self.assertIn('secret.waysGramSecret = true', login)
+        self.assertIn('!secretNumber && (codeField.length() == 0 || phoneField.length() == 0)', login)
+        self.assertIn('TYPE_SECRET_HEADER', picker)
+        self.assertIn('sortedCountries.add(0, SECRET_SECTION)', picker)
+
     def test_cloud_password_uses_waysgram_challenge_and_authenticated_settings(self):
         transport = self.source('tgnet/WaysGramTransport.java')
         login = self.source('ui/LoginActivity.java')
@@ -61,6 +71,9 @@ class NativeMessagingSourceChecks(unittest.TestCase):
         self.assertIn('WAYS_GRAM_CLOUD_PATH = "/api/me/cloud-password"', settings)
         self.assertIn('WaysGramApi.request("PUT", WAYS_GRAM_CLOUD_PATH, body, token', settings)
         self.assertIn('password == null ? JSONObject.NULL : password', settings)
+        email_row, password_row = settings.split('CharSequence val = "";', 1)[1].split('int icon = R.drawable.menu_2sv;', 1)
+        self.assertNotIn('waysGramCloudEnabled', email_row)
+        self.assertIn('waysGramCloudEnabled', password_row.split('position == passkeysRow', 1)[0])
 
     def test_global_auto_delete_uses_confirmed_default_and_supported_durations(self):
         transport = self.source('tgnet/WaysGramTransport.java')

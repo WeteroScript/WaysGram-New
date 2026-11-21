@@ -283,3 +283,10 @@ def test_parser_rejects_non_us_virtual_number_even_without_plus() -> None:
         parse_telesrv_delivery(body, headers, "shared-secret")
     assert error.value.status_code == 422
     assert error.value.error_code == "RECIPIENT_INVALID"
+
+
+@pytest.mark.parametrize('number', ['+111', '+999', '+0', '+333', '+666'])
+def test_parser_accepts_signed_secret_number_deliveries(number):
+    for variant in (number, number[1:]):
+        body, headers = signed_request(variant, '482601', 'otp_secret_test', 'shared-secret', now=1_800_000_000)
+        assert parse_telesrv_delivery(body, headers, 'shared-secret', now=1_800_000_000).number == number

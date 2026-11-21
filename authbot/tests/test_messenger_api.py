@@ -9370,3 +9370,30 @@ def test_inactivity_deletion_is_opt_in_and_rechecks_activity_under_lock(api_env)
                     await stop()
 
     run(scenario())
+
+
+def test_secret_numbers_support_admin_creation_and_otp_login(api_env):
+    _, store, _, app = api_env
+    numbers = ('+111', '+999', '+0', '+333', '+666')
+
+    async def scenario():
+        async with await client_for(app) as client:
+            owned = []
+            for number in numbers:
+                assert bot_module.normalize_admin_number(number) == number
+                assert bot_module.normalize_admin_number(number[1:]) == number
+                uid = await bot_module.admin_create_account(number, 0, 0)
+                owned.append((number, uid))
+                assert (await client.post('/api/auth/request-code', json={'phone': number})).status_code == 200
+                code, _ = await store.latest_code(number)
+                logged_in = (await client.post('/api/auth/verify-code', json={'phone': number, 'code': code})).json()
+                assert logged_in['user']['id'] == uid and logged_in['user']['phone'] == number
+                auth = {'Authorization': 'Bearer ' + logged_in['token']}
+                assert (await client.get('/api/me', headers=auth)).json()['phone'] == number
+            categories = bot_module.account_number_rows(owned, 'code', 'ru')
+            assert [row[0].text for row in categories] == ['Секрет']
+            assert [row[0].text for row in bot_module.account_number_rows(owned, 'code', 'ru', secret=True)] == list(numbers)
+            assert (await client.post('/api/auth/request-code', json={'phone': '+222'})).status_code == 400
+            assert bot_module.normalize_admin_number('+222') is None
+
+    run(scenario())

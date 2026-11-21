@@ -8,6 +8,7 @@ import os
 import random
 import re
 import secrets
+from virtual_numbers import SECRET_NUMBERS, is_virtual_number
 import time
 from pathlib import Path
 from typing import Any
@@ -66,7 +67,6 @@ WELCOME_DM_TEXT = (
     "Добро пожаловать в WaysGram! ✨"
 )
 
-PHONE_RE = re.compile(r"^\+[1-9]\d{7,14}$")
 OTP_RE = re.compile(r"^\d{6}$")
 EMOJI = ["🐱", "🐶", "🦊", "🐼", "🐸", "🐵", "🐧", "🐰", "🦁", "🐨", "🐯", "🐹"]
 
@@ -895,9 +895,8 @@ async def get_code_handler(message: Message) -> None:
     if not owned:
         await message.answer(tr(lang, "need_number"))
         return
-    if len(owned) > 1:
-        rows = [[InlineKeyboardButton(text=number, callback_data=f"myacc:code:{number}")]
-                for number, _ in owned]
+    if len(owned) > 1 or owned[0][0] in SECRET_NUMBERS:
+        rows = account_number_rows(owned, "code", lang)
         await message.answer(tr(lang, "my_accounts"), reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
         return
     number = owned[0][0]
@@ -910,6 +909,14 @@ async def get_code_handler(message: Message) -> None:
     await message.answer(tr(lang, "code_ready", code=code, minutes=minutes))
 
 
+def account_number_rows(owned: list[tuple[str, int]], action: str, lang: str, *, secret: bool = False):
+    rows = [[InlineKeyboardButton(text=number, callback_data=f"myacc:{action}:{number}")]
+            for number, _ in owned if (number in SECRET_NUMBERS) == secret]
+    if not secret and any(number in SECRET_NUMBERS for number, _ in owned):
+        rows.append([InlineKeyboardButton(text="Секрет" if lang == "ru" else "Secret", callback_data=f"myacc:secret:{action}")])
+    return rows
+
+
 async def send_my_accounts(message: Message, telegram_id: int, lang: str) -> None:
     owned = await store.owned_numbers(telegram_id)
     if not owned:
@@ -920,8 +927,7 @@ async def send_my_accounts(message: Message, telegram_id: int, lang: str) -> Non
             ]),
         )
         return
-    keyboard = [[InlineKeyboardButton(text=number, callback_data=f"myacc:open:{number}")]
-                for number, _ in owned]
+    keyboard = account_number_rows(owned, "open", lang)
     keyboard.append([InlineKeyboardButton(text=tr(lang, "account_back"), callback_data="nav:menu")])
     await message.answer(tr(lang, "my_accounts"), reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard))
 
@@ -976,6 +982,16 @@ async def my_accounts_callback(callback: CallbackQuery) -> None:
         await send_my_accounts(callback.message, user_id, lang)
         return
     owned = await store.owned_numbers(user_id)
+    if action == "secret" and number in ("open", "code"):
+        rows = account_number_rows(owned, number, lang, secret=True)
+        if not rows:
+            await safe_callback_answer(callback, tr(lang, "account_not_found"), True)
+            return
+        rows.append([InlineKeyboardButton(text=tr(lang, "account_back"), callback_data="myacc:list")])
+        await safe_callback_answer(callback)
+        await callback.message.answer("Секрет" if lang == "ru" else "Secret",
+                                      reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+        return
     if not number or not any(item[0] == number for item in owned):
         await safe_callback_answer(callback, tr(lang, "account_not_found"), True)
         return
@@ -2049,14 +2065,16 @@ USERNAME_RE = re.compile(r"[a-z][a-z0-9_]{1,31}")
 
 
 def normalize_admin_number(value: str) -> str | None:
-    """Normalize an international E.164 number; retain legacy US input shortcuts."""
+    """Normalize a WaysGram number, retaining legacy US input shortcuts."""
     raw = value.strip()
     if not re.fullmatch(r"[+0-9().\s-]+", raw):
         return None
     digits = re.sub(r"\D", "", raw)
     if raw.startswith("+"):
         normalized = "+" + digits
-        return normalized if PHONE_RE.fullmatch(normalized) else None
+        return normalized if is_virtual_number(normalized) else None
+    if "+" + digits in SECRET_NUMBERS:
+        return "+" + digits
     if len(digits) == 10:
         return "+1" + digits
     if len(digits) == 11 and digits.startswith("1"):
@@ -2262,6 +2280,8 @@ async def set_telegram_gift_values(gift_id: str, price: int | None = None, suppl
 
 async def admin_create_account(number: str, stars: int, grams: int, *, actor_id: int | None = None) -> int:
     """An account that no Telegram user owns. Login codes for its number are delivered to the administrator."""
+    if not is_virtual_number(number):
+        raise ValueError("Invalid WaysGram number")
     actor_id = ADMIN_ID if actor_id is None else actor_id
     now = int(time.time())
     async with aiosqlite.connect(DATABASE_PATH) as db:
@@ -3790,7 +3810,7 @@ async def admin_text_input(message: Message) -> None:
     elif kind == "newacct_number":
         number = normalize_admin_number(value)
         if not number:
-            await message.answer("Введите номер в международном формате: +код страны и 7–14 остальных цифр. Можно использовать пробелы, скобки и дефисы.")
+            await message.answer("Введите номер в международном формате: +код страны и 7–14 остальных цифр. Или выберите секретный номер: +111, +999, +0, +333, +666.")
             return
         async with aiosqlite.connect(DATABASE_PATH) as db:
             cur = await db.execute("SELECT 1 FROM numbers WHERE number=?", (number,))
@@ -4043,15 +4063,15 @@ async def admin_text_input(message: Message) -> None:
             reply_markup=admin_keyboard([[("Открыть каталог", "wgadm:gifts")]]))
 
 class NumberResolveRequest(BaseModel):
-    number: str = Field(min_length=9, max_length=16, pattern=r"^\+[1-9]\d{7,14}$")
+    number: str = Field(min_length=2, max_length=16)
 
 
 class AuthCodeRequest(BaseModel):
-    number: str = Field(min_length=9, max_length=16, pattern=r"^\+[1-9]\d{7,14}$")
+    number: str = Field(min_length=2, max_length=16)
 
 
 class CodeVerifyRequest(BaseModel):
-    number: str = Field(min_length=9, max_length=16, pattern=r"^\+[1-9]\d{7,14}$")
+    number: str = Field(min_length=2, max_length=16)
     code: str = Field(pattern=r"^\d{6}$")
 
 
@@ -4239,8 +4259,8 @@ async def resolve_number(
     x_internal_token: str | None = Header(default=None),
 ) -> dict[str, Any]:
     verify_internal_token(x_internal_token)
-    if not PHONE_RE.fullmatch(payload.number):
-        raise HTTPException(status_code=422, detail="Invalid international E.164 number format")
+    if not is_virtual_number(payload.number):
+        raise HTTPException(status_code=422, detail="Invalid WaysGram number format")
     owner = await store.resolve_number(payload.number)
     if not owner:
         raise HTTPException(status_code=404, detail="Number is not assigned")
@@ -4257,7 +4277,7 @@ async def request_auth_code(
     x_internal_token: str | None = Header(default=None),
 ) -> dict[str, str]:
     verify_internal_token(x_internal_token)
-    if not PHONE_RE.fullmatch(payload.number):
+    if not is_virtual_number(payload.number):
         raise HTTPException(status_code=422, detail="Invalid internal number format")
     owner = await store.resolve_number(payload.number)
     if not owner:
@@ -4289,7 +4309,7 @@ async def verify_auth_code(
     x_internal_token: str | None = Header(default=None),
 ) -> dict[str, bool]:
     verify_internal_token(x_internal_token)
-    if not PHONE_RE.fullmatch(payload.number):
+    if not is_virtual_number(payload.number):
         raise HTTPException(status_code=422, detail="Invalid internal number format")
     owner = await store.resolve_number(payload.number)
     if not owner or not owner.get("verified") or await account_is_banned(int(owner["telegram_id"])):
