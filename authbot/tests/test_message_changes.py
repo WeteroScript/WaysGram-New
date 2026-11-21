@@ -1056,3 +1056,32 @@ def test_channel_admin_rights_are_independent(env):
             assert (await client.put(path + f'/members/{ADMIN}/ban', headers=admin, json={'banned': True})).status_code == 200
 
     run(scenario())
+
+
+def test_additional_channel_invites_limit_and_revoke_independently(env):
+    _, app = env
+
+    async def scenario():
+        async with await client_for(app) as client:
+            owner, member, guest = headers(101), headers(102), headers(ADMIN)
+            create = await client.post('/api/channels', headers=owner, json={'title': 'Private links', 'is_public': False})
+            assert create.status_code == 201, create.text
+            path = f"/api/channels/{create.json()['id']}/invites"
+            limited = await client.post(path, headers=owner, json={'max_uses': 1, 'expires_in_seconds': 600, 'label': 'One use'})
+            assert limited.status_code == 201, limited.text
+            link = limited.json()['invite_link']
+            assert (await client.get(path, headers=member)).status_code == 403
+            assert (await client.get(link)).status_code == 200
+            for _ in range(2):
+                assert (await client.post('/api/channels/join', headers=member, json={'invite_link': link})).status_code == 200
+            assert (await client.post('/api/channels/join', headers=guest, json={'invite_link': link})).status_code == 404
+            active = (await client.get(path, headers=owner)).json()['invites']
+            assert active[0]['uses'] == 1 and active[0]['label'] == 'One use'
+            endpoint = path + '/' + link.rsplit('/', 1)[-1]
+            assert (await client.delete(endpoint, headers=member)).status_code == 403
+            assert (await client.delete(endpoint, headers=owner)).status_code == 200
+            assert (await client.get(path, headers=owner, params={'revoked': 'true'})).json()['count'] == 1
+            assert (await client.get(create.json()['invite_link'])).status_code == 200
+            assert (await client.get(path.rsplit('/', 1)[0], headers=member)).status_code == 200
+
+    run(scenario())
