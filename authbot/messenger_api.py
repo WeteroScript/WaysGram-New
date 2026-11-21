@@ -9276,7 +9276,7 @@ def build_messenger_router(
         async with aiosqlite.connect(db_path()) as db:
             await db.execute("BEGIN IMMEDIATE" if buy else "BEGIN")
             await require_channel_access(channel_id, uid)
-            cur = await db.execute("""SELECT p.media_id,p.price_stars,c.owner_telegram_id,a.storage_name,
+            cur = await db.execute("""SELECT p.media_id,p.price_stars,c.owner_telegram_id,a.storage_name,a.mime_type,a.original_name,a.media_kind,a.media_metadata,
                 EXISTS(SELECT 1 FROM channel_paid_media_purchases b WHERE b.message_id=p.message_id AND b.buyer_id=?)
                 FROM channel_paid_media p JOIN channel_messages m ON m.id=p.message_id AND m.channel_id=p.channel_id
                 JOIN channels c ON c.id=p.channel_id JOIN media_assets a ON a.id=p.media_id
@@ -9284,7 +9284,7 @@ def build_messenger_router(
             offer = await cur.fetchone()
             if offer is None:
                 raise HTTPException(404, "PAID_MEDIA_NOT_FOUND")
-            media, price, owner, storage_name, purchased = offer
+            media, price, owner, storage_name, mime, name, kind, metadata, purchased = offer
             unlocked = purchased or uid == owner
             if buy and not unlocked:
                 approved = (payload or {}).get("approved_price_stars")
@@ -9306,7 +9306,8 @@ def build_messenger_router(
                 await db.execute("INSERT INTO channel_paid_media_purchases VALUES(?,?,?)", (message_id, uid, price))
                 await db.commit()
                 unlocked = True
-        return {"price_stars": price, "unlocked": bool(unlocked), **({"media_id": media} if unlocked else {})}
+        return {"price_stars": price, "unlocked": bool(unlocked), **({"media_id": media, "media_type": mime, "media_name": name,
+                   "media_kind": kind, "media_metadata": metadata} if unlocked else {})}
 
     @router.put("/api/channels/{channel_id}/paid-reactions")
     async def set_channel_paid_reactions(channel_id: int, payload: dict[str, Any],

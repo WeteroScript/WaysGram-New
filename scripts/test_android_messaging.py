@@ -70,9 +70,20 @@ class NativeMessagingSourceChecks(unittest.TestCase):
         self.assertIn('WaysGramPaidReactions.showPost', menu)
         self.assertIn('WaysGramPaidReactions.showSetting', edit)
         self.assertIn('retryKey != null ? retryKey : UUID.randomUUID().toString()', payment)
-        self.assertLess(payment.index('putString(slot, key)'), payment.index('request("POST", path'))
+        checkout = payment.split('private static void confirm(BaseFragment', 1)[1]
+        self.assertLess(checkout.index('putString(slot, key)'), checkout.index('request("POST", path'))
         self.assertIn('put("stars", amount), token, 15000, key', payment)
         self.assertIn('data.optLong("total_stars"), data.optLong("my_stars")', payment)
+
+    def test_paid_media_picker_checkout_and_viewer_use_server_channel_id(self):
+        menu = self.source('ui/ChatActivity.java')
+        payment = self.source('ui/WaysGramPaidReactions.java')
+        self.assertIn('PICK_WAYSGRAM_PAID_MEDIA', menu)
+        self.assertIn('WaysGramPaidReactions.confirmPaidMediaUpload', menu)
+        self.assertIn('WaysGramChats.channelServer(channel) + "/messages/" + post + "/paid-media"', payment)
+        self.assertIn('put("approved_price_stars", price)', payment)
+        self.assertIn('if (offer.optBoolean("unlocked"))', payment)
+        self.assertIn('viewer.openPhoto', payment)
 
     def test_channel_analytics_is_owner_only_and_reads_real_revenue(self):
         editor = self.source('ui/ChatEditActivity.java')

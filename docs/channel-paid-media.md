@@ -1,6 +1,6 @@
 # Paid channel media (server API)
 
-Uses internal WaysGram Stars. Android integration is not yet available.
+Uses internal WaysGram Stars. In Android, open **Paid media** from the context menu of a published channel post. The owner can attach a photo (up to 10 MB) or an MP4 (up to 25 MB) to a text post. Readers confirm the price before checking out and use the same menu to reopen a purchased file.
 
 1. The channel owner uploads a fresh photo or video using the media API and publishes a text-only channel post. Do not attach the upload as ordinary media or share it elsewhere.
 2. Owner calls `PUT /api/channels/{channel_id}/messages/{post_id}/paid-media` with `{"media_id":"…","price_stars":5}`. One item per post; the price and asset cannot be changed. Valid prices are 1–10000 Stars.
