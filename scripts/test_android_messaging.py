@@ -23,6 +23,19 @@ class NativeMessagingSourceChecks(unittest.TestCase):
     def source(self, path):
         return self.archive.read(BASE + path).decode('utf-8')
 
+    def test_cloud_password_uses_waysgram_challenge_and_authenticated_settings(self):
+        transport = self.source('tgnet/WaysGramTransport.java')
+        login = self.source('ui/LoginActivity.java')
+        settings = self.source('ui/PrivacySettingsActivity.java')
+        self.assertIn('return new CloudPasswordRequired(challenge, phone)', transport)
+        self.assertIn('response instanceof WaysGramTransport.CloudPasswordRequired', login)
+        self.assertIn('WaysGramApi.request("POST", "/api/auth/verify-password", body, null', login)
+        self.assertIn('!dialog.isShowing()) return;', login)
+        self.assertIn('onAuthSuccess(WaysGramTransport.completeCloudLogin', login)
+        self.assertIn('WAYS_GRAM_CLOUD_PATH = "/api/me/cloud-password"', settings)
+        self.assertIn('WaysGramApi.request("PUT", WAYS_GRAM_CLOUD_PATH, body, token', settings)
+        self.assertIn('password == null ? JSONObject.NULL : password', settings)
+
     def test_global_auto_delete_uses_confirmed_default_and_supported_durations(self):
         transport = self.source('tgnet/WaysGramTransport.java')
         settings = self.source('ui/AutoDeleteMessagesActivity.java')
