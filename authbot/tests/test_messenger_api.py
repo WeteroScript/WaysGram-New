@@ -5585,6 +5585,13 @@ def test_group_invite_join_requests_require_admin_approval(api_env) -> None:
             )
             assert promoted.status_code == 201
 
+            permanent = await client.post(f"/api/groups/{group_id}/invites", headers=admin,
+                                          json={"expires_in_seconds": None})
+            assert permanent.status_code == 201 and permanent.json()["expires_at"] is None
+            short = await client.post(f"/api/groups/{group_id}/invites", headers=admin,
+                                      json={"expires_in_seconds": 60})
+            assert short.status_code == 201 and short.json()["expires_at"] > 0
+
             invite = await client.post(
                 f"/api/groups/{group_id}/invites", headers=admin,
                 json={"expires_in_hours": 24, "max_uses": 1, "require_approval": True},
@@ -5625,6 +5632,10 @@ def test_group_invite_join_requests_require_admin_approval(api_env) -> None:
             )
             assert denied_list.status_code == 403
 
+            admin_details = (await client.get(f"/api/groups/{group_id}", headers=admin)).json()
+            assert admin_details["requests_pending"] == 1
+            assert admin_details["recent_requesters"] == [95804]
+
             denied_approve = await client.post(
                 f"/api/groups/{group_id}/join-requests/95804/approve", headers=member,
             )
@@ -5664,6 +5675,9 @@ def test_group_invite_join_requests_require_admin_approval(api_env) -> None:
             )
             assert declined_request.status_code == 200
             assert declined_request.json()["join_requested"] is True
+            member_details = (await client.get(f"/api/groups/{group_id}", headers=guest)).json()
+            assert member_details["requests_pending"] == 0
+            assert member_details["recent_requesters"] == []
             declined = await client.post(
                 f"/api/groups/{group_id}/join-requests/95803/decline", headers=owner,
             )

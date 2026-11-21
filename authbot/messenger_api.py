@@ -13282,10 +13282,22 @@ def build_messenger_router(
                 (group_id,),
             )
             members = await cur.fetchall()
+            pending = 0
+            recent_requesters = []
+            if membership["role"] in ("owner", "admin"):
+                cur = await db.execute("""SELECT r.telegram_id,COUNT(*) OVER () AS total
+                    FROM group_join_requests r JOIN accounts a ON a.telegram_id=r.telegram_id
+                    WHERE r.group_id=? AND r.status='pending' AND a.is_banned=0
+                    ORDER BY r.requested_at DESC,r.telegram_id DESC LIMIT 3""", (group_id,))
+                rows = await cur.fetchall()
+                pending = rows[0]["total"] if rows else 0
+                recent_requesters = [r["telegram_id"] for r in rows]
         result = dict(group)
         result["labels"] = await entity_labels("group", group_id)
         result["my_role"] = membership["role"]
         result["my_telegram_id"] = uid
+        result["requests_pending"] = pending
+        result["recent_requesters"] = recent_requesters
         result["members"] = []
         for row in members:
             item = dict(row)
@@ -13360,6 +13372,9 @@ def build_messenger_router(
             raise HTTPException(status_code=400, detail="expires_in_hours должен быть целым числом")
         if expires_hours < 1 or expires_hours > 24 * 365:
             raise HTTPException(status_code=400, detail="Срок приглашения должен быть от 1 часа до 1 года")
+        expires_seconds = payload.get("expires_in_seconds", expires_hours * 3600)
+        if expires_seconds is not None and (type(expires_seconds) is not int or not 1 <= expires_seconds <= 365 * 86400):
+            raise HTTPException(400, "Недопустимый срок приглашения")
         require_approval = payload.get("require_approval", False)
         if not isinstance(require_approval, bool):
             raise HTTPException(status_code=400, detail="require_approval должен быть логическим значением")
@@ -13372,7 +13387,7 @@ def build_messenger_router(
                 raise HTTPException(status_code=400, detail="Лимит вступлений должен быть от 1 до 10000")
             max_uses = raw_max_uses
         now = int(time.time())
-        expires_at = now + expires_hours * 3600
+        expires_at = now + expires_seconds if expires_seconds is not None else None
         token = secrets.token_urlsafe(32)
         token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
         async with aiosqlite.connect(db_path()) as db:
