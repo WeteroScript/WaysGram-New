@@ -205,10 +205,18 @@ class NativeMessagingSourceChecks(unittest.TestCase):
                       'waysGramReactionRequests.remove(key)'):
             self.assertIn(guard, picker)
         self.assertIn('options.isEmpty() && optionsView == null && !waysGramReactionMenu', chat)
-        self.assertIn('showWaysGramReactionPicker(primaryMessage)', chat)
+        self.assertNotIn('showWaysGramReactionPicker', chat)
+        self.assertNotIn('R.string.WaysGramReactionSelected', chat)
+        self.assertIn('isReactionsAvailable = waysGramReactionMenu', chat)
+        self.assertIn('reactionsLayout.setWaysGramMessage(messageWithReactions)', chat)
+        panel = self.source('ui/Components/ReactionsContainerLayout.java')
+        self.assertIn('selectedReactions.addAll(message.getChoosenReactions())', panel)
+        self.assertIn('for (String emoji : org.telegram.tgnet.WaysGramReactions.EMOJI)', panel)
+        self.assertIn('waysGramPalette ? Math.min(7, getItemsCount())', panel)
+        self.assertIn('(waysGramPalette || type == TYPE_STICKER_SET_EMOJI)', panel)
+        self.assertIn('Emoji.getEmojiDrawable(react.emojicon)', panel)
         self.assertIn('toggleWaysGramReaction(primaryMessage, visibleReaction.emojicon)', chat)
         self.assertIn('isReactionsViewAvailable = !org.telegram.tgnet.WaysGramTransport.ENABLED', chat)
-        self.assertIn('org.telegram.tgnet.WaysGramTransport.ENABLED || suggestEdit || isEphemeral', chat)
         self.assertIn('imageReceiver.setImageBitmap(Emoji.getEmojiDrawable(visibleReaction.emojicon))', bubble)
         keys = {'WaysGramReactionSelected', 'WaysGramReactionNotSelected', 'WaysGramReactionPending',
                 'WaysGramReactionUnsupported', 'WaysGramReactionLimit'}
