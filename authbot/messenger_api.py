@@ -1618,6 +1618,9 @@ async def init_messenger_storage(database_path: Path) -> None:
         cur = await db.execute(f"PRAGMA {db_split.SCHEMA}.table_info(group_members)")
         if "admin_rights" not in {str(row[1]) for row in await cur.fetchall()}:
             await db.execute(f"ALTER TABLE {db_split.SCHEMA}.group_members ADD COLUMN admin_rights INTEGER NOT NULL DEFAULT 63")
+        cur = await db.execute(f"PRAGMA main.table_info(group_mutes)")
+        if "rights" not in {str(row[1]) for row in await cur.fetchall()}:
+            await db.execute(f"ALTER TABLE main.group_mutes ADD COLUMN rights INTEGER NOT NULL DEFAULT 1")
         cur = await db.execute(f"PRAGMA {db_split.SCHEMA}.table_info(group_invites)")
         group_invite_columns = {str(row[1]) for row in await cur.fetchall()}
         if "require_approval" not in group_invite_columns:
@@ -4402,11 +4405,31 @@ def build_messenger_router(
     def group_has_right(member: dict[str, Any], bit: int) -> bool:
         return member["role"] == "owner" or (member["role"] == "admin" and bool(member["admin_rights"] & bit))
 
-    async def require_group_can_send(db: Any, group_id: int, uid: int) -> None:
-        cur = await db.execute("SELECT 1 FROM group_mutes WHERE group_id=? AND telegram_id=? AND (until_date=0 OR until_date>?)",
+    async def require_group_can_send(db: Any, group_id: int, uid: int, media_id: str | None = None) -> None:
+        cur = await db.execute("SELECT rights FROM group_mutes WHERE group_id=? AND telegram_id=? AND (until_date=0 OR until_date>?)",
                                (group_id, uid, int(time.time())))
-        if await cur.fetchone():
+        row = await cur.fetchone()
+        if row is None:
+            return
+        mask = int(row[0])
+        if mask & 1:
             raise HTTPException(403, "CHAT_WRITE_FORBIDDEN")
+        if media_id:
+            fields = await media_message_fields(db, media_id)
+            kind = fields["media_kind"]
+            mime = str(fields["media_type"] or "").lower()
+            if kind == "sticker" or mime in ("application/x-tgsticker", "application/x-tgsdice"):
+                bit = 16
+            elif kind == "voice":
+                bit = 8
+            elif mime.startswith("image/"):
+                bit = 2
+            elif mime.startswith("video/"):
+                bit = 4
+            else:
+                bit = 32
+            if mask & bit:
+                raise HTTPException(403, "CHAT_WRITE_FORBIDDEN")
 
     async def require_group_member(
         db: Any, group_id: int, telegram_id: int
@@ -11151,6 +11174,8 @@ def build_messenger_router(
                 if row is None:
                     raise HTTPException(status_code=404, detail="Исходное сообщение не найдено")
                 item = dict(row)
+                if target_scope == "group":
+                    await require_group_can_send(db, target_peer, uid, item.get("media_id"))
                 if source_scope == "dm":
                     cur = await db.execute("SELECT 1 FROM message_gifts WHERE message_id=?", (mid,))
                     if await cur.fetchone():
@@ -12557,6 +12582,8 @@ def build_messenger_router(
                 new_media = None
             else:
                 new_media = await require_owned_media(db, requested_id, uid)
+                if scope == "group":
+                    await require_group_can_send(db, chat_id, uid, new_media)
                 if normalized_media_metadata is not None:
                     cur = await db.execute(
                         "SELECT mime_type,media_kind FROM media_assets WHERE id=? AND owner_telegram_id=?",
@@ -14262,6 +14289,9 @@ def build_messenger_router(
                              authorization: str | None = Header(default=None)) -> dict[str, Any]:
         uid = int((await current_user(authorization))["telegram_id"])
         until = payload.get("until_date")
+        rights = payload.get("rights", 1)
+        if type(rights) is not int or not 1 <= rights <= 63:
+            raise HTTPException(400, "Некорректные ограничения")
         if "until_date" not in payload or (until is not None and (type(until) is not int or (until != 0 and not int(time.time()) < until <= 2147483647))):
             raise HTTPException(400, "Некорректный срок ограничения")
         async with aiosqlite.connect(db_path()) as db:
@@ -14273,8 +14303,8 @@ def build_messenger_router(
             if until is None:
                 await db.execute("DELETE FROM group_mutes WHERE group_id=? AND telegram_id=?", (group_id, target_id))
             else:
-                await db.execute("""INSERT INTO group_mutes(group_id,telegram_id,until_date) VALUES(?,?,?)
-                    ON CONFLICT(group_id,telegram_id) DO UPDATE SET until_date=excluded.until_date""", (group_id, target_id, until))
+                await db.execute("""INSERT INTO group_mutes(group_id,telegram_id,until_date,rights) VALUES(?,?,?,?)
+                    ON CONFLICT(group_id,telegram_id) DO UPDATE SET until_date=excluded.until_date,rights=excluded.rights""", (group_id, target_id, until, rights))
             await db.commit()
         return {"muted": until is not None, "until_date": until}
 
@@ -14483,7 +14513,7 @@ def build_messenger_router(
         async with aiosqlite.connect(db_path()) as db:
             await db.execute("BEGIN IMMEDIATE")
             membership = await require_group_member(db, group_id, uid)
-            await require_group_can_send(db, group_id, uid)
+            await require_group_can_send(db, group_id, uid, media_id)
             previous = await idempotency_lookup(db, uid, scope, descriptor, now)
             if previous is not None:
                 await db.rollback()
@@ -14673,6 +14703,7 @@ def build_messenger_router(
             batch_classes: set[str] = set()
             for media_id in media_ids:
                 owned_id = await require_owned_media(db, media_id, uid)
+                await require_group_can_send(db, group_id, uid, owned_id)
                 fields = await media_message_fields(db, owned_id)
                 media_type = str(fields.get("media_type") or "").lower()
                 if not allow_documents:

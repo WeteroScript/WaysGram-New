@@ -1156,7 +1156,10 @@ def test_group_admin_rights_are_independent(env):
 
 
 def test_group_mute_blocks_sending_without_removing_read_access(env):
-    _, app = env
+    import sqlite3
+    import uuid
+
+    db_path, app = env
 
     async def scenario():
         async with await client_for(app) as client:
@@ -1173,5 +1176,15 @@ def test_group_mute_blocks_sending_without_removing_read_access(env):
             assert blocked.status_code == 403 and blocked.json()['detail'] == 'CHAT_WRITE_FORBIDDEN'
             assert (await client.put(mute, headers=owner, json={'until_date': None})).status_code == 200
             assert (await client.post(path + '/messages', headers=member, json={'body': 'Allowed'})).status_code == 201
+            photo, voice = uuid.uuid4().hex, uuid.uuid4().hex
+            with sqlite3.connect(db_path.with_name("waysgram_messenger.sqlite3")) as db:
+                db.executemany("""INSERT INTO media_assets
+                    (id,owner_telegram_id,storage_name,mime_type,size_bytes,created_at,media_kind)
+                    VALUES(?,102,?,?,100,1,?)""", [(photo, photo, "image/png", ""), (voice, voice, "audio/ogg", "voice")])
+            assert (await client.put(mute, headers=owner, json={'until_date': 0, 'rights': 2})).status_code == 200
+            assert (await client.post(path + '/messages', headers=member, json={'body': 'Text still allowed'})).status_code == 201
+            assert (await client.post(path + '/messages', headers=member, json={'media_id': photo})).status_code == 403
+            assert (await client.post(path + '/messages', headers=member, json={'media_id': voice})).status_code == 201
+
 
     run(scenario())
