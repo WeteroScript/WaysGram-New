@@ -272,6 +272,25 @@ class AndroidGiftSourceChecks(unittest.TestCase):
         self.assertIn("setWaysGramBatchMark", cells)
         self.assertIn("0xff34a853", cells)
 
+    def test_batch_buttons_follow_visible_profile_bottom_above_main_tabs(self):
+        page = self.source("ui/Gifts/ProfileGiftsContainer.java")
+        media = self.source("ui/Components/SharedMediaLayout.java")
+        profile = self.source("ui/ProfileActivity.java")
+        self.assertIn("giftBatchMode == null ? View.GONE : View.VISIBLE", page)
+        self.assertIn("setEnabled(!giftBatchBusy && !selectedGiftSerials.isEmpty())", page)
+        self.assertIn("setTranslationY(-hiddenBottom - parent.inventoryBottomInset)", page)
+        self.assertIn("parent.inventoryBottomInset + dp(giftBatchMode != null ? 72 : 12)", page)
+        self.assertEqual(media.count("waysGramGiftsContainer.setInventoryBottomInset(pagesPaddingBottom)"), 2)
+        self.assertIn("setPagesPaddingBottom(navigationBarHeight + additionNavigationBarHeight)", profile)
+
+    def test_profile_nested_scroll_can_reach_gift_grid_and_return_to_header(self):
+        profile = self.source("ui/ProfileActivity.java")
+        media = self.source("ui/Components/SharedMediaLayout.java")
+        self.assertIn("return waysGramGiftsContainer.getCurrentListView()", media)
+        self.assertIn("top <= 0 && innerListView != null && dyUnconsumed != 0", profile)
+        self.assertIn("innerListView.canScrollVertically(Integer.signum(dyUnconsumed))", profile)
+        self.assertIn("innerListView.scrollBy(0, consumed[1])", profile)
+
     def test_shop_price_sort_is_persistent_and_uses_a_vector_icon(self):
         import xml.etree.ElementTree as ET
         sheet = self.source("ui/Gifts/GiftSheet.java")
