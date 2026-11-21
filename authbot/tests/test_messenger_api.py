@@ -5627,6 +5627,17 @@ def test_group_invite_join_requests_require_admin_approval(api_env) -> None:
             assert listed.status_code == 200
             assert listed.json()["count"] == 1
             assert listed.json()["requests"][0]["telegram_id"] == 95804
+            filtered = await client.get(f"/api/groups/{group_id}/join-requests", headers=admin,
+                                        params={"invite_token": token, "q": "APPROVAL_GUEST", "limit": 1})
+            assert filtered.status_code == 200 and filtered.json()["count"] == 1
+            item = filtered.json()["requests"][0]
+            next_page = await client.get(f"/api/groups/{group_id}/join-requests", headers=admin,
+                                         params={"after_date": item["requested_at"], "after_user": item["telegram_id"]})
+            assert next_page.json()["count"] == 1 and next_page.json()["requests"] == []
+            other_token = permanent.json()["invite_link"].rsplit("/", 1)[-1]
+            empty = await client.get(f"/api/groups/{group_id}/join-requests", headers=admin,
+                                     params={"invite_token": other_token})
+            assert empty.json()["count"] == 0
             denied_list = await client.get(
                 f"/api/groups/{group_id}/join-requests", headers=member,
             )

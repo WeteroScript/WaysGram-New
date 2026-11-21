@@ -13769,6 +13769,8 @@ def build_messenger_router(
     @router.get("/api/groups/{group_id}/join-requests")
     async def list_group_join_requests(
         group_id: int,
+        invite_token: str | None = None, q: str = "",
+        after_date: int = 0, after_user: int = 0, limit: int = 200,
         authorization: str | None = Header(default=None),
     ) -> dict[str, Any]:
         user = await current_user(authorization)
@@ -13778,16 +13780,27 @@ def build_messenger_router(
             member = await require_group_member(db, group_id, uid)
             if member["role"] not in ("owner", "admin"):
                 raise HTTPException(status_code=403, detail="Просматривать заявки могут только администраторы группы")
-            cur = await db.execute(
-                """SELECT r.telegram_id,r.requested_at,a.username,a.display_name,a.avatar_media_id
-                   FROM group_join_requests r
-                   JOIN accounts a ON a.telegram_id=r.telegram_id
-                   WHERE r.group_id=? AND r.status='pending' AND a.is_banned=0
-                   ORDER BY r.requested_at,r.telegram_id LIMIT 200""",
-                (group_id,),
-            )
+            token_hash = None
+            if invite_token is not None:
+                if not re.fullmatch(r"[A-Za-z0-9_-]{20,128}", invite_token):
+                    raise HTTPException(404, "Приглашение не найдено")
+                token_hash = hashlib.sha256(invite_token.encode()).hexdigest()
+                cur = await db.execute("SELECT 1 FROM group_invites WHERE group_id=? AND token_hash=?", (group_id, token_hash))
+                if await cur.fetchone() is None:
+                    raise HTTPException(404, "Приглашение не найдено")
+            query = q.strip().casefold()
+            base = """FROM group_join_requests r JOIN accounts a ON a.telegram_id=r.telegram_id
+                      WHERE r.group_id=? AND r.status='pending' AND a.is_banned=0
+                        AND (? IS NULL OR r.invite_token_hash=?)
+                        AND instr(lower(COALESCE(a.display_name,'') || ' ' || COALESCE(a.username,'')),?)>0"""
+            args = (group_id, token_hash, token_hash, query)
+            cur = await db.execute("SELECT COUNT(*) " + base, args)
+            count = (await cur.fetchone())[0]
+            cur = await db.execute("SELECT r.telegram_id,r.requested_at,a.username,a.display_name,a.avatar_media_id "
+                                   + base + " AND (r.requested_at,r.telegram_id)>(?,?) ORDER BY r.requested_at,r.telegram_id LIMIT ?",
+                                   args + (max(0, after_date), max(0, after_user), max(1, min(200, limit))))
             rows = [dict(row) for row in await cur.fetchall()]
-        return {"group_id": group_id, "requests": rows, "count": len(rows)}
+        return {"group_id": group_id, "requests": rows, "count": count}
 
     @router.post("/api/groups/{group_id}/join-requests/{telegram_id}/approve")
     async def approve_group_join_request(
