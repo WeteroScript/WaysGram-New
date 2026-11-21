@@ -6,4 +6,4 @@ The Android document picker accepts any filename and MIME type. Images must stil
 
 Copying a link explicitly publishes the configuration to the WaysGram API. The link `https://t.wg/custom/<token>` is readable by signed-in clients with the token, not an edit credential. The server allows up to 32 unique published configurations per account; re-sharing the same content returns its existing token. Import shows the name and image previews and requires Apply before saving and activating on the recipient's device.
 
-External opening is subject to the `t.wg` DNS/HTTPS and Android App Links deployment described in `waysgram-links.md`. The app intercepts recognized links opened within the client. Device behavior has not been verified.
+Open these links within WaysGram. The app does not associate `t.wg` with external browsers or other apps. Device behavior has not been verified.

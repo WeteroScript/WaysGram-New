@@ -55,6 +55,12 @@ class NativeMessagingSourceChecks(unittest.TestCase):
         self.assertIn('hasEmoji = document != null;', header)
         self.assertIn('emoji.set(document, AnimatedEmojiDrawable.CACHE_TYPE_ALERT_PREVIEW_STATIC, false);', header)
 
+    def test_t_wg_is_not_registered_with_android_as_an_external_link(self):
+        for path in self.archive.namelist():
+            if path.endswith('/AndroidManifest.xml'):
+                self.assertNotIn(b'android:host="t.wg"', self.archive.read(path), path)
+        self.assertIn('WaysGramCustomizationActivity.isLink(uri)', self.source('messenger/browser/Browser.java'))
+
     def test_branded_links_keep_api_transport_separate(self):
         links = self.source('tgnet/WaysGramLinks.java')
         launch = self.source('ui/LaunchActivity.java')

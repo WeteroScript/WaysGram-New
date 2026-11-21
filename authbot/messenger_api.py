@@ -149,7 +149,7 @@ def _external_api_base_url(request: Request) -> str:
 
 
 def _invite_share_origin(request: Request) -> str:
-    # Enable only once the branded host is deployed; older clients use the API origin.
+    # Enable only once clients understand the in-app host; older clients use the API origin.
     if os.getenv("WAYSGRAM_BRANDED_INVITES", "").strip() == "1":
         return "https://t.wg"
     return _external_api_base_url(request)
