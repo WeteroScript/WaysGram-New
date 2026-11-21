@@ -37,7 +37,7 @@ class NativeMessagingSourceChecks(unittest.TestCase):
         self.assertIn('ACTION_OPEN_DOCUMENT', custom)
         self.assertIn('https://t.wg/custom/', custom)
         self.assertIn('WaysGramCustomizationActivity.isLink(data)', launch)
-        self.assertIn('setPositiveButton(R.string.WgCustomApply', custom)
+        self.assertIn('setPositiveButton(LocaleController.getString(R.string.WgCustomApply', custom)
         self.assertIn('if (title.isEmpty())', custom)
 
     def test_admin_labels_decorate_settings_header(self):
@@ -148,7 +148,7 @@ class NativeMessagingSourceChecks(unittest.TestCase):
         chat = self.source('ui/ChatActivity.java')
         helper = self.source('ui/WaysGramGroupIdentity.java')
         mapper = self.source('tgnet/WaysGramChats.java')
-        self.assertIn('WaysGramGroupIdentity.open(this, currentAccount, currentChat.id)', chat)
+        self.assertIn('WaysGramGroupIdentity.open(ChatActivity.this, currentAccount, currentChat.id)', chat)
         self.assertIn('put("send_as_id", identity)', helper)
         self.assertIn('root(group) + "/identity-messages"', helper)
         self.assertIn('send(chat, account, group, token, identity, body, key)', helper)
@@ -159,7 +159,7 @@ class NativeMessagingSourceChecks(unittest.TestCase):
     def test_group_stories_use_membership_scoped_routes_and_permission_controls(self):
         chat = self.source('ui/ChatActivity.java')
         stories = self.source('ui/WaysGramGroupStories.java')
-        self.assertIn('WaysGramGroupStories.open(this, currentAccount, currentChat.id)', chat)
+        self.assertIn('WaysGramGroupStories.open(ChatActivity.this, currentAccount, currentChat.id)', chat)
         self.assertIn('PICK_WAYSGRAM_GROUP_STORY', chat)
         self.assertIn('root(group) + "/story-settings"', stories)
         self.assertIn('data.optBoolean("can_pin")', stories)
@@ -178,7 +178,7 @@ class NativeMessagingSourceChecks(unittest.TestCase):
     def test_channel_giveaways_have_owner_creation_and_member_entry(self):
         chat = self.source('ui/ChatActivity.java')
         helper = self.source('ui/WaysGramPaidReactions.java')
-        self.assertIn('WaysGramPaidReactions.showGiveaways(this, currentAccount, currentChat.id)', chat)
+        self.assertIn('WaysGramPaidReactions.showGiveaways(ChatActivity.this, currentAccount, currentChat.id)', chat)
         self.assertIn('data.optBoolean("can_create")', helper)
         self.assertIn('data.optBoolean("can_enter")', helper)
         self.assertIn('path + "/" + id + "/entry"', helper)
@@ -207,7 +207,7 @@ class NativeMessagingSourceChecks(unittest.TestCase):
     def test_community_boosts_use_waysgram_and_explicit_move_confirmation(self):
         chat = self.source('ui/ChatActivity.java')
         helper = self.source('ui/WaysGramPaidReactions.java')
-        self.assertIn('WaysGramPaidReactions.showCommunityBoosts(this, currentAccount, currentChat.id,', chat)
+        self.assertIn('WaysGramPaidReactions.showCommunityBoosts(ChatActivity.this, currentAccount, currentChat.id,', chat)
         self.assertIn('"/api/community-boosts/" + (channel ? "channel/" : "group/")', helper)
         self.assertIn('R.string.WaysGramBoostMoveConfirm', helper)
         self.assertIn('new JSONObject().put("slow_mode_bypass", !bypass)', helper)
@@ -215,7 +215,7 @@ class NativeMessagingSourceChecks(unittest.TestCase):
     def test_group_topics_use_separate_history_and_server_management(self):
         chat = self.source('ui/ChatActivity.java')
         topics = self.source('ui/WaysGramGroupTopics.java')
-        self.assertIn('WaysGramGroupTopics.open(this, currentAccount, currentChat.id)', chat)
+        self.assertIn('WaysGramGroupTopics.open(ChatActivity.this, currentAccount, currentChat.id)', chat)
         forum = self.source('ui/WaysGramForumActivity.java')
         self.assertIn('"/api/groups/" + groupId + "/topics"', forum)
         self.assertIn('data.optBoolean("can_manage")', forum)
@@ -232,7 +232,7 @@ class NativeMessagingSourceChecks(unittest.TestCase):
         chat = self.source('ui/ChatActivity.java')
         edit = self.source('ui/ChatEditActivity.java')
         inbox = self.source('ui/WaysGramChannelInbox.java')
-        self.assertIn('WaysGramChannelInbox.open(this, currentAccount, currentChat.id, currentChat.creator)', chat)
+        self.assertIn('WaysGramChannelInbox.open(ChatActivity.this, currentAccount, currentChat.id, currentChat.creator)', chat)
         self.assertIn('WaysGramChannelInbox.settings(this, currentAccount, chatId)', edit)
         self.assertIn('root + "/me"', inbox)
         self.assertIn('root + "/threads/"', inbox)
