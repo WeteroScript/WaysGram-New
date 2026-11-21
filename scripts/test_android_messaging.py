@@ -85,6 +85,17 @@ class NativeMessagingSourceChecks(unittest.TestCase):
         self.assertIn('if (offer.optBoolean("unlocked"))', payment)
         self.assertIn('viewer.openPhoto', payment)
 
+    def test_channel_discussions_use_owned_groups_and_real_comment_threads(self):
+        chat = self.source('ui/ChatActivity.java')
+        editor = self.source('ui/ChatEditActivity.java')
+        discussion = self.source('ui/WaysGramDiscussions.java')
+        self.assertIn('WaysGramDiscussions.open(this, currentAccount, currentChat.id, post.getId())', chat)
+        self.assertIn('WaysGramDiscussions.settings(this, currentAccount, chatId)', editor)
+        self.assertIn('"owner".equals(group.optString("role"))', discussion)
+        self.assertIn('WaysGramChats.channelServer(channel)', discussion)
+        self.assertIn('data.optLong("next_before_id")', discussion)
+        self.assertIn('put("body", body), token, 15000, key', discussion)
+
     def test_paid_subscription_links_require_explicit_confirm_and_stable_retry(self):
         launch = self.source('ui/LaunchActivity.java')
         editor = self.source('ui/ChatEditActivity.java')
