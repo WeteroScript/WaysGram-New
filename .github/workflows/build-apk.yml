@@ -270,6 +270,12 @@ jobs:
             fi
             echo '```'
           } > /tmp/report.md
+          # Branch builds may not have a PR; surface diagnostics on the check itself.
+          if [ -s "$file" ]; then
+            grep -E '^(e: |.*\.java:[0-9]+: error:|Execution failed for task)' "$file" | head -25 | while IFS= read -r line; do
+              printf '::error::%s\n' "${line//%/%25}"
+            done
+          fi
           number="$(gh pr list --head "${GITHUB_REF_NAME}" --json number --jq '.[0].number' 2>/dev/null || true)"
           if [ -n "${number:-}" ] && [ "$number" != "null" ]; then
             gh pr comment "$number" --body-file /tmp/report.md || true
