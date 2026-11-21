@@ -426,7 +426,7 @@ def test_direct_message_long_poll_returns_new_message(api_env) -> None:
             assert messages[0]["id"] == next_message.json()["id"]
             assert messages[0]["body"] == "arrived during long poll"
 
-            event_response = await asyncio.wait_for(pending_events, timeout=3)
+            event_response = await asyncio.wait_for(pending_events, timeout=2)
             assert event_response.status_code == 200
             assert any(
                 event["kind"] == "new_message"

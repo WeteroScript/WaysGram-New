@@ -39,6 +39,14 @@ class NativeMessagingSourceChecks(unittest.TestCase):
             self.assertEqual((animation['w'], animation['h'], animation['fr']), (512, 512, 60))
             self.assertTrue(any(t['a'] == 1 for layer in animation['layers'] for t in layer['ks'].values()))
 
+    def test_message_poller_waits_for_events_without_fixed_success_delay(self):
+        poller = self.source('tgnet/WaysGramPoller.java')
+        api = self.source('tgnet/WaysGramApi.java')
+        self.assertIn('&wait_seconds=', poller)
+        self.assertIn('nextDelay = Math.max(0, 200 -', poller)
+        self.assertIn('refreshMessages(account, first, selfId, token, generation);', poller)
+        self.assertIn('newScheduledThreadPool(org.telegram.messenger.UserConfig.MAX_ACCOUNT_COUNT', api)
+
     def test_basic_group_admin_editor_uses_native_group_request(self):
         ui = self.source('ui/ChatRightsEditActivity.java')
         controller = self.source('messenger/MessagesController.java')

@@ -13571,7 +13571,7 @@ def build_messenger_router(
                 cur = await db.execute(
                     """SELECT id,scope,chat_id,user_a,user_b,message_id,kind,actor_id,created_at
                        FROM message_events
-                       WHERE id>? AND (scope='scheduled' AND actor_id=? OR scope<>'scheduled' AND (
+                       WHERE id>? AND id<=? AND (scope='scheduled' AND actor_id=? OR scope<>'scheduled' AND (
                            (kind IN ('delete_for_me','clear_for_me','pin_local','unpin_local') AND actor_id=?)
                            OR kind IN ('delete_for_all_sync','reaction','pin','unpin')
                            OR (kind NOT IN ('delete_for_me','clear_for_me','pin_local','unpin_local','delete_for_all_sync','reaction','pin','unpin') AND actor_id<>?)
@@ -13588,13 +13588,13 @@ def build_messenger_router(
                                             WHERE cm.channel_id=ch.id AND cm.telegram_id=?)
                            )))))
                        ORDER BY id ASC LIMIT 200""",
-                    (after_id, uid, uid, uid, uid, uid, uid, uid, uid, uid, uid),
+                    (after_id, latest, uid, uid, uid, uid, uid, uid, uid, uid, uid, uid),
                 )
                 rows = [dict(row) for row in await cur.fetchall()]
             if rows or time.monotonic() >= deadline:
                 break
             await asyncio.sleep(min(0.5, max(0.05, deadline - time.monotonic())))
-        cursor = rows[-1]["id"] if len(rows) >= 200 else latest
+        cursor = rows[-1]["id"] if len(rows) >= 200 else max(after_id, latest)
         return {"events": rows, "latest_id": cursor}
 
     @router.get("/api/conversations")
