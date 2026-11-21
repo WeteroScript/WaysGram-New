@@ -4823,7 +4823,7 @@ def build_messenger_router(
         else:
             cur = await db.execute("SELECT rules FROM account_profile_privacy WHERE telegram_id=? AND setting=?", (uid, setting))
         row = await cur.fetchone()
-        return json.loads(row[0]) if row else {"mode": {"invites": "everyone", "find-by-phone": "contacts", "avatar": "everyone", "bio": "everyone", "music": "everyone"}.get(setting, "nobody"), "allow": [], "deny": []}
+        return json.loads(row[0]) if row else {"mode": {"invites": "everyone", "find-by-phone": "contacts", "avatar": "everyone", "bio": "everyone", "music": "everyone", "voice": "everyone"}.get(setting, "nobody"), "allow": [], "deny": []}
 
     async def privacy_allows(db: Any, owner: int, viewer: int, setting: str) -> bool:
         if owner == viewer:
@@ -4857,6 +4857,10 @@ def build_messenger_router(
             result.append(item)
         return result
 
+    async def require_voice_privacy(db: Any, recipient: int, sender: int, fields: dict[str, Any]) -> None:
+        if fields.get("media_kind") in ("voice", "video_note") and not await privacy_allows(db, recipient, sender, "voice"):
+            raise HTTPException(403, "VOICE_MESSAGES_FORBIDDEN")
+
     async def require_invite_privacy(db: Any, actor: int, target: int) -> None:
         if not await privacy_allows(db, target, actor, "invites"):
             raise HTTPException(403, "USER_PRIVACY_RESTRICTED")
@@ -4864,7 +4868,7 @@ def build_messenger_router(
     @router.get("/api/me/privacy/{setting}")
     async def get_privacy(setting: str, authorization: str | None = Header(default=None)):
         uid = int((await current_user(authorization))["telegram_id"])
-        if setting not in ("invites", "phone", "last-seen", "find-by-phone", "avatar", "bio", "birthday", "music"):
+        if setting not in ("invites", "phone", "last-seen", "find-by-phone", "avatar", "bio", "birthday", "music", "voice"):
             raise HTTPException(404, "PRIVACY_KEY_INVALID")
         async with aiosqlite.connect(db_path()) as db:
             return await privacy_rules(db, uid, setting)
@@ -4872,7 +4876,7 @@ def build_messenger_router(
     @router.put("/api/me/privacy/{setting}")
     async def set_privacy(setting: str, payload: dict[str, Any], authorization: str | None = Header(default=None)):
         uid = int((await current_user(authorization))["telegram_id"])
-        if setting not in ("invites", "phone", "last-seen", "find-by-phone", "avatar", "bio", "birthday", "music"):
+        if setting not in ("invites", "phone", "last-seen", "find-by-phone", "avatar", "bio", "birthday", "music", "voice"):
             raise HTTPException(404, "PRIVACY_KEY_INVALID")
         mode = payload.get("mode")
         if mode not in ("everyone", "contacts", "nobody"):
@@ -10240,6 +10244,7 @@ def build_messenger_router(
             if not body:
                 body = _message_body(await default_media_message_body(db, media_id))
             media_fields = await media_message_fields(db, media_id)
+            await require_voice_privacy(db, recipient_id, uid, media_fields)
             cur = await db.execute(
                 "SELECT is_banned FROM accounts WHERE telegram_id=?",
                 (recipient_id,),
@@ -11582,6 +11587,8 @@ def build_messenger_router(
                     from_name, from_date = str(author[0]) if author else "Пользователь", int(item["created_at"])
                 item["forward_name"], item["forward_date"] = from_name, from_date
                 item["media_fields"] = await media_message_fields(db, item.get("media_id"))
+                if target_scope == "dm":
+                    await require_voice_privacy(db, target_peer, uid, item["media_fields"])
                 sources.append(item)
 
             # Preserve albums (including a selected subset) without reusing the
@@ -11761,6 +11768,8 @@ def build_messenger_router(
             if int((await cur.fetchone())[0]) >= DM_MESSAGES_PER_MINUTE:
                 await db.rollback()
                 raise HTTPException(status_code=429, detail="Превышен лимит отправки сообщений")
+            media_fields = await media_message_fields(db, source["media_id"])
+            await require_voice_privacy(db, recipient_id, uid, media_fields)
             forwarded_from_id = (
                 int(source["forwarded_from_telegram_id"])
                 if source["forwarded_from_telegram_id"] is not None
@@ -11788,7 +11797,6 @@ def build_messenger_router(
                 db, "dm", new_message_id, "new_message", uid,
                 user_a=uid, user_b=recipient_id,
             )
-            media_fields = await media_message_fields(db, source["media_id"])
             result = {
                 "id": new_message_id,
                 "status": "forwarded",
@@ -12956,6 +12964,8 @@ def build_messenger_router(
                 new_media = None
             else:
                 new_media = await require_owned_media(db, requested_id, uid)
+                if scope == "dm":
+                    await require_voice_privacy(db, int(row[1]), uid, await media_message_fields(db, new_media))
                 if scope == "group":
                     await require_group_can_send(db, chat_id, uid, new_media)
                 if normalized_media_metadata is not None:

@@ -1428,3 +1428,34 @@ def test_profile_birthday_and_bio_privacy(env):
             assert (await client.put(endpoint, headers=owner, json={'birthday': None})).json()['birthday'] is None
 
     run(scenario())
+
+
+def test_voice_privacy_rejects_direct_and_forwarded_voice_but_not_text(env):
+    import sqlite3
+    import uuid
+
+    db_path, app = env
+    media = uuid.uuid4().hex
+
+    async def scenario():
+        async with await client_for(app) as client:
+            sender, recipient = headers(101), headers(102)
+            with sqlite3.connect(db_path.with_name('waysgram_messenger.sqlite3')) as db:
+                db.execute('''INSERT INTO media_assets (id,owner_telegram_id,storage_name,mime_type,size_bytes,created_at,media_kind)
+                    VALUES(?,101,?,'audio/ogg',10,1,'voice')''', (media, media))
+            original = await client.post('/api/messages', headers=sender, json={'recipient_id': 102, 'media_id': media})
+            assert original.status_code == 201
+            mid = original.json()['id']
+            privacy = '/api/me/privacy/voice'
+            assert (await client.put(privacy, headers=recipient, json={'mode': 'nobody'})).status_code == 200
+            direct = await client.post('/api/messages', headers=sender, json={'recipient_id': 102, 'media_id': media})
+            assert direct.status_code == 403 and direct.json()['detail'] == 'VOICE_MESSAGES_FORBIDDEN'
+            legacy = await client.post(f'/api/messages/{mid}/forward', headers=sender, json={'recipient_id': 102})
+            assert legacy.status_code == 403 and legacy.json()['detail'] == 'VOICE_MESSAGES_FORBIDDEN'
+            batch = await client.post('/api/forward', headers=sender, json={'source_scope': 'dm', 'target_scope': 'dm', 'source_peer_id': 102, 'target_peer_id': 102, 'message_ids': [mid]})
+            assert batch.status_code == 403 and batch.json()['detail'] == 'VOICE_MESSAGES_FORBIDDEN'
+            assert (await client.post('/api/messages', headers=sender, json={'recipient_id': 102, 'body': 'Text works'})).status_code == 201
+            assert (await client.put(privacy, headers=recipient, json={'mode': 'nobody', 'allow': [101]})).status_code == 200
+            assert (await client.post('/api/messages', headers=sender, json={'recipient_id': 102, 'media_id': media})).status_code == 201
+
+    run(scenario())
