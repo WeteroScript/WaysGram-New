@@ -1153,3 +1153,25 @@ def test_group_admin_rights_are_independent(env):
             assert (await client.post(path + '/invites', headers=admin, json={})).status_code == 403
 
     run(scenario())
+
+
+def test_group_mute_blocks_sending_without_removing_read_access(env):
+    _, app = env
+
+    async def scenario():
+        async with await client_for(app) as client:
+            owner, member = headers(101), headers(102)
+            group = await client.post('/api/groups', headers=owner, json={'title': 'Mute test'})
+            path = f"/api/groups/{group.json()['id']}"
+            assert (await client.post(path + '/members', headers=owner, json={'telegram_id': 102})).status_code == 201
+            mute = path + '/members/102/mute'
+            assert (await client.put(mute, headers=member, json={'until_date': 0})).status_code == 403
+            assert (await client.put(mute, headers=owner, json={'until_date': 1})).status_code == 400
+            assert (await client.put(mute, headers=owner, json={'until_date': 0})).status_code == 200
+            assert (await client.get(path + '/messages', headers=member)).status_code == 200
+            blocked = await client.post(path + '/messages', headers=member, json={'body': 'Blocked'})
+            assert blocked.status_code == 403 and blocked.json()['detail'] == 'CHAT_WRITE_FORBIDDEN'
+            assert (await client.put(mute, headers=owner, json={'until_date': None})).status_code == 200
+            assert (await client.post(path + '/messages', headers=member, json={'body': 'Allowed'})).status_code == 201
+
+    run(scenario())

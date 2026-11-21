@@ -1270,6 +1270,10 @@ async def init_messenger_storage(database_path: Path) -> None:
                 slow_mode_seconds INTEGER NOT NULL DEFAULT 0
                     CHECK(slow_mode_seconds IN (0,5,10,15,30,60,120,300))
             );
+            CREATE TABLE IF NOT EXISTS group_mutes (
+                group_id INTEGER NOT NULL, telegram_id INTEGER NOT NULL, until_date INTEGER NOT NULL,
+                PRIMARY KEY(group_id,telegram_id)
+            );
             CREATE TABLE IF NOT EXISTS group_members (
                 group_id INTEGER NOT NULL,
                 telegram_id INTEGER NOT NULL,
@@ -4397,6 +4401,12 @@ def build_messenger_router(
     # Group rights: change info, invite/review, remove members, pin, delete others' messages, slow mode.
     def group_has_right(member: dict[str, Any], bit: int) -> bool:
         return member["role"] == "owner" or (member["role"] == "admin" and bool(member["admin_rights"] & bit))
+
+    async def require_group_can_send(db: Any, group_id: int, uid: int) -> None:
+        cur = await db.execute("SELECT 1 FROM group_mutes WHERE group_id=? AND telegram_id=? AND (until_date=0 OR until_date>?)",
+                               (group_id, uid, int(time.time())))
+        if await cur.fetchone():
+            raise HTTPException(403, "CHAT_WRITE_FORBIDDEN")
 
     async def require_group_member(
         db: Any, group_id: int, telegram_id: int
@@ -11049,6 +11059,7 @@ def build_messenger_router(
                         raise HTTPException(status_code=404, detail="Исходное сообщение не найдено")
                 if target_scope == "group":
                     await require_group_member(db, target_peer, uid)
+                    await require_group_can_send(db, target_peer, uid)
                 elif target_scope == "channel":
                     cur = await db.execute("""SELECT 1 FROM channels c WHERE c.id=? AND
                         (c.owner_telegram_id=? OR EXISTS(SELECT 1 FROM channel_admins a
@@ -11100,6 +11111,7 @@ def build_messenger_router(
                 table, sender_col, limit = "messages", "sender_telegram_id", DM_MESSAGES_PER_MINUTE
             elif target_scope == "group":
                 member = await require_group_member(db, target_peer, uid)
+                await require_group_can_send(db, target_peer, uid)
                 table, sender_col, limit = "group_messages", "sender_telegram_id", DM_MESSAGES_PER_MINUTE
                 cur = await db.execute("SELECT slow_mode_seconds FROM chat_groups WHERE id=?", (target_peer,))
                 slow = int((await cur.fetchone())[0])
@@ -13701,7 +13713,7 @@ def build_messenger_router(
                 await db.execute(f"DELETE FROM {table} WHERE scope='group' AND chat_id=?", (group_id,))
             for table in ("read_markers", "read_receipts", "cloud_drafts", "cloud_draft_versions", "cloud_draft_changes"):
                 await db.execute(f"DELETE FROM {table} WHERE scope='group' AND peer_id=?", (group_id,))
-            for table in ("group_join_requests", "group_invites", "group_members", "group_messages"):
+            for table in ("group_join_requests", "group_invites", "group_mutes", "group_members", "group_messages"):
                 await db.execute(f"DELETE FROM {table} WHERE group_id=?", (group_id,))
             await db.execute("DELETE FROM chat_groups WHERE id=?", (group_id,))
             await db.commit()
@@ -14245,6 +14257,27 @@ def build_messenger_router(
             await db.commit()
         return {"removed": cur.rowcount == 1, "group_id": group_id, "telegram_id": telegram_id}
 
+    @router.put("/api/groups/{group_id}/members/{target_id}/mute")
+    async def set_group_mute(group_id: int, target_id: int, payload: dict[str, Any],
+                             authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        uid = int((await current_user(authorization))["telegram_id"])
+        until = payload.get("until_date")
+        if "until_date" not in payload or (until is not None and (type(until) is not int or (until != 0 and not int(time.time()) < until <= 2147483647))):
+            raise HTTPException(400, "Некорректный срок ограничения")
+        async with aiosqlite.connect(db_path()) as db:
+            await db.execute("BEGIN IMMEDIATE")
+            actor = await require_group_member(db, group_id, uid)
+            target = await require_group_member(db, group_id, target_id)
+            if uid == target_id or not group_has_right(actor, 4) or target["role"] != "member":
+                raise HTTPException(403, "Нет права ограничивать этого участника")
+            if until is None:
+                await db.execute("DELETE FROM group_mutes WHERE group_id=? AND telegram_id=?", (group_id, target_id))
+            else:
+                await db.execute("""INSERT INTO group_mutes(group_id,telegram_id,until_date) VALUES(?,?,?)
+                    ON CONFLICT(group_id,telegram_id) DO UPDATE SET until_date=excluded.until_date""", (group_id, target_id, until))
+            await db.commit()
+        return {"muted": until is not None, "until_date": until}
+
     @router.post("/api/groups/{group_id}/admins", status_code=201)
     async def promote_group_admin(
         group_id: int,
@@ -14278,6 +14311,7 @@ def build_messenger_router(
                 "UPDATE group_members SET role='admin',admin_rights=? WHERE group_id=? AND telegram_id=?",
                 (effective_rights, group_id, target_id),
             )
+            await db.execute("DELETE FROM group_mutes WHERE group_id=? AND telegram_id=?", (group_id, target_id))
             await db.commit()
         return {"group_id": group_id, "telegram_id": target_id, "role": "admin", "admin_rights": effective_rights}
 
@@ -14449,6 +14483,7 @@ def build_messenger_router(
         async with aiosqlite.connect(db_path()) as db:
             await db.execute("BEGIN IMMEDIATE")
             membership = await require_group_member(db, group_id, uid)
+            await require_group_can_send(db, group_id, uid)
             previous = await idempotency_lookup(db, uid, scope, descriptor, now)
             if previous is not None:
                 await db.rollback()
@@ -14606,6 +14641,7 @@ def build_messenger_router(
             db.row_factory = aiosqlite.Row
             await db.execute("BEGIN IMMEDIATE")
             membership = await require_group_member(db, group_id, uid)
+            await require_group_can_send(db, group_id, uid)
             previous = await idempotency_lookup(db, uid, scope, descriptor, now)
             if previous is not None:
                 await db.rollback()
