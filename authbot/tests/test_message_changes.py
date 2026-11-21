@@ -1096,3 +1096,35 @@ def test_additional_channel_invites_limit_and_revoke_independently(env):
             assert (await client.get(path.rsplit('/', 1)[0], headers=member)).status_code == 200
 
     run(scenario())
+
+
+def test_private_channel_join_requests_require_owner_approval(env):
+    _, app = env
+
+    async def scenario():
+        async with await client_for(app) as client:
+            owner, member, guest = headers(101), headers(102), headers(ADMIN)
+            channel = await client.post('/api/channels', headers=owner, json={'title': 'Approval', 'is_public': False})
+            assert channel.status_code == 201
+            path = f"/api/channels/{channel.json()['id']}"
+            invite = await client.post(path + '/invites', headers=owner, json={'require_approval': True, 'max_uses': 1})
+            assert invite.status_code == 201, invite.text
+            link = invite.json()['invite_link']
+            assert (await client.get(link)).json()['require_approval'] is True
+            for user in (member, guest, member):
+                result = await client.post('/api/channels/join', headers=user, json={'invite_link': link})
+                assert result.status_code == 200 and result.json()['join_requested'] is True
+                assert (await client.get(path, headers=user)).status_code == 403
+            requests = path + '/join-requests'
+            assert (await client.get(requests, headers=member)).status_code == 403
+            assert (await client.get(path, headers=owner)).json()['requests_pending'] == 2
+            assert (await client.get(requests, headers=owner)).json()['count'] == 2
+            assert (await client.post(requests + '/102/approve', headers=member)).status_code == 403
+            assert (await client.post(requests + '/102/approve', headers=owner)).status_code == 200
+            assert (await client.get(path, headers=member)).status_code == 200
+            assert (await client.post(requests + f'/{ADMIN}/approve', headers=owner)).status_code == 410
+            assert (await client.post(requests + f'/{ADMIN}/decline', headers=owner)).status_code == 200
+            assert (await client.get(path, headers=guest)).status_code == 403
+            assert (await client.get(path, headers=owner)).json()['requests_pending'] == 0
+
+    run(scenario())
