@@ -394,6 +394,9 @@ class NativeMessagingSourceChecks(unittest.TestCase):
         self.assertIn('sender.channel_id == target.channel_id', helper)
 
     def test_native_text_edit_uses_supported_put_and_shows_actual_error(self):
+        chat = self.source('ui/ChatActivity.java')
+        preflight = chat.split('WaysGram checks ownership on the edit PUT', 1)[1].split('TL_messages_getMessageEditData req', 1)[0]
+        self.assertIn('!org.telegram.tgnet.WaysGramTransport.ENABLED', preflight)
         api = self.source('tgnet/WaysGramApi.java')
         bridge = self.source('tgnet/WaysGramMessages.java')
         self.assertIn('return request("PUT", path, body, getToken(account), 30000)', api)

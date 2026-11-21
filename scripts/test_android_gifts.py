@@ -255,6 +255,14 @@ class AndroidGiftSourceChecks(unittest.TestCase):
         self.assertIn('isWaysGramWornGift(status)', profile)
         self.assertIn('R.drawable.filled_crown_on', profile)
 
+    def test_worn_pattern_uses_resolved_artwork_not_an_unloaded_status_id(self):
+        profile = self.source("ui/ProfileActivity.java")
+        bridge = self.source("tgnet/WaysGramProfile.java")
+        self.assertIn("WaysGramProfile.wornPatternDocumentId(currentAccount, status.collectible_id)", profile)
+        self.assertIn("topView.setBackgroundEmojiId(patternId", profile)
+        self.assertIn("readyWornPatterns.put(key, pattern.id)", bridge)
+        self.assertIn("!ready.isEmpty() || patternChanged", bridge)
+
     def test_waysgram_collectible_pin_uses_internal_profile_route(self):
         sheet = self.source("ui/Stars/StarGiftSheet.java")
         self.assertIn('this::toggleWaysGramPin', sheet)
