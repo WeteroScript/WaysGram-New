@@ -5356,6 +5356,41 @@ def build_messenger_router(
             await db.commit()
         return {"visible": visible}
 
+    gift_receive_types = ("regular", "collectible")
+
+    async def gift_receive_rules(db: Any, uid: int) -> list[str]:
+        cur = await db.execute("SELECT rules FROM account_profile_privacy WHERE telegram_id=? AND setting='gift-receive'", (uid,))
+        row = await cur.fetchone()
+        return json.loads(row[0]) if row else list(gift_receive_types)
+
+    @router.get("/api/me/gift-receive")
+    async def get_gift_receive(authorization: str | None = Header(default=None)):
+        uid = int((await current_user(authorization))["telegram_id"])
+        async with aiosqlite.connect(db_path()) as db:
+            return {"allowed_types": await gift_receive_rules(db, uid)}
+
+    @router.put("/api/me/gift-receive")
+    async def set_gift_receive(payload: dict[str, Any], authorization: str | None = Header(default=None)):
+        uid = int((await current_user(authorization))["telegram_id"])
+        allowed = payload.get("allowed_types")
+        if not isinstance(allowed, list) or len(allowed) > len(gift_receive_types) or any(x not in gift_receive_types for x in allowed):
+            raise HTTPException(400, "GIFT_TYPES_INVALID")
+        allowed = [kind for kind in gift_receive_types if kind in allowed]
+        async with aiosqlite.connect(db_path()) as db:
+            await db.execute("""INSERT INTO account_profile_privacy VALUES(?,'gift-receive',?)
+                ON CONFLICT(telegram_id,setting) DO UPDATE SET rules=excluded.rules""", (uid, json.dumps(allowed)))
+            await db.commit()
+        return {"allowed_types": allowed}
+
+    async def require_gift_type(db: Any, recipient: int, upgrade_level: int = 0, attributes_json: str | None = None) -> None:
+        try:
+            attributes = json.loads(attributes_json or "{}")
+        except (ValueError, TypeError):
+            attributes = {}
+        kind = "collectible" if int(upgrade_level or 0) > 0 or _has_collectible_traits(attributes) else "regular"
+        if kind not in await gift_receive_rules(db, recipient):
+            raise HTTPException(403, "GIFT_TYPE_FORBIDDEN")
+
     async def require_gift_delivery_allowed(db: Any, sender: int, recipient: int) -> None:
         if sender == recipient:
             return
@@ -6091,6 +6126,7 @@ def build_messenger_router(
                     raise HTTPException(status_code=404, detail="Получатель не найден")
                 owner = int(recipient)
                 await require_gift_delivery_allowed(db, uid, owner)
+                await require_gift_type(db, owner)
             cur = await db.execute(
                 "UPDATE accounts SET stars=stars-?,updated_at=? WHERE telegram_id=? AND stars>=?",
                 (price, now, uid, price),
@@ -7234,7 +7270,7 @@ def build_messenger_router(
                 raise HTTPException(status_code=400, detail="Нельзя передать подарок самому себе")
             await require_gift_delivery_allowed(db, uid, target_id)
             cur = await db.execute(
-                """SELECT id,gift_name FROM user_gifts
+                """SELECT id,gift_name,upgrade_level,attributes_json FROM user_gifts
                    WHERE serial_number=? AND owner_telegram_id=?""",
                 (serial, uid),
             )
@@ -7242,6 +7278,7 @@ def build_messenger_router(
             if not gift:
                 await db.rollback()
                 raise HTTPException(status_code=404, detail="Подарок не найден в вашем инвентаре")
+            await require_gift_type(db, target_id, gift["upgrade_level"], gift["attributes_json"])
             cur = await db.execute(
                 "SELECT 1 FROM gift_market_listings WHERE serial_number=? AND status='active'",
                 (serial,),
@@ -11352,6 +11389,7 @@ def build_messenger_router(
             if gift is None:
                 await db.rollback()
                 raise HTTPException(status_code=404, detail="Подарок не найден в вашем инвентаре")
+            await require_gift_type(db, recipient_id, gift["upgrade_level"], gift["attributes_json"])
             cur = await db.execute(
                 "SELECT 1 FROM gift_market_listings WHERE serial_number=? AND status='active'",
                 (serial,),

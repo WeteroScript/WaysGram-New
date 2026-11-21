@@ -3090,3 +3090,32 @@ def test_blocked_sender_cannot_deliver_gifts_through_any_route(env):
             assert (await client.post(buy, headers=sender, json={'recipient_id': 102})).status_code in (200, 201)
 
     run(scenario())
+
+
+def test_recipient_gift_type_filter_applies_before_purchase_and_transfer(env):
+    path, app = env
+    serial = 'WG-000000000045'
+    with db_split.sqlite_connect(path) as db:
+        db.execute('INSERT INTO user_gifts(serial_number,gift_name,owner_telegram_id,acquired_at,upgrade_level) VALUES(?,?,?,?,?)',
+                   (serial, 'Collectible', 101, 1_800_000_000, 1))
+        db.commit()
+
+    async def scenario():
+        await bot_module.set_telegram_gift_values('g1', price=1, supply=1)
+        async with await client_for(app) as client:
+            sender, owner = headers(101), headers(102)
+            settings = '/api/me/gift-receive'
+            assert (await client.get(settings, headers=owner)).json()['allowed_types'] == ['regular', 'collectible']
+            assert (await client.put(settings, headers=owner, json={'allowed_types': ['unknown']})).status_code == 400
+            assert (await client.put(settings, headers=owner, json={'allowed_types': ['collectible']})).status_code == 200
+            route = '/api/telegram/gifts/g1/purchase'
+            assert (await client.post(route, headers=sender, json={'recipient_id': 102})).json()['detail'] == 'GIFT_TYPE_FORBIDDEN'
+            assert (await client.put(settings, headers=owner, json={'allowed_types': ['regular']})).status_code == 200
+            delivery = {'recipient_id': 102, 'serial_number': serial}
+            for endpoint in ('/api/gifts/transfer', '/api/messages/gift'):
+                assert (await client.post(endpoint, headers=sender, json=delivery)).json()['detail'] == 'GIFT_TYPE_FORBIDDEN'
+            assert (await client.post(route, headers=sender, json={'recipient_id': 102})).status_code in (200, 201)
+            assert (await client.put(settings, headers=owner, json={'allowed_types': ['collectible']})).status_code == 200
+            assert (await client.post('/api/gifts/transfer', headers=sender, json=delivery)).status_code == 200
+
+    run(scenario())
