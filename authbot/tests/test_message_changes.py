@@ -691,3 +691,71 @@ def test_message_reactions_toggle_and_respect_chat_access(env) -> None:
             )).status_code == 401
 
     run(scenario())
+
+
+def test_poll_and_checklist_round_trip(env) -> None:
+    _, app = env
+
+    async def scenario():
+        async with await client_for(app) as client:
+            async def send(card):
+                response = await client.post('/api/messages', headers=headers(101), json={'recipient_id': 102, 'card': card})
+                assert response.status_code == 201, response.text
+                return response.json()['id']
+
+            async def history(viewer, other):
+                response = await client.get(f'/api/messages?with={other}', headers=headers(viewer))
+                assert response.status_code == 200, response.text
+                return {row['id']: row['card'] for row in response.json()['messages']}
+
+            items = [{'id': 1, 'text': 'A'}, {'id': 2, 'text': 'B'}]
+            poll = await send({'kind': 'poll', 'title': 'Pick one', 'items': items})
+            checklist = await send({'kind': 'checklist', 'title': 'Tasks', 'items': items, 'others_can_complete': True})
+            private_list = await send({'kind': 'checklist', 'title': 'Owner only', 'items': items})
+            assert (await history(102, 101))[poll]['items'] == items
+            vote_url = f'/api/message-cards/dm/101/{poll}'
+            assert (await client.post(vote_url, headers=headers(ADMIN), json={'votes': [1]})).status_code == 404
+            assert (await client.post(vote_url, headers=headers(102), json={'votes': [1, 2]})).status_code == 400
+            vote = await client.post(vote_url, headers=headers(102), json={'votes': [2]})
+            assert vote.status_code == 200, vote.text
+            assert (await history(102, 101))[poll]['votes']['2'] == {'count': 1, 'chosen': True}
+            assert (await history(101, 102))[poll]['votes']['2'] == {'count': 1, 'chosen': False}
+            assert (await client.post(vote_url, headers=headers(102), json={'votes': []})).status_code == 200
+            assert not (await history(101, 102))[poll].get('votes')
+            toggle_url = f'/api/message-cards/dm/101/{checklist}'
+            assert (await client.post(toggle_url, headers=headers(102), json={'completed': [1]})).status_code == 200
+            assert (await history(101, 102))[checklist]['done']['1']['user'] == 102
+            assert (await client.post(toggle_url, headers=headers(102), json={'incompleted': [1]})).status_code == 200
+            assert (await history(101, 102))[checklist]['done'] == {}
+            assert (await client.post(f'/api/message-cards/dm/101/{private_list}', headers=headers(102), json={'completed': [1]})).status_code == 403
+
+    run(scenario())
+
+
+def test_message_cards_in_group_and_channel(env) -> None:
+    _, app = env
+
+    async def scenario():
+        async with await client_for(app) as client:
+            group = (await client.post('/api/groups', headers=headers(101), json={'title': 'Cards'})).json()['id']
+            assert (await client.post(f'/api/groups/{group}/members', headers=headers(101), json={'telegram_id': 102})).status_code in (200, 201)
+            channel = (await client.post('/api/channels', headers=headers(101), json={'title': 'Cards', 'username': 'card_news'})).json()['id']
+            card = {'kind': 'poll', 'title': 'Pick', 'multiple_choice': True,
+                    'items': [{'id': 0, 'text': 'A'}, {'id': 1, 'text': 'B'}]}
+            for scope, peer in [('group', group), ('channel', channel)]:
+                path = f'/api/{scope}s/{peer}/messages'
+                sent = await client.post(path, headers=headers(101), json={'card': card})
+                assert sent.status_code == 201, sent.text
+                mid = sent.json()['id']
+                update = f'/api/message-cards/{scope}/{peer}/{mid}'
+                if scope == 'group':
+                    assert (await client.post(update, headers=headers(ADMIN), json={'votes': [0]})).status_code == 403
+                resp = await client.post(update, headers=headers(102), json={'votes': [0, 1]})
+                assert resp.status_code == 200, resp.text
+                rows = (await client.get(path, headers=headers(102))).json()['messages']
+                assert rows[0]['card']['voters'] == 1
+                assert rows[0]['card']['votes'] == {'0': {'chosen': True, 'count': 1}, '1': {'chosen': True, 'count': 1}}
+                assert (await client.delete(f'{path}/{mid}', headers=headers(101))).status_code == 200
+                assert (await client.post(update, headers=headers(102), json={'votes': [0]})).status_code == 404
+
+    run(scenario())

@@ -44,6 +44,8 @@ MESSENGER_TABLES = frozenset(
         "message_reactions",
         "message_forward_sources",
         "message_forward_locations",
+        "message_cards",
+        "message_card_votes",
         "message_hidden_for",
         "message_events",
         "scheduled_messages",

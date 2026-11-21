@@ -18,7 +18,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from io import BytesIO
 from urllib.parse import quote, unquote, urlsplit
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Literal, Callable
 
 import aiosqlite
 import gift_names
@@ -876,6 +876,17 @@ async def init_messenger_storage(database_path: Path) -> None:
                 message_id INTEGER NOT NULL,
                 from_name TEXT NOT NULL,
                 from_date INTEGER NOT NULL,
+                PRIMARY KEY(scope,message_id)
+            );
+            CREATE TABLE IF NOT EXISTS message_card_votes (
+                scope TEXT NOT NULL, message_id INTEGER NOT NULL,
+                voter INTEGER NOT NULL, item_id INTEGER NOT NULL,
+                PRIMARY KEY(scope,message_id,voter,item_id)
+            );
+            CREATE TABLE IF NOT EXISTS message_cards (
+                scope TEXT NOT NULL CHECK(scope IN ('dm','group','channel')),
+                message_id INTEGER NOT NULL,
+                data_json TEXT NOT NULL,
                 PRIMARY KEY(scope,message_id)
             );
             CREATE TABLE IF NOT EXISTS message_forward_locations (
@@ -1760,6 +1771,13 @@ async def init_messenger_storage(database_path: Path) -> None:
                 DELETE FROM message_forward_sources WHERE scope='{scope}' AND message_id=OLD.id;
                 END""")
 
+        for table, scope in (("messages", "dm"), ("group_messages", "group"), ("channel_messages", "channel")):
+            await db.execute(f"""CREATE TRIGGER IF NOT EXISTS {db_split.SCHEMA}.cleanup_message_card_{scope}
+                AFTER DELETE ON {table} BEGIN
+                DELETE FROM message_card_votes WHERE scope='{scope}' AND message_id=OLD.id;
+                DELETE FROM message_cards WHERE scope='{scope}' AND message_id=OLD.id;
+                END""")
+
         for table, scope in (("group_messages", "group"), ("channel_messages", "channel")):
             await db.execute(f"""CREATE TRIGGER IF NOT EXISTS {db_split.SCHEMA}.cleanup_forward_location_{scope}
                 AFTER DELETE ON {table} BEGIN
@@ -2304,6 +2322,43 @@ async def fetch_telegram_sticker(bot: Any, file_id: str, preferred_mime: str = "
             raise ValueError("Telegram sticker file exceeds the supported size")
     media_type = preferred_mime or mimetypes.guess_type(file_path)[0] or "application/octet-stream"
     return content, media_type
+
+
+def _parse_message_card(value: Any) -> dict[str, Any] | None:
+    if value is None:
+        return None
+
+    def invalid() -> HTTPException:
+        return HTTPException(status_code=400, detail="Некорректный опрос или чек-лист")
+
+    def text(raw: Any, limit: int) -> str:
+        if not isinstance(raw, str) or not raw.strip() or len(raw) > limit:
+            raise invalid()
+        return raw
+
+    if not isinstance(value, dict) or value.get("kind") not in ("poll", "checklist"):
+        raise invalid()
+    kind = value["kind"]
+    items = value.get("items")
+    limit = 12 if kind == "poll" else 30
+    if not isinstance(items, list) or not (2 if kind == "poll" else 1) <= len(items) <= limit:
+        raise invalid()
+    result = {"kind": kind, "title": text(value.get("title"), 300), "items": []}
+    ids = set()
+    for item in items:
+        if not isinstance(item, dict):
+            raise invalid()
+        item_id = item.get("id")
+        if type(item_id) is not int or not 0 <= item_id <= 2147483647 or item_id in ids:
+            raise invalid()
+        ids.add(item_id)
+        result["items"].append({"id": item_id, "text": text(item.get("text"), 100)})
+    for flag in (("multiple_choice",) if kind == "poll" else ("others_can_complete",)):
+        enabled = value.get(flag, False)
+        if type(enabled) is not bool:
+            raise invalid()
+        result[flag] = enabled
+    return result
 
 
 def _message_body(value: str) -> str:
@@ -8211,7 +8266,27 @@ def build_messenger_router(
                 f"SELECT message_id,from_name,from_date FROM message_forward_sources WHERE scope=? AND message_id IN ({placeholders})",
                 (scope, *message_ids),
             )
+            card_rows = await db.execute(
+                f"SELECT message_id,data_json FROM message_cards WHERE scope=? AND message_id IN ({placeholders})",
+                (scope, *message_ids),
+            )
+            cards = {int(row[0]): json.loads(row[1]) for row in await card_rows.fetchall()}
             sources = {int(row[0]): (str(row[1]), int(row[2])) for row in await cur.fetchall()}
+            if any(card["kind"] == "poll" for card in cards.values()):
+                cur = await db.execute(
+                    f"SELECT message_id,item_id,COUNT(*),MAX(voter=?) FROM message_card_votes WHERE scope=? AND message_id IN ({placeholders}) GROUP BY message_id,item_id",
+                    (user_id, scope, *message_ids),
+                )
+                for mid, option, count, chosen in await cur.fetchall():
+                    if mid in cards:
+                        cards[mid].setdefault("votes", {})[str(option)] = {"count": count, "chosen": bool(chosen)}
+                cur = await db.execute(
+                    f"SELECT message_id,COUNT(DISTINCT voter) FROM message_card_votes WHERE scope=? AND message_id IN ({placeholders}) GROUP BY message_id",
+                    (scope, *message_ids),
+                )
+                for mid, count in await cur.fetchall():
+                    if mid in cards:
+                        cards[mid]["voters"] = count
             locations = {}
             contacts = {}
             if scope in ("group", "channel"):
@@ -8230,6 +8305,8 @@ def build_messenger_router(
             mine.setdefault(int(message_id), []).append(str(reaction))
         for item in items:
             _add_message_entities(item)
+            if int(item["id"]) in cards:
+                item["card"] = cards[int(item["id"])]
             item["my_reactions"] = mine.get(int(item["id"]), [])
             source = sources.get(int(item["id"]))
             if source:
@@ -8492,8 +8569,13 @@ def build_messenger_router(
             raise HTTPException(status_code=400, detail="Нельзя объединять контакт с файлом или геолокацией")
         if location_payload and media_id:
             raise HTTPException(status_code=400, detail="Нельзя отправлять геолокацию вместе с файлом")
+        card = _parse_message_card(payload.get("card"))
+        if card and (contact_payload or location_payload or media_id or "entities" in payload):
+            raise HTTPException(status_code=400, detail="Нельзя объединять опрос или чек-лист с другим вложением")
         body_value = str(payload.get("body") or "")
-        if contact_payload and not body_value.strip():
+        if card:
+            body_value = card["title"]
+        elif contact_payload and not body_value.strip():
             body_value = "Контакт: " + contact_payload["name"]
         elif location_payload and not body_value.strip():
             body_value = str(location_payload["label"] or "Местоположение")
@@ -8568,6 +8650,9 @@ def build_messenger_router(
                     ("channel", message_id, location_payload["latitude"],
                      location_payload["longitude"], location_payload["label"], _location_venue_json(location_payload)),
                 )
+            if card:
+                await db.execute("INSERT INTO message_cards(scope,message_id,data_json) VALUES(?,?,?)",
+                                 ("channel", message_id, json.dumps(card, ensure_ascii=True)))
             await record_event(
                 db, "channel", message_id, "new_message", uid, chat_id=channel_id,
             )
@@ -8580,6 +8665,8 @@ def build_messenger_router(
                 result["quote"] = quote
             if entities:
                 result["entities"] = entities
+            if card:
+                result["card"] = card
             await idempotency_store(db, uid, scope, descriptor, result, now)
             await db.commit()
         async with aiosqlite.connect(db_path()) as db:
@@ -9148,6 +9235,63 @@ def build_messenger_router(
         await attach_my_reactions(items, "dm", 0, uid)
         return {"query": term, "messages": items, "count": len(items), "has_more": len(items) == 100}
 
+    @router.post("/api/message-cards/{scope}/{peer_id}/{message_id}")
+    async def update_message_card(scope: Literal["dm", "group", "channel"], peer_id: int, message_id: int,
+                                  payload: dict[str, Any], authorization: str | None = Header(default=None)):
+        uid = int((await current_user(authorization))["telegram_id"])
+        async with aiosqlite.connect(db_path()) as db:
+            await db.execute("BEGIN IMMEDIATE")
+            await require_cloud_draft_access(scope, peer_id, uid, db)
+            if scope == "dm":
+                cur = await db.execute("""SELECT sender_telegram_id FROM messages WHERE id=? AND
+                    ((sender_telegram_id=? AND recipient_telegram_id=?) OR (sender_telegram_id=? AND recipient_telegram_id=?))
+                    AND NOT EXISTS(SELECT 1 FROM message_hidden_for h WHERE h.message_id=messages.id AND h.telegram_id=?)""",
+                    (message_id, uid, peer_id, peer_id, uid, uid))
+            else:
+                table, peer_col, author = (("group_messages", "group_id", "sender_telegram_id") if scope == "group"
+                                           else ("channel_messages", "channel_id", "author_telegram_id"))
+                cur = await db.execute(f"SELECT {author} FROM {table} WHERE id=? AND {peer_col}=?", (message_id, peer_id))
+            owner = await cur.fetchone()
+            cur = await db.execute("SELECT data_json FROM message_cards WHERE scope=? AND message_id=?", (scope, message_id))
+            row = await cur.fetchone()
+            if owner is None or row is None:
+                raise HTTPException(404, "Вложение не найдено")
+            card = json.loads(row[0])
+            allowed = {item["id"] for item in card["items"]}
+
+            def ids(key):
+                values = payload.get(key, [])
+                if not isinstance(values, list) or len(values) > len(allowed) or any(type(v) is not int or v not in allowed for v in values):
+                    raise HTTPException(400, "Некорректные пункты")
+                return set(values)
+
+            if card["kind"] == "poll" and "votes" in payload:
+                choices = ids("votes")
+                if len(choices) > 1 and not card["multiple_choice"]:
+                    raise HTTPException(400, "Выберите один вариант")
+                await db.execute("DELETE FROM message_card_votes WHERE scope=? AND message_id=? AND voter=?", (scope, message_id, uid))
+                await db.executemany("INSERT INTO message_card_votes VALUES(?,?,?,?)", [(scope, message_id, uid, c) for c in choices])
+            elif card["kind"] == "checklist" and ("completed" in payload or "incompleted" in payload):
+                if uid != owner[0] and not card["others_can_complete"]:
+                    raise HTTPException(403, "Отмечать пункты может только автор")
+                complete, undo = ids("completed"), ids("incompleted")
+                if complete & undo:
+                    raise HTTPException(400, "Некорректные пункты")
+                done = card.setdefault("done", {})
+                for item in undo:
+                    done.pop(str(item), None)
+                for item in complete:
+                    done.setdefault(str(item), {"user": uid, "date": int(time.time())})
+                await db.execute("UPDATE message_cards SET data_json=? WHERE scope=? AND message_id=?", (json.dumps(card), scope, message_id))
+            else:
+                raise HTTPException(400, "Некорректное действие")
+            if scope == "dm":
+                await record_event(db, scope, message_id, "edit", uid, user_a=uid, user_b=peer_id)
+            else:
+                await record_event(db, scope, message_id, "edit", uid, chat_id=peer_id)
+            await db.commit()
+        return {"ok": True}
+
     @router.post("/api/messages/quote/v1", status_code=201)
     @router.post("/api/messages", status_code=201)
     async def send_message(
@@ -9172,8 +9316,13 @@ def build_messenger_router(
             raise HTTPException(status_code=400, detail="Нельзя объединять контакт с файлом или геолокацией")
         if location_payload and media_id:
             raise HTTPException(status_code=400, detail="Нельзя отправлять геолокацию вместе с файлом")
+        card = _parse_message_card(payload.get("card"))
+        if card and (contact_payload or location_payload or media_id or "entities" in payload):
+            raise HTTPException(status_code=400, detail="Нельзя объединять опрос или чек-лист с другим вложением")
         body_value = str(payload.get("body") or "")
-        if contact_payload and not body_value.strip():
+        if card:
+            body_value = card["title"]
+        elif contact_payload and not body_value.strip():
             body_value = "Контакт: " + contact_payload["name"]
         elif location_payload and not body_value.strip():
             body_value = location_payload["label"] or "Местоположение"
@@ -9280,6 +9429,9 @@ def build_messenger_router(
                         _location_venue_json(location_payload),
                     ),
                 )
+            if card:
+                await db.execute("INSERT INTO message_cards(scope,message_id,data_json) VALUES(?,?,?)",
+                                 ("dm", message_id, json.dumps(card, ensure_ascii=True)))
             await record_event(
                 db, "dm", message_id, "new_message", uid,
                 user_a=uid, user_b=recipient_id,
@@ -9301,6 +9453,8 @@ def build_messenger_router(
                 result["quote"] = quote
             if entities:
                 result["entities"] = entities
+            if card:
+                result["card"] = card
             await idempotency_store(db, uid, "/api/messages", descriptor, result, now)
             queued_push = False
             if recipient_id != uid and not silent:
@@ -13591,8 +13745,13 @@ def build_messenger_router(
             raise HTTPException(status_code=400, detail="Нельзя объединять контакт с файлом или геолокацией")
         if location_payload and media_id:
             raise HTTPException(status_code=400, detail="Нельзя отправлять геолокацию вместе с файлом")
+        card = _parse_message_card(payload.get("card"))
+        if card and (contact_payload or location_payload or media_id or "entities" in payload):
+            raise HTTPException(status_code=400, detail="Нельзя объединять опрос или чек-лист с другим вложением")
         body_value = str(payload.get("body") or "")
-        if contact_payload and not body_value.strip():
+        if card:
+            body_value = card["title"]
+        elif contact_payload and not body_value.strip():
             body_value = "Контакт: " + contact_payload["name"]
         elif location_payload and not body_value.strip():
             body_value = str(location_payload["label"] or "Местоположение")
@@ -13683,6 +13842,9 @@ def build_messenger_router(
                     ("group", message_id, location_payload["latitude"],
                      location_payload["longitude"], location_payload["label"], _location_venue_json(location_payload)),
                 )
+            if card:
+                await db.execute("INSERT INTO message_cards(scope,message_id,data_json) VALUES(?,?,?)",
+                                 ("group", message_id, json.dumps(card, ensure_ascii=True)))
             await record_event(
                 db, "group", message_id, "new_message", uid, chat_id=group_id,
             )
@@ -13699,6 +13861,8 @@ def build_messenger_router(
                 result["quote"] = quote
             if entities:
                 result["entities"] = entities
+            if card:
+                result["card"] = card
             await idempotency_store(db, uid, scope, descriptor, result, now)
             await db.commit()
         async with aiosqlite.connect(db_path()) as db:
