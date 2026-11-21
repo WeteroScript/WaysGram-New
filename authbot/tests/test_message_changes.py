@@ -1817,3 +1817,49 @@ def test_group_analytics_excludes_old_and_deleted_messages_and_requires_admin(en
             assert (await client.get(url, headers=owner)).json()['messages_remaining'] == 0
 
     run(scenario())
+
+
+def test_channel_paid_media_requires_purchase_and_charges_once(env):
+    import aiosqlite
+    import sqlite3
+    import uuid
+
+    path, app = env
+    media = uuid.uuid4().hex
+    storage = path.parent / 'waysgram_media'
+    storage.mkdir(exist_ok=True)
+    (storage / media).write_bytes(b'photo')
+    with sqlite3.connect(path.with_name('waysgram_messenger.sqlite3')) as db:
+        db.execute("""INSERT INTO media_assets(id,owner_telegram_id,storage_name,mime_type,size_bytes,created_at)
+                       VALUES(?,101,?,'image/png',5,1)""", (media, media))
+    with sqlite3.connect(path) as db:
+        db.execute('UPDATE accounts SET stars=10 WHERE telegram_id=102')
+
+    async def scenario():
+        async with await client_for(app) as client:
+            owner, buyer, other = headers(101), headers(102), headers(ADMIN)
+            channel = await client.post('/api/channels', headers=owner,
+                                        json={'title': 'Paid photos', 'username': 'paid_photos', 'is_public': True})
+            base = f"/api/channels/{channel.json()['id']}"
+            post = await client.post(base + '/messages', headers=owner, json={'body': 'Paid photo'})
+            post_url = base + f"/messages/{post.json()['id']}"
+            url = post_url + '/paid-media'
+            file_url = '/api/media/' + media
+            assert (await client.put(url, headers=owner, json={'price_stars': 5, 'media_id': media})).status_code == 200
+            assert (await client.get(url, headers=buyer)).json() == {'price_stars': 5, 'unlocked': False}
+            assert (await client.get(file_url, headers=buyer)).status_code == 404
+            assert (await client.post(base + '/messages', headers=owner, json={'media_id': media})).status_code == 404
+            assert (await client.post(url, headers=buyer, json={'approved_price_stars': 4})).status_code == 402
+            payments = await asyncio.gather(*(client.post(url, headers=buyer, json={'approved_price_stars': 5}) for _ in range(2)))
+            assert all(p.status_code == 200 and p.json()['media_id'] == media for p in payments)
+            result = await client.get(file_url, headers=buyer)
+            assert result.content == b'photo' and 'no-store' in result.headers['cache-control']
+            assert (await client.get(file_url, headers=other)).status_code == 404
+            assert (await client.delete('/api/media/storage/' + media, headers=owner)).status_code == 409
+            assert (await client.delete(post_url, headers=owner)).status_code == 200
+            assert (await client.get(file_url, headers=buyer)).status_code == 404
+        async with aiosqlite.connect(path) as db:
+            cur = await db.execute("SELECT telegram_id,amount FROM economy_transactions WHERE reason LIKE 'channel_paid_media:%' ORDER BY telegram_id")
+            assert await cur.fetchall() == [(101, 5), (102, -5)]
+
+    run(scenario())

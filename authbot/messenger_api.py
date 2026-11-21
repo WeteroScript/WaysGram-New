@@ -1019,6 +1019,18 @@ async def init_messenger_storage(database_path: Path) -> None:
                 ON channel_messages(channel_id, id DESC);
             CREATE INDEX IF NOT EXISTS idx_api_channel_author_time
                 ON channel_messages(author_telegram_id, created_at);
+            CREATE TABLE IF NOT EXISTS channel_paid_media (
+                channel_id INTEGER NOT NULL,
+                message_id INTEGER PRIMARY KEY,
+                media_id TEXT NOT NULL UNIQUE,
+                price_stars INTEGER NOT NULL CHECK(price_stars BETWEEN 1 AND 10000)
+            );
+            CREATE TABLE IF NOT EXISTS channel_paid_media_purchases (
+                message_id INTEGER NOT NULL,
+                buyer_id INTEGER NOT NULL,
+                stars INTEGER NOT NULL,
+                PRIMARY KEY(message_id,buyer_id)
+            );
             CREATE TABLE IF NOT EXISTS channel_paid_reactions (
                 sender_id INTEGER NOT NULL,
                 operation_key TEXT NOT NULL,
@@ -3307,7 +3319,7 @@ def build_messenger_router(
         if not re.fullmatch(r"[a-f0-9]{32}", value):
             raise HTTPException(status_code=400, detail="Некорректный идентификатор изображения")
         cur = await db.execute(
-            "SELECT 1 FROM media_assets WHERE id=? AND owner_telegram_id=?",
+            "SELECT 1 FROM media_assets WHERE id=? AND owner_telegram_id=? AND NOT EXISTS(SELECT 1 FROM channel_paid_media p WHERE p.media_id=media_assets.id)",
             (value, owner_id),
         )
         if await cur.fetchone() is None:
@@ -3852,7 +3864,8 @@ def build_messenger_router(
                     WHERE cm.media_id=a.id AND NOT EXISTS(SELECT 1 FROM channel_bans cb WHERE cb.channel_id=c.id AND cb.telegram_id=? AND (cb.until_date=0 OR cb.until_date>CAST(strftime('%s','now') AS INTEGER))) AND (c.is_public=1 OR c.owner_telegram_id=?
                         OR EXISTS(SELECT 1 FROM channel_admins ca WHERE ca.channel_id=c.id AND ca.telegram_id=?)
                         OR EXISTS(SELECT 1 FROM channel_members member WHERE member.channel_id=c.id AND member.telegram_id=?))
-                )) AS allowed FROM media_assets a WHERE a.id=?""",
+                )) AS allowed FROM media_assets a WHERE a.id=?
+                AND NOT EXISTS(SELECT 1 FROM channel_paid_media p WHERE p.media_id=a.id)""",
             (uid, uid, uid, uid, uid, uid, uid, uid, uid, media_id),
         )
         media = await cur.fetchone()
@@ -4146,8 +4159,9 @@ def build_messenger_router(
                    + (SELECT COUNT(*) FROM channel_messages WHERE media_id=?)
                    + (SELECT COUNT(*) FROM accounts WHERE avatar_media_id=?)
                    + (SELECT COUNT(*) FROM profile_music WHERE media_id=?)
-                   + (SELECT COUNT(*) FROM channel_stories WHERE media_id=? AND deleted=0)""",
-                (media_id, media_id, media_id, media_id, media_id, media_id),
+                   + (SELECT COUNT(*) FROM channel_stories WHERE media_id=? AND deleted=0)
+                   + (SELECT COUNT(*) FROM channel_paid_media p JOIN channel_messages m ON m.id=p.message_id AND m.channel_id=p.channel_id WHERE p.media_id=?)""",
+                (media_id, media_id, media_id, media_id, media_id, media_id, media_id),
             )
             references = int((await cur.fetchone())[0] or 0)
             if references > 0:
@@ -4232,6 +4246,7 @@ def build_messenger_router(
             raise HTTPException(status_code=404, detail="Изображение не найдено")
 
         async with aiosqlite.connect(db_path()) as db:
+            await db.execute("BEGIN")
             db.row_factory = aiosqlite.Row
             cur = await db.execute(
                 "SELECT * FROM media_assets WHERE id=?",
@@ -4243,6 +4258,17 @@ def build_messenger_router(
 
             is_avatar = False
             allowed = int(media["owner_telegram_id"]) == uid
+            cur = await db.execute("SELECT channel_id,message_id FROM channel_paid_media WHERE media_id=?", (media_id,))
+            locked = await cur.fetchone()
+            if locked is not None and not allowed:
+                cur = await db.execute("""SELECT 1 FROM channel_paid_media_purchases p
+                    JOIN channel_messages m ON m.id=p.message_id AND m.channel_id=?
+                    JOIN channels c ON c.id=m.channel_id
+                    WHERE p.message_id=? AND p.buyer_id=? AND """ + STORY_CHANNEL_ACCESS,
+                    (locked["channel_id"], locked["message_id"], uid, uid, uid, uid, uid))
+                if await cur.fetchone() is None:
+                    raise HTTPException(404, "MEDIA_NOT_FOUND")
+                allowed = True
             story_access = False
             if not allowed:
                 cur = await db.execute("""SELECT 1 FROM channel_stories s JOIN channels c ON c.id=s.channel_id
@@ -4367,7 +4393,7 @@ def build_messenger_router(
         )
         response_headers = {
             "Accept-Ranges": "bytes",
-            "Cache-Control": "private, no-store" if is_avatar or story_access else "private, max-age=3600",
+            "Cache-Control": "private, no-store" if is_avatar or story_access or locked is not None else "private, max-age=3600",
             "X-Content-Type-Options": "nosniff",
             "Content-Security-Policy": "default-src 'none'; sandbox",
             "Content-Disposition": content_disposition,
@@ -9210,6 +9236,77 @@ def build_messenger_router(
         return {"days": int(days), "since": since, "as_of": now, "members": members,
                 "current_members_joined": recent_members, "published_posts_remaining": posts,
                 "paid_reaction_purchases": purchases, "paid_reaction_stars": stars}
+
+    @router.put("/api/channels/{channel_id}/messages/{message_id}/paid-media")
+    async def attach_channel_paid_media(channel_id: int, message_id: int, payload: dict[str, Any],
+                                        authorization: str | None = Header(default=None)):
+        uid = int((await current_user(authorization))["telegram_id"])
+        price = payload.get("price_stars")
+        if type(price) is not int or not 1 <= price <= 10000:
+            raise HTTPException(400, "INVALID_PAID_MEDIA_PRICE")
+        async with aiosqlite.connect(db_path()) as db:
+            await db.execute("BEGIN IMMEDIATE")
+            cur = await db.execute("""SELECT 1 FROM channel_messages m JOIN channels c ON c.id=m.channel_id
+                WHERE m.id=? AND c.id=? AND c.owner_telegram_id=? AND m.media_id IS NULL""", (message_id, channel_id, uid))
+            if not await cur.fetchone():
+                raise HTTPException(404, "CHANNEL_POST_NOT_FOUND")
+            media = await require_owned_media(db, payload.get("media_id"), uid)
+            cur = await db.execute("""SELECT 1 FROM media_assets a WHERE a.id=?
+                AND (a.mime_type LIKE 'image/%' OR a.mime_type LIKE 'video/%')
+                AND NOT EXISTS(SELECT 1 FROM messages WHERE media_id=a.id)
+                AND NOT EXISTS(SELECT 1 FROM group_messages WHERE media_id=a.id)
+                AND NOT EXISTS(SELECT 1 FROM channel_messages WHERE media_id=a.id)
+                AND NOT EXISTS(SELECT 1 FROM channel_stories WHERE media_id=a.id)
+                AND NOT EXISTS(SELECT 1 FROM accounts WHERE avatar_media_id=a.id)
+                AND NOT EXISTS(SELECT 1 FROM profile_music WHERE media_id=a.id)""", (media,))
+            if not await cur.fetchone():
+                raise HTTPException(400, "PAID_MEDIA_REQUIRES_UNSHARED_PHOTO_OR_VIDEO")
+            cur = await db.execute("INSERT OR IGNORE INTO channel_paid_media VALUES(?,?,?,?)", (channel_id, message_id, media, price))
+            if cur.rowcount != 1:
+                raise HTTPException(409, "PAID_MEDIA_ALREADY_ATTACHED")
+            await db.commit()
+        return {"price_stars": price}
+
+    @router.get("/api/channels/{channel_id}/messages/{message_id}/paid-media")
+    @router.post("/api/channels/{channel_id}/messages/{message_id}/paid-media")
+    async def channel_paid_media(channel_id: int, message_id: int, request: Request,
+                                 payload: dict[str, Any] | None = None, authorization: str | None = Header(default=None)):
+        uid = int((await current_user(authorization))["telegram_id"])
+        buy = request.method == "POST"
+        async with aiosqlite.connect(db_path()) as db:
+            await db.execute("BEGIN IMMEDIATE" if buy else "BEGIN")
+            await require_channel_access(channel_id, uid)
+            cur = await db.execute("""SELECT p.media_id,p.price_stars,c.owner_telegram_id,a.storage_name,
+                EXISTS(SELECT 1 FROM channel_paid_media_purchases b WHERE b.message_id=p.message_id AND b.buyer_id=?)
+                FROM channel_paid_media p JOIN channel_messages m ON m.id=p.message_id AND m.channel_id=p.channel_id
+                JOIN channels c ON c.id=p.channel_id JOIN media_assets a ON a.id=p.media_id
+                WHERE p.channel_id=? AND p.message_id=?""", (uid, channel_id, message_id))
+            offer = await cur.fetchone()
+            if offer is None:
+                raise HTTPException(404, "PAID_MEDIA_NOT_FOUND")
+            media, price, owner, storage_name, purchased = offer
+            unlocked = purchased or uid == owner
+            if buy and not unlocked:
+                approved = (payload or {}).get("approved_price_stars")
+                if type(approved) is not int or approved != price:
+                    raise HTTPException(402, {"code": "PAID_MEDIA_PRICE_REQUIRED", "stars": price})
+                if not await asyncio.to_thread((media_storage_dir() / storage_name).is_file):
+                    raise HTTPException(404, "PAID_MEDIA_NOT_FOUND")
+                now = int(time.time())
+                for account, amount in ((uid, -price), (owner, price)):
+                    cur = await db.execute("""UPDATE accounts SET stars=stars+? WHERE telegram_id=? AND is_banned=0
+                        AND stars+? BETWEEN 0 AND 9223372036854775807 RETURNING stars""", (amount, account, amount))
+                    balance = await cur.fetchone()
+                    await cur.close()
+                    if balance is None:
+                        raise HTTPException(409, "PAID_MEDIA_TRANSFER_FAILED")
+                    await db.execute("""INSERT INTO economy_transactions
+                        (telegram_id,asset,amount,balance_after,reason,admin_id,created_at) VALUES(?,'stars',?,?,?,NULL,?)""",
+                        (account, amount, balance[0], f"channel_paid_media:{channel_id}:{message_id}", now))
+                await db.execute("INSERT INTO channel_paid_media_purchases VALUES(?,?,?)", (message_id, uid, price))
+                await db.commit()
+                unlocked = True
+        return {"price_stars": price, "unlocked": bool(unlocked), **({"media_id": media} if unlocked else {})}
 
     @router.put("/api/channels/{channel_id}/paid-reactions")
     async def set_channel_paid_reactions(channel_id: int, payload: dict[str, Any],
