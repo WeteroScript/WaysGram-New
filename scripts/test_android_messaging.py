@@ -49,6 +49,12 @@ class NativeMessagingSourceChecks(unittest.TestCase):
         self.assertIn('getUserConfig().saveConfig(true)', intro)
         self.assertIn('NotificationCenter.mainUserInfoChanged', intro)
 
+    def test_waysgram_chat_refresh_does_not_request_telegram_boosts(self):
+        chat = self.source('ui/ChatActivity.java')
+        edit = self.source('ui/ChatEditActivity.java')
+        self.assertIn('!org.telegram.tgnet.WaysGramTransport.ENABLED && ChatObject.isBoostSupported(currentChat)', chat)
+        self.assertIn('!org.telegram.tgnet.WaysGramTransport.ENABLED && ChatObject.isChannelAndNotMegaGroup(currentChat) && !ChatObject.isCommunity(currentChat)', edit)
+
     def test_secret_numbers_are_grouped_and_valid_at_login(self):
         login = self.source('ui/LoginActivity.java')
         picker = self.source('ui/CountrySelectActivity.java')
