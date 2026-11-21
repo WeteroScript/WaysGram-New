@@ -966,3 +966,36 @@ def test_channel_moderation_blocks_rejoin_and_hides_public_history(env):
             assert (await client.put(path + '/membership', headers=member, json={'joined': True})).status_code == 200
 
     run(scenario())
+
+
+def test_temporary_channel_ban_expires_without_restoring_subscription(env):
+    import time
+    import db_split
+
+    path, app = env
+
+    async def scenario():
+        async with await client_for(app) as client:
+            owner, member = headers(101), headers(102)
+            created = await client.post('/api/channels', headers=owner, json={'title': 'Temporary', 'username': 'temporary'})
+            assert created.status_code == 201, created.text
+            cid = created.json()['id']
+            channel = f'/api/channels/{cid}'
+            ban = channel + '/members/102/ban'
+            assert (await client.put(channel + '/membership', headers=member, json={'joined': True})).status_code == 200
+            assert (await client.put(ban, headers=owner, json={'banned': True, 'until_date': 1})).status_code == 400
+            until = int(time.time()) + 600
+            response = await client.put(ban, headers=owner, json={'banned': True, 'until_date': until})
+            assert response.status_code == 200, response.text
+            blocked = (await client.get(channel + '/members', headers=owner, params={'banned': True})).json()
+            assert blocked['members'][0]['until_date'] == until
+            assert (await client.get(channel + '/messages', headers=member)).status_code == 403
+            with db_split.sqlite_connect(path) as db:
+                db.execute('UPDATE channel_bans SET until_date=1 WHERE channel_id=? AND telegram_id=102', (cid,))
+            assert (await client.get(channel + '/members', headers=owner, params={'banned': True})).json()['count'] == 0
+            assert (await client.get(channel + '/messages', headers=member)).status_code == 200
+            listed = (await client.get('/api/channels', headers=member)).json()['channels']
+            assert next(c for c in listed if c['id'] == cid)['is_member'] == 0
+            assert (await client.put(channel + '/membership', headers=member, json={'joined': True})).status_code == 200
+
+    run(scenario())

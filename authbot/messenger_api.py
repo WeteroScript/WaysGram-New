@@ -1611,6 +1611,9 @@ async def init_messenger_storage(database_path: Path) -> None:
         for column in ("share_token", "label"):
             if column not in group_invite_columns:
                 await db.execute(f"ALTER TABLE {db_split.SCHEMA}.group_invites ADD COLUMN {column} TEXT")
+        cur = await db.execute("PRAGMA main.table_info(channel_bans)")
+        if "until_date" not in {str(row[1]) for row in await cur.fetchall()}:
+            await db.execute("ALTER TABLE main.channel_bans ADD COLUMN until_date INTEGER NOT NULL DEFAULT 0")
         cur = await db.execute(f"PRAGMA {db_split.SCHEMA}.table_info(channels)")
         channel_columns = {str(row[1]) for row in await cur.fetchall()}
         if "is_public" not in channel_columns:
@@ -3697,7 +3700,7 @@ def build_messenger_router(
                     WHERE gm.media_id=a.id AND member.telegram_id=?
                 ) OR EXISTS(
                     SELECT 1 FROM channel_messages cm JOIN channels c ON c.id=cm.channel_id
-                    WHERE cm.media_id=a.id AND NOT EXISTS(SELECT 1 FROM channel_bans cb WHERE cb.channel_id=c.id AND cb.telegram_id=?) AND (c.is_public=1 OR c.owner_telegram_id=?
+                    WHERE cm.media_id=a.id AND NOT EXISTS(SELECT 1 FROM channel_bans cb WHERE cb.channel_id=c.id AND cb.telegram_id=? AND (cb.until_date=0 OR cb.until_date>CAST(strftime('%s','now') AS INTEGER))) AND (c.is_public=1 OR c.owner_telegram_id=?
                         OR EXISTS(SELECT 1 FROM channel_admins ca WHERE ca.channel_id=c.id AND ca.telegram_id=?)
                         OR EXISTS(SELECT 1 FROM channel_members member WHERE member.channel_id=c.id AND member.telegram_id=?))
                 )) AS allowed FROM media_assets a WHERE a.id=?""",
@@ -4118,7 +4121,7 @@ def build_messenger_router(
                 cur = await db.execute(
                     """SELECT 1 FROM channel_messages cm
                        JOIN channels c ON c.id=cm.channel_id
-                       WHERE cm.media_id=? AND NOT EXISTS(SELECT 1 FROM channel_bans cb WHERE cb.channel_id=c.id AND cb.telegram_id=?) AND (c.is_public=1 OR c.owner_telegram_id=?
+                       WHERE cm.media_id=? AND NOT EXISTS(SELECT 1 FROM channel_bans cb WHERE cb.channel_id=c.id AND cb.telegram_id=? AND (cb.until_date=0 OR cb.until_date>CAST(strftime('%s','now') AS INTEGER))) AND (c.is_public=1 OR c.owner_telegram_id=?
                            OR EXISTS(SELECT 1 FROM channel_admins ca
                                      WHERE ca.channel_id=c.id AND ca.telegram_id=?)
                            OR EXISTS(SELECT 1 FROM channel_members member
@@ -4163,7 +4166,7 @@ def build_messenger_router(
                        JOIN channels c ON c.id=cm.channel_id
                        WHERE json_valid(video.media_metadata)
                          AND json_extract(video.media_metadata,'$.video_cover_media_id')=?
-                         AND NOT EXISTS(SELECT 1 FROM channel_bans cb WHERE cb.channel_id=c.id AND cb.telegram_id=?) AND (c.is_public=1 OR c.owner_telegram_id=?
+                         AND NOT EXISTS(SELECT 1 FROM channel_bans cb WHERE cb.channel_id=c.id AND cb.telegram_id=? AND (cb.until_date=0 OR cb.until_date>CAST(strftime('%s','now') AS INTEGER))) AND (c.is_public=1 OR c.owner_telegram_id=?
                            OR EXISTS(SELECT 1 FROM channel_admins ca
                                      WHERE ca.channel_id=c.id AND ca.telegram_id=?)
                            OR EXISTS(SELECT 1 FROM channel_members member
@@ -4333,7 +4336,7 @@ def build_messenger_router(
         async with aiosqlite.connect(db_path()) as db:
             cur = await db.execute(
                 """SELECT 1 FROM channels ch
-                   WHERE ch.id=? AND NOT EXISTS(SELECT 1 FROM channel_bans cb WHERE cb.channel_id=ch.id AND cb.telegram_id=?) AND (
+                   WHERE ch.id=? AND NOT EXISTS(SELECT 1 FROM channel_bans cb WHERE cb.channel_id=ch.id AND cb.telegram_id=? AND (cb.until_date=0 OR cb.until_date>CAST(strftime('%s','now') AS INTEGER))) AND (
                        ch.is_public=1 OR ch.owner_telegram_id=?
                        OR EXISTS(SELECT 1 FROM channel_admins ca
                                  WHERE ca.channel_id=ch.id AND ca.telegram_id=?)
@@ -4345,7 +4348,7 @@ def build_messenger_router(
             return await cur.fetchone() is not None
 
     async def require_channel_not_banned(db: Any, channel_id: int, uid: int) -> None:
-        cur = await db.execute("SELECT 1 FROM channel_bans WHERE channel_id=? AND telegram_id=?", (channel_id, uid))
+        cur = await db.execute("SELECT 1 FROM channel_bans WHERE channel_id=? AND telegram_id=? AND (until_date=0 OR until_date>CAST(strftime('%s','now') AS INTEGER))", (channel_id, uid))
         if await cur.fetchone():
             raise HTTPException(403, "Доступ к каналу ограничен владельцем")
 
@@ -4403,7 +4406,7 @@ def build_messenger_router(
             await require_group_member(db, peer_id, telegram_id)
         elif scope == "channel":
             cur = await db.execute(
-                """SELECT NOT EXISTS(SELECT 1 FROM channel_bans cb WHERE cb.channel_id=c.id AND cb.telegram_id=?) AND (c.is_public=1 OR c.owner_telegram_id=?
+                """SELECT NOT EXISTS(SELECT 1 FROM channel_bans cb WHERE cb.channel_id=c.id AND cb.telegram_id=? AND (cb.until_date=0 OR cb.until_date>CAST(strftime('%s','now') AS INTEGER))) AND (c.is_public=1 OR c.owner_telegram_id=?
                        OR EXISTS(SELECT 1 FROM channel_admins ca WHERE ca.channel_id=c.id AND ca.telegram_id=?)
                        OR EXISTS(SELECT 1 FROM channel_members cm WHERE cm.channel_id=c.id AND cm.telegram_id=?))
                    FROM channels c WHERE c.id=?""",
@@ -8118,7 +8121,7 @@ def build_messenger_router(
                                                   AND rm.peer_id=ch.id),0)) AS unread_count
                    FROM channels ch LEFT JOIN accounts owner
                      ON owner.telegram_id=ch.owner_telegram_id
-                   WHERE NOT EXISTS (SELECT 1 FROM channel_bans cb WHERE cb.channel_id=ch.id AND cb.telegram_id=?)
+                   WHERE NOT EXISTS (SELECT 1 FROM channel_bans cb WHERE cb.channel_id=ch.id AND cb.telegram_id=? AND (cb.until_date=0 OR cb.until_date>CAST(strftime('%s','now') AS INTEGER)))
                      AND (ch.is_public=1 OR ch.owner_telegram_id=?
                       OR EXISTS(SELECT 1 FROM channel_admins ca
                                 WHERE ca.channel_id=ch.id AND ca.telegram_id=?)
@@ -8409,10 +8412,13 @@ def build_messenger_router(
                 WHERE m.channel_id=? AND (?='' OR instr(lower(COALESCE(a.username,'')),lower(?))>0
                   OR instr(lower(COALESCE(a.display_name,'')),lower(?))>0)
                 AND (NOT ? OR c.owner_telegram_id=m.telegram_id OR ca.telegram_id IS NOT NULL)"""
+            if banned:
+                base += " AND (m.until_date=0 OR m.until_date>CAST(strftime('%s','now') AS INTEGER))"
+            until_date = "m.until_date" if banned else "0"
             args = (channel_id, q, q, q, admins)
             cur = await db.execute("SELECT COUNT(*) " + base, args)
             count = (await cur.fetchone())[0]
-            cur = await db.execute(f"""SELECT m.telegram_id,m.{date} AS date,a.username,a.display_name,a.avatar_media_id,
+            cur = await db.execute(f"""SELECT m.telegram_id,m.{date} AS date,{until_date} AS until_date,a.username,a.display_name,a.avatar_media_id,
                 CASE WHEN c.owner_telegram_id=m.telegram_id THEN 'owner' WHEN ca.telegram_id IS NOT NULL THEN 'admin' ELSE 'member' END AS role
                 {base} ORDER BY m.{date} DESC,m.telegram_id LIMIT ? OFFSET ?""",
                 args + (max(1, min(200, limit)), max(0, offset)))
@@ -8421,11 +8427,15 @@ def build_messenger_router(
 
     @router.put("/api/channels/{channel_id}/members/{target_id}/ban")
     async def moderate_channel_member(channel_id: int, target_id: int, payload: dict[str, Any],
-                                       authorization: str | None = Header(default=None)) -> dict[str, bool]:
+                                       authorization: str | None = Header(default=None)) -> dict[str, Any]:
         uid = int((await current_user(authorization))["telegram_id"])
         banned = payload.get("banned")
         if type(banned) is not bool:
             raise HTTPException(400, "Некорректное действие модерации")
+        until_date = payload.get("until_date", 0)
+        now = int(time.time())
+        if type(until_date) is not int or (until_date != 0 and (not banned or not now < until_date <= 2147483647)):
+            raise HTTPException(400, "Некорректный срок блокировки")
         async with aiosqlite.connect(db_path()) as db:
             await db.execute("BEGIN IMMEDIATE")
             cur = await db.execute("SELECT owner_telegram_id FROM channels WHERE id=?", (channel_id,))
@@ -8438,13 +8448,15 @@ def build_messenger_router(
                 cur = await db.execute("SELECT 1 FROM accounts WHERE telegram_id=?", (target_id,))
                 if not await cur.fetchone():
                     raise HTTPException(404, "Пользователь не найден")
-                await db.execute("INSERT OR IGNORE INTO channel_bans VALUES(?,?,?)", (channel_id, target_id, int(time.time())))
+                await db.execute("""INSERT INTO channel_bans(channel_id,telegram_id,created_at,until_date) VALUES(?,?,?,?)
+                    ON CONFLICT(channel_id,telegram_id) DO UPDATE SET created_at=excluded.created_at,until_date=excluded.until_date""",
+                    (channel_id, target_id, now, until_date))
                 for table in ("channel_members", "channel_admins"):
                     await db.execute(f"DELETE FROM {table} WHERE channel_id=? AND telegram_id=?", (channel_id, target_id))
             else:
                 await db.execute("DELETE FROM channel_bans WHERE channel_id=? AND telegram_id=?", (channel_id, target_id))
             await db.commit()
-        return {"banned": banned}
+        return {"banned": banned, "until_date": until_date}
 
     @router.get("/api/channels/{channel_id}/admins")
     async def list_channel_admins(
@@ -10777,7 +10789,7 @@ def build_messenger_router(
                 if source_scope == "group":
                     await require_group_member(db, source_peer, uid)
                 elif source_scope == "channel":
-                    cur = await db.execute("""SELECT 1 FROM channels c WHERE c.id=? AND NOT EXISTS(SELECT 1 FROM channel_bans cb WHERE cb.channel_id=c.id AND cb.telegram_id=?) AND
+                    cur = await db.execute("""SELECT 1 FROM channels c WHERE c.id=? AND NOT EXISTS(SELECT 1 FROM channel_bans cb WHERE cb.channel_id=c.id AND cb.telegram_id=? AND (cb.until_date=0 OR cb.until_date>CAST(strftime('%s','now') AS INTEGER))) AND
                         (c.is_public=1 OR c.owner_telegram_id=? OR EXISTS(SELECT 1 FROM channel_admins a
                         WHERE a.channel_id=c.id AND a.telegram_id=?) OR EXISTS(SELECT 1 FROM channel_members m
                         WHERE m.channel_id=c.id AND m.telegram_id=?))""", (source_peer, uid, uid, uid, uid))
@@ -10824,7 +10836,7 @@ def build_messenger_router(
             if source_scope == "group":
                 await require_group_member(db, source_peer, uid)
             elif source_scope == "channel":
-                cur = await db.execute("""SELECT 1 FROM channels c WHERE c.id=? AND NOT EXISTS(SELECT 1 FROM channel_bans cb WHERE cb.channel_id=c.id AND cb.telegram_id=?) AND
+                cur = await db.execute("""SELECT 1 FROM channels c WHERE c.id=? AND NOT EXISTS(SELECT 1 FROM channel_bans cb WHERE cb.channel_id=c.id AND cb.telegram_id=? AND (cb.until_date=0 OR cb.until_date>CAST(strftime('%s','now') AS INTEGER))) AND
                     (c.is_public=1 OR c.owner_telegram_id=? OR EXISTS(
                         SELECT 1 FROM channel_admins a WHERE a.channel_id=c.id AND a.telegram_id=?) OR EXISTS(
                         SELECT 1 FROM channel_members m WHERE m.channel_id=c.id AND m.telegram_id=?))""",
@@ -11462,7 +11474,7 @@ def build_messenger_router(
                     raise HTTPException(status_code=404, detail="Сообщение не найдено")
             elif scope == "channel":
                 cur = await db.execute(
-                    """SELECT NOT EXISTS(SELECT 1 FROM channel_bans cb WHERE cb.channel_id=c.id AND cb.telegram_id=?) AND (c.is_public=1 OR c.owner_telegram_id=?
+                    """SELECT NOT EXISTS(SELECT 1 FROM channel_bans cb WHERE cb.channel_id=c.id AND cb.telegram_id=? AND (cb.until_date=0 OR cb.until_date>CAST(strftime('%s','now') AS INTEGER))) AND (c.is_public=1 OR c.owner_telegram_id=?
                            OR EXISTS(SELECT 1 FROM channel_admins ca WHERE ca.channel_id=c.id AND ca.telegram_id=?)
                            OR EXISTS(SELECT 1 FROM channel_members cm WHERE cm.channel_id=c.id AND cm.telegram_id=?))
                        FROM channels c WHERE c.id=?""", (user_id, user_id, user_id, user_id, chat_id),
@@ -11585,7 +11597,7 @@ def build_messenger_router(
                     raise HTTPException(status_code=404, detail="Сообщение не найдено")
             elif scope == "channel":
                 cur = await db.execute(
-                    """SELECT NOT EXISTS(SELECT 1 FROM channel_bans cb WHERE cb.channel_id=c.id AND cb.telegram_id=?) AND (c.is_public=1 OR c.owner_telegram_id=?
+                    """SELECT NOT EXISTS(SELECT 1 FROM channel_bans cb WHERE cb.channel_id=c.id AND cb.telegram_id=? AND (cb.until_date=0 OR cb.until_date>CAST(strftime('%s','now') AS INTEGER))) AND (c.is_public=1 OR c.owner_telegram_id=?
                            OR EXISTS(SELECT 1 FROM channel_admins ca WHERE ca.channel_id=c.id AND ca.telegram_id=?)
                            OR EXISTS(SELECT 1 FROM channel_members cm WHERE cm.channel_id=c.id AND cm.telegram_id=?))
                        FROM channels c WHERE c.id=?""", (user_id, user_id, user_id, user_id, chat_id),
@@ -12795,7 +12807,7 @@ def build_messenger_router(
                           WHERE gm.group_id=d.peer_id AND gm.telegram_id=?
                        ))
                        OR (d.scope='channel' AND EXISTS (
-                          SELECT 1 FROM channels c WHERE c.id=d.peer_id AND NOT EXISTS(SELECT 1 FROM channel_bans cb WHERE cb.channel_id=c.id AND cb.telegram_id=?) AND (
+                          SELECT 1 FROM channels c WHERE c.id=d.peer_id AND NOT EXISTS(SELECT 1 FROM channel_bans cb WHERE cb.channel_id=c.id AND cb.telegram_id=? AND (cb.until_date=0 OR cb.until_date>CAST(strftime('%s','now') AS INTEGER))) AND (
                              c.is_public=1 OR c.owner_telegram_id=?
                              OR EXISTS (SELECT 1 FROM channel_admins ca
                                         WHERE ca.channel_id=c.id AND ca.telegram_id=?)
@@ -12867,7 +12879,7 @@ def build_messenger_router(
                           WHERE gm.group_id=c.peer_id AND gm.telegram_id=?
                        ))
                        OR (c.scope='channel' AND EXISTS (
-                          SELECT 1 FROM channels ch WHERE ch.id=c.peer_id AND NOT EXISTS(SELECT 1 FROM channel_bans cb WHERE cb.channel_id=ch.id AND cb.telegram_id=?) AND (
+                          SELECT 1 FROM channels ch WHERE ch.id=c.peer_id AND NOT EXISTS(SELECT 1 FROM channel_bans cb WHERE cb.channel_id=ch.id AND cb.telegram_id=? AND (cb.until_date=0 OR cb.until_date>CAST(strftime('%s','now') AS INTEGER))) AND (
                              ch.is_public=1 OR ch.owner_telegram_id=?
                              OR EXISTS (SELECT 1 FROM channel_admins ca
                                         WHERE ca.channel_id=ch.id AND ca.telegram_id=?)
@@ -13211,7 +13223,7 @@ def build_messenger_router(
                            OR (scope='group' AND chat_id IN (SELECT group_id FROM group_members WHERE telegram_id=?))
                            OR (scope='channel' AND chat_id IN (
                                SELECT ch.id FROM channels ch
-                               WHERE NOT EXISTS(SELECT 1 FROM channel_bans cb WHERE cb.channel_id=ch.id AND cb.telegram_id=?)
+                               WHERE NOT EXISTS(SELECT 1 FROM channel_bans cb WHERE cb.channel_id=ch.id AND cb.telegram_id=? AND (cb.until_date=0 OR cb.until_date>CAST(strftime('%s','now') AS INTEGER)))
                                  AND (ch.is_public=1 OR ch.owner_telegram_id=?
                                   OR EXISTS(SELECT 1 FROM channel_admins ca
                                             WHERE ca.channel_id=ch.id AND ca.telegram_id=?)
