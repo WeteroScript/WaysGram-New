@@ -657,6 +657,14 @@ async def init_messenger_storage(database_path: Path) -> None:
                 expires_at INTEGER NOT NULL,
                 created_at INTEGER NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS api_shared_customizations (
+                token TEXT PRIMARY KEY,
+                owner_id INTEGER NOT NULL,
+                digest TEXT NOT NULL,
+                payload TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                UNIQUE(owner_id, digest)
+            );
             CREATE TABLE IF NOT EXISTS api_user_presence (
                 telegram_id INTEGER PRIMARY KEY,
                 last_seen_at INTEGER NOT NULL
@@ -3240,6 +3248,67 @@ def build_messenger_router(
                     status_code=503,
                     detail="Не удалось загрузить каталог подарков Telegram. Проверьте BOT_TOKEN и настройки MTProto.",
                 ) from exc
+
+    @router.post("/api/customizations")
+    async def share_customization(request: Request, authorization: str | None = Header(default=None)) -> dict[str, str]:
+        owner = int((await current_user(authorization))["telegram_id"])
+        raw = bytearray()
+        async for chunk in request.stream():
+            if len(raw) + len(chunk) > 355000:
+                raise HTTPException(413, "CUSTOMIZATION_TOO_LARGE")
+            raw.extend(chunk)
+        try:
+            value = json.loads(raw)
+            name = value["name"].strip()
+            if not 1 <= len(name) <= 48 or any(ord(c) < 32 for c in name):
+                raise ValueError()
+            payload = {"name": name}
+            for key in ("image0", "image1"):
+                image = value.get(key, "")
+                if not isinstance(image, str):
+                    raise ValueError()
+                if image:
+                    data = base64.b64decode(image, validate=True)
+                    if not 33 <= len(data) <= 131072 or data[:16] != b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR":
+                        raise ValueError()
+                    width = int.from_bytes(data[16:20], "big")
+                    height = int.from_bytes(data[20:24], "big")
+                    if not 1 <= width <= 640 or not 1 <= height <= 256:
+                        raise ValueError()
+                    image = base64.b64encode(data).decode("ascii")
+                payload[key] = image
+            if not (payload["image0"] or payload["image1"]):
+                raise ValueError()
+        except (AttributeError, KeyError, TypeError, ValueError):
+            raise HTTPException(400, "INVALID_CUSTOMIZATION") from None
+        serialized = json.dumps(payload, ensure_ascii=True, separators=(",", ":"))
+        digest = hashlib.sha256(serialized.encode()).hexdigest()
+        async with aiosqlite.connect(db_path()) as db:
+            await db.execute("BEGIN IMMEDIATE")
+            cur = await db.execute("SELECT token FROM api_shared_customizations WHERE owner_id=? AND digest=?", (owner, digest))
+            existing = await cur.fetchone()
+            if existing:
+                await db.commit()
+                return {"token": existing[0]}
+            cur = await db.execute("SELECT COUNT(*) FROM api_shared_customizations WHERE owner_id=?", (owner,))
+            if (await cur.fetchone())[0] >= 32:
+                raise HTTPException(429, "CUSTOMIZATION_LIMIT")
+            token = secrets.token_urlsafe(24)
+            await db.execute("INSERT INTO api_shared_customizations VALUES(?,?,?,?,?)", (token, owner, digest, serialized, int(time.time())))
+            await db.commit()
+        return {"token": token}
+
+    @router.get("/api/customizations/{token}")
+    async def read_customization(token: str, authorization: str | None = Header(default=None)) -> dict[str, str]:
+        await current_user(authorization)
+        if not re.fullmatch(r"[A-Za-z0-9_-]{32}", token):
+            raise HTTPException(404, "CUSTOMIZATION_NOT_FOUND")
+        async with aiosqlite.connect(db_path()) as db:
+            cur = await db.execute("SELECT payload FROM api_shared_customizations WHERE token=?", (token,))
+            result = await cur.fetchone()
+        if result is None:
+            raise HTTPException(404, "CUSTOMIZATION_NOT_FOUND")
+        return json.loads(result[0])
 
     async def current_user(authorization: str | None) -> dict[str, Any]:
         if not authorization or not authorization.startswith("Bearer "):

@@ -23,6 +23,23 @@ class NativeMessagingSourceChecks(unittest.TestCase):
     def source(self, path):
         return self.archive.read(BASE + path).decode('utf-8')
 
+    def test_customization_targets_only_navigation_layers_and_requires_apply(self):
+        settings = self.source('ui/SettingsActivity.java')
+        custom = self.source('ui/WaysGramCustomizationActivity.java')
+        layout = self.source('ui/MainTabsLayout.java')
+        tab = self.source('ui/Components/glass/GlassTabView.java')
+        launch = self.source('ui/LaunchActivity.java')
+        self.assertIn('presentFragment(new WaysGramCustomizationActivity())', settings)
+        self.assertIn('wrapBackground(currentAccount, tabsView, tabsViewBackground', self.source('ui/MainTabsActivity.java'))
+        self.assertIn('drawIndicator(this, canvas', layout)
+        self.assertIn('getParent() instanceof MainTabsLayout', tab)
+        self.assertLess(tab.index('drawIndicator('), tab.index('super.dispatchDraw(canvas)'))
+        self.assertIn('ACTION_OPEN_DOCUMENT', custom)
+        self.assertIn('https://t.wg/custom/', custom)
+        self.assertIn('WaysGramCustomizationActivity.isLink(data)', launch)
+        self.assertIn('setPositiveButton(R.string.WgCustomApply', custom)
+        self.assertIn('if (title.isEmpty())', custom)
+
     def test_admin_labels_decorate_settings_header(self):
         settings = self.source('ui/SettingsActivity.java')
         self.assertIn('WaysGramPeerBadges.decorate(', settings)

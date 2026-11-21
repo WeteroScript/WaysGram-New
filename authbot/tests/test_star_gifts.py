@@ -2607,6 +2607,29 @@ def test_sent_gift_enqueues_one_durable_push_with_idempotency(env, monkeypatch) 
     run(scenario())
 
 
+def test_shared_customization_is_bounded_and_reusable(env):
+    _, app = env
+    payload = {"name": "Blue", "image0": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aR/sAAAAASUVORK5CYII=", "image1": ""}
+
+    async def scenario():
+        async with await client_for(app) as client:
+            path = "/api/customizations"
+            assert (await client.post(path, json=payload)).status_code == 401
+            assert (await client.post(path, headers=headers(101), json={**payload, "name": " "})).status_code == 400
+            assert (await client.post(path, headers=headers(101), json={**payload, "image0": "broken!"})).status_code == 400
+            assert (await client.post(path, headers=headers(101), content=b"x" * 355001)).status_code == 413
+            shared = await client.post(path, headers=headers(101), json=payload)
+            assert shared.status_code == 200, shared.text
+            token = shared.json()["token"]
+            assert len(token) == 32
+            assert (await client.post(path, headers=headers(101), json=payload)).json()["token"] == token
+            assert (await client.get(f"{path}/{token}")).status_code == 401
+            assert (await client.get(f"{path}/{token}", headers=headers(102))).json() == payload
+            assert (await client.get(f"{path}/bad", headers=headers(102))).status_code == 404
+
+    run(scenario())
+
+
 def test_worn_pattern_recovers_legacy_model_id_by_exact_name(env, monkeypatch):
     path, app = env
     serial = "WG-000000000010"
