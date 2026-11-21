@@ -14553,6 +14553,11 @@ def build_messenger_router(
             raise HTTPException(status_code=400, detail="Описание группы слишком длинное")
         if username and not re.fullmatch(r"[a-z][a-z0-9_]{3,31}", username):
             raise HTTPException(status_code=400, detail="Username группы должен содержать 4–32 символа")
+        member_ids = payload.get("member_ids", [])
+        if not isinstance(member_ids, list) or len(member_ids) > 200 or any(type(i) is not int or not 0 < i < 2**63 for i in member_ids):
+            raise HTTPException(400, "GROUP_MEMBERS_INVALID")
+        skipped = []
+        added = 0
         now = int(time.time())
         uid = int(user["telegram_id"])
         try:
@@ -14568,6 +14573,23 @@ def build_messenger_router(
                     "INSERT INTO group_members(group_id,telegram_id,role,joined_at) VALUES(?,?,'owner',?)",
                     (group_id, uid, now),
                 )
+                for target_id in dict.fromkeys(member_ids):
+                    if target_id == uid:
+                        continue
+                    target = await db.execute("SELECT 1 FROM accounts WHERE telegram_id=? AND is_banned=0", (target_id,))
+                    if not await target.fetchone():
+                        skipped.append(target_id)
+                        continue
+                    try:
+                        await require_invite_privacy(db, uid, target_id)
+                    except HTTPException as exc:
+                        if exc.status_code != 403:
+                            raise
+                        skipped.append(target_id)
+                        continue
+                    await db.execute("INSERT INTO group_members(group_id,telegram_id,role,joined_at) VALUES(?,?,'member',?)",
+                                     (group_id, target_id, now))
+                    added += 1
                 await db.commit()
         except aiosqlite.IntegrityError as exc:
             raise HTTPException(status_code=409, detail="Username группы уже занят") from exc
@@ -14578,6 +14600,9 @@ def build_messenger_router(
             "description": description,
             "owner_telegram_id": uid,
             "role": "owner",
+            "my_role": "owner",
+            "member_count": 1 + added,
+            "skipped_member_ids": skipped,
             "created_at": now,
         }
 

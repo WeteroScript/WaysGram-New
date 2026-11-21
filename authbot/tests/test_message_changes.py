@@ -1659,3 +1659,23 @@ def test_paid_dm_requires_current_quote_and_charges_once(env):
             assert (await client.get(quote, headers=sender)).json() == {'stars': 0}
 
     run(scenario())
+
+
+def test_group_create_returns_group_with_initial_members_and_privacy_skips(env):
+    _, app = env
+
+    async def scenario():
+        async with await client_for(app) as client:
+            assert (await client.put('/api/me/privacy/invites', headers=headers(ADMIN), json={'mode': 'nobody'})).status_code == 200
+            created = await client.post('/api/groups', headers=headers(101), json={
+                'title': 'WaysGram chat', 'member_ids': [101, 102, 102, ADMIN],
+            })
+            assert created.status_code == 201
+            group = created.json()
+            assert group['my_role'] == 'owner' and group['member_count'] == 2
+            assert group['skipped_member_ids'] == [ADMIN]
+            result = await client.get(f"/api/groups/{group['id']}", headers=headers(102))
+            assert result.status_code == 200
+            assert (await client.post('/api/groups', headers=headers(101), json={'title': 'Invalid', 'member_ids': [True]})).status_code == 400
+
+    run(scenario())
