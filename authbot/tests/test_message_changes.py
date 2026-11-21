@@ -808,3 +808,42 @@ def test_channel_membership_and_owner_invite_are_server_authoritative(env):
             assert (await client.get(path, headers=member)).status_code == 403
 
     run(scenario())
+
+
+def test_profile_music_publish_reorder_and_remove(env):
+    import sqlite3
+
+    path, app = env
+    a, b, voice = 'a' * 32, 'b' * 32, 'c' * 32
+
+
+    async def scenario():
+        async with await client_for(app) as client:
+            assert (await client.get("/api/users/101/music", headers=headers(101))).status_code == 200
+            with sqlite3.connect(path.with_name("waysgram_messenger.sqlite3")) as db:
+                db.executemany('''INSERT INTO media_assets
+                    (id,owner_telegram_id,storage_name,mime_type,size_bytes,created_at,media_kind)
+                    VALUES(?,101,?,'audio/mpeg',100,1,?)''', [(a, a, 'audio'), (b, b, 'audio'), (voice, voice, 'voice')])
+            async def save(media, author=101, **kwargs):
+                return await client.put('/api/me/music', headers=headers(author), json={'media_id': media, **kwargs})
+
+            async def tracks(query='', viewer=102):
+                response = await client.get('/api/users/101/music' + query, headers=headers(viewer))
+                assert response.status_code == 200
+                return response.json()['count'], [t['media_id'] for t in response.json()['tracks']]
+
+            assert (await save(a, 102)).status_code == 403
+            assert (await save(voice)).status_code == 403
+            assert (await save(a)).status_code == 200
+            assert (await save(b, after_id='missing')).status_code == 400
+            assert (await save(b)).status_code == 200
+            assert await tracks('?offset=1&limit=1') == (2, [a])
+            assert (await save(b, after_id=a)).status_code == 200
+            assert await tracks() == (2, [a, b])
+            assert (await client.delete('/api/media/storage/' + a, headers=headers(101))).status_code == 409
+            assert (await client.post('/api/blocks', headers=headers(101), json={'user_id': 102})).status_code == 201
+            assert await tracks() == (0, [])
+            assert (await save(a, remove=True)).status_code == 200
+            assert await tracks(viewer=101) == (1, [b])
+
+    run(scenario())

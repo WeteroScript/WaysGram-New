@@ -696,6 +696,11 @@ async def init_messenger_storage(database_path: Path) -> None:
             );
             CREATE INDEX IF NOT EXISTS idx_media_assets_owner_time
                 ON media_assets(owner_telegram_id,created_at);
+            CREATE TABLE IF NOT EXISTS profile_music (
+                user_id INTEGER NOT NULL, media_id TEXT NOT NULL, position INTEGER NOT NULL,
+                PRIMARY KEY(user_id, media_id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_profile_music_media ON profile_music(media_id);
             CREATE TABLE IF NOT EXISTS media_transcriptions (
                 media_id TEXT PRIMARY KEY,
                 transcript TEXT NOT NULL,
@@ -3980,8 +3985,9 @@ def build_messenger_router(
                      (SELECT COUNT(*) FROM messages WHERE media_id=?)
                    + (SELECT COUNT(*) FROM group_messages WHERE media_id=?)
                    + (SELECT COUNT(*) FROM channel_messages WHERE media_id=?)
-                   + (SELECT COUNT(*) FROM accounts WHERE avatar_media_id=?)""",
-                (media_id, media_id, media_id, media_id),
+                   + (SELECT COUNT(*) FROM accounts WHERE avatar_media_id=?)
+                   + (SELECT COUNT(*) FROM profile_music WHERE media_id=?)""",
+                (media_id, media_id, media_id, media_id, media_id),
             )
             references = int((await cur.fetchone())[0] or 0)
             if references > 0:
@@ -4008,6 +4014,49 @@ def build_messenger_router(
             "freed_bytes": int(media["size_bytes"]),
         }
 
+    @router.get("/api/users/{user_id}/music")
+    async def profile_music(user_id: int, offset: int = 0, limit: int = 30,
+                            authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        uid = int((await current_user(authorization))["telegram_id"])
+        async with aiosqlite.connect(db_path()) as db:
+            db.row_factory = aiosqlite.Row
+            cur = await db.execute("""SELECT a.id AS media_id,a.mime_type AS media_type,
+                a.original_name AS media_name,a.media_kind,a.media_metadata,a.size_bytes
+                FROM profile_music p JOIN media_assets a ON a.id=p.media_id
+                WHERE p.user_id=? AND NOT EXISTS (SELECT 1 FROM blocked_users b WHERE
+                  (b.owner_telegram_id=p.user_id AND b.blocked_telegram_id=?) OR
+                  (b.owner_telegram_id=? AND b.blocked_telegram_id=p.user_id))
+                ORDER BY p.position""", (user_id, uid, uid))
+            rows = await cur.fetchall()
+        offset, limit = max(0, offset), max(1, min(100, limit))
+        return {"count": len(rows), "tracks": [dict(r) for r in rows[offset:offset + limit]]}
+
+    @router.put("/api/me/music")
+    async def update_profile_music(payload: dict[str, Any],
+                                   authorization: str | None = Header(default=None)) -> dict[str, bool]:
+        uid = int((await current_user(authorization))["telegram_id"])
+        media_id, after = payload.get("media_id"), payload.get("after_id")
+        remove = payload.get("remove", False)
+        if not isinstance(media_id, str) or type(remove) is not bool or (after is not None and not isinstance(after, str)):
+            raise HTTPException(400, "MEDIA_INVALID")
+        async with aiosqlite.connect(db_path()) as db:
+            await db.execute("BEGIN IMMEDIATE")
+            cur = await db.execute("SELECT media_id FROM profile_music WHERE user_id=? ORDER BY position", (uid,))
+            tracks = [r[0] for r in await cur.fetchall() if r[0] != media_id]
+            if not remove:
+                cur = await db.execute("""SELECT 1 FROM media_assets WHERE id=? AND owner_telegram_id=?
+                    AND media_kind='audio' AND mime_type LIKE 'audio/%'""", (media_id, uid))
+                if not await cur.fetchone():
+                    raise HTTPException(403, "Добавить можно только собственный музыкальный файл")
+                if len(tracks) >= 100 or (after is not None and after not in tracks):
+                    raise HTTPException(400, "PLAYLIST_LIMIT_OR_POSITION_INVALID")
+                tracks.insert(0 if after is None else tracks.index(after) + 1, media_id)
+            await db.execute("DELETE FROM profile_music WHERE user_id=?", (uid,))
+            await db.executemany("INSERT INTO profile_music(user_id,media_id,position) VALUES(?,?,?)",
+                                 [(uid, track, i) for i, track in enumerate(tracks)])
+            await db.commit()
+        return {"ok": True}
+
     @router.get("/api/media/{media_id}")
     async def download_media(
         media_id: str,
@@ -4030,6 +4079,13 @@ def build_messenger_router(
                 raise HTTPException(status_code=404, detail="Изображение не найдено")
 
             allowed = int(media["owner_telegram_id"]) == uid
+            if not allowed:
+                cur = await db.execute("""SELECT 1 FROM profile_music p WHERE p.media_id=?
+                    AND p.user_id=? AND NOT EXISTS (SELECT 1 FROM blocked_users b WHERE
+                      (b.owner_telegram_id=p.user_id AND b.blocked_telegram_id=?) OR
+                      (b.owner_telegram_id=? AND b.blocked_telegram_id=p.user_id))""",
+                    (media_id, media["owner_telegram_id"], uid, uid))
+                allowed = await cur.fetchone() is not None
             if not allowed:
                 cur = await db.execute(
                     """SELECT 1 FROM messages
