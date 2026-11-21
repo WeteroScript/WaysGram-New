@@ -85,6 +85,14 @@ class NativeMessagingSourceChecks(unittest.TestCase):
         self.assertIn('if (offer.optBoolean("unlocked"))', payment)
         self.assertIn('viewer.openPhoto', payment)
 
+    def test_community_boosts_use_waysgram_and_explicit_move_confirmation(self):
+        chat = self.source('ui/ChatActivity.java')
+        helper = self.source('ui/WaysGramPaidReactions.java')
+        self.assertIn('WaysGramPaidReactions.showCommunityBoosts(this, currentAccount, currentChat.id,', chat)
+        self.assertIn('"/api/community-boosts/" + (channel ? "channel/" : "group/")', helper)
+        self.assertIn('R.string.WaysGramBoostMoveConfirm', helper)
+        self.assertIn('new JSONObject().put("slow_mode_bypass", !bypass)', helper)
+
     def test_group_topics_use_separate_history_and_server_management(self):
         chat = self.source('ui/ChatActivity.java')
         topics = self.source('ui/WaysGramGroupTopics.java')

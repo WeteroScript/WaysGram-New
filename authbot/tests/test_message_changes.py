@@ -2125,3 +2125,46 @@ def test_group_antispam_blocks_bursts_and_repeats_but_not_retries_or_admins(env)
             assert (await client.post(msg, headers=member, json=body)).status_code == 201
 
     run(scenario())
+
+
+def test_community_boost_has_one_slot_and_optional_slow_mode_exception(env):
+    import aiosqlite
+
+    path, app = env
+
+    async def scenario():
+        async with await client_for(app) as client:
+            owner, member, other = headers(101), headers(102), headers(ADMIN)
+            group = await client.post('/api/groups', headers=owner, json={'title': 'Boosted group', 'member_ids': [102]})
+            gid = group.json()['id']
+            channel = await client.post('/api/channels', headers=owner,
+                                        json={'title': 'Boosted channel', 'username': 'boosted_channel', 'is_public': True})
+            cid = channel.json()['id']
+            root = f'/api/groups/{gid}'
+            group_boost = f'/api/community-boosts/group/{gid}'
+            channel_boost = f'/api/community-boosts/channel/{cid}'
+            assert (await client.get(group_boost, headers=other)).status_code == 403
+            assert (await client.put(channel_boost, headers=member)).status_code == 403
+            assert (await client.put(root + '/slow-mode', headers=owner, json={'seconds': 300})).status_code == 200
+            assert (await client.post(root + '/messages', headers=member, json={'body': 'First'})).status_code == 201
+            boost = await client.put(group_boost, headers=member)
+            assert boost.status_code == 200 and boost.json()['level'] == 1 and boost.json()['boosts'] == 1
+            assert (await client.put(group_boost, headers=member)).json() == boost.json()
+            assert (await client.post(root + '/messages', headers=member, json={'body': 'Still slowed'})).status_code == 429
+            assert (await client.put(root + '/boost-settings', headers=member, json={'slow_mode_bypass': True})).status_code == 403
+            assert (await client.put(root + '/boost-settings', headers=owner, json={'slow_mode_bypass': True})).status_code == 200
+            assert (await client.post(root + '/messages', headers=member, json={'body': 'Boost bypass'})).status_code == 201
+            assert (await client.put(root + '/send-permissions', headers=owner, json={'default_send_restrictions': 1})).status_code == 200
+            assert (await client.post(root + '/messages', headers=member, json={'body': 'Still restricted'})).status_code == 403
+            assert (await client.put(f'/api/channels/{cid}/membership', headers=member, json={'joined': True})).status_code == 200
+            assert (await client.put(channel_boost, headers=member)).status_code == 409
+            async with aiosqlite.connect(path) as db:
+                await db.execute('UPDATE community_boosts SET assigned_at=0 WHERE account_id=102')
+                await db.commit()
+            assert (await client.put(channel_boost, headers=member)).json()['assigned_here'] is True
+            assert (await client.get(group_boost, headers=owner)).json()['boosts'] == 0
+            assert (await client.get(channel_boost, headers=owner)).json()['boosts'] == 1
+            assert (await client.put(f'/api/channels/{cid}/membership', headers=member, json={'joined': False})).status_code == 200
+            assert (await client.get(channel_boost, headers=owner)).json()['boosts'] == 0
+
+    run(scenario())

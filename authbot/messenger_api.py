@@ -1410,6 +1410,13 @@ async def init_messenger_storage(database_path: Path) -> None:
             CREATE TABLE IF NOT EXISTS account_invite_privacy (
                 telegram_id INTEGER PRIMARY KEY, rules TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS community_boosts (
+                account_id INTEGER PRIMARY KEY,
+                scope TEXT NOT NULL CHECK(scope IN ('group','channel')),
+                chat_id INTEGER NOT NULL,
+                assigned_at INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_community_boosts_chat ON community_boosts(scope,chat_id);
             CREATE TABLE IF NOT EXISTS group_topics (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 group_id INTEGER NOT NULL,
@@ -1783,6 +1790,8 @@ async def init_messenger_storage(database_path: Path) -> None:
         cur = await db.execute("PRAGMA table_info(channels)")
         if "paid_reactions_enabled" not in {row[1] for row in await cur.fetchall()}:
             await db.execute("ALTER TABLE channels ADD COLUMN paid_reactions_enabled INTEGER NOT NULL DEFAULT 0")
+        if "boost_slow_mode_bypass" not in chat_group_columns:
+            await db.execute(f"ALTER TABLE {db_split.SCHEMA}.chat_groups ADD COLUMN boost_slow_mode_bypass INTEGER NOT NULL DEFAULT 0")
         if "anti_spam_enabled" not in chat_group_columns:
             await db.execute(f"ALTER TABLE {db_split.SCHEMA}.chat_groups ADD COLUMN anti_spam_enabled INTEGER NOT NULL DEFAULT 0")
         if "default_send_restrictions" not in chat_group_columns:
@@ -4677,6 +4686,11 @@ def build_messenger_router(
                 bit = 32
             if mask & bit:
                 raise HTTPException(403, "CHAT_WRITE_FORBIDDEN")
+
+    async def group_boost_bypasses_slow_mode(db: Any, group_id: int, uid: int) -> bool:
+        cur = await db.execute("""SELECT 1 FROM chat_groups g JOIN community_boosts b ON b.chat_id=g.id
+            WHERE g.id=? AND g.boost_slow_mode_bypass=1 AND b.scope='group' AND b.account_id=?""", (group_id, uid))
+        return await cur.fetchone() is not None
 
     async def require_group_anti_spam(db: Any, group_id: int, uid: int, member: dict[str, Any],
                                       now: int, units: int = 1, body: str = "") -> None:
@@ -9316,6 +9330,69 @@ def build_messenger_router(
         if not await cur.fetchone():
             raise HTTPException(404, "CHANNEL_NOT_FOUND")
 
+    @router.get("/api/community-boosts/{scope}/{chat_id}")
+    @router.put("/api/community-boosts/{scope}/{chat_id}")
+    async def community_boost(scope: Literal["group", "channel"], chat_id: int, request: Request,
+                              authorization: str | None = Header(default=None)):
+        uid = int((await current_user(authorization))["telegram_id"])
+        write = request.method == "PUT"
+        now = int(time.time())
+        async with aiosqlite.connect(db_path()) as db:
+            await db.execute("BEGIN IMMEDIATE" if write else "BEGIN")
+            bypass = can_configure = False
+            if scope == "group":
+                member = await require_group_member(db, chat_id, uid)
+                can_boost = True
+                can_configure = group_has_right(member, 32)
+                cur = await db.execute("SELECT boost_slow_mode_bypass FROM chat_groups WHERE id=?", (chat_id,))
+                bypass = bool((await cur.fetchone())[0])
+                roster, field = "group_members", "group_id"
+            else:
+                cur = await db.execute("SELECT 1 FROM channels c WHERE c.id=? AND " + STORY_CHANNEL_ACCESS, (chat_id, uid, uid, uid, uid))
+                if not await cur.fetchone():
+                    raise HTTPException(404, "CHANNEL_NOT_FOUND")
+                cur = await db.execute("SELECT 1 FROM active_channel_members WHERE channel_id=? AND telegram_id=?", (chat_id, uid))
+                can_boost = await cur.fetchone() is not None
+                roster, field = "active_channel_members", "channel_id"
+            cur = await db.execute("SELECT scope,chat_id,assigned_at FROM community_boosts WHERE account_id=?", (uid,))
+            slot = await cur.fetchone()
+            assigned = slot is not None and (slot[0], slot[1]) == (scope, chat_id)
+            movable_at = slot[2] + 7 * 86400 if slot else 0
+            if write and not assigned:
+                if not can_boost:
+                    raise HTTPException(403, "BOOST_MEMBERSHIP_REQUIRED")
+                if movable_at > now:
+                    raise HTTPException(409, {"code": "BOOST_MOVE_COOLDOWN", "movable_at": movable_at})
+                await db.execute("""INSERT INTO community_boosts(account_id,scope,chat_id,assigned_at) VALUES(?,?,?,?)
+                    ON CONFLICT(account_id) DO UPDATE SET scope=excluded.scope,chat_id=excluded.chat_id,assigned_at=excluded.assigned_at""",
+                    (uid, scope, chat_id, now))
+                assigned, movable_at = True, now + 7 * 86400
+            cur = await db.execute(f"""SELECT COUNT(*) FROM community_boosts b JOIN accounts a ON a.telegram_id=b.account_id AND a.is_banned=0
+                JOIN {roster} m ON m.{field}=b.chat_id AND m.telegram_id=b.account_id WHERE b.scope=? AND b.chat_id=?""", (scope, chat_id))
+            count = (await cur.fetchone())[0]
+            if write:
+                await db.commit()
+        levels = (1, 3, 5, 10, 25)
+        return {"boosts": count, "level": sum(count >= target for target in levels),
+                "next_level_at": next((target for target in levels if target > count), None),
+                "assigned_here": assigned and can_boost, "slot_in_use": slot is not None or assigned,
+                "can_boost": can_boost, "movable_at": movable_at, "can_configure": can_configure,
+                "slow_mode_bypass": bypass}
+
+    @router.put("/api/groups/{group_id}/boost-settings")
+    async def update_group_boost_settings(group_id: int, payload: dict[str, Any], authorization: str | None = Header(default=None)):
+        uid = int((await current_user(authorization))["telegram_id"])
+        value = payload.get("slow_mode_bypass")
+        if type(value) is not bool:
+            raise HTTPException(400, "INVALID_BOOST_SETTINGS")
+        async with aiosqlite.connect(db_path()) as db:
+            await db.execute("BEGIN IMMEDIATE")
+            if not group_has_right(await require_group_member(db, group_id, uid), 32):
+                raise HTTPException(403, "GROUP_BOOST_SETTINGS_FORBIDDEN")
+            await db.execute("UPDATE chat_groups SET boost_slow_mode_bypass=? WHERE id=?", (int(value), group_id))
+            await db.commit()
+        return {"slow_mode_bypass": value}
+
     @router.get("/api/channels/{channel_id}/inbox/settings")
     @router.put("/api/channels/{channel_id}/inbox/settings")
     async def channel_inbox_settings(channel_id: int, request: Request, payload: dict[str, Any] | None = None,
@@ -10854,6 +10931,7 @@ def build_messenger_router(
             await db.execute("DELETE FROM channel_post_comments WHERE channel_id=?", (channel_id,))
             await db.execute("DELETE FROM channel_inbox_settings WHERE channel_id=?", (channel_id,))
             await db.execute("DELETE FROM channel_inbox_messages WHERE channel_id=?", (channel_id,))
+            await db.execute("DELETE FROM community_boosts WHERE scope='channel' AND chat_id=?", (channel_id,))
             await db.execute(
                 "DELETE FROM channels WHERE id=? AND owner_telegram_id=?",
                 (channel_id, int(user["telegram_id"])),
@@ -12639,7 +12717,7 @@ def build_messenger_router(
                 table, sender_col, limit = "group_messages", "sender_telegram_id", DM_MESSAGES_PER_MINUTE
                 cur = await db.execute("SELECT slow_mode_seconds FROM chat_groups WHERE id=?", (target_peer,))
                 slow = int((await cur.fetchone())[0])
-                if slow and member["role"] not in ("owner", "admin"):
+                if slow and member["role"] not in ("owner", "admin") and not await group_boost_bypasses_slow_mode(db, target_peer, uid):
                     if len(ids) > 1:
                         raise HTTPException(status_code=429, detail="Медленный режим: пересылайте сообщения по одному")
                     cur = await db.execute("""SELECT created_at FROM group_messages WHERE group_id=? AND sender_telegram_id=?
@@ -15544,6 +15622,7 @@ def build_messenger_router(
             await db.execute("DELETE FROM channel_discussion_groups WHERE group_id=?", (group_id,))
             await db.execute("DELETE FROM channel_post_comments WHERE group_id=?", (group_id,))
             await db.execute("DELETE FROM group_topics WHERE group_id=?", (group_id,))
+            await db.execute("DELETE FROM community_boosts WHERE scope='group' AND chat_id=?", (group_id,))
             await db.execute("DELETE FROM chat_groups WHERE id=?", (group_id,))
             await db.commit()
         return {"deleted": True}
@@ -16422,7 +16501,7 @@ def build_messenger_router(
             )
             group_settings = await cur.fetchone()
             slow_mode_seconds = int(group_settings[0]) if group_settings else 0
-            if slow_mode_seconds > 0 and membership["role"] not in ("owner", "admin"):
+            if slow_mode_seconds > 0 and membership["role"] not in ("owner", "admin") and not await group_boost_bypasses_slow_mode(db, group_id, uid):
                 cur = await db.execute(
                     """SELECT created_at FROM group_messages
                        WHERE group_id=? AND sender_telegram_id=?
@@ -16589,7 +16668,7 @@ def build_messenger_router(
             cur = await db.execute("SELECT slow_mode_seconds FROM chat_groups WHERE id=?", (group_id,))
             group_settings = await cur.fetchone()
             slow_mode_seconds = int(group_settings[0]) if group_settings else 0
-            if slow_mode_seconds > 0 and membership["role"] not in ("owner", "admin"):
+            if slow_mode_seconds > 0 and membership["role"] not in ("owner", "admin") and not await group_boost_bypasses_slow_mode(db, group_id, uid):
                 cur = await db.execute(
                     """SELECT created_at FROM group_messages
                        WHERE group_id=? AND sender_telegram_id=?

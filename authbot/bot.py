@@ -2771,6 +2771,7 @@ async def admin_callback(callback: CallbackQuery) -> None:
                     await db.execute("DELETE FROM channel_post_comments WHERE channel_id=?", (channel_id,))
                     await db.execute("DELETE FROM channel_inbox_settings WHERE channel_id=?", (channel_id,))
                     await db.execute("DELETE FROM channel_inbox_messages WHERE channel_id=?", (channel_id,))
+                    await db.execute("DELETE FROM community_boosts WHERE scope='channel' AND chat_id=?", (channel_id,))
                     await db.execute("DELETE FROM message_reactions WHERE scope='channel' AND chat_id=?", (channel_id,))
                     await db.execute("DELETE FROM pinned_messages WHERE scope='channel' AND chat_id=?", (channel_id,))
                     await db.execute("DELETE FROM cloud_drafts WHERE scope='channel' AND peer_id=?", (channel_id,))
