@@ -23,6 +23,17 @@ class NativeMessagingSourceChecks(unittest.TestCase):
     def source(self, path):
         return self.archive.read(BASE + path).decode('utf-8')
 
+    def test_branded_links_keep_api_transport_separate(self):
+        links = self.source('tgnet/WaysGramLinks.java')
+        launch = self.source('ui/LaunchActivity.java')
+        self.assertIn('HOST = "t.wg"', links)
+        self.assertIn('BuildVars.WAYSGRAM_API_BASE_URL', links)
+        self.assertIn('/api/(groups|channels)/invites/', links)
+        self.assertIn('/api/channel-subscriptions/', links)
+        self.assertIn('WaysGramLinks.isShareRoute(data)', launch)
+        self.assertIn('WaysGramLinks.canonicalShareLink(invite.link)', self.source('ui/ManageLinksActivity.java'))
+        self.assertIn('TL_channels_exportMessageLink', self.source('tgnet/WaysGramTransport.java'))
+
     def test_call_privacy_preferences_do_not_claim_call_support(self):
         profile = self.source('tgnet/WaysGramProfile.java')
         controls = self.source('ui/PrivacyControlActivity.java')

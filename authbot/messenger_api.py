@@ -148,6 +148,14 @@ def _external_api_base_url(request: Request) -> str:
     return f"{parsed.scheme}://{parsed.netloc}"
 
 
+def _invite_share_origin(request: Request) -> str:
+    # Enable only once the branded host is deployed; older clients use the API origin.
+    if os.getenv("WAYSGRAM_BRANDED_INVITES", "").strip() == "1":
+        return "https://t.wg"
+    return _external_api_base_url(request)
+
+
+
 
 def _normalize_uploaded_image(raw: bytes) -> tuple[bytes, str, str]:
     """Decode, validate and re-encode a static raster image without metadata."""
@@ -9120,7 +9128,7 @@ def build_messenger_router(
             "is_public": is_public,
         }
         if invite_token:
-            result["invite_link"] = _external_api_base_url(request) + f"/api/channels/invites/{invite_token}"
+            result["invite_link"] = _invite_share_origin(request) + f"/api/channels/invites/{invite_token}"
         return result
 
     @router.get("/api/channels/{channel_id}/invite")
@@ -9145,7 +9153,7 @@ def build_messenger_router(
             if not token:
                 raise HTTPException(404, "Ссылка не найдена")
             await db.commit()
-        return {"invite_link": _external_api_base_url(request) + f"/api/channels/invites/{token}",
+        return {"invite_link": _invite_share_origin(request) + f"/api/channels/invites/{token}",
                 "created_at": channel[3]}
 
     @router.get("/api/channels/{channel_id}/invites")
@@ -9154,7 +9162,7 @@ def build_messenger_router(
                                     admin_id: int | None = None, revoked: bool = False, after: str | None = None,
                                     limit: int = 50, authorization: str | None = Header(default=None)) -> dict[str, Any]:
         uid = int((await current_user(authorization))["telegram_id"])
-        base = _external_api_base_url(request) + "/api/channels/invites/"
+        base = _invite_share_origin(request) + "/api/channels/invites/"
         async with aiosqlite.connect(db_path()) as db:
             db.row_factory = aiosqlite.Row
             await db.execute("BEGIN IMMEDIATE")
@@ -16185,7 +16193,7 @@ def build_messenger_router(
                     (token_hash,group_id,created_by,created_at,share_token,is_permanent)
                     VALUES(?,?,?,?,?,1)""", (hashlib.sha256(token.encode()).hexdigest(), group_id, uid, created_at, token))
             await db.commit()
-        return {"invite_link": _external_api_base_url(request) + f"/api/groups/invites/{token}", "created_at": created_at}
+        return {"invite_link": _invite_share_origin(request) + f"/api/groups/invites/{token}", "created_at": created_at}
 
     @router.get("/api/groups/{group_id}/invites")
     async def list_group_invites(group_id: int, request: Request, admin_id: int | None = None,
@@ -16211,7 +16219,7 @@ def build_messenger_router(
                 FROM group_invites WHERE {where} ORDER BY created_at DESC,token_hash DESC LIMIT ?""",
                 args + (max(1, min(100, limit)),))
             rows = await cur.fetchall()
-        base = _external_api_base_url(request) + "/api/groups/invites/"
+        base = _invite_share_origin(request) + "/api/groups/invites/"
         invites = []
         for row in rows:
             item = dict(row)
@@ -16310,7 +16318,7 @@ def build_messenger_router(
         return {
             "group_id": group_id,
             "title": str(group[0]),
-            "invite_link": _external_api_base_url(request) + f"/api/groups/invites/{token}",
+            "invite_link": _invite_share_origin(request) + f"/api/groups/invites/{token}",
             "expires_at": expires_at,
             "max_uses": max_uses,
             "uses": 0,
