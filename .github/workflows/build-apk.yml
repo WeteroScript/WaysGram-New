@@ -316,7 +316,7 @@ jobs:
           # An APK is a zip: a corrupted archive must fail here, not on the phone with
           # "invalid stored block lengths".
           unzip -tq "$APK"
-          sha256sum "$APK"
+          ( cd "$(dirname "$APK")" && sha256sum app.apk | tee app.apk.sha256 )
           stat -c '%s bytes' "$APK"
           printf '%s\\n' "$BADGING" | grep -E "^(package:|application-label:|sdkVersion:|targetSdkVersion:)"
 
@@ -324,7 +324,10 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: WaysGram-New-APK-${{ github.run_number }}
-          path: TMessagesProj_App/build/outputs/apk/afat/release/app.apk
+          compression-level: 0
+          path: |
+            TMessagesProj_App/build/outputs/apk/afat/release/app.apk
+            TMessagesProj_App/build/outputs/apk/afat/release/app.apk.sha256
           if-no-files-found: error
           retention-days: 14
 
