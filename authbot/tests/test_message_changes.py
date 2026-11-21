@@ -1332,3 +1332,26 @@ def test_group_permanent_invite_is_reused_until_rotated(env):
             assert (await client.get(second.json()['invite_link'])).status_code == 200
 
     run(scenario())
+
+
+def test_channel_creation_visibility_and_subscriber_lookup(env):
+    _, app = env
+
+    async def scenario():
+        async with await client_for(app) as client:
+            owner, subscriber = headers(101), headers(102)
+            created = await client.post('/api/channels', headers=owner, json={'title': 'Private first', 'is_public': False})
+            assert created.status_code == 201
+            route = f"/api/channels/{created.json()['id']}"
+            assert (await client.get(route + '/invite', headers=owner)).json()['invite_link']
+            assert (await client.get(route, headers=subscriber)).status_code in (403, 404)
+            assert (await client.put(route, headers=owner, json={'is_public': True, 'username': 'privatefirst'})).status_code == 200
+            assert (await client.get(route + '/members/102', headers=subscriber)).status_code == 404
+            assert (await client.put(route + '/membership', headers=subscriber, json={'joined': True})).status_code == 200
+            assert (await client.get(route + '/members/102', headers=subscriber)).json()['role'] == 'member'
+            assert (await client.get(route + '/members/102', headers=owner)).json()['telegram_id'] == 102
+            assert (await client.get(route + '/members/101', headers=subscriber)).status_code == 403
+            assert any(row['telegram_id'] == 102 for row in (await client.get(route + '/members', headers=owner)).json()['members'])
+            assert (await client.put(route, headers=owner, json={'is_public': False})).json()['is_public'] is False
+
+    run(scenario())

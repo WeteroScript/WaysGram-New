@@ -47,6 +47,19 @@ class NativeMessagingSourceChecks(unittest.TestCase):
         self.assertIn('refreshMessages(account, first, selfId, token, generation);', poller)
         self.assertIn('newScheduledThreadPool(org.telegram.messenger.UserConfig.MAX_ACCOUNT_COUNT', api)
 
+    def test_channel_creation_and_subscriber_requests_use_waysgram_routes(self):
+        transport = self.source('tgnet/WaysGramTransport.java')
+        profile = self.source('tgnet/WaysGramProfile.java')
+        users = self.source('ui/ChatUsersActivity.java')
+        create = self.source('ui/ChannelCreateActivity.java')
+        channel_ui = self.source('ui/ProfileActivity.java')
+        self.assertIn('WaysGramChats.channelParticipant(account', transport)
+        self.assertIn('body.put("is_public", false)', profile)
+        self.assertIn('WaysGramChats.CHANNEL_OFFSET) {\n                req.filter = new TLRPC.TL_channelParticipantsRecent()', users)
+        self.assertIn('WaysGramInvites.channelInvite(account, id', create)
+        self.assertIn('!waysGramBroadcast && ChatObject.canManageCalls(chat)', channel_ui)
+        self.assertIn('status.expires = lastSeen', self.source('tgnet/WaysGramMapper.java'))
+
     def test_basic_group_admin_editor_uses_native_group_request(self):
         ui = self.source('ui/ChatRightsEditActivity.java')
         controller = self.source('messenger/MessagesController.java')

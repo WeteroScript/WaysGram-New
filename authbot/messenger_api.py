@@ -8721,13 +8721,15 @@ def build_messenger_router(
         user = await current_user(authorization)
         channel = await channel_row(channel_id)
         uid = int(user["telegram_id"])
-        if not payload or not payload.keys() <= {"title", "username", "description"}:
+        if not payload or not payload.keys() <= {"title", "username", "description", "is_public"}:
             raise HTTPException(status_code=400, detail="Нет полей для изменения")
-        if "username" in payload and channel["owner_telegram_id"] != uid:
+        if ("username" in payload or "is_public" in payload) and channel["owner_telegram_id"] != uid:
             raise HTTPException(403, "Изменять публичный адрес может только владелец канала")
-        is_public = bool(channel.get("is_public", 1))
-        if not is_public and "username" in payload:
-            raise HTTPException(status_code=400, detail="У приватного канала нельзя изменить публичный username")
+        is_public = payload.get("is_public", bool(channel.get("is_public", 1)))
+        if type(is_public) is not bool or ("username" in payload and not is_public):
+            raise HTTPException(400, "Некорректный публичный адрес канала")
+        if payload.get("is_public") is True and "username" not in payload:
+            raise HTTPException(400, "Публичному каналу нужен username")
 
         title = str(channel["title"])
         username = str(channel["username"])
@@ -8752,6 +8754,12 @@ def build_messenger_router(
                 for key, value in (("title", title), ("username", username), ("description", description.strip())):
                     if key in payload:
                         await db.execute(f"UPDATE channels SET {key}=? WHERE id=?", (value, channel_id))
+                if payload.get("is_public") is False:
+                    await db.execute("UPDATE channels SET is_public=0,username=?,invite_token=COALESCE(invite_token,?) WHERE id=?",
+                                     ("private_" + secrets.token_hex(16), secrets.token_urlsafe(32), channel_id))
+                    await db.execute("DELETE FROM profile_channels WHERE channel_id=?", (channel_id,))
+                elif payload.get("is_public") is True:
+                    await db.execute("UPDATE channels SET is_public=1 WHERE id=?", (channel_id,))
                 await db.commit()
         except aiosqlite.IntegrityError as exc:
             raise HTTPException(status_code=409, detail="Username канала уже занят") from exc
@@ -8822,6 +8830,28 @@ def build_messenger_router(
                                  [(channel_id, target) for target in targets])
             await db.commit()
         return {"channel_id": channel_id, "user_ids": targets}
+
+    @router.get("/api/channels/{channel_id}/members/{target_id}")
+    async def get_channel_participant(channel_id: int, target_id: int,
+                                      authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        uid = int((await current_user(authorization))["telegram_id"])
+        await require_channel_access(channel_id, uid)
+        if uid != target_id and not await can_manage_channel(channel_id, uid):
+            raise HTTPException(403, "USER_NOT_PARTICIPANT")
+        async with aiosqlite.connect(db_path()) as db:
+            db.row_factory = aiosqlite.Row
+            cur = await db.execute("""SELECT a.telegram_id,a.username,a.display_name,a.avatar_media_id,
+                COALESCE(m.joined_at,c.created_at) AS date,COALESCE(ca.rights,0) AS admin_rights,
+                CASE WHEN a.telegram_id=c.owner_telegram_id THEN 'owner' WHEN ca.telegram_id IS NOT NULL THEN 'admin' ELSE 'member' END AS role
+                FROM channels c JOIN accounts a ON a.telegram_id=? AND a.is_banned=0
+                LEFT JOIN channel_members m ON m.channel_id=c.id AND m.telegram_id=a.telegram_id
+                LEFT JOIN channel_admins ca ON ca.channel_id=c.id AND ca.telegram_id=a.telegram_id
+                WHERE c.id=? AND (a.telegram_id=c.owner_telegram_id OR ca.telegram_id IS NOT NULL OR m.telegram_id IS NOT NULL)""",
+                (target_id, channel_id))
+            row = await cur.fetchone()
+            if not row:
+                raise HTTPException(404, "USER_NOT_PARTICIPANT")
+            return (await avatar_visible_rows(db, [row], uid))[0]
 
     @router.get("/api/channels/{channel_id}/members")
     async def list_channel_members(channel_id: int, offset: int = 0, limit: int = 50, q: str = "",
