@@ -85,6 +85,16 @@ class NativeMessagingSourceChecks(unittest.TestCase):
         self.assertIn('if (offer.optBoolean("unlocked"))', payment)
         self.assertIn('viewer.openPhoto', payment)
 
+    def test_group_stories_use_membership_scoped_routes_and_permission_controls(self):
+        chat = self.source('ui/ChatActivity.java')
+        stories = self.source('ui/WaysGramGroupStories.java')
+        self.assertIn('WaysGramGroupStories.open(this, currentAccount, currentChat.id)', chat)
+        self.assertIn('PICK_WAYSGRAM_GROUP_STORY', chat)
+        self.assertIn('root(group) + "/story-settings"', stories)
+        self.assertIn('data.optBoolean("can_pin")', stories)
+        self.assertIn('row.optBoolean("can_delete")', stories)
+        self.assertIn('put("random_id", random)', stories)
+
     def test_topic_notifications_open_the_matching_account_topic(self):
         topics = self.source('ui/WaysGramGroupTopics.java')
         push = self.source('messenger/waysgram/WaysGramPushNotifications.java')

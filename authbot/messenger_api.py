@@ -1412,6 +1412,15 @@ async def init_messenger_storage(database_path: Path) -> None:
                 slow_mode_seconds INTEGER NOT NULL DEFAULT 0
                     CHECK(slow_mode_seconds IN (0,5,10,15,30,60,120,300))
             );
+            CREATE TABLE IF NOT EXISTS group_stories (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, channel_id INTEGER NOT NULL,
+                author_id INTEGER NOT NULL, random_id INTEGER NOT NULL, media_id TEXT NOT NULL,
+                caption TEXT NOT NULL, created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL,
+                pinned INTEGER NOT NULL, noforwards INTEGER NOT NULL, deleted INTEGER NOT NULL DEFAULT 0,
+                UNIQUE(channel_id,author_id,random_id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_group_stories_room ON group_stories(channel_id,id);
+            CREATE INDEX IF NOT EXISTS idx_group_stories_media ON group_stories(media_id);
             CREATE TABLE IF NOT EXISTS channel_stories (
                 id INTEGER PRIMARY KEY AUTOINCREMENT, channel_id INTEGER NOT NULL,
                 author_id INTEGER NOT NULL, random_id INTEGER NOT NULL, media_id TEXT NOT NULL,
@@ -1838,6 +1847,8 @@ async def init_messenger_storage(database_path: Path) -> None:
         cur = await db.execute("PRAGMA table_info(channels)")
         if "paid_reactions_enabled" not in {row[1] for row in await cur.fetchall()}:
             await db.execute("ALTER TABLE channels ADD COLUMN paid_reactions_enabled INTEGER NOT NULL DEFAULT 0")
+        if "members_can_post_stories" not in chat_group_columns:
+            await db.execute(f"ALTER TABLE {db_split.SCHEMA}.chat_groups ADD COLUMN members_can_post_stories INTEGER NOT NULL DEFAULT 0")
         if "boost_slow_mode_bypass" not in chat_group_columns:
             await db.execute(f"ALTER TABLE {db_split.SCHEMA}.chat_groups ADD COLUMN boost_slow_mode_bypass INTEGER NOT NULL DEFAULT 0")
         if "anti_spam_enabled" not in chat_group_columns:
@@ -4309,8 +4320,9 @@ def build_messenger_router(
                    + (SELECT COUNT(*) FROM accounts WHERE avatar_media_id=?)
                    + (SELECT COUNT(*) FROM profile_music WHERE media_id=?)
                    + (SELECT COUNT(*) FROM channel_stories WHERE media_id=? AND deleted=0)
+                   + (SELECT COUNT(*) FROM group_stories WHERE media_id=? AND deleted=0)
                    + (SELECT COUNT(*) FROM channel_paid_media p JOIN channel_messages m ON m.id=p.message_id AND m.channel_id=p.channel_id WHERE p.media_id=?)""",
-                (media_id, media_id, media_id, media_id, media_id, media_id, media_id),
+                (media_id, media_id, media_id, media_id, media_id, media_id, media_id, media_id),
             )
             references = int((await cur.fetchone())[0] or 0)
             if references > 0:
@@ -4425,6 +4437,12 @@ def build_messenger_router(
                     AND (s.expires_at>? OR s.pinned=1 OR c.owner_telegram_id=? OR EXISTS(
                         SELECT 1 FROM channel_admins sa WHERE sa.channel_id=c.id AND sa.telegram_id=? AND (sa.rights & 4)!=0)) LIMIT 1""",
                     (media_id, uid, uid, uid, uid, int(time.time()), uid, uid))
+                story_access = allowed = await cur.fetchone() is not None
+            if not allowed:
+                cur = await db.execute("""SELECT 1 FROM group_stories s JOIN group_members gm ON gm.group_id=s.channel_id
+                    WHERE s.media_id=? AND gm.telegram_id=? AND s.deleted=0
+                    AND (s.expires_at>? OR s.pinned=1 OR gm.role='owner' OR (gm.role='admin' AND (gm.admin_rights & 16)!=0)) LIMIT 1""",
+                    (media_id, uid, int(time.time())))
                 story_access = allowed = await cur.fetchone() is not None
             if not allowed:
                 cur = await db.execute("""SELECT 1 FROM profile_music p WHERE p.media_id=?
@@ -10019,6 +10037,7 @@ def build_messenger_router(
                 AND NOT EXISTS(SELECT 1 FROM group_messages WHERE media_id=a.id)
                 AND NOT EXISTS(SELECT 1 FROM channel_messages WHERE media_id=a.id)
                 AND NOT EXISTS(SELECT 1 FROM channel_stories WHERE media_id=a.id)
+                AND NOT EXISTS(SELECT 1 FROM group_stories WHERE media_id=a.id)
                 AND NOT EXISTS(SELECT 1 FROM accounts WHERE avatar_media_id=a.id)
                 AND NOT EXISTS(SELECT 1 FROM profile_music WHERE media_id=a.id)""", (media,))
             if not await cur.fetchone():
@@ -10285,18 +10304,44 @@ def build_messenger_router(
     STORY_COLUMNS = """s.id,s.author_id,s.media_id,s.caption,s.created_at,s.expires_at,s.pinned,s.noforwards,
         m.mime_type,m.original_name,m.media_kind,m.media_metadata"""
 
-    @router.get("/api/channels/{channel_id}/stories/can-post")
-    async def channel_story_permission(channel_id: int, authorization: str | None = Header(default=None)):
+    async def group_story_rights(db: Any, group: int, uid: int) -> tuple[bool, bool, bool]:
+        member = await require_group_member(db, group, uid)
+        cur = await db.execute("SELECT members_can_post_stories FROM chat_groups WHERE id=?", (group,))
+        allowed = bool((await cur.fetchone())[0])
+        return group_has_right(member, 1) or allowed, group_has_right(member, 8), group_has_right(member, 16)
+
+    @router.put("/api/groups/{group_id}/story-settings")
+    async def update_group_story_settings(group_id: int, payload: dict[str, Any], authorization: str | None = Header(default=None)):
         uid = int((await current_user(authorization))["telegram_id"])
+        value = payload.get("members_can_post")
+        if type(value) is not bool:
+            raise HTTPException(400, "STORY_INVALID")
         async with aiosqlite.connect(db_path()) as db:
-            if not await channel_has_right(db, channel_id, uid, 1):
+            await db.execute("BEGIN IMMEDIATE")
+            if not group_has_right(await require_group_member(db, group_id, uid), 32):
+                raise HTTPException(403, "CHAT_ADMIN_REQUIRED")
+            await db.execute("UPDATE chat_groups SET members_can_post_stories=? WHERE id=?", (int(value), group_id))
+            await db.commit()
+        return {"members_can_post": value}
+
+    @router.get("/api/channels/{channel_id}/stories/can-post")
+    @router.get("/api/groups/{channel_id}/stories/can-post")
+    async def channel_story_permission(channel_id: int, request: Request, authorization: str | None = Header(default=None)):
+        uid = int((await current_user(authorization))["telegram_id"])
+        group_story = request.url.path.startswith("/api/groups/")
+        table = "group_stories" if group_story else "channel_stories"
+        async with aiosqlite.connect(db_path()) as db:
+            if not ((await group_story_rights(db, channel_id, uid))[0] if group_story else await channel_has_right(db, channel_id, uid, 1)):
                 raise HTTPException(403, "CHAT_WRITE_FORBIDDEN")
-            cur = await db.execute("SELECT COUNT(*) FROM channel_stories WHERE channel_id=? AND deleted=0 AND expires_at>?", (channel_id, int(time.time())))
+            cur = await db.execute(f"SELECT COUNT(*) FROM {table} WHERE channel_id=? AND deleted=0 AND expires_at>?", (channel_id, int(time.time())))
             return {"count_remains": max(0, 20 - (await cur.fetchone())[0])}
 
     @router.post("/api/channels/{channel_id}/stories", status_code=201)
-    async def publish_channel_story(channel_id: int, payload: dict[str, Any], authorization: str | None = Header(default=None)):
+    @router.post("/api/groups/{channel_id}/stories", status_code=201)
+    async def publish_channel_story(channel_id: int, request: Request, payload: dict[str, Any], authorization: str | None = Header(default=None)):
         uid = int((await current_user(authorization))["telegram_id"])
+        group_story = request.url.path.startswith("/api/groups/")
+        table = "group_stories" if group_story else "channel_stories"
         random_id = payload.get("random_id")
         period = payload.get("period", 86400)
         caption = payload.get("caption", "")
@@ -10309,21 +10354,30 @@ def build_messenger_router(
         async with aiosqlite.connect(db_path()) as db:
             db.row_factory = aiosqlite.Row
             await db.execute("BEGIN IMMEDIATE")
-            if not await channel_has_right(db, channel_id, uid, 1):
+            if not ((await group_story_rights(db, channel_id, uid))[0] if group_story else await channel_has_right(db, channel_id, uid, 1)):
                 raise HTTPException(403, "CHAT_WRITE_FORBIDDEN")
-            query = "SELECT " + STORY_COLUMNS + " FROM channel_stories s JOIN media_assets m ON m.id=s.media_id WHERE s.channel_id=? AND s.author_id=? AND s.random_id=? AND s.deleted=0"
+            if group_story:
+                if pinned and not (await group_story_rights(db, channel_id, uid))[1]:
+                    raise HTTPException(403, "CHAT_ADMIN_REQUIRED")
+                # Story posting honors the regular group media restrictions too.
+                await require_group_can_send(db, channel_id, uid, str(payload.get("media_id") or ""))
+            query = "SELECT " + STORY_COLUMNS + f" FROM {table} s JOIN media_assets m ON m.id=s.media_id WHERE s.channel_id=? AND s.author_id=? AND s.random_id=? AND s.deleted=0"
             cur = await db.execute(query, (channel_id, uid, random_id))
             previous = await cur.fetchone()
             if previous:
                 return dict(previous)
-            cur = await db.execute("SELECT COUNT(*) FROM channel_stories WHERE channel_id=? AND deleted=0 AND expires_at>?", (channel_id, now))
+            cur = await db.execute(f"SELECT COUNT(*) FROM {table} WHERE channel_id=? AND deleted=0 AND expires_at>?", (channel_id, now))
             if (await cur.fetchone())[0] >= 20:
                 raise HTTPException(429, "STORIES_TOO_MUCH")
+            if group_story and pinned:
+                cur = await db.execute("SELECT COUNT(*) FROM group_stories WHERE channel_id=? AND deleted=0 AND pinned=1", (channel_id,))
+                if (await cur.fetchone())[0] >= 20:
+                    raise HTTPException(429, "STORIES_TOO_MUCH")
             media = await require_owned_media(db, str(payload.get("media_id") or ""), uid)
             fields = await media_message_fields(db, media)
             if fields["media_kind"] == "document" or not str(fields["media_type"]).startswith(("image/", "video/mp4")):
                 raise HTTPException(415, "MEDIA_NOT_SUPPORTED")
-            await db.execute("""INSERT INTO channel_stories(channel_id,author_id,random_id,media_id,caption,created_at,expires_at,pinned,noforwards)
+            await db.execute(f"""INSERT INTO {table}(channel_id,author_id,random_id,media_id,caption,created_at,expires_at,pinned,noforwards)
                 VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(channel_id,author_id,random_id) DO NOTHING""",
                 (channel_id, uid, random_id, media, caption, now, now + period, pinned, noforwards))
             cur = await db.execute(query, (channel_id, uid, random_id))
@@ -10334,17 +10388,27 @@ def build_messenger_router(
             return dict(result)
 
     @router.get("/api/channels/{channel_id}/stories")
-    async def list_channel_stories(channel_id: int, mode: Literal["active", "pinned", "archive", "ids"] = "active",
+    @router.get("/api/groups/{channel_id}/stories")
+    async def list_channel_stories(channel_id: int, request: Request, mode: Literal["active", "pinned", "archive", "ids"] = "active",
                                    offset: int = Query(default=0, ge=0), limit: int = Query(default=20, ge=1, le=100),
                                    ids: str = Query(default="", max_length=1200), authorization: str | None = Header(default=None)):
         uid = int((await current_user(authorization))["telegram_id"])
+        group_story = request.url.path.startswith("/api/groups/")
+        table = "group_stories" if group_story else "channel_stories"
         async with aiosqlite.connect(db_path()) as db:
             db.row_factory = aiosqlite.Row
             await db.execute("BEGIN")
-            cur = await db.execute("SELECT 1 FROM channels c WHERE c.id=? AND " + STORY_CHANNEL_ACCESS, (channel_id, uid, uid, uid, uid))
-            if not await cur.fetchone():
-                raise HTTPException(403, "CHANNEL_PRIVATE")
-            archive = await channel_has_right(db, channel_id, uid, 4)
+            if group_story:
+                can_post, can_pin, archive = await group_story_rights(db, channel_id, uid)
+                member = await require_group_member(db, channel_id, uid)
+                can_configure = group_has_right(member, 32)
+                cur = await db.execute("SELECT members_can_post_stories FROM chat_groups WHERE id=?", (channel_id,))
+                members_can_post = bool((await cur.fetchone())[0])
+            else:
+                cur = await db.execute("SELECT 1 FROM channels c WHERE c.id=? AND " + STORY_CHANNEL_ACCESS, (channel_id, uid, uid, uid, uid))
+                if not await cur.fetchone():
+                    raise HTTPException(403, "CHANNEL_PRIVATE")
+                archive = await channel_has_right(db, channel_id, uid, 4)
             if mode == "archive" and not archive:
                 raise HTTPException(403, "CHAT_ADMIN_REQUIRED")
             args = [channel_id]
@@ -10361,27 +10425,40 @@ def build_messenger_router(
                 where += " AND s.id IN (" + ",".join("?" for _ in selected) + ")"
                 args.extend(selected)
                 limit = len(selected)
-            base = " FROM channel_stories s JOIN media_assets m ON m.id=s.media_id WHERE " + where
+            base = f" FROM {table} s JOIN media_assets m ON m.id=s.media_id WHERE " + where
             cur = await db.execute("SELECT COUNT(*)" + base, args)
             count = (await cur.fetchone())[0]
             if offset:
                 base += " AND s.id<?"
                 args.append(offset)
             cur = await db.execute("SELECT " + STORY_COLUMNS + base + " ORDER BY s.id " + ("ASC" if mode == "active" else "DESC") + " LIMIT ?", (*args, limit))
-            return {"count": count, "stories": [dict(row) for row in await cur.fetchall()]}
+            items = [dict(row) for row in await cur.fetchall()]
+            result = {"count": count, "stories": items}
+            if group_story:
+                result.update(can_post=can_post, can_pin=can_pin, can_configure=can_configure, members_can_post=members_can_post)
+                for item in items:
+                    item["can_delete"] = archive or item["author_id"] == uid
+            return result
 
     @router.post("/api/channels/{channel_id}/stories/delete")
-    async def delete_channel_stories(channel_id: int, payload: dict[str, Any], authorization: str | None = Header(default=None)):
+    @router.post("/api/groups/{channel_id}/stories/delete")
+    async def delete_channel_stories(channel_id: int, request: Request, payload: dict[str, Any], authorization: str | None = Header(default=None)):
         uid = int((await current_user(authorization))["telegram_id"])
+        group_story = request.url.path.startswith("/api/groups/")
+        table = "group_stories" if group_story else "channel_stories"
         ids = payload.get("ids")
         if not isinstance(ids, list) or not 1 <= len(ids) <= 100 or any(type(i) is not int or not 0 < i < 2**31 for i in ids):
             raise HTTPException(400, "STORY_INVALID")
         async with aiosqlite.connect(db_path()) as db:
             await db.execute("BEGIN IMMEDIATE")
-            if not await channel_has_right(db, channel_id, uid, 4):
-                raise HTTPException(403, "CHAT_ADMIN_REQUIRED")
-            cur = await db.execute("UPDATE channel_stories SET deleted=1 WHERE channel_id=? AND id IN (" + ",".join("?" for _ in ids) + ") RETURNING id",
-                                   (channel_id, *ids))
+            if group_story:
+                moderator = (await group_story_rights(db, channel_id, uid))[2]
+            else:
+                if not await channel_has_right(db, channel_id, uid, 4):
+                    raise HTTPException(403, "CHAT_ADMIN_REQUIRED")
+                moderator = True
+            cur = await db.execute(f"UPDATE {table} SET deleted=1 WHERE channel_id=? AND deleted=0 AND (? OR author_id=?) AND id IN (" + ",".join("?" for _ in ids) + ") RETURNING id",
+                                   (channel_id, int(moderator), uid, *ids))
             removed = [row[0] for row in await cur.fetchall()]
             await db.commit()
             return {"ids": removed}
@@ -15956,6 +16033,7 @@ def build_messenger_router(
             await db.execute("DELETE FROM channel_discussion_groups WHERE group_id=?", (group_id,))
             await db.execute("DELETE FROM channel_post_comments WHERE group_id=?", (group_id,))
             await db.execute("DELETE FROM group_topic_followers WHERE group_id=?", (group_id,))
+            await db.execute("DELETE FROM group_stories WHERE channel_id=?", (group_id,))
             await db.execute("DELETE FROM group_topics WHERE group_id=?", (group_id,))
             await db.execute("DELETE FROM community_boosts WHERE scope='group' AND chat_id=?", (group_id,))
             await db.execute("DELETE FROM chat_groups WHERE id=?", (group_id,))

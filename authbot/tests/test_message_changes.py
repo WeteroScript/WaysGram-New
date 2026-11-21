@@ -2389,3 +2389,42 @@ def test_topic_notifications_are_opt_in_scoped_and_queued_once(env, monkeypatch)
                 assert json.loads(rows[0][2])['topic_id'] == str(ids[0])
 
     run(scenario())
+
+
+def test_group_story_membership_publish_and_pin_permissions(env):
+    import sqlite3
+    import uuid
+
+    path, app = env
+    media = uuid.uuid4().hex
+    storage = path.parent / 'waysgram_media'
+    storage.mkdir(exist_ok=True)
+    (storage / media).write_bytes(b'group story')
+    with sqlite3.connect(path.with_name('waysgram_messenger.sqlite3')) as db:
+        db.execute("""INSERT INTO media_assets(id,owner_telegram_id,storage_name,mime_type,size_bytes,created_at)
+                       VALUES(?,102,?,'image/png',11,1)""", (media, media))
+
+    async def scenario():
+        async with await client_for(app) as client:
+            owner, member, outsider = headers(101), headers(102), headers(ADMIN)
+            group = await client.post('/api/groups', headers=owner, json={'title': 'Stories group', 'member_ids': [102]})
+            root = f"/api/groups/{group.json()['id']}"
+            stories = root + '/stories'
+            body = {'media_id': media, 'random_id': 212, 'caption': 'Group photo'}
+            assert (await client.get(stories, headers=outsider)).status_code == 403
+            assert (await client.post(stories, headers=member, json=body)).status_code == 403
+            assert (await client.put(root + '/story-settings', headers=member, json={'members_can_post': True})).status_code == 403
+            assert (await client.put(root + '/story-settings', headers=owner, json={'members_can_post': True})).status_code == 200
+            assert (await client.post(stories, headers=member, json={**body, 'pinned': True})).status_code == 403
+            story = await client.post(stories, headers=member, json=body)
+            assert story.status_code == 201, story.text
+            sid = story.json()['id']
+            assert (await client.get(stories, headers=owner)).json()['stories'][0]['id'] == sid
+            assert (await client.get('/api/media/' + media, headers=owner)).content == b'group story'
+            assert (await client.get('/api/media/' + media, headers=outsider)).status_code == 404
+            assert (await client.post(stories + '/delete', headers=member, json={'ids': [sid]})).json()['ids'] == [sid]
+            assert (await client.get('/api/media/' + media, headers=owner)).status_code == 404
+            assert (await client.put(root + '/send-permissions', headers=owner, json={'default_send_restrictions': 2})).status_code == 200
+            assert (await client.post(stories, headers=member, json={**body, 'random_id': 213})).status_code == 403
+
+    run(scenario())

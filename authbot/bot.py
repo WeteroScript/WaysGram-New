@@ -3109,6 +3109,7 @@ async def admin_callback(callback: CallbackQuery) -> None:
             await db.execute("DELETE FROM group_messages WHERE group_id=?", (group_id,))
             await db.execute("DELETE FROM group_members WHERE group_id=?", (group_id,))
             await db.execute("DELETE FROM group_topic_followers WHERE group_id=?", (group_id,))
+            await db.execute("DELETE FROM group_stories WHERE channel_id=?", (group_id,))
             await db.execute("DELETE FROM chat_groups WHERE id=?", (group_id,))
             await db.execute(
                 "INSERT INTO admin_logs(admin_id,action,target,details,created_at) VALUES(?,?,?,?,?)",
