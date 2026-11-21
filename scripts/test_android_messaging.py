@@ -23,6 +23,15 @@ class NativeMessagingSourceChecks(unittest.TestCase):
     def source(self, path):
         return self.archive.read(BASE + path).decode('utf-8')
 
+    def test_account_inactivity_deletion_requires_explicit_confirmation(self):
+        settings = self.source('ui/PrivacySettingsActivity.java')
+        self.assertIn('WAYS_GRAM_INACTIVITY_PATH = "/api/me/inactivity-deletion"', settings)
+        self.assertIn('WaysGramApi.request("GET", WAYS_GRAM_INACTIVITY_PATH', settings)
+        self.assertIn('WaysGramApi.request("PUT", WAYS_GRAM_INACTIVITY_PATH', settings)
+        self.assertIn('saveWaysGramInactivity(token, 0, false)', settings)
+        self.assertIn('.setPositiveButton(getString(R.string.Confirm), (d, button) -> saveWaysGramInactivity(token, days, true))', settings)
+        self.assertIn('new JSONObject().put("days", days).put("confirm", confirmed)', settings)
+
     def test_change_number_uses_authenticated_waysgram_rotation(self):
         intro = self.source('ui/ActionIntroActivity.java')
         self.assertIn('ROTATE_NUMBER_PATH = "/api/me/rotate-number"', intro)

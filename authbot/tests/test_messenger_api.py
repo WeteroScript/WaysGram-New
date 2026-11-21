@@ -9339,6 +9339,9 @@ def test_inactivity_deletion_is_opt_in_and_rechecks_activity_under_lock(api_env)
             assert (await client.get(route, headers=auth)).json() == {'days': 0, 'available': True}
             assert (await client.put(route, headers=auth, json={'days': 30})).status_code == 400
             assert (await client.put(route, headers=auth, json={'days': 30, 'confirm': True})).json() == {'days': 30}
+            assert (await client.put(route, headers=auth, json={'days': 0})).json() == {'days': 0}
+            assert not await store.delete_number(number, 81001, inactive_at=int(time.time())+730*86400)
+            assert (await client.put(route, headers=auth, json={'days': 30, 'confirm': True})).status_code == 200
             now = int(time.time())
             with db_split.sqlite_connect(path) as db:
                 db.execute('UPDATE account_inactivity_deletion SET enabled_at=? WHERE telegram_id=81001', (now-31*86400,))
