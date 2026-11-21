@@ -94,7 +94,9 @@ class NativeMessagingSourceChecks(unittest.TestCase):
         self.assertIn('"owner".equals(group.optString("role"))', discussion)
         self.assertIn('WaysGramChats.channelServer(channel)', discussion)
         self.assertIn('data.optLong("next_before_id")', discussion)
-        self.assertIn('put("body", body), token, 15000, key', discussion)
+        self.assertIn('request("POST", path, payload, token, 15000, key)', discussion)
+        self.assertIn('payload.put("reply_to_id", replyToId)', discussion)
+        self.assertIn('row.optString("reply_to_body")', discussion)
 
     def test_paid_subscription_links_require_explicit_confirm_and_stable_retry(self):
         launch = self.source('ui/LaunchActivity.java')

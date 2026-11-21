@@ -15974,9 +15974,14 @@ def build_messenger_router(
             await db.execute("BEGIN")
             group = await channel_discussion_access(db, channel_id, post_id, uid)
             cur = await db.execute("""SELECT m.id,m.sender_telegram_id AS sender_id,m.body,m.created_at,m.edited_at,
-                                             a.display_name AS sender_name
+                                             a.display_name AS sender_name,m.reply_to_id,
+                                             substr(parent.body,1,180) AS reply_to_body,pa.display_name AS reply_to_sender_name
                 FROM channel_post_comments p JOIN group_messages m ON m.id=p.group_message_id AND m.group_id=p.group_id
                 LEFT JOIN accounts a ON a.telegram_id=m.sender_telegram_id
+                LEFT JOIN channel_post_comments pp ON pp.group_message_id=m.reply_to_id
+                    AND pp.group_id=p.group_id AND pp.channel_id=p.channel_id AND pp.post_id=p.post_id
+                LEFT JOIN group_messages parent ON parent.id=pp.group_message_id AND parent.group_id=p.group_id
+                LEFT JOIN accounts pa ON pa.telegram_id=parent.sender_telegram_id
                 WHERE p.channel_id=? AND p.post_id=? AND p.group_id=? AND (?=0 OR p.group_message_id<?)
                 ORDER BY p.group_message_id DESC LIMIT ?""", (channel_id, post_id, group, before_id, before_id, limit + 1))
             rows = await cur.fetchall()
@@ -15993,7 +15998,13 @@ def build_messenger_router(
             raise HTTPException(400, "COMMENT_TEXT_REQUIRED")
         async with aiosqlite.connect(db_path()) as db:
             group = await channel_discussion_access(db, channel_id, post_id, uid)
-        return await store_group_message(group, {"body": body}, authorization, idempotency_key, (channel_id, post_id))
+        message = {"body": body}
+        if "reply_to_id" in payload:
+            reply_to_id = payload["reply_to_id"]
+            if type(reply_to_id) is not int or not 0 < reply_to_id <= 2**63 - 1:
+                raise HTTPException(400, "INVALID_COMMENT_REPLY")
+            message["reply_to_id"] = reply_to_id
+        return await store_group_message(group, message, authorization, idempotency_key, (channel_id, post_id))
 
     @router.post("/api/groups/{group_id}/messages/quote/v1", status_code=201)
     @router.post("/api/groups/{group_id}/messages", status_code=201)
@@ -16081,6 +16092,13 @@ def build_messenger_router(
             media_fields = await media_message_fields(db, media_id)
             reply_to_id = parse_reply_id(payload)
             quote = parse_message_quote(payload, reply_to_id)
+            if reply_to_id and discussion:
+                cur = await db.execute("""SELECT 1 FROM channel_post_comments p
+                    JOIN group_messages m ON m.id=p.group_message_id AND m.group_id=p.group_id
+                    WHERE p.group_message_id=? AND p.group_id=? AND p.channel_id=? AND p.post_id=?""",
+                    (reply_to_id, group_id, *discussion))
+                if await cur.fetchone() is None:
+                    raise HTTPException(404, "COMMENT_REPLY_NOT_FOUND")
             if reply_to_id:
                 await require_reply_target(
                     db, "SELECT 1 FROM group_messages WHERE id=? AND group_id=?", (reply_to_id, group_id)

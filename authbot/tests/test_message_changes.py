@@ -1946,10 +1946,21 @@ def test_channel_discussion_comments_use_group_permissions_and_moderation(env):
             comments = (await client.get(url, headers=owner)).json()['comments']
             assert [row['body'] for row in comments] == ['Comment']
             assert [row['id'] for row in (await client.get(group_api + '/messages', headers=owner)).json()['messages']] == [first.json()['id']]
+            second_post = await client.post(base + '/messages', headers=owner, json={'body': 'Different post'})
+            second_url = base + f"/messages/{second_post.json()['id']}/comments"
+            assert (await client.post(second_url, headers=member, json={'body': 'Cross-thread reply', 'reply_to_id': first.json()['id']})).status_code == 404
+            ordinary = await client.post(group_api + '/messages', headers=member, json={'body': 'Not a comment'})
+            assert (await client.post(url, headers=member, json={'body': 'Ordinary reply', 'reply_to_id': ordinary.json()['id']})).status_code == 404
+            reply = await client.post(url, headers=member, json={'body': 'Reply', 'reply_to_id': first.json()['id']})
+            assert reply.status_code == 201
+            last = (await client.get(url, headers=owner)).json()['comments'][-1]
+            assert (last['reply_to_id'], last['reply_to_body']) == (first.json()['id'], 'Comment')
+
             assert (await client.put(group_api + '/send-permissions', headers=owner, json={'default_send_restrictions': 1})).status_code == 200
             assert (await client.post(url, headers=member, json={'body': 'Blocked'})).status_code == 403
             assert (await client.delete(group_api + f"/messages/{first.json()['id']}", headers=owner)).status_code == 200
-            assert (await client.get(url, headers=owner)).json()['comments'] == []
+            remaining = (await client.get(url, headers=owner)).json()['comments']
+            assert len(remaining) == 1 and remaining[0]['body'] == 'Reply' and remaining[0]['reply_to_body'] is None
             assert (await client.put(link, headers=owner, json={'group_id': None})).status_code == 200
             assert (await client.get(url, headers=owner)).status_code == 404
 
