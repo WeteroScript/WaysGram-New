@@ -1005,6 +1005,25 @@ async def init_messenger_storage(database_path: Path) -> None:
             );
             CREATE INDEX IF NOT EXISTS idx_channel_members_user
                 ON channel_members(telegram_id,channel_id);
+            CREATE TABLE IF NOT EXISTS channel_inbox_settings (
+                channel_id INTEGER PRIMARY KEY,
+                enabled INTEGER NOT NULL CHECK(enabled IN (0,1)),
+                fee_stars INTEGER NOT NULL CHECK(fee_stars BETWEEN 0 AND 10000)
+            );
+            CREATE TABLE IF NOT EXISTS channel_inbox_messages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                channel_id INTEGER NOT NULL,
+                reader_id INTEGER NOT NULL,
+                direction TEXT NOT NULL CHECK(direction IN ('incoming','reply')),
+                body TEXT NOT NULL,
+                fee_stars INTEGER NOT NULL DEFAULT 0,
+                created_at INTEGER NOT NULL,
+                operation_key TEXT NOT NULL,
+                UNIQUE(channel_id,reader_id,direction,operation_key)
+            );
+            CREATE INDEX IF NOT EXISTS idx_channel_inbox_thread ON channel_inbox_messages(channel_id,reader_id,id DESC);
+            CREATE INDEX IF NOT EXISTS idx_channel_inbox_reader_usage ON channel_inbox_messages(reader_id,direction,created_at);
+            CREATE INDEX IF NOT EXISTS idx_channel_inbox_owner_usage ON channel_inbox_messages(channel_id,direction,created_at);
             CREATE TABLE IF NOT EXISTS channel_discussion_groups (
                 channel_id INTEGER PRIMARY KEY,
                 group_id INTEGER NOT NULL UNIQUE
@@ -9250,6 +9269,137 @@ def build_messenger_router(
         channel["labels"] = await entity_labels("channel", channel_id)
         return channel
 
+    async def require_channel_inbox_owner(db: Any, channel_id: int, uid: int) -> None:
+        cur = await db.execute("SELECT 1 FROM channels WHERE id=? AND owner_telegram_id=?", (channel_id, uid))
+        if not await cur.fetchone():
+            raise HTTPException(404, "CHANNEL_NOT_FOUND")
+
+    @router.get("/api/channels/{channel_id}/inbox/settings")
+    @router.put("/api/channels/{channel_id}/inbox/settings")
+    async def channel_inbox_settings(channel_id: int, request: Request, payload: dict[str, Any] | None = None,
+                                     authorization: str | None = Header(default=None)):
+        uid = int((await current_user(authorization))["telegram_id"])
+        write = request.method == "PUT"
+        async with aiosqlite.connect(db_path()) as db:
+            await db.execute("BEGIN IMMEDIATE" if write else "BEGIN")
+            await require_channel_inbox_owner(db, channel_id, uid)
+            if write:
+                enabled, fee = (payload or {}).get("enabled"), (payload or {}).get("fee_stars")
+                if type(enabled) is not bool or type(fee) is not int or not 0 <= fee <= 10000:
+                    raise HTTPException(400, "INVALID_CHANNEL_INBOX_SETTINGS")
+                await db.execute("""INSERT INTO channel_inbox_settings VALUES(?,?,?)
+                    ON CONFLICT(channel_id) DO UPDATE SET enabled=excluded.enabled,fee_stars=excluded.fee_stars""",
+                    (channel_id, int(enabled), fee))
+                await db.commit()
+                return {"enabled": enabled, "fee_stars": fee}
+            cur = await db.execute("SELECT enabled,fee_stars FROM channel_inbox_settings WHERE channel_id=?", (channel_id,))
+            enabled, fee = await cur.fetchone() or (0, 0)
+        return {"enabled": bool(enabled), "fee_stars": fee}
+
+    @router.get("/api/channels/{channel_id}/inbox")
+    async def list_channel_inbox(channel_id: int, before_id: int = Query(default=0, ge=0),
+                                 limit: int = Query(default=40, ge=1, le=100),
+                                 authorization: str | None = Header(default=None)):
+        uid = int((await current_user(authorization))["telegram_id"])
+        async with aiosqlite.connect(db_path()) as db:
+            await db.execute("BEGIN")
+            await require_channel_inbox_owner(db, channel_id, uid)
+            db.row_factory = aiosqlite.Row
+            cur = await db.execute("""SELECT m.id,m.reader_id,a.display_name AS reader_name,m.direction,m.body,m.created_at
+                FROM (SELECT MAX(id) AS id FROM channel_inbox_messages WHERE channel_id=? GROUP BY reader_id) t
+                JOIN channel_inbox_messages m ON m.id=t.id LEFT JOIN accounts a ON a.telegram_id=m.reader_id
+                WHERE (?=0 OR m.id<?) ORDER BY m.id DESC LIMIT ?""", (channel_id, before_id, before_id, limit + 1))
+            rows = await cur.fetchall()
+        return {"threads": [dict(row) for row in rows[:limit]], "next_before_id": rows[limit - 1]["id"] if len(rows) > limit else 0}
+
+    @router.get("/api/channels/{channel_id}/inbox/me")
+    @router.post("/api/channels/{channel_id}/inbox/me")
+    async def channel_inbox_reader(channel_id: int, request: Request, payload: dict[str, Any] | None = None,
+                                   before_id: int = Query(default=0, ge=0), limit: int = Query(default=40, ge=1, le=100),
+                                   authorization: str | None = Header(default=None),
+                                   key: str | None = Header(default=None, alias="Idempotency-Key")):
+        uid = int((await current_user(authorization))["telegram_id"])
+        return await channel_inbox_thread(channel_id, uid, uid, False, request.method == "POST", payload, key, before_id, limit)
+
+    @router.get("/api/channels/{channel_id}/inbox/threads/{reader_id}")
+    @router.post("/api/channels/{channel_id}/inbox/threads/{reader_id}")
+    async def channel_inbox_owner_thread(channel_id: int, reader_id: int, request: Request, payload: dict[str, Any] | None = None,
+                                         before_id: int = Query(default=0, ge=0), limit: int = Query(default=40, ge=1, le=100),
+                                         authorization: str | None = Header(default=None),
+                                         key: str | None = Header(default=None, alias="Idempotency-Key")):
+        uid = int((await current_user(authorization))["telegram_id"])
+        if not 0 < reader_id <= 2**63 - 1:
+            raise HTTPException(404, "CHANNEL_THREAD_NOT_FOUND")
+        return await channel_inbox_thread(channel_id, reader_id, uid, True, request.method == "POST", payload, key, before_id, limit)
+
+    async def channel_inbox_thread(channel_id: int, reader: int, uid: int, as_owner: bool, write: bool,
+                                   payload: dict[str, Any] | None, key: str | None, before_id: int, limit: int):
+        direction = "reply" if as_owner else "incoming"
+        async with aiosqlite.connect(db_path()) as db:
+            await db.execute("BEGIN IMMEDIATE" if write else "BEGIN")
+            db.row_factory = aiosqlite.Row
+            if as_owner:
+                await require_channel_inbox_owner(db, channel_id, uid)
+            cur = await db.execute("""SELECT c.owner_telegram_id,COALESCE(s.enabled,0),COALESCE(s.fee_stars,0)
+                FROM channels c JOIN accounts a ON a.telegram_id=c.owner_telegram_id AND a.is_banned=0
+                LEFT JOIN channel_inbox_settings s ON s.channel_id=c.id WHERE c.id=?""" +
+                ("" if as_owner else " AND " + STORY_CHANNEL_ACCESS),
+                (channel_id,) if as_owner else (channel_id, uid, uid, uid, uid))
+            channel = await cur.fetchone()
+            if channel is None:
+                raise HTTPException(404, "CHANNEL_NOT_FOUND")
+            owner, enabled, fee = channel
+            columns = "id,direction,body,fee_stars,created_at"
+            if as_owner:
+                cur = await db.execute("SELECT 1 FROM channel_inbox_messages WHERE channel_id=? AND reader_id=? AND direction='incoming' LIMIT 1", (channel_id, reader))
+                if not await cur.fetchone():
+                    raise HTTPException(404, "CHANNEL_THREAD_NOT_FOUND")
+            if not write:
+                cur = await db.execute(f"""SELECT {columns} FROM channel_inbox_messages WHERE channel_id=? AND reader_id=?
+                    AND (?=0 OR id<?) ORDER BY id DESC LIMIT ?""", (channel_id, reader, before_id, before_id, limit + 1))
+                rows = await cur.fetchall()
+                return {"messages": [dict(row) for row in reversed(rows[:limit])],
+                        "next_before_id": rows[limit - 1]["id"] if len(rows) > limit else 0,
+                        "can_send": as_owner or (bool(enabled) and reader != owner), "fee_stars": 0 if as_owner else fee}
+            body = (payload or {}).get("body")
+            approved = (payload or {}).get("approved_fee_stars", 0)
+            if not isinstance(body, str) or type(approved) is not int or not key or not re.fullmatch(r"[A-Za-z0-9_-]{16,128}", key):
+                raise HTTPException(400, "INVALID_CHANNEL_INBOX_MESSAGE")
+            body = _message_body(body)
+            cur = await db.execute(f"SELECT {columns} FROM channel_inbox_messages WHERE channel_id=? AND reader_id=? AND direction=? AND operation_key=?", (channel_id, reader, direction, key))
+            prior = await cur.fetchone()
+            if prior is not None:
+                if (prior["body"], prior["fee_stars"]) != (body, approved):
+                    raise HTTPException(409, "IDEMPOTENCY_KEY_CONFLICT")
+                return dict(prior)
+            if as_owner:
+                fee = 0
+            elif not enabled or reader == owner:
+                raise HTTPException(403, "CHANNEL_INBOX_DISABLED")
+            if approved != fee:
+                raise HTTPException(402, {"code": "CHANNEL_INBOX_FEE_REQUIRED", "stars": fee})
+            now = int(time.time())
+            field, target = ("channel_id", channel_id) if as_owner else ("reader_id", reader)
+            cur = await db.execute(f"SELECT COUNT(*) FROM channel_inbox_messages WHERE {field}=? AND direction=? AND created_at>?", (target, direction, now - 60))
+            if (await cur.fetchone())[0] >= 20:
+                raise HTTPException(429, "CHANNEL_INBOX_RATE_LIMIT")
+            cur = await db.execute("INSERT INTO channel_inbox_messages(channel_id,reader_id,direction,body,fee_stars,created_at,operation_key) VALUES(?,?,?,?,?,?,?)",
+                                   (channel_id, reader, direction, body, fee, now, key))
+            message_id = int(cur.lastrowid)
+            if fee:
+                for account, amount in ((reader, -fee), (owner, fee)):
+                    cur = await db.execute("""UPDATE accounts SET stars=stars+? WHERE telegram_id=? AND is_banned=0
+                        AND stars+? BETWEEN 0 AND 9223372036854775807 RETURNING stars""", (amount, account, amount))
+                    balance = await cur.fetchone()
+                    await cur.close()
+                    if balance is None:
+                        raise HTTPException(409, "CHANNEL_INBOX_TRANSFER_FAILED")
+                    await db.execute("""INSERT INTO economy_transactions
+                        (telegram_id,asset,amount,balance_after,reason,admin_id,created_at) VALUES(?,'stars',?,?,?,NULL,?)""",
+                        (account, amount, balance[0], f"channel_inbox:{channel_id}:{message_id}", now))
+            await db.commit()
+        return {"id": message_id, "direction": direction, "body": body, "fee_stars": fee, "created_at": now}
+
     @router.get("/api/channels/{channel_id}/discussion-group")
     @router.put("/api/channels/{channel_id}/discussion-group")
     async def manage_channel_discussion_group(channel_id: int, request: Request, payload: dict[str, Any] | None = None,
@@ -10604,6 +10754,8 @@ def build_messenger_router(
             await db.execute("DELETE FROM channel_subscriptions WHERE channel_id=?", (channel_id,))
             await db.execute("DELETE FROM channel_discussion_groups WHERE channel_id=?", (channel_id,))
             await db.execute("DELETE FROM channel_post_comments WHERE channel_id=?", (channel_id,))
+            await db.execute("DELETE FROM channel_inbox_settings WHERE channel_id=?", (channel_id,))
+            await db.execute("DELETE FROM channel_inbox_messages WHERE channel_id=?", (channel_id,))
             await db.execute(
                 "DELETE FROM channels WHERE id=? AND owner_telegram_id=?",
                 (channel_id, int(user["telegram_id"])),

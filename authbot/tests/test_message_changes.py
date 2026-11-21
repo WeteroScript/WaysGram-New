@@ -1965,3 +1965,48 @@ def test_channel_discussion_comments_use_group_permissions_and_moderation(env):
             assert (await client.get(url, headers=owner)).status_code == 404
 
     run(scenario())
+
+
+def test_channel_inbox_is_private_and_requires_current_confirmed_fee(env):
+    import aiosqlite
+
+    path, app = env
+
+    async def scenario():
+        async with aiosqlite.connect(path) as db:
+            await db.execute('UPDATE accounts SET stars=20 WHERE telegram_id=102')
+            await db.commit()
+        async with await client_for(app) as client:
+            owner, reader, other = headers(101), headers(102), headers(ADMIN)
+            channel = await client.post('/api/channels', headers=owner,
+                                        json={'title': 'Reader inbox', 'username': 'reader_inbox', 'is_public': True})
+            base = f"/api/channels/{channel.json()['id']}/inbox"
+            key = {**reader, 'Idempotency-Key': 'inbox-payment-0001'}
+            assert (await client.get(base + '/me', headers=reader)).json()['can_send'] is False
+            assert (await client.post(base + '/me', headers=key, json={'body': 'Hello'})).status_code == 403
+            assert (await client.put(base + '/settings', headers=reader, json={'enabled': True, 'fee_stars': 6})).status_code == 404
+            assert (await client.put(base + '/settings', headers=owner, json={'enabled': True, 'fee_stars': 6})).status_code == 200
+            assert (await client.get(base + '/me', headers=reader)).json()['fee_stars'] == 6
+            wrong = await client.post(base + '/me', headers=key, json={'body': 'Hello', 'approved_fee_stars': 5})
+            assert wrong.status_code == 402 and wrong.json()['detail']['stars'] == 6
+            paid = {'body': 'Hello', 'approved_fee_stars': 6}
+            first, duplicate = await asyncio.gather(*(client.post(base + '/me', headers=key, json=paid) for _ in range(2)))
+            assert first.status_code == duplicate.status_code == 200
+            assert first.json() == duplicate.json()
+            assert (await client.post(base + '/me', headers=key, json={**paid, 'body': 'Other'})).status_code == 409
+            assert (await client.get(base, headers=other)).status_code == 404
+            assert (await client.get(base + '/threads/102', headers=other)).status_code == 404
+            assert (await client.get(base + '/me', headers=other)).json()['messages'] == []
+            assert (await client.get(base, headers=owner)).json()['threads'][0]['reader_id'] == 102
+            assert (await client.post(base + '/threads/102', headers={**owner, 'Idempotency-Key': 'inbox-response-0001'}, json={'body': 'Welcome'})).status_code == 200
+            thread = (await client.get(base + '/me', headers=reader)).json()['messages']
+            assert [(m['body'], m['direction'], m['fee_stars']) for m in thread] == [('Hello', 'incoming', 6), ('Welcome', 'reply', 0)]
+            assert not any('sender_id' in m or 'owner_telegram_id' in m for m in thread)
+            assert (await client.put(base + '/settings', headers=owner, json={'enabled': False, 'fee_stars': 0})).status_code == 200
+            assert (await client.post(base + '/me', headers=key, json=paid)).json() == first.json()
+            assert (await client.get(base + '/me', headers=reader)).json()['can_send'] is False
+        async with aiosqlite.connect(path) as db:
+            cur = await db.execute("SELECT telegram_id,amount FROM economy_transactions WHERE reason LIKE 'channel_inbox:%' ORDER BY telegram_id")
+            assert await cur.fetchall() == [(101, 6), (102, -6)]
+
+    run(scenario())
