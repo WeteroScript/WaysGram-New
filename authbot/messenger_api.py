@@ -11476,7 +11476,7 @@ def build_messenger_router(
                 await db.rollback()
                 raise HTTPException(status_code=429, detail="Превышен лимит отправки сообщений")
             fee = await dm_message_fee(db, uid, recipient_id)
-            if fee:
+            if fee or "approved_fee_stars" in payload:
                 allowed = payload.get("approved_fee_stars")
                 if type(allowed) is not int or allowed != fee:
                     raise HTTPException(402, {"code": "MESSAGE_FEE_REQUIRED", "stars": fee})

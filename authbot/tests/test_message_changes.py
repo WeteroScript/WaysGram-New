@@ -1670,6 +1670,13 @@ def test_paid_dm_requires_current_quote_and_charges_once(env):
             assert all(item['body'] != 'unfunded' for item in listed)
             assert (await client.put(route, headers=owner, json={'stars': 3, 'exempt_users': [101]})).status_code == 200
             assert (await client.get(quote, headers=sender)).json() == {'stars': 0}
+            retry_key = {**sender, 'Idempotency-Key': 'message-fee-test-0003'}
+            changed_body = {**body, 'body': 'now free'}
+            changed = await client.post('/api/messages', headers=retry_key, json=changed_body)
+            assert changed.status_code == 402 and changed.json()['detail']['stars'] == 0
+            free = await client.post('/api/messages', headers=retry_key, json={**changed_body, 'approved_fee_stars': 0})
+            assert free.status_code == 201
+            assert (await client.post('/api/messages', headers=keyed, json=body)).json()['id'] == sent.json()['id']
 
     run(scenario())
 

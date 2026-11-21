@@ -8,4 +8,4 @@ The server stores an optional fee in internal Stars (1–10,000) per recipient. 
 
 A paid send creates the message, debits the sender, credits the recipient, records both ledger entries, and persists the idempotent response in one transaction. Batches, forwards, gift messages, and scheduled messages that would require a fee are rejected rather than charging without consent. Store receipts are not paid chat sends.
 
-The APK does not yet expose the fee switch or the sender confirmation flow. Keep the setting off for accounts that need to receive messages from current APKs; those clients cannot approve a fee.
+Android source exposes the fee and exceptions under Privacy → Messages. Direct text and text replies prompt in the active chat using the exact server price. Ambiguous paid retries reuse the previous approval and request key, and are refused locally after 24 hours. A changed price, including zero, requires new confirmation. Media and other send types do not have a paid confirmation UI. Older APKs cannot approve a fee.

@@ -85,6 +85,17 @@ class NativeMessagingSourceChecks(unittest.TestCase):
         self.assertIn('if (offer.optBoolean("unlocked"))', payment)
         self.assertIn('viewer.openPhoto', payment)
 
+    def test_paid_direct_text_confirms_exact_fee_and_preserves_retry(self):
+        transport = self.source('tgnet/WaysGramTransport.java')
+        privacy = self.source('ui/PrivacySettingsActivity.java')
+        helper = self.source('ui/WaysGramPaidDm.java')
+        self.assertIn('WaysGramPaidDm.settings(this, currentAccount)', privacy)
+        self.assertIn('new JSONArray(ids)', helper)
+        self.assertIn('R.string.WaysGramPaidDmConfirm, fee', helper)
+        self.assertIn('putInt(slot, fee).putLong(slot + ":since", since).commit()', transport)
+        self.assertIn('body.put("approved_fee_stars", approvedFee)', transport)
+        self.assertIn('confirmPaidText(account, send, token, changed, false', transport)
+
     def test_community_boosts_use_waysgram_and_explicit_move_confirmation(self):
         chat = self.source('ui/ChatActivity.java')
         helper = self.source('ui/WaysGramPaidReactions.java')
