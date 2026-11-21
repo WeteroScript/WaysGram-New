@@ -784,3 +784,27 @@ def test_group_and_channel_settings_put(env) -> None:
             assert (await client.put(channel_path, headers=headers(101), json={'username': 'renamed_news'})).status_code == 200
 
     run(scenario())
+
+
+def test_channel_membership_and_owner_invite_are_server_authoritative(env):
+    _, app = env
+
+    async def scenario():
+        async with await client_for(app) as client:
+            owner, member, outsider = headers(101), headers(102), headers(ADMIN)
+            channel = await client.post('/api/channels', headers=owner, json={'title': 'Private', 'is_public': False})
+            assert channel.status_code == 201, channel.text
+            cid = channel.json()['id']
+            path = f'/api/channels/{cid}'
+            assert (await client.put(path + '/membership', headers=member, json={'joined': True})).status_code == 403
+            assert (await client.post(path + '/members', headers=outsider, json={'user_ids': [102]})).status_code == 403
+            assert (await client.post(path + '/members', headers=owner, json={'user_ids': [102, 9999999]})).status_code == 404
+            assert (await client.get(path, headers=member)).status_code == 403
+            assert (await client.post(path + '/members', headers=owner, json={'user_ids': [102, 102]})).status_code == 201
+            listed = (await client.get('/api/channels', headers=member)).json()['channels']
+            assert next(c for c in listed if c['id'] == cid)['is_member'] == 1
+            assert (await client.put(path + '/membership', headers=owner, json={'joined': False})).status_code == 409
+            assert (await client.put(path + '/membership', headers=member, json={'joined': False})).status_code == 200
+            assert (await client.get(path, headers=member)).status_code == 403
+
+    run(scenario())

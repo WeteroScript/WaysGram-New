@@ -8040,6 +8040,7 @@ def build_messenger_router(
                           ch.title,ch.owner_telegram_id,ch.is_public,
                           owner.username AS owner_username,
                           EXISTS(SELECT 1 FROM channel_admins ca WHERE ca.channel_id=ch.id AND ca.telegram_id=?) AS is_admin,
+                          EXISTS(SELECT 1 FROM channel_members cm WHERE cm.channel_id=ch.id AND cm.telegram_id=?) AS is_member,
                           COALESCE((SELECT rm.last_read_id FROM read_markers rm
                                     WHERE rm.telegram_id=? AND rm.scope='channel' AND rm.peer_id=ch.id),0) AS last_read_id,
                           (SELECT COUNT(*) FROM channel_messages z
@@ -8055,7 +8056,7 @@ def build_messenger_router(
                       OR EXISTS(SELECT 1 FROM channel_members cm
                                 WHERE cm.channel_id=ch.id AND cm.telegram_id=?)
                    ORDER BY ch.id DESC""",
-                (uid, uid, uid, uid, uid, uid, uid),
+                (uid, uid, uid, uid, uid, uid, uid, uid),
             )
             rows = await cur.fetchall()
         channels = []
@@ -8237,6 +8238,62 @@ def build_messenger_router(
             "owner_telegram_id": int(channel["owner_telegram_id"]),
             "is_public": is_public,
         }
+
+    @router.put("/api/channels/{channel_id}/membership")
+    async def set_channel_membership(channel_id: int, payload: dict[str, Any],
+                                     authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        uid = int((await current_user(authorization))["telegram_id"])
+        joined = payload.get("joined")
+        if type(joined) is not bool:
+            raise HTTPException(400, "joined должен быть логическим значением")
+        async with aiosqlite.connect(db_path()) as db:
+            await db.execute("BEGIN IMMEDIATE")
+            cur = await db.execute("SELECT is_public,owner_telegram_id FROM channels WHERE id=?", (channel_id,))
+            channel = await cur.fetchone()
+            if channel is None:
+                raise HTTPException(404, "Канал не найден")
+            if joined:
+                if not channel[0]:
+                    cur = await db.execute("SELECT 1 FROM channel_members WHERE channel_id=? AND telegram_id=?", (channel_id, uid))
+                    if not await cur.fetchone():
+                        raise HTTPException(403, "Нужна ссылка-приглашение")
+                await db.execute("INSERT OR IGNORE INTO channel_members(channel_id,telegram_id,joined_at) VALUES(?,?,?)",
+                                 (channel_id, uid, int(time.time())))
+            else:
+                if uid == channel[1]:
+                    raise HTTPException(409, "Владелец не может покинуть канал")
+                await db.execute("DELETE FROM channel_admins WHERE channel_id=? AND telegram_id=?", (channel_id, uid))
+                await db.execute("DELETE FROM channel_members WHERE channel_id=? AND telegram_id=?", (channel_id, uid))
+            await db.commit()
+        return {"joined": joined, "channel_id": channel_id}
+
+    @router.post("/api/channels/{channel_id}/members", status_code=201)
+    async def invite_channel_members(channel_id: int, payload: dict[str, Any],
+                                     authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        uid = int((await current_user(authorization))["telegram_id"])
+        targets = payload.get("user_ids")
+        if not isinstance(targets, list) or not 1 <= len(targets) <= 200 or any(
+            type(target) is not int or not 0 < target <= 2**63 - 1 for target in targets
+        ):
+            raise HTTPException(400, "Нужно выбрать от 1 до 200 участников")
+        targets = list(dict.fromkeys(targets))
+        async with aiosqlite.connect(db_path()) as db:
+            await db.execute("BEGIN IMMEDIATE")
+            cur = await db.execute("SELECT owner_telegram_id FROM channels WHERE id=?", (channel_id,))
+            row = await cur.fetchone()
+            if row is None or row[0] != uid:
+                raise HTTPException(403, "Приглашать участников может только владелец канала")
+            for target in targets:
+                cur = await db.execute("""SELECT 1 FROM accounts WHERE telegram_id=? AND is_banned=0
+                    AND NOT EXISTS(SELECT 1 FROM blocked_users WHERE
+                        (owner_telegram_id=? AND blocked_telegram_id=?) OR
+                        (owner_telegram_id=? AND blocked_telegram_id=?))""", (target, target, uid, uid, target))
+                if not await cur.fetchone():
+                    raise HTTPException(404, "Один из получателей не найден или недоступен")
+            await db.executemany("INSERT OR IGNORE INTO channel_members(channel_id,telegram_id,joined_at) VALUES(?,?,?)",
+                                 [(channel_id, target, int(time.time())) for target in targets])
+            await db.commit()
+        return {"channel_id": channel_id, "user_ids": targets}
 
     @router.get("/api/channels/{channel_id}/admins")
     async def list_channel_admins(
