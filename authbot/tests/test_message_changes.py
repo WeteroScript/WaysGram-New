@@ -1489,3 +1489,21 @@ def test_forward_privacy_controls_profile_link_for_each_viewer(env):
             assert all(row['forwarded_from_telegram_id'] == 101 for row in await history())
 
     run(scenario())
+
+
+def test_blocked_users_list_and_unblock_restore_dm_access(env):
+    _, app = env
+
+    async def scenario():
+        async with await client_for(app) as client:
+            owner, peer = headers(101), headers(102)
+            assert (await client.post('/api/blocks', headers=owner, json={'user_id': 102})).status_code == 201
+            rows = (await client.get('/api/blocks', headers=owner)).json()
+            assert rows['count'] == 1 and rows['blocked_users'][0]['id'] == 102
+            assert (await client.get('/api/blocks', headers=peer)).json()['count'] == 0
+            assert (await client.post('/api/messages', headers=peer, json={'recipient_id': 101, 'body': 'Blocked'})).status_code == 403
+            assert (await client.delete('/api/blocks/102', headers=owner)).status_code == 200
+            assert (await client.get('/api/blocks', headers=owner)).json()['count'] == 0
+            assert (await client.post('/api/messages', headers=peer, json={'recipient_id': 101, 'body': 'Allowed'})).status_code == 201
+
+    run(scenario())

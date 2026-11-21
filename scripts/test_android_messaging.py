@@ -71,6 +71,14 @@ class NativeMessagingSourceChecks(unittest.TestCase):
         self.assertIn('full.stories = WaysGramStories.active', chats)
         self.assertIn('if (canAddStory)', profile)
 
+    def test_blocked_users_ui_uses_server_list_and_mutations(self):
+        transport = self.source('tgnet/WaysGramTransport.java')
+        self.assertIn('TLRPC.TL_contacts_getBlocked', transport)
+        self.assertIn('WaysGramApi.get(account, "/api/blocks")', transport)
+        self.assertIn('out.blocked.add(peer)', transport)
+        self.assertIn('WaysGramApi.post(account, "/api/blocks", body)', transport)
+        self.assertIn('WaysGramApi.delete(account, "/api/blocks/" + peer.user_id)', transport)
+
     def test_basic_group_admin_editor_uses_native_group_request(self):
         ui = self.source('ui/ChatRightsEditActivity.java')
         controller = self.source('messenger/MessagesController.java')
