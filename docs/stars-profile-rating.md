@@ -1,6 +1,6 @@
 # WaysGram profile rating
 
-The server derives the public rating from settled Stars activity, not the wallet balance. Android uses the existing Telegram `StarRatingView` and detail sheet, populated from `/api/me` and `/api/users/{id}`. An upcoming increase and its application date are visible only to the owner.
+The server derives the public rating from settled Stars activity, not the wallet balance. Android uses the existing Telegram `StarRatingView` and detail sheet, populated from `/api/me` and `/api/users/{id}`. Level 0 is public too, including before the first points mature. An upcoming increase and its application date are visible only to the owner.
 
 | Operation | Rating effect |
 | --- | --- |

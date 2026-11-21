@@ -52,13 +52,12 @@ async def profile_rating(db, uid: int, *, now: int, include_pending: bool) -> di
             elif include_pending:
                 future[applies] = future.get(applies, 0) + points
     points = _whole_points(current)
-    result = {"stars_rating": rating_value(points) if points else None}
+    result = {"stars_rating": rating_value(points)}
     if future:
         for applies, earned in sorted(future.items()):
             current += earned
             next_points = _whole_points(current)
             if next_points != points:
-                result["stars_rating"] = rating_value(points)
                 result["stars_my_pending_rating"] = rating_value(next_points)
                 result["stars_my_pending_rating_date"] = applies
                 break

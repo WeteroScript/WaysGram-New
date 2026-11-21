@@ -50,3 +50,24 @@ def test_rating_from_ledger_and_pending_privacy(env):
                 assert ('stars_my_pending_rating' in profile) == (viewer == 101)
 
     run(scenario())
+
+
+def test_other_users_see_level_zero_before_earnings_mature(env):
+    path, app = env
+    with db_split.sqlite_connect(path) as db:
+        db.execute("""INSERT INTO economy_transactions
+            (telegram_id,asset,amount,balance_after,reason,created_at)
+            VALUES(101,'stars',-50,0,'telegram_gift:1',?)""", (int(time.time()),))
+        db.commit()
+
+    async def scenario():
+        async with await client_for(app) as client:
+            other = await client.get('/api/users/101', headers=headers(102))
+            assert other.status_code == 200, other.text
+            assert other.json()['stars_rating'] == rating_value(0)
+            assert 'stars_my_pending_rating' not in other.json()
+            me = (await client.get('/api/me', headers=headers(101))).json()
+            assert me['stars_rating'] == rating_value(0)
+            assert me['stars_my_pending_rating']['stars'] == 50
+
+    run(scenario())
