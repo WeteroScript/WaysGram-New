@@ -23,6 +23,14 @@ class NativeMessagingSourceChecks(unittest.TestCase):
     def source(self, path):
         return self.archive.read(BASE + path).decode('utf-8')
 
+    def test_basic_group_admin_editor_uses_native_group_request(self):
+        ui = self.source('ui/ChatRightsEditActivity.java')
+        controller = self.source('messenger/MessagesController.java')
+        transport = self.source('tgnet/WaysGramTransport.java')
+        self.assertIn('!isWaysGramBasicAdmin() && !ChatObject.isChannel(currentChat)', ui)
+        self.assertIn('req.waysGramRights = (rights.change_info ? 1 : 0)', controller)
+        self.assertIn('edit.is_admin, edit.waysGramRights', transport)
+
     def test_empty_chat_dialogs_do_not_shift_peer_messages(self):
         chats = self.source('tgnet/WaysGramChats.java')
         collect = chats.split('Snapshot collect(', 1)[1].split('// ---------------------------------------------------------------- history', 1)[0]

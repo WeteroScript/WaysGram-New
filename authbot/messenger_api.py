@@ -14272,6 +14272,8 @@ def build_messenger_router(
             if target["role"] == "owner":
                 raise HTTPException(status_code=409, detail="Владелец уже обладает полными правами")
             effective_rights = rights if rights is not None else (target["admin_rights"] if target["role"] == "admin" else 63)
+            if payload.get("preserve_slow_mode") is True and target["role"] == "admin":
+                effective_rights |= target["admin_rights"] & 32
             await db.execute(
                 "UPDATE group_members SET role='admin',admin_rights=? WHERE group_id=? AND telegram_id=?",
                 (effective_rights, group_id, target_id),
