@@ -1856,6 +1856,8 @@ def test_channel_paid_media_requires_purchase_and_charges_once(env):
             assert result.content == b'photo' and 'no-store' in result.headers['cache-control']
             assert (await client.get(file_url, headers=other)).status_code == 404
             assert (await client.delete('/api/media/storage/' + media, headers=owner)).status_code == 409
+            stats = (await client.get(base + '/analytics', headers=owner)).json()
+            assert stats['paid_media_stars'] == stats['total_revenue_stars'] == 5
             assert (await client.delete(post_url, headers=owner)).status_code == 200
             assert (await client.get(file_url, headers=buyer)).status_code == 404
         async with aiosqlite.connect(path) as db:
@@ -1909,6 +1911,8 @@ def test_paid_channel_subscription_expires_without_converting_to_free_membership
             renewal = await client.post(url, headers={**buyer, 'Idempotency-Key': 'subscription-0002'}, json={'approved_price_stars': 6})
             assert renewal.status_code == 200
             assert (await client.get(base + '/messages', headers=buyer)).status_code == 200
+            stats = (await client.get(base + '/analytics', headers=owner)).json()
+            assert stats['subscription_stars'] == stats['total_revenue_stars'] == 12
         async with aiosqlite.connect(path) as db:
             cur = await db.execute("SELECT telegram_id,SUM(amount),COUNT(*) FROM economy_transactions WHERE reason=? GROUP BY telegram_id ORDER BY telegram_id", (f'channel_subscription:{cid}',))
             assert await cur.fetchall() == [(101, 12, 2), (102, -12, 2)]
@@ -2005,6 +2009,8 @@ def test_channel_inbox_is_private_and_requires_current_confirmed_fee(env):
             assert (await client.put(base + '/settings', headers=owner, json={'enabled': False, 'fee_stars': 0})).status_code == 200
             assert (await client.post(base + '/me', headers=key, json=paid)).json() == first.json()
             assert (await client.get(base + '/me', headers=reader)).json()['can_send'] is False
+            stats = (await client.get(base.removesuffix('/inbox') + '/analytics', headers=owner)).json()
+            assert stats['inbox_stars'] == stats['total_revenue_stars'] == 6
         async with aiosqlite.connect(path) as db:
             cur = await db.execute("SELECT telegram_id,amount FROM economy_transactions WHERE reason LIKE 'channel_inbox:%' ORDER BY telegram_id")
             assert await cur.fetchall() == [(101, 6), (102, -6)]

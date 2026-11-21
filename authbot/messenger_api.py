@@ -9616,14 +9616,23 @@ def build_messenger_router(
             cur = await db.execute("""SELECT COUNT(*) FROM channel_messages m WHERE channel_id=? AND created_at>=?
                 AND (media_album_id IS NULL OR media_album_index=0)""", (channel_id, since))
             posts = (await cur.fetchone())[0]
-            # Read settled credits from the ledger so deleting a post does not erase revenue.
-            cur = await db.execute("""SELECT COUNT(*), COALESCE(SUM(amount),0)
+            # Count only settled credits, including those for posts that have since been deleted.
+            patterns = (f"channel_paid_reaction:{channel_id}:*", f"channel_paid_media:{channel_id}:*",
+                        f"channel_subscription:{channel_id}", f"channel_inbox:{channel_id}:*")
+            cur = await db.execute("""SELECT
+                    COUNT(CASE WHEN reason GLOB ? THEN 1 END),
+                    COALESCE(SUM(CASE WHEN reason GLOB ? THEN amount ELSE 0 END),0),
+                    COALESCE(SUM(CASE WHEN reason GLOB ? THEN amount ELSE 0 END),0),
+                    COALESCE(SUM(CASE WHEN reason=? THEN amount ELSE 0 END),0),
+                    COALESCE(SUM(CASE WHEN reason GLOB ? THEN amount ELSE 0 END),0)
                 FROM economy_transactions WHERE telegram_id=? AND asset='stars' AND admin_id IS NULL
-                AND amount>0 AND created_at>=? AND reason GLOB ?""", (uid, since, f"channel_paid_reaction:{channel_id}:*"))
-            purchases, stars = await cur.fetchone()
+                AND amount>0 AND created_at BETWEEN ? AND ?""", (patterns[0], *patterns, uid, since, now))
+            purchases, reaction_stars, media_stars, subscription_stars, inbox_stars = await cur.fetchone()
         return {"days": int(days), "since": since, "as_of": now, "members": members,
                 "current_members_joined": recent_members, "published_posts_remaining": posts,
-                "paid_reaction_purchases": purchases, "paid_reaction_stars": stars}
+                "paid_reaction_purchases": purchases, "paid_reaction_stars": reaction_stars,
+                "paid_media_stars": media_stars, "subscription_stars": subscription_stars, "inbox_stars": inbox_stars,
+                "total_revenue_stars": reaction_stars + media_stars + subscription_stars + inbox_stars}
 
     @router.put("/api/channels/{channel_id}/messages/{message_id}/paid-media")
     async def attach_channel_paid_media(channel_id: int, message_id: int, payload: dict[str, Any],

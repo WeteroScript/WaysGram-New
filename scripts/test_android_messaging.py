@@ -147,6 +147,8 @@ class NativeMessagingSourceChecks(unittest.TestCase):
         self.assertIn('WaysGramPaidReactions.showAnalytics', gate[1])
         self.assertIn('int[] days = {7, 30, 90}', helper)
         self.assertIn('data.optLong("paid_reaction_stars")', helper)
+        for metric in ("paid_media_stars", "subscription_stars", "inbox_stars", "total_revenue_stars"):
+            self.assertIn(f'data.optLong("{metric}")', helper)
 
     def test_group_analytics_uses_group_endpoint_and_activity_metrics(self):
         editor = self.source('ui/ChatEditActivity.java')
