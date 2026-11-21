@@ -4362,7 +4362,7 @@ def build_messenger_router(
         if not await can_view_channel(channel_id, telegram_id):
             raise HTTPException(status_code=403, detail="Это приватный канал. Нужна ссылка-приглашение.")
 
-    # Wire bitmask shared with WaysGramChats: post, edit, delete, pin, invite, ban.
+    # Wire bitmask shared with WaysGramChats: post, edit, delete, pin, invite, ban, change info.
     async def channel_has_right(db: Any, channel_id: int, uid: int, bit: int) -> bool:
         cur = await db.execute("""SELECT 1 FROM channels c WHERE c.id=? AND (c.owner_telegram_id=? OR EXISTS(
             SELECT 1 FROM channel_admins a WHERE a.channel_id=c.id AND a.telegram_id=? AND (a.rights & ?) != 0))""",
@@ -8313,10 +8313,11 @@ def build_messenger_router(
     ) -> dict[str, Any]:
         user = await current_user(authorization)
         channel = await channel_row(channel_id)
-        if int(channel["owner_telegram_id"]) != int(user["telegram_id"]):
-            raise HTTPException(status_code=403, detail="Изменять канал может только владелец")
-        if not payload or not ({"title", "username", "description"} & payload.keys()):
+        uid = int(user["telegram_id"])
+        if not payload or not payload.keys() <= {"title", "username", "description"}:
             raise HTTPException(status_code=400, detail="Нет полей для изменения")
+        if "username" in payload and channel["owner_telegram_id"] != uid:
+            raise HTTPException(403, "Изменять публичный адрес может только владелец канала")
         is_public = bool(channel.get("is_public", 1))
         if not is_public and "username" in payload:
             raise HTTPException(status_code=400, detail="У приватного канала нельзя изменить публичный username")
@@ -8339,6 +8340,8 @@ def build_messenger_router(
         try:
             async with aiosqlite.connect(db_path()) as db:
                 await db.execute("BEGIN IMMEDIATE")
+                if not await channel_has_right(db, channel_id, uid, 64):
+                    raise HTTPException(403, "Нет права изменять информацию о канале")
                 for key, value in (("title", title), ("username", username), ("description", description.strip())):
                     if key in payload:
                         await db.execute(f"UPDATE channels SET {key}=? WHERE id=?", (value, channel_id))
@@ -9130,7 +9133,7 @@ def build_messenger_router(
         if target_id <= 0:
             raise HTTPException(status_code=400, detail="Некорректный Telegram ID")
         rights = payload.get("rights", 15)
-        if type(rights) is not int or not 1 <= rights <= 63:
+        if type(rights) is not int or not 1 <= rights <= 127:
             raise HTTPException(400, "Некорректные права администратора")
         if target_id == uid:
             raise HTTPException(409, "Нельзя изменить права владельца")

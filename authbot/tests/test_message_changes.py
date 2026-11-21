@@ -1032,6 +1032,15 @@ def test_channel_admin_rights_are_independent(env):
             assert (await client.get(path, headers=member)).status_code == 200
             assert (await client.post(path + '/admins', headers=admin, json={'telegram_id': ADMIN, 'rights': 63})).status_code == 403
 
+            assert (await client.put(path, headers=admin, json={'title': 'Denied'})).status_code == 403
+            await grant(64)
+            changed = await client.put(path, headers=admin, json={'title': 'Updated', 'description': 'New description'})
+            assert changed.status_code == 200, changed.text
+            assert changed.json()['title'] == 'Updated' and changed.json()['description'] == 'New description'
+            assert (await client.put(path, headers=admin, json={'username': 'another', 'title': 'Must not change'})).status_code == 403
+            assert (await client.get(path, headers=owner)).json()['title'] == 'Updated'
+            assert (await client.post(path + '/messages', headers=admin, json={'body': 'Still denied'})).status_code == 403
+
             await grant(4 | 32)
             assert (await client.delete(message, headers=admin)).status_code == 200
             assert (await client.put(path + '/members/101/ban', headers=admin, json={'banned': True})).status_code == 403
