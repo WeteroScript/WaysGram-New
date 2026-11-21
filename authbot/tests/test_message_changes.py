@@ -2050,3 +2050,39 @@ def test_reader_post_proposals_require_owner_approval_and_publish_once(env):
             assert [m['proposal_state'] for m in messages] == ['published', 'withdrawn', 'declined']
 
     run(scenario())
+
+
+def test_group_topics_have_separate_history_and_enforce_membership_and_closure(env):
+    _, app = env
+
+    async def scenario():
+        async with await client_for(app) as client:
+            owner, member, outsider = headers(101), headers(102), headers(ADMIN)
+            group = await client.post('/api/groups', headers=owner, json={'title': 'Topic group', 'member_ids': [102]})
+            path = f"/api/groups/{group.json()['id']}"
+            topics = path + '/topics'
+            assert (await client.get(topics, headers=outsider)).status_code == 403
+            assert (await client.post(topics, headers=member, json={'title': 'Denied'})).status_code == 403
+            results = [await client.post(topics, headers=owner, json={'title': title}) for title in ('Planning', 'Ideas')]
+            assert [r.status_code for r in results] == [200, 200]
+            assert (await client.post(topics, headers=owner, json={'title': 'planning'})).status_code == 409
+            topic, other = [topics + f"/{r.json()['id']}" for r in results]
+            key = {**member, 'Idempotency-Key': 'topic-message-0001'}
+            sent = await client.post(topic + '/messages', headers=key, json={'body': 'Topic only'})
+            assert sent.status_code == 201
+            assert (await client.post(topic + '/messages', headers=key, json={'body': 'Topic only'})).json()['id'] == sent.json()['id']
+            assert (await client.get(topic + '/messages', headers=outsider)).status_code == 403
+            assert (await client.get(other + '/messages', headers=member)).json()['messages'] == []
+            assert (await client.get(path + '/messages', headers=member)).json()['messages'] == []
+            assert (await client.get(path + f"/messages?message_ids={sent.json()['id']}", headers=member)).json()['messages'] == []
+            assert (await client.get(path + '/messages/search?q=Topic', headers=member)).json()['messages'] == []
+            assert (await client.patch(topic, headers=owner, json={'closed': True, 'title': 'Plans'})).json()['closed'] is True
+            assert (await client.get(topic + '/messages', headers=member)).json()['messages'][0]['body'] == 'Topic only'
+            assert (await client.post(topic + '/messages', headers=member, json={'body': 'Closed'})).status_code == 403
+            assert (await client.patch(topic, headers=owner, json={'closed': False})).json()['closed'] is False
+            assert (await client.put(path + '/send-permissions', headers=owner, json={'default_send_restrictions': 1})).status_code == 200
+            assert (await client.post(topic + '/messages', headers=member, json={'body': 'Blocked'})).status_code == 403
+            assert (await client.delete(topic, headers=owner)).status_code == 200
+            assert (await client.get(topic + '/messages', headers=member)).status_code == 404
+
+    run(scenario())

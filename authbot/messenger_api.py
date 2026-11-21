@@ -1410,6 +1410,16 @@ async def init_messenger_storage(database_path: Path) -> None:
             CREATE TABLE IF NOT EXISTS account_invite_privacy (
                 telegram_id INTEGER PRIMARY KEY, rules TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS group_topics (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                group_id INTEGER NOT NULL,
+                title TEXT NOT NULL COLLATE NOCASE,
+                closed INTEGER NOT NULL DEFAULT 0 CHECK(closed IN (0,1)),
+                created_at INTEGER NOT NULL,
+                deleted_at INTEGER
+            );
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_group_topics_title
+                ON group_topics(group_id,title) WHERE deleted_at IS NULL;
             CREATE TABLE IF NOT EXISTS group_mutes (
                 group_id INTEGER NOT NULL, telegram_id INTEGER NOT NULL, until_date INTEGER NOT NULL,
                 PRIMARY KEY(group_id,telegram_id)
@@ -1760,6 +1770,10 @@ async def init_messenger_storage(database_path: Path) -> None:
             )
         cur = await db.execute(f"PRAGMA {db_split.SCHEMA}.table_info(chat_groups)")
         chat_group_columns = {str(row[1]) for row in await cur.fetchall()}
+        cur = await db.execute(f"PRAGMA {db_split.SCHEMA}.table_info(group_messages)")
+        if "topic_id" not in {row[1] for row in await cur.fetchall()}:
+            await db.execute(f"ALTER TABLE {db_split.SCHEMA}.group_messages ADD COLUMN topic_id INTEGER")
+        await db.execute(f"CREATE INDEX IF NOT EXISTS {db_split.SCHEMA}.idx_group_topic_messages ON group_messages(group_id,topic_id,id DESC)")
         cur = await db.execute("PRAGMA main.table_info(channel_inbox_messages)")
         inbox_columns = {row[1] for row in await cur.fetchall()}
         if "proposal_state" not in inbox_columns:
@@ -15160,7 +15174,7 @@ def build_messenger_router(
                           COALESCE((SELECT rm.last_read_id FROM read_markers rm
                                     WHERE rm.telegram_id=? AND rm.scope='group' AND rm.peer_id=g.id),0) AS last_read_id,
                           (SELECT COUNT(*) FROM group_messages y
-                           WHERE y.group_id=g.id AND y.sender_telegram_id<>?
+                           WHERE y.group_id=g.id AND y.topic_id IS NULL AND y.sender_telegram_id<>?
                              AND y.id>COALESCE((SELECT rm.last_read_id FROM read_markers rm
                                                 WHERE rm.telegram_id=? AND rm.scope='group'
                                                   AND rm.peer_id=g.id),0)) AS unread_count
@@ -15299,6 +15313,97 @@ def build_messenger_router(
             result["members"].append(item)
         return result
 
+    def group_topic_title(value: Any) -> str:
+        if not isinstance(value, str) or not 1 <= len(value.strip()) <= 80 or any(ord(ch) < 32 for ch in value):
+            raise HTTPException(400, "INVALID_TOPIC_TITLE")
+        return value.strip()
+
+    async def get_group_topic_row(db: Any, group: int, topic: int):
+        cur = await db.execute("SELECT id,title,closed,created_at FROM group_topics WHERE id=? AND group_id=? AND deleted_at IS NULL", (topic, group))
+        row = await cur.fetchone()
+        if row is None:
+            raise HTTPException(404, "GROUP_TOPIC_NOT_FOUND")
+        return {"id": row[0], "title": row[1], "closed": bool(row[2]), "created_at": row[3]}
+
+    @router.get("/api/groups/{group_id}/topics")
+    @router.post("/api/groups/{group_id}/topics")
+    async def group_topics(group_id: int, request: Request, payload: dict[str, Any] | None = None,
+                           authorization: str | None = Header(default=None)):
+        uid = int((await current_user(authorization))["telegram_id"])
+        write = request.method == "POST"
+        async with aiosqlite.connect(db_path()) as db:
+            await db.execute("BEGIN IMMEDIATE" if write else "BEGIN")
+            member = await require_group_member(db, group_id, uid)
+            manage = group_has_right(member, 1)
+            if not write:
+                cur = await db.execute("SELECT id,title,closed,created_at FROM group_topics WHERE group_id=? AND deleted_at IS NULL ORDER BY id DESC LIMIT 100", (group_id,))
+                rows = await cur.fetchall()
+                return {"can_manage": manage, "topics": [{"id": r[0], "title": r[1], "closed": bool(r[2]), "created_at": r[3]} for r in rows]}
+            if not manage:
+                raise HTTPException(403, "GROUP_TOPIC_MANAGE_REQUIRED")
+            title = group_topic_title((payload or {}).get("title"))
+            cur = await db.execute("SELECT COUNT(*) FROM group_topics WHERE group_id=? AND deleted_at IS NULL", (group_id,))
+            if (await cur.fetchone())[0] >= 100:
+                raise HTTPException(409, "GROUP_TOPIC_LIMIT")
+            try:
+                cur = await db.execute("INSERT INTO group_topics(group_id,title,created_at) VALUES(?,?,?)", (group_id, title, int(time.time())))
+            except aiosqlite.IntegrityError as e:
+                raise HTTPException(409, "GROUP_TOPIC_TITLE_EXISTS") from e
+            topic = await get_group_topic_row(db, group_id, int(cur.lastrowid))
+            await db.commit()
+        return topic
+
+    @router.patch("/api/groups/{group_id}/topics/{topic_id}")
+    @router.delete("/api/groups/{group_id}/topics/{topic_id}")
+    async def update_group_topic(group_id: int, topic_id: int, request: Request, payload: dict[str, Any] | None = None,
+                                  authorization: str | None = Header(default=None)):
+        uid = int((await current_user(authorization))["telegram_id"])
+        async with aiosqlite.connect(db_path()) as db:
+            await db.execute("BEGIN IMMEDIATE")
+            if not group_has_right(await require_group_member(db, group_id, uid), 1):
+                raise HTTPException(403, "GROUP_TOPIC_MANAGE_REQUIRED")
+            topic = await get_group_topic_row(db, group_id, topic_id)
+            if request.method == "DELETE":
+                await db.execute("UPDATE group_topics SET deleted_at=?,closed=1 WHERE id=? AND group_id=?", (int(time.time()), topic_id, group_id))
+                await db.commit()
+                return {"deleted": True}
+            payload = payload or {}
+            if not payload or set(payload) - {"title", "closed"} or "closed" in payload and type(payload["closed"]) is not bool:
+                raise HTTPException(400, "INVALID_TOPIC_SETTINGS")
+            title = group_topic_title(payload["title"]) if "title" in payload else topic["title"]
+            closed = payload.get("closed", topic["closed"])
+            try:
+                await db.execute("UPDATE group_topics SET title=?,closed=? WHERE id=? AND group_id=?", (title, int(closed), topic_id, group_id))
+            except aiosqlite.IntegrityError as e:
+                raise HTTPException(409, "GROUP_TOPIC_TITLE_EXISTS") from e
+            await db.commit()
+        return {**topic, "title": title, "closed": closed}
+
+    @router.get("/api/groups/{group_id}/topics/{topic_id}/messages")
+    async def list_group_topic_messages(group_id: int, topic_id: int, before_id: int = Query(default=0, ge=0),
+                                        limit: int = Query(default=40, ge=1, le=100), authorization: str | None = Header(default=None)):
+        uid = int((await current_user(authorization))["telegram_id"])
+        async with aiosqlite.connect(db_path()) as db:
+            await db.execute("BEGIN")
+            member = await require_group_member(db, group_id, uid)
+            topic = await get_group_topic_row(db, group_id, topic_id)
+            cur = await db.execute("""SELECT m.id,m.body,m.created_at,m.sender_telegram_id AS sender_id,a.display_name AS sender_name
+                FROM group_messages m LEFT JOIN accounts a ON a.telegram_id=m.sender_telegram_id
+                WHERE m.group_id=? AND m.topic_id=? AND (?=0 OR m.id<?) ORDER BY m.id DESC LIMIT ?""",
+                (group_id, topic_id, before_id, before_id, limit + 1))
+            rows = await cur.fetchall()
+        return {"topic": topic, "can_manage": group_has_right(member, 1),
+                "messages": [dict(row) for row in reversed(rows[:limit])],
+                "next_before_id": rows[limit - 1]["id"] if len(rows) > limit else 0}
+
+    @router.post("/api/groups/{group_id}/topics/{topic_id}/messages", status_code=201)
+    async def send_group_topic_message(group_id: int, topic_id: int, payload: dict[str, Any],
+                                       authorization: str | None = Header(default=None),
+                                       idempotency_key: str | None = Header(default=None, alias="Idempotency-Key")):
+        if not isinstance(payload.get("body"), str):
+            raise HTTPException(400, "TOPIC_TEXT_REQUIRED")
+        return await store_group_message(group_id, {"body": payload["body"]}, authorization, idempotency_key, topic_id=topic_id)
+
     @router.get("/api/groups/{group_id}/analytics")
     async def get_group_analytics(group_id: int, days: Literal["7", "30", "90"] = "30",
                                   authorization: str | None = Header(default=None)):
@@ -15400,6 +15505,7 @@ def build_messenger_router(
                 await db.execute(f"DELETE FROM {table} WHERE group_id=?", (group_id,))
             await db.execute("DELETE FROM channel_discussion_groups WHERE group_id=?", (group_id,))
             await db.execute("DELETE FROM channel_post_comments WHERE group_id=?", (group_id,))
+            await db.execute("DELETE FROM group_topics WHERE group_id=?", (group_id,))
             await db.execute("DELETE FROM chat_groups WHERE id=?", (group_id,))
             await db.commit()
         return {"deleted": True}
@@ -16091,7 +16197,7 @@ def build_messenger_router(
                                   (SELECT original_name FROM media_assets WHERE id=group_messages.media_id) AS media_name,
                                   (SELECT media_kind FROM media_assets WHERE id=group_messages.media_id) AS media_kind,
                                   (SELECT media_metadata FROM media_assets WHERE id=group_messages.media_id) AS media_metadata
-                           FROM group_messages WHERE group_id=? AND id>? ORDER BY id ASC LIMIT ?""",
+                           FROM group_messages WHERE group_id=? AND topic_id IS NULL AND id>? ORDER BY id ASC LIMIT ?""",
                         (group_id, after_id, limit),
                     )
                 else:
@@ -16109,7 +16215,7 @@ def build_messenger_router(
                                   (SELECT original_name FROM media_assets WHERE id=group_messages.media_id) AS media_name,
                                   (SELECT media_kind FROM media_assets WHERE id=group_messages.media_id) AS media_kind,
                                   (SELECT media_metadata FROM media_assets WHERE id=group_messages.media_id) AS media_metadata
-                           FROM group_messages WHERE group_id=? AND (?=0 OR id<?)""" + id_filter + " ORDER BY id DESC LIMIT ?",
+                           FROM group_messages WHERE group_id=? AND topic_id IS NULL AND (?=0 OR id<?)""" + id_filter + " ORDER BY id DESC LIMIT ?",
                         (group_id, before_id, before_id) + tuple(selected_ids or ()) + (selected_limit,),
                     )
                 rows = await cur.fetchall()
@@ -16148,7 +16254,7 @@ def build_messenger_router(
                                   (SELECT media_kind FROM media_assets WHERE id=group_messages.media_id) AS media_kind,
                                   (SELECT media_metadata FROM media_assets WHERE id=group_messages.media_id) AS media_metadata
                    FROM group_messages
-                   WHERE group_id=? AND body LIKE ? COLLATE NOCASE
+                   WHERE group_id=? AND topic_id IS NULL AND body LIKE ? COLLATE NOCASE
                    ORDER BY id DESC LIMIT 100""",
                 (group_id, f"%{term}%"),
             )
@@ -16222,7 +16328,7 @@ def build_messenger_router(
         return await store_group_message(group_id, payload, authorization, idempotency_key)
 
     async def store_group_message(group_id: int, payload: dict[str, Any], authorization: str | None,
-                                  idempotency_key: str | None, discussion: tuple[int, int] | None = None):
+                                  idempotency_key: str | None, discussion: tuple[int, int] | None = None, topic_id: int | None = None):
         user = await current_user(authorization)
         uid = int(user["telegram_id"])
         silent = payload.get("silent", False)
@@ -16256,6 +16362,8 @@ def build_messenger_router(
         scope = f"/api/groups/{group_id}/messages"
         if discussion:
             scope = f"/api/channels/{discussion[0]}/messages/{discussion[1]}/comments"
+        if topic_id is not None:
+            scope = f"/api/groups/{group_id}/topics/{topic_id}/messages"
         descriptor = idempotency_descriptor(scope, {**payload, "discussion_group_id": group_id} if discussion else payload, idempotency_key)
         async with aiosqlite.connect(db_path()) as db:
             await db.execute("BEGIN IMMEDIATE")
@@ -16267,6 +16375,8 @@ def build_messenger_router(
             if previous is not None:
                 await db.rollback()
                 return previous
+            if topic_id is not None and (await get_group_topic_row(db, group_id, topic_id))["closed"]:
+                raise HTTPException(403, "GROUP_TOPIC_CLOSED")
             cur = await db.execute(
                 "SELECT slow_mode_seconds FROM chat_groups WHERE id=?",
                 (group_id,),
@@ -16306,7 +16416,7 @@ def build_messenger_router(
                     raise HTTPException(404, "COMMENT_REPLY_NOT_FOUND")
             if reply_to_id:
                 await require_reply_target(
-                    db, "SELECT 1 FROM group_messages WHERE id=? AND group_id=?", (reply_to_id, group_id)
+                    db, "SELECT 1 FROM group_messages WHERE id=? AND group_id=? AND topic_id IS ?", (reply_to_id, group_id, topic_id)
                 )
             cur = await db.execute(
                 "SELECT COUNT(*) FROM group_messages WHERE sender_telegram_id=? AND created_at>?",
@@ -16317,9 +16427,9 @@ def build_messenger_router(
                 raise HTTPException(status_code=429, detail="Превышен лимит отправки сообщений")
             cur = await db.execute(
                 """INSERT INTO group_messages
-                   (group_id,sender_telegram_id,body,media_id,reply_to_id,created_at)
-                   VALUES(?,?,?,?,?,?)""",
-                (group_id, uid, body, media_id, reply_to_id, now),
+                   (group_id,sender_telegram_id,body,media_id,reply_to_id,created_at,topic_id)
+                   VALUES(?,?,?,?,?,?,?)""",
+                (group_id, uid, body, media_id, reply_to_id, now, topic_id),
             )
             message_id = int(cur.lastrowid)
             if discussion:
@@ -16349,9 +16459,8 @@ def build_messenger_router(
             if card:
                 await db.execute("INSERT INTO message_cards(scope,message_id,data_json) VALUES(?,?,?)",
                                  ("group", message_id, json.dumps(card, ensure_ascii=True)))
-            await record_event(
-                db, "group", message_id, "new_message", uid, chat_id=group_id,
-            )
+            if topic_id is None:
+                await record_event(db, "group", message_id, "new_message", uid, chat_id=group_id)
             result = {
                 "id": message_id, "group_id": group_id, "sender_id": uid,
                 "body": body, "media_id": media_id, "reply_to_id": reply_to_id,
@@ -16369,6 +16478,8 @@ def build_messenger_router(
                 result["card"] = card
             await idempotency_store(db, uid, scope, descriptor, result, now)
             await db.commit()
+        if topic_id is not None:
+            return result
         async with aiosqlite.connect(db_path()) as db:
             cur = await db.execute(
                 "SELECT telegram_id FROM group_members WHERE group_id=? AND telegram_id<>?",

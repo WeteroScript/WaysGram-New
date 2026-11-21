@@ -85,6 +85,15 @@ class NativeMessagingSourceChecks(unittest.TestCase):
         self.assertIn('if (offer.optBoolean("unlocked"))', payment)
         self.assertIn('viewer.openPhoto', payment)
 
+    def test_group_topics_use_separate_history_and_server_management(self):
+        chat = self.source('ui/ChatActivity.java')
+        topics = self.source('ui/WaysGramGroupTopics.java')
+        self.assertIn('WaysGramGroupTopics.open(this, currentAccount, currentChat.id)', chat)
+        self.assertIn('"/api/groups/" + group + "/topics"', topics)
+        self.assertIn('data.optBoolean("can_manage")', topics)
+        self.assertIn('new JSONObject().put("closed", !closed)', topics)
+        self.assertIn('path + "/messages?limit=25&before_id="', topics)
+
     def test_channel_inbox_uses_distinct_owner_and_reader_flows_and_confirms_fee(self):
         chat = self.source('ui/ChatActivity.java')
         edit = self.source('ui/ChatEditActivity.java')
