@@ -2607,6 +2607,35 @@ def test_sent_gift_enqueues_one_durable_push_with_idempotency(env, monkeypatch) 
     run(scenario())
 
 
+def test_worn_pattern_recovers_legacy_model_id_by_exact_name(env, monkeypatch):
+    path, app = env
+    serial = "WG-000000000010"
+    traits = {"model": {"name": "Model", "document_id": 10},
+              "pattern": {"name": "Actual Pattern", "document_id": 10}}
+    with db_split.sqlite_connect(path) as db:
+        db.execute(
+            "INSERT INTO user_gifts(serial_number,gift_name,telegram_gift_id,owner_telegram_id,acquired_at,upgrade_level,profile_worn,attributes_json) VALUES(?,?,?,101,1,1,1,?)",
+            (serial, "Legacy gift", "100", json.dumps({"collectible_traits": traits})),
+        )
+        db.commit()
+
+    async def documents(db, gift_id):
+        return {"pattern": [{"name": "Other", "document_id": 11, "position": 0},
+                            {"name": "Actual Pattern", "document_id": 12, "position": 1}]}
+
+    monkeypatch.setattr(messenger_api, "_gift_attribute_documents", documents)
+
+    async def scenario():
+        async with await client_for(app) as client:
+            response = await client.get("/api/users/101", headers=headers(102))
+            assert response.status_code == 200, response.text
+            worn = response.json()["worn_gift"]["traits"]
+            assert worn["model"]["document_id"] == 10
+            assert worn["pattern"]["document_id"] == 12
+
+    run(scenario())
+
+
 def test_worn_gift_is_public_exclusive_and_clears_on_transfer(env) -> None:
     path, app = env
     with db_split.sqlite_connect(path) as db:

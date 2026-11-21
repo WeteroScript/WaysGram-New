@@ -5306,16 +5306,21 @@ def build_messenger_router(
         except (TypeError, ValueError):
             traits = {}
         gift_id = str(row[2] or "")
-        if gift_id and gift_upgrades.is_current_traits(traits):
-            pattern = traits.get("pattern") or {}
-            model = traits.get("model") or {}
-            if not pattern.get("document_id") or not model.get("document_id"):
+        pattern = traits.get("pattern")
+        model = traits.get("model")
+        if isinstance(pattern, dict):
+            # Legacy rows can carry the model ID in both slots. Never repeat the
+            # model around the avatar: recover the pattern by its own name only.
+            if isinstance(model, dict) and pattern.get("document_id") and str(pattern["document_id"]) == str(model.get("document_id")):
+                pattern.pop("document_id")
+            traits["strict_artwork"] = True
+            if gift_id and (not pattern.get("document_id") or (isinstance(model, dict) and not model.get("document_id"))):
                 documents = await _gift_attribute_documents(db, gift_id)
-                if not documents:
+                if not documents.get("pattern"):
                     schedule_attribute_sync(gift_id)
-                # A worn gift must never show another collectible's pattern from a partial sample.
-                exact = {**traits, "strict_artwork": True}
-                _enrich_traits_documents(exact, {}, documents, gift_id=gift_id)
+                _enrich_traits_documents(traits, {}, documents, gift_id=gift_id)
+                if isinstance(model, dict) and pattern.get("document_id") and str(pattern["document_id"]) == str(model.get("document_id")):
+                    pattern.pop("document_id")
         return {"id": row[0], "serial_number": row[1], "telegram_gift_id": row[2], "title": row[3], "traits": traits}
 
     @router.put("/api/me/gifts/{serial_number}/wear")

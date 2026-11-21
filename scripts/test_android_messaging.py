@@ -23,6 +23,14 @@ class NativeMessagingSourceChecks(unittest.TestCase):
     def source(self, path):
         return self.archive.read(BASE + path).decode('utf-8')
 
+    def test_worn_gift_header_does_not_reuse_model_as_pattern(self):
+        artwork = self.source('tgnet/WaysGramProfile.java')
+        header = self.source('ui/ProfileActivity.java')
+        self.assertIn('if (pattern != null && pattern.id == modelId) pattern = null;', artwork)
+        self.assertIn('WaysGramGiftTraits.name(traits, "pattern")', artwork)
+        self.assertIn('hasEmoji = document != null;', header)
+        self.assertIn('emoji.set(document, AnimatedEmojiDrawable.CACHE_TYPE_ALERT_PREVIEW_STATIC, false);', header)
+
     def test_branded_links_keep_api_transport_separate(self):
         links = self.source('tgnet/WaysGramLinks.java')
         launch = self.source('ui/LaunchActivity.java')
