@@ -32,6 +32,8 @@ from otp_webhook import OtpWebhookError, parse_telesrv_delivery
 from pydantic import BaseModel, Field
 import uvicorn
 from cryptography.fernet import Fernet, InvalidToken
+import gift_upgrades
+from messenger_api import _assign_unique_number, _gift_attribute_rows, _gift_supports_upgrade, _normalise_attribute_name
 from messenger_api import build_messenger_router, init_messenger_storage, sync_telegram_gifts, _telegram_gift_metadata
 from telegram_mtproto import TelegramMTProtoGiftCatalog
 
@@ -1585,7 +1587,8 @@ async def admin_account_card(telegram_id: int) -> tuple[str, InlineKeyboardMarku
     ban_label = "Разблокировать" if row["is_banned"] else "Заблокировать"
     return body, admin_keyboard([
         [("➕ Начислить Stars", f"wgadm:credit:stars:{telegram_id}"), ("➕ Начислить Gram", f"wgadm:credit:grams:{telegram_id}")],
-        [("🎁 Выдать подарок", f"wgadm:grant:{telegram_id}"), ("📦 Подарки аккаунта", f"wgadm:usergifts:{telegram_id}")],
+        [("🎁 Выдать подарок", f"wgadm:grant:{telegram_id}"), ("💎 Выдать NFT-подарок", f"wgadm:nftgrant:{telegram_id}")],
+        [("📦 Подарки аккаунта", f"wgadm:usergifts:{telegram_id}")],
         [("↔️ Передать подарок", f"wgadm:transfer:{telegram_id}")],
         [(ban_label, f"wgadm:ban:{telegram_id}")],
         [("⬅️ В меню", "wgadm:home")],
@@ -1627,6 +1630,76 @@ def admin_grant_page(state: dict[str, Any], page: int) -> tuple[str, InlineKeybo
     return text, admin_keyboard(keyboard)
 
 
+NFT_SLOTS = ('model', 'backdrop', 'pattern')
+NFT_LABELS = {'model': 'Модель', 'backdrop': 'Фон', 'pattern': 'Узор (эмодзи)'}
+
+
+async def admin_nft_options(db, gift):
+    gift_id = str(gift['id'])
+    _, pool = gift_upgrades.pool_for_gift(gift_id)
+    metadata = await _telegram_gift_metadata(db, gift_id)
+    if not _gift_supports_upgrade(gift_id, metadata):
+        return {}
+    live = await _gift_attribute_rows(db, gift_id)
+    options = {}
+    for slot in NFT_SLOTS:
+        colored = slot == 'backdrop'
+        rows = gift_upgrades._live_rows(live, slot)
+        entries = (pool or {}).get(slot + 's', [])
+        weights = gift_upgrades._slot_weights(entries, colored=colored)
+        by_name = {}
+        for entry, weight in zip(entries, weights):
+            trait = gift_upgrades._backdrop_traits(entry) if colored else gift_upgrades._model_traits(entry)
+            trait['permille'] = gift_upgrades._effective_permille(weight, weights)
+            by_name[_normalise_attribute_name(trait['name'])] = trait
+        live_weights = gift_upgrades._live_weights(rows)
+        for row, weight in zip(rows, live_weights):
+            trait = gift_upgrades._live_traits(row, slot, len(rows))
+            key = _normalise_attribute_name(trait['name'])
+            if len(rows) > 1:
+                trait['permille'] = gift_upgrades._effective_permille(weight, live_weights)
+            elif key in by_name:
+                trait['permille'] = by_name[key]['permille']
+            by_name[key] = trait
+        options[slot] = list(by_name.values())
+    return options
+
+
+def admin_nft_page(state, page=0):
+    stage = state['stage']
+    options = state['gifts'] if stage == 'gift' else state['options'][stage] if stage in NFT_SLOTS else []
+    last = max(0, (len(options) - 1) // GRANT_PAGE_SIZE)
+    page = max(0, min(page, last))
+    key = f"wgadm:nft:{state['token']}:{stage}:"
+    rows = []
+    if stage == 'confirm':
+        text = f"Выдать NFT-подарок WaysGram «{state['gift']['name']}» аккаунту {state['user_id']}?"
+    else:
+        text = f"Выберите: {NFT_LABELS.get(stage, 'подарок')} · {page + 1}/{last + 1}"
+    selected = state.get('selected', {})
+    for slot in NFT_SLOTS:
+        if slot in selected:
+            trait = selected[slot]
+            text += f"\n{NFT_LABELS[slot]}: {trait['name']} · {trait['permille'] / 10:g}%"
+    if 'backdrop' in selected and 'pattern' in selected:
+        chance = selected['backdrop']['permille'] * selected['pattern']['permille'] / 10000
+        text += f"\nФон + узор при независимом выпадении: ≈ {chance:g}%"
+    if stage == 'confirm':
+        rows.append([('✅ Выдать один NFT-подарок', key + 'go')])
+    else:
+        for index in range(page * GRANT_PAGE_SIZE, min(len(options), (page + 1) * GRANT_PAGE_SIZE)):
+            entry = options[index]
+            title = entry['name'][:44] + (f" · {entry['permille'] / 10:g}%" if stage != 'gift' else '')
+            rows.append([(title, key + f's{index}')])
+        nav = []
+        if page: nav.append(('⬅️', key + f'p{page - 1}'))
+        if page < last: nav.append(('➡️', key + f'p{page + 1}'))
+        if nav: rows.append(nav)
+    if stage != 'gift': rows.append([('↩️ Начать выбор заново', f"wgadm:nftgrant:{state['user_id']}")])
+    rows.append([('⬅️ К аккаунту', f"wgadm:user:{state['user_id']}")])
+    return text, admin_keyboard(rows)
+
+
 async def admin_grant_gifts(actor_id: int, payload: dict[str, Any], quantity: int) -> None:
     """Mint gifts into the selected WaysGram inventory in one audited transaction."""
     if isinstance(quantity, bool) or not isinstance(quantity, int) or not 1 <= quantity <= GRANT_MAX_QUANTITY:
@@ -1662,6 +1735,20 @@ async def admin_grant_gifts(actor_id: int, payload: dict[str, Any], quantity: in
             name = str(row["name"])
         else:
             raise ValueError("Подарок не найден. Начните выдачу заново.")
+        selected = payload.get("selected")
+        attributes = {}
+        gift_key = None
+        if selected is not None:
+            if source != "telegram" or quantity != 1 or set(selected) != set(NFT_SLOTS):
+                raise ValueError("Некорректный выбор NFT-подарка.")
+            options = await admin_nft_options(db, gift)
+            if any(selected[slot] not in options.get(slot, []) for slot in NFT_SLOTS):
+                raise ValueError("Атрибуты обновились. Выберите NFT-подарок заново.")
+            gift_key, _ = gift_upgrades.pool_for_gift(gift_id)
+            attributes = {"upgrade_level": 1, "upgrade_source": "admin_grant", "last_upgraded_at": now,
+                          "collectible_traits": {"version": gift_upgrades.TRAITS_VERSION, "rolled_at": now,
+                              "roll_source": "admin_grant", "strict_artwork": True, **selected,
+                              "rarity": gift_upgrades._rarest(t["rarity"] for t in selected.values())}}
         snapshot = json.dumps(metadata, ensure_ascii=False, separators=(",", ":"))
         for _ in range(quantity):
             serial = "WG-" + secrets.token_hex(6).upper()
@@ -1670,14 +1757,18 @@ async def admin_grant_gifts(actor_id: int, payload: dict[str, Any], quantity: in
                  owner_telegram_id,acquired_at,purchase_asset,purchase_price)
                 VALUES(?,?,?,?,?,?,?,?,'stars',0)""",
                 (serial, legacy_id, gift_id if source == "telegram" else "", name, emoji, snapshot, user_id, now))
+            if attributes:
+                await db.execute("UPDATE user_gifts SET upgrade_level=1,attributes_json=? WHERE serial_number=?",
+                                 (json.dumps(attributes, ensure_ascii=False), serial))
+                await _assign_unique_number(db, serial, gift_key or gift_id, now)
             await db.execute("""INSERT INTO gift_transactions
                 (event_type,serial_number,gift_name,from_telegram_id,to_telegram_id,created_at)
                 VALUES('admin_grant',?,?,?,?,?)""", (serial, name, from_id, user_id, now))
         await db.execute("""INSERT INTO admin_logs(admin_id,action,target,details,created_at)
-            VALUES(?,?,?,?,?)""", (actor_id, "gift_grant", str(user_id),
-            f"source={source}; gift_id={gift_id}; name={name}; quantity={quantity}; store_stock=unchanged", now))
+            VALUES(?,?,?,?,?)""", (actor_id, "nft_gift_grant" if attributes else "gift_grant", str(user_id),
+            f"source={source}; gift_id={gift_id}; name={name}; quantity={quantity}; store_stock=unchanged; traits={json.dumps(selected, ensure_ascii=False)}", now))
         cur = await db.execute("INSERT INTO messages(sender_telegram_id,recipient_telegram_id,body,created_at) VALUES(?,?,?,?)",
-            (from_id, user_id, f"Вам выдан подарок WaysGram: {name} × {quantity}. Найти его можно в подарках профиля.", now))
+            (from_id, user_id, f"Вам выдан {'NFT-подарок' if attributes else 'подарок'} WaysGram: {name} × {quantity}. Найти его можно в подарках профиля.", now))
         await db.execute("""INSERT INTO message_events(scope,chat_id,user_a,user_b,message_id,kind,actor_id,created_at)
             VALUES('dm',0,?,?,?,'new_message',?,?)""",
             (min(from_id, user_id), max(from_id, user_id), int(cur.lastrowid), from_id, now))
@@ -2255,6 +2346,9 @@ async def admin_callback(callback: CallbackQuery) -> None:
     if ADMIN_INPUT.get(actor_id, (None,))[0] in {"db_gift_count", "db_gift_fallback_price"}:
         ADMIN_INPUT.pop(actor_id, None)
     if ADMIN_INPUT.get(actor_id, (None,))[0] in {"grant_select", "grant_count"} and action not in {"gpage", "gsel"}:
+        ADMIN_INPUT.pop(actor_id, None)
+
+    if ADMIN_INPUT.get(actor_id, (None,))[0] == "nft_grant" and action != "nft":
         ADMIN_INPUT.pop(actor_id, None)
 
     if action in {"addadmin", "addadminconfirm", "admins", "adminremoveask", "adminremove", "admincancel"}:
@@ -3262,6 +3356,74 @@ async def admin_callback(callback: CallbackQuery) -> None:
         user_id = int(parts[2])
         ADMIN_INPUT[actor_id] = ("transfer_serial", user_id)
         await callback.message.answer(f"Введите серийный номер подарка, который сейчас принадлежит аккаунту {user_id}.")
+    elif action == "nftgrant" and len(parts) == 3 and parts[2].isascii() and parts[2].isdigit():
+        user_id = int(parts[2])
+        if not await admin_account_card(user_id):
+            await callback.message.answer("Аккаунт не найден.")
+            return
+        catalog = await admin_grant_catalog()
+        async with aiosqlite.connect(DATABASE_PATH) as db:
+            cur = await db.execute("SELECT DISTINCT gift_id FROM telegram_mtproto_gift_attributes WHERE is_available=1")
+            known = {str(row[0]) for row in await cur.fetchall()}
+        gifts = [gift for gift in catalog if gift['source'] == 'telegram'
+                 and (gift['id'] in known or gift_upgrades.pool_for_gift(gift['id'])[1])]
+        if not gifts:
+            await callback.message.answer("Нет коллекций с загруженными атрибутами.")
+            return
+        state = {"user_id": user_id, "gifts": gifts, "stage": "gift", "selected": {},
+                 "token": secrets.token_hex(6), "expires": time.time() + 900}
+        ADMIN_INPUT[actor_id] = ("nft_grant", state)
+        text, keyboard = admin_nft_page(state)
+        await callback.message.answer(text, reply_markup=keyboard)
+    elif action == "nft" and len(parts) == 5:
+        current = ADMIN_INPUT.get(actor_id)
+        if (not current or current[0] != "nft_grant" or current[1]["token"] != parts[2]
+                or current[1]["stage"] != parts[3] or time.time() > current[1]["expires"]):
+            await callback.message.answer("Выбор устарел. Откройте выдачу NFT-подарка заново.")
+            return
+        state, stage, choice = current[1], parts[3], parts[4]
+        if stage == 'confirm' and choice == 'go':
+            ADMIN_INPUT.pop(actor_id, None)
+            try:
+                await admin_grant_gifts(actor_id, state, 1)
+            except ValueError as exc:
+                await callback.message.answer(str(exc))
+                return
+            except Exception:
+                log.exception("Admin NFT gift grant failed")
+                await callback.message.answer("Не удалось выдать NFT-подарок. Откройте выдачу заново.")
+                return
+            await callback.message.answer(f"NFT-подарок «{state['gift']['name']}» выдан аккаунту {state['user_id']}.",
+                reply_markup=admin_keyboard([[("⬅️ К аккаунту", f"wgadm:user:{state['user_id']}")]]))
+            return
+        if stage == 'confirm' or not re.fullmatch(r'[ps][0-9]{1,6}', choice):
+            return
+        index = int(choice[1:])
+        if choice.startswith('p'):
+            text, keyboard = admin_nft_page(state, index)
+        elif stage == 'gift':
+            if index >= len(state['gifts']):
+                return
+            gift = state['gifts'][index]
+            async with aiosqlite.connect(DATABASE_PATH) as db:
+                db.row_factory = aiosqlite.Row
+                options = await admin_nft_options(db, gift)
+            if ADMIN_INPUT.get(actor_id) is not current or state['stage'] != stage:
+                return
+            if not all(options.get(slot) for slot in NFT_SLOTS):
+                await callback.message.answer("У коллекции нет полного набора доступных атрибутов. Выберите другой подарок.")
+                return
+            state.update(gift=gift, options=options, stage=NFT_SLOTS[0])
+            text, keyboard = admin_nft_page(state)
+        else:
+            options = state['options'][stage]
+            if index >= len(options):
+                return
+            state['selected'][stage] = options[index]
+            next_slot = NFT_SLOTS.index(stage) + 1
+            state['stage'] = NFT_SLOTS[next_slot] if next_slot < len(NFT_SLOTS) else 'confirm'
+            text, keyboard = admin_nft_page(state)
+        await callback.message.answer(text, reply_markup=keyboard)
     elif action == "grant" and len(parts) == 3 and parts[2].isdigit():
         user_id = int(parts[2])
         if not await admin_account_card(user_id):
