@@ -299,6 +299,12 @@ class AndroidGiftSourceChecks(unittest.TestCase):
                          'items.subList(firstGift, items.size()).sort', 'Long.compare(shopPrice(b), shopPrice(a))',
                          'Long.compare(shopPrice(a), shopPrice(b))', 'return gift.resell_min_stars'):
             self.assertIn(fragment, sheet)
+        for key in ('WaysGramGiftSortPrice', 'WaysGramGiftSortAscending', 'WaysGramGiftSortDescending'):
+            self.assertIn(f'context.getString(R.string.{key})', sheet)
+            for language in ('values', 'values-ru'):
+                resources = ET.fromstring(self.archive.read(
+                    f'WaysGram-Android/TMessagesProj/src/main/res/{language}/waysgram_gift_sort.xml'))
+                self.assertTrue(resources.find(f"string[@name='{key}']").text.strip())
         path = 'WaysGram-Android/TMessagesProj/src/main/res/drawable/waysgram_gift_sort.xml'
         icon = ET.fromstring(self.archive.read(path))
         self.assertEqual(icon.tag, 'vector')
