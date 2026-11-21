@@ -23,6 +23,22 @@ class NativeMessagingSourceChecks(unittest.TestCase):
     def source(self, path):
         return self.archive.read(BASE + path).decode('utf-8')
 
+    def test_single_emoji_uses_bundled_vector_animation(self):
+        import gzip
+        import json
+
+        emoji = self.source('tgnet/WaysGramAnimatedEmoji.java')
+        media = self.source('messenger/MediaDataController.java')
+        transport = self.source('tgnet/WaysGramTransport.java')
+        self.assertIn('application/x-tgsticker', emoji)
+        self.assertIn('WaysGramAnimatedEmoji.find(emoji)', media)
+        self.assertIn('WaysGramAnimatedEmoji.getFile', transport)
+        for name in ('heart', 'fire', 'star'):
+            asset = 'WaysGram-Android/TMessagesProj/src/main/assets/waysgram_emoji/' + name + '.tgs'
+            animation = json.loads(gzip.decompress(self.archive.read(asset)))
+            self.assertEqual((animation['w'], animation['h'], animation['fr']), (512, 512, 60))
+            self.assertTrue(any(t['a'] == 1 for layer in animation['layers'] for t in layer['ks'].values()))
+
     def test_basic_group_admin_editor_uses_native_group_request(self):
         ui = self.source('ui/ChatRightsEditActivity.java')
         controller = self.source('messenger/MessagesController.java')
