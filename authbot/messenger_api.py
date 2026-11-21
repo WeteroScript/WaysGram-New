@@ -24,6 +24,7 @@ import aiosqlite
 import gift_names
 import gift_model_fallbacks
 import db_split  # noqa: F401  # two-file database layout
+from star_rating import profile_rating
 import gift_upgrades  # noqa: F401  # official Telegram upgrade pools
 import httpx
 from fastapi import APIRouter, Header, HTTPException, Query, Request, Response
@@ -4627,6 +4628,7 @@ def build_messenger_router(
                 result["phone"] = number
         async with aiosqlite.connect(db_path()) as db:
             result["worn_gift"] = await worn_gift_status(db, int(user["telegram_id"]))
+            result.update(await profile_rating(db, int(user["telegram_id"]), now=int(time.time()), include_pending=True))
         result["is_admin"] = is_admin_user(user)
         result["labels"] = await entity_labels("account", int(user["telegram_id"]))
         return result
@@ -5368,7 +5370,9 @@ def build_messenger_router(
             )
             common_contacts = [dict(item) for item in await cur.fetchall()]
             status = await worn_gift_status(db, user_id)
+            rating = await profile_rating(db, user_id, now=int(time.time()), include_pending=viewer_id == user_id)
         profile = dict(row)
+        profile.update(rating)
         profile["worn_gift"] = status
         profile["labels"] = await entity_labels("account", user_id)
         for contact in common_contacts:

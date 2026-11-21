@@ -1114,6 +1114,8 @@ async def init_admin_storage() -> None:
             admin_id INTEGER,
             created_at INTEGER NOT NULL
         );
+        CREATE INDEX IF NOT EXISTS idx_economy_transactions_rating
+            ON economy_transactions(telegram_id,asset) WHERE admin_id IS NULL;
         CREATE TABLE IF NOT EXISTS gift_transactions (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             event_type TEXT NOT NULL,

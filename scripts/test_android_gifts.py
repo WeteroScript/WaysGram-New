@@ -263,6 +263,14 @@ class AndroidGiftSourceChecks(unittest.TestCase):
         self.assertIn("readyWornPatterns.put(key, pattern.id)", bridge)
         self.assertIn("!ready.isEmpty() || patternChanged", bridge)
 
+    def test_star_rating_uses_native_profile_badge_and_server_thresholds(self):
+        profile = self.source("ui/ProfileActivity.java")
+        bridge = self.source("tgnet/WaysGramProfile.java")
+        self.assertIn("ratingView.set(userInfo.stars_rating)", profile)
+        self.assertIn('full.stars_rating = readStarRating(json.optJSONObject("stars_rating"))', bridge)
+        self.assertIn('rating.current_level_stars = value.optLong("current_level_stars")', bridge)
+        self.assertIn('full.stars_my_pending_rating_date = json.optInt("stars_my_pending_rating_date")', bridge)
+
     def test_waysgram_collectible_pin_uses_internal_profile_route(self):
         sheet = self.source("ui/Stars/StarGiftSheet.java")
         self.assertIn('this::toggleWaysGramPin', sheet)
