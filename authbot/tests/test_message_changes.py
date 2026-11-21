@@ -937,3 +937,32 @@ def test_group_delete_owner_only_and_admin_cannot_remove_peer_admin(env):
             assert (await client.delete(path, headers=owner)).status_code == 404
 
     run(scenario())
+
+
+def test_channel_moderation_blocks_rejoin_and_hides_public_history(env):
+    _, app = env
+
+    async def scenario():
+        async with await client_for(app) as client:
+            owner, member = headers(101), headers(102)
+            created = await client.post('/api/channels', headers=owner, json={'title': 'Moderated', 'username': 'moderated'})
+            assert created.status_code == 201, created.text
+            cid = created.json()['id']
+            path = f'/api/channels/{cid}'
+            ban = path + '/members/102/ban'
+            assert (await client.put(path + '/membership', headers=member, json={'joined': True})).status_code == 200
+            assert (await client.get(path + '/members', headers=member)).status_code == 403
+            assert (await client.put(ban, headers=member, json={'banned': True})).status_code == 403
+            assert (await client.get(path + '/members', headers=owner, params={'q': 'friend'})).json()['count'] == 1
+            assert (await client.put(ban, headers=owner, json={'banned': True})).status_code == 200
+            assert (await client.get(path + '/members', headers=owner, params={'banned': True})).json()['members'][0]['telegram_id'] == 102
+            assert (await client.get(path + '/messages', headers=member)).status_code == 403
+            assert cid not in [c['id'] for c in (await client.get('/api/channels', headers=member)).json()['channels']]
+            assert (await client.put(path + '/membership', headers=member, json={'joined': True})).status_code == 403
+            assert (await client.post(path + '/members', headers=owner, json={'user_ids': [102]})).status_code == 403
+            assert (await client.post(path + '/admins', headers=owner, json={'telegram_id': 102})).status_code == 403
+            assert (await client.put(ban, headers=owner, json={'banned': False})).status_code == 200
+            assert (await client.get(path + '/members', headers=owner)).json()['count'] == 1
+            assert (await client.put(path + '/membership', headers=member, json={'joined': True})).status_code == 200
+
+    run(scenario())
