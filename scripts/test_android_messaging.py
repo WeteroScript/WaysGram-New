@@ -23,6 +23,18 @@ class NativeMessagingSourceChecks(unittest.TestCase):
     def source(self, path):
         return self.archive.read(BASE + path).decode('utf-8')
 
+    def test_empty_chat_dialogs_do_not_shift_peer_messages(self):
+        chats = self.source('tgnet/WaysGramChats.java')
+        collect = chats.split('Snapshot collect(', 1)[1].split('// ---------------------------------------------------------------- history', 1)[0]
+        self.assertIn('last == null ? 0 : clientGroupId', collect)
+        self.assertIn('last == null ? 0 : last.optInt', collect)
+        self.assertEqual(collect.count('if (last != null) out.messages.add'), 2)
+        self.assertIn('channelDialog.flags |= TLObject.FLAG_0', collect)
+        transport = self.source('tgnet/WaysGramTransport.java')
+        peer_dialogs = transport.split('private static TLObject getPeerDialogs(', 1)[1]
+        self.assertIn('wantedChannels.contains(message.peer_id.channel_id)', peer_dialogs)
+        self.assertNotIn('chats.messages.get(i)', peer_dialogs)
+
     def test_file_completion_and_cancellation_use_stage_queue(self):
         conn = self.source('tgnet/ConnectionsManager.java')
         loader = self.source('messenger/FileLoadOperation.java')

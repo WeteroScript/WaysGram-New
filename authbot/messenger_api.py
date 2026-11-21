@@ -8120,7 +8120,7 @@ def build_messenger_router(
             cur = await db.execute(
                 """SELECT ch.id,
                           CASE WHEN ch.is_public=1 THEN ch.username ELSE '' END AS username,
-                          ch.title,ch.owner_telegram_id,ch.is_public,
+                          ch.title,ch.owner_telegram_id,ch.is_public,ch.created_at,
                           owner.username AS owner_username,
                           EXISTS(SELECT 1 FROM channel_admins ca WHERE ca.channel_id=ch.id AND ca.telegram_id=?) AS is_admin,
                           COALESCE((SELECT ca.rights FROM channel_admins ca WHERE ca.channel_id=ch.id AND ca.telegram_id=?),0) AS admin_rights,
