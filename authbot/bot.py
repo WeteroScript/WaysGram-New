@@ -1596,6 +1596,7 @@ async def admin_account_card(telegram_id: int) -> tuple[str, InlineKeyboardMarku
 
 GRANT_PAGE_SIZE = 10
 GRANT_MAX_QUANTITY = 100
+NFT_GRANT_MAX_QUANTITY = 150
 
 
 async def admin_grant_catalog() -> list[dict[str, Any]]:
@@ -1685,7 +1686,7 @@ def admin_nft_page(state, page=0):
         chance = selected['backdrop']['permille'] * selected['pattern']['permille'] / 10000
         text += f"\nФон + узор при независимом выпадении: ≈ {chance:g}%"
     if stage == 'confirm':
-        rows.append([('✅ Выдать один NFT-подарок', key + 'go')])
+        text += f"\n\nВведите количество от 1 до {NFT_GRANT_MAX_QUANTITY}. Ввод числа подтверждает выдачу."
     else:
         for index in range(page * GRANT_PAGE_SIZE, min(len(options), (page + 1) * GRANT_PAGE_SIZE)):
             entry = options[index]
@@ -1702,7 +1703,9 @@ def admin_nft_page(state, page=0):
 
 async def admin_grant_gifts(actor_id: int, payload: dict[str, Any], quantity: int) -> None:
     """Mint gifts into the selected WaysGram inventory in one audited transaction."""
-    if isinstance(quantity, bool) or not isinstance(quantity, int) or not 1 <= quantity <= GRANT_MAX_QUANTITY:
+    selected = payload.get("selected")
+    limit = NFT_GRANT_MAX_QUANTITY if selected is not None else GRANT_MAX_QUANTITY
+    if isinstance(quantity, bool) or not isinstance(quantity, int) or not 1 <= quantity <= limit:
         raise ValueError("Некорректное количество подарков.")
     from_id, user_id, gift = SYSTEM_ACCOUNT_ID, int(payload["user_id"]), payload["gift"]
     now = int(time.time())
@@ -1735,11 +1738,10 @@ async def admin_grant_gifts(actor_id: int, payload: dict[str, Any], quantity: in
             name = str(row["name"])
         else:
             raise ValueError("Подарок не найден. Начните выдачу заново.")
-        selected = payload.get("selected")
         attributes = {}
         gift_key = None
         if selected is not None:
-            if source != "telegram" or quantity != 1 or set(selected) != set(NFT_SLOTS):
+            if source != "telegram" or set(selected) != set(NFT_SLOTS):
                 raise ValueError("Некорректный выбор NFT-подарка.")
             options = await admin_nft_options(db, gift)
             if any(selected[slot] not in options.get(slot, []) for slot in NFT_SLOTS):
@@ -2345,8 +2347,11 @@ async def admin_callback(callback: CallbackQuery) -> None:
     # Navigating away from the quantity prompt cancels it, including via older menus.
     if ADMIN_INPUT.get(actor_id, (None,))[0] in {"db_gift_count", "db_gift_fallback_price"}:
         ADMIN_INPUT.pop(actor_id, None)
-    if ADMIN_INPUT.get(actor_id, (None,))[0] in {"grant_select", "grant_count"} and action not in {"gpage", "gsel"}:
-        ADMIN_INPUT.pop(actor_id, None)
+    active_grant = ADMIN_INPUT.get(actor_id, (None, None))
+    if active_grant[0] in {"grant_select", "grant_count"} and action not in {"gpage", "gsel"}:
+        # A stale attribute button must not cancel the NFT quantity prompt.
+        if not (action == "nft" and active_grant[0] == "grant_count" and active_grant[1].get("selected") is not None):
+            ADMIN_INPUT.pop(actor_id, None)
 
     if ADMIN_INPUT.get(actor_id, (None,))[0] == "nft_grant" and action != "nft":
         ADMIN_INPUT.pop(actor_id, None)
@@ -3382,21 +3387,7 @@ async def admin_callback(callback: CallbackQuery) -> None:
             await callback.message.answer("Выбор устарел. Откройте выдачу NFT-подарка заново.")
             return
         state, stage, choice = current[1], parts[3], parts[4]
-        if stage == 'confirm' and choice == 'go':
-            ADMIN_INPUT.pop(actor_id, None)
-            try:
-                await admin_grant_gifts(actor_id, state, 1)
-            except ValueError as exc:
-                await callback.message.answer(str(exc))
-                return
-            except Exception:
-                log.exception("Admin NFT gift grant failed")
-                await callback.message.answer("Не удалось выдать NFT-подарок. Откройте выдачу заново.")
-                return
-            await callback.message.answer(f"NFT-подарок «{state['gift']['name']}» выдан аккаунту {state['user_id']}.",
-                reply_markup=admin_keyboard([[("⬅️ К аккаунту", f"wgadm:user:{state['user_id']}")]]))
-            return
-        if stage == 'confirm' or not re.fullmatch(r'[ps][0-9]{1,6}', choice):
+        if not re.fullmatch(r'[ps][0-9]{1,6}', choice):
             return
         index = int(choice[1:])
         if choice.startswith('p'):
@@ -3422,6 +3413,8 @@ async def admin_callback(callback: CallbackQuery) -> None:
             state['selected'][stage] = options[index]
             next_slot = NFT_SLOTS.index(stage) + 1
             state['stage'] = NFT_SLOTS[next_slot] if next_slot < len(NFT_SLOTS) else 'confirm'
+            if state['stage'] == 'confirm':
+                ADMIN_INPUT[actor_id] = ('grant_count', state)
             text, keyboard = admin_nft_page(state)
         await callback.message.answer(text, reply_markup=keyboard)
     elif action == "grant" and len(parts) == 3 and parts[2].isdigit():
@@ -3644,8 +3637,10 @@ async def admin_text_input(message: Message) -> None:
             ADMIN_INPUT.pop(actor_id, None)
             await message.answer("Время выбора истекло. Откройте выдачу подарков заново.")
             return
-        if not re.fullmatch(r"[0-9]{1,3}", value) or not 1 <= int(value) <= GRANT_MAX_QUANTITY:
-            await message.answer(f"Введите целое число от 1 до {GRANT_MAX_QUANTITY} или нажмите «Отмена».")
+        is_nft = payload.get("selected") is not None
+        limit = NFT_GRANT_MAX_QUANTITY if is_nft else GRANT_MAX_QUANTITY
+        if not re.fullmatch(r"[0-9]{1,3}", value) or not 1 <= int(value) <= limit:
+            await message.answer(f"Введите целое число от 1 до {limit} или вернитесь к аккаунту.")
             return
         # Only one message can consume this prompt, even when updates arrive concurrently.
         if ADMIN_INPUT.get(actor_id) is not state:
@@ -3660,7 +3655,8 @@ async def admin_text_input(message: Message) -> None:
             log.exception("Admin gift grant failed")
             await message.answer("Не удалось выдать подарки. Откройте выдачу заново и повторите.")
             return
-        await message.answer(f"Выдано подарков: {value} · {payload['gift']['name']}. Они добавлены в профиль аккаунта; остатки магазина не изменены.")
+        gift_type = "NFT-подарков" if is_nft else "подарков"
+        await message.answer(f"Выдано {gift_type}: {value} · {payload['gift']['name']}. Они добавлены в профиль аккаунта; остатки магазина не изменены.")
         card = await admin_account_card(int(payload["user_id"]))
         if card:
             await message.answer(card[0], reply_markup=card[1])

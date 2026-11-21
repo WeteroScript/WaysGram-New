@@ -982,7 +982,7 @@ def test_bulk_import_missing_price_prompts_before_atomic_write_and_can_cancel(pa
     assert query(path, "SELECT COUNT(*) FROM telegram_gift_prices WHERE supply>sold") == [(3,)]
 
 
-def test_admin_grants_one_nft_with_selected_traits(panel):
+def test_admin_grants_nft_batch_with_selected_traits(panel):
     import json
 
     path, _ = panel
@@ -1005,12 +1005,18 @@ def test_admin_grants_one_nft_with_selected_traits(panel):
     for slot in bot_module.NFT_SLOTS:
         response = press(f'wgadm:nft:{token}:{slot}:s0')
     assert 'Фон + узор' in response.sent[0][0]
-    assert 'выдан' in press(f'wgadm:nft:{token}:confirm:go').sent[0][0]
-    assert 'устарел' in press(f'wgadm:nft:{token}:confirm:go').sent[0][0]
-    serial, level, raw, paid = query(path, 'SELECT serial_number,upgrade_level,attributes_json,purchase_price FROM user_gifts WHERE owner_telegram_id=?', (uid,))[0]
-    assert (level, paid) == (1, 0)
-    traits = json.loads(raw)['collectible_traits']
-    assert all(traits[slot] == state['selected'][slot] for slot in bot_module.NFT_SLOTS)
-    assert query(path, 'SELECT unique_num FROM gift_unique_numbers WHERE serial_number=?', (serial,)) == [(1,)]
+    assert 'от 1 до 150' in response.sent[0][0]
+    assert 'от 1 до 150' in type_text('0').sent[0][0]
+    assert 'от 1 до 150' in type_text('151').sent[0][0]
+    assert 'устарел' in press(f'wgadm:nft:{token}:pattern:s0').sent[0][0]
+    assert 'Выдано NFT-подарков: 150' in type_text('150').sent[0][0]
+    assert not type_text('150').sent
+    rows = query(path, 'SELECT serial_number,upgrade_level,attributes_json,purchase_price FROM user_gifts WHERE owner_telegram_id=?', (uid,))
+    assert len(rows) == len({row[0] for row in rows}) == 150
+    for _, level, raw, paid in rows:
+        assert (level, paid) == (1, 0)
+        traits = json.loads(raw)['collectible_traits']
+        assert all(traits[slot] == state['selected'][slot] for slot in bot_module.NFT_SLOTS)
+    assert query(path, 'SELECT unique_num FROM gift_unique_numbers ORDER BY unique_num') == [(i,) for i in range(1, 151)]
     assert query(path, 'SELECT supply,sold FROM telegram_gift_prices WHERE gift_id=?', (gift_id,)) == [(2, 0)]
     assert query(path, "SELECT COUNT(*) FROM admin_logs WHERE action='nft_gift_grant'") == [(1,)]
