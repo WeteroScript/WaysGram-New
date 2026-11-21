@@ -85,6 +85,17 @@ class NativeMessagingSourceChecks(unittest.TestCase):
         self.assertIn('if (offer.optBoolean("unlocked"))', payment)
         self.assertIn('viewer.openPhoto', payment)
 
+    def test_paid_subscription_links_require_explicit_confirm_and_stable_retry(self):
+        launch = self.source('ui/LaunchActivity.java')
+        editor = self.source('ui/ChatEditActivity.java')
+        helper = self.source('ui/WaysGramPaidReactions.java')
+        self.assertIn('wg/subscription/', launch)
+        self.assertIn('WaysGramPaidReactions.showSubscriptionSettings', editor)
+        checkout = helper.split('private static void confirmSubscription', 1)[1].split('private static void subscriptionReceipt', 1)[0]
+        self.assertLess(checkout.index('putString(slot, key)'), checkout.index('request("POST", path'))
+        self.assertIn('put("approved_price_stars", price), session, 15000, key', checkout)
+        self.assertIn('data.optLong("purchased_until")', helper)
+
     def test_channel_analytics_is_owner_only_and_reads_real_revenue(self):
         editor = self.source('ui/ChatEditActivity.java')
         helper = self.source('ui/WaysGramPaidReactions.java')

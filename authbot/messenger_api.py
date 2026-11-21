@@ -9307,7 +9307,11 @@ def build_messenger_router(
             cur = await db.execute("SELECT 1 FROM active_channel_members WHERE channel_id=? AND telegram_id=? UNION ALL SELECT 1 FROM channel_admins WHERE channel_id=? AND telegram_id=? LIMIT 1", (channel, uid, channel, uid))
             already_has_access = uid == owner or await cur.fetchone() is not None
             if not purchase:
-                return {"channel_id": channel, "title": title, "price_stars": price, "period_days": 30, "already_has_access": already_has_access}
+                cur = await db.execute("SELECT expires_at FROM channel_subscriptions WHERE channel_id=? AND telegram_id=? AND expires_at>?",
+                                       (channel, uid, now))
+                active_pass = await cur.fetchone()
+                return {"channel_id": channel, "title": title, "price_stars": price, "period_days": 30,
+                        "already_has_access": already_has_access, "purchased_until": active_pass[0] if active_pass else None}
             if already_has_access:
                 raise HTTPException(409, "CHANNEL_ACCESS_ALREADY_ACTIVE")
             if type(approved) is not int or approved != price:

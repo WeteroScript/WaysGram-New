@@ -1895,7 +1895,9 @@ def test_paid_channel_subscription_expires_without_converting_to_free_membership
             assert responses[0].json() == responses[1].json()
             assert (await client.get(base + '/messages', headers=buyer)).json()['messages'][0]['body'] == 'Private news'
             assert (await client.put(base + '/membership', headers=buyer, json={'joined': True})).status_code == 200
-            assert (await client.get(url, headers=buyer)).json()['already_has_access'] is True
+            quote = (await client.get(url, headers=buyer)).json()
+            assert quote['already_has_access'] is True
+            assert quote['purchased_until'] == responses[0].json()['purchased_until']
             async with aiosqlite.connect(path) as db:
                 await db.execute('UPDATE channel_subscriptions SET expires_at=0 WHERE channel_id=? AND telegram_id=102', (cid,))
                 await db.commit()
