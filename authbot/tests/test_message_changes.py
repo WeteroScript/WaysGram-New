@@ -910,3 +910,30 @@ def test_group_invite_list_edit_and_revoke(env):
             assert [x['label'] for x in revoked] == ['Updated']
 
     run(scenario())
+
+
+def test_group_delete_owner_only_and_admin_cannot_remove_peer_admin(env):
+    _, app = env
+
+    async def scenario():
+        async with await client_for(app) as client:
+            owner, admin, peer = headers(101), headers(102), headers(ADMIN)
+            created = await client.post('/api/groups', headers=owner, json={'title': 'Delete group'})
+            assert created.status_code == 201, created.text
+            path = f"/api/groups/{created.json()['id']}"
+            for uid in (102, ADMIN):
+                assert (await client.post(path + '/members', headers=owner, json={'telegram_id': uid})).status_code == 201
+                assert (await client.post(path + '/admins', headers=owner, json={'telegram_id': uid})).status_code == 201
+            assert (await client.delete(path + f'/members/{ADMIN}', headers=admin)).status_code == 403
+            assert (await client.get(path, headers=peer)).status_code == 200
+            assert (await client.delete(path, headers=admin)).status_code == 403
+            invite = await client.post(path + '/invites', headers=owner, json={})
+            assert invite.status_code == 201
+            assert (await client.post(path + '/messages', headers=owner, json={'body': 'Before deletion'})).status_code == 201
+            deleted = await client.delete(path, headers=owner)
+            assert deleted.status_code == 200, deleted.text
+            assert (await client.get(invite.json()['invite_link'])).status_code == 404
+            assert (await client.get(path + '/messages', headers=peer)).status_code in (403, 404)
+            assert (await client.delete(path, headers=owner)).status_code == 404
+
+    run(scenario())

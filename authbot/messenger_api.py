@@ -13357,6 +13357,31 @@ def build_messenger_router(
             await db.commit()
         return {"id": group_id, **fields}
 
+    @router.delete("/api/groups/{group_id}")
+    async def delete_group(group_id: int, authorization: str | None = Header(default=None)) -> dict[str, bool]:
+        uid = int((await current_user(authorization))["telegram_id"])
+        async with aiosqlite.connect(db_path()) as db:
+            await db.execute("BEGIN IMMEDIATE")
+            cur = await db.execute("SELECT owner_telegram_id FROM chat_groups WHERE id=?", (group_id,))
+            group = await cur.fetchone()
+            if group is None:
+                raise HTTPException(404, "Группа не найдена")
+            if group[0] != uid:
+                raise HTTPException(403, "Удалить группу может только владелец")
+            for table in ("message_scoped_contacts", "message_forward_sources", "message_forward_locations",
+                          "message_card_votes", "message_cards"):
+                await db.execute(f"DELETE FROM {table} WHERE scope='group' AND message_id IN "
+                                 "(SELECT id FROM group_messages WHERE group_id=?)", (group_id,))
+            for table in ("message_events", "typing_indicators", "typing_indicator_sessions", "message_reactions", "pinned_messages"):
+                await db.execute(f"DELETE FROM {table} WHERE scope='group' AND chat_id=?", (group_id,))
+            for table in ("read_markers", "read_receipts", "cloud_drafts", "cloud_draft_versions", "cloud_draft_changes"):
+                await db.execute(f"DELETE FROM {table} WHERE scope='group' AND peer_id=?", (group_id,))
+            for table in ("group_join_requests", "group_invites", "group_members", "group_messages"):
+                await db.execute(f"DELETE FROM {table} WHERE group_id=?", (group_id,))
+            await db.execute("DELETE FROM chat_groups WHERE id=?", (group_id,))
+            await db.commit()
+        return {"deleted": True}
+
     @router.put("/api/groups/{group_id}/slow-mode")
     async def update_group_slow_mode(
         group_id: int,
@@ -13832,12 +13857,13 @@ def build_messenger_router(
         uid = int(user["telegram_id"])
         async with aiosqlite.connect(db_path()) as db:
             db.row_factory = aiosqlite.Row
+            await db.execute("BEGIN IMMEDIATE")
             actor = await require_group_member(db, group_id, uid)
             target = await require_group_member(db, group_id, telegram_id)
             if telegram_id == uid:
                 if target["role"] == "owner":
                     raise HTTPException(status_code=409, detail="Владелец не может покинуть группу без передачи владения")
-            elif actor["role"] not in ("owner", "admin") or target["role"] == "owner":
+            elif actor["role"] != "owner" and (actor["role"] != "admin" or target["role"] != "member"):
                 raise HTTPException(status_code=403, detail="Недостаточно прав для удаления участника")
             cur = await db.execute(
                 "DELETE FROM group_members WHERE group_id=? AND telegram_id=?",
