@@ -85,6 +85,15 @@ class NativeMessagingSourceChecks(unittest.TestCase):
         self.assertIn('if (offer.optBoolean("unlocked"))', payment)
         self.assertIn('viewer.openPhoto', payment)
 
+    def test_channel_giveaways_have_owner_creation_and_member_entry(self):
+        chat = self.source('ui/ChatActivity.java')
+        helper = self.source('ui/WaysGramPaidReactions.java')
+        self.assertIn('WaysGramPaidReactions.showGiveaways(this, currentAccount, currentChat.id)', chat)
+        self.assertIn('data.optBoolean("can_create")', helper)
+        self.assertIn('data.optBoolean("can_enter")', helper)
+        self.assertIn('path + "/" + id + "/entry"', helper)
+        self.assertIn('R.string.WaysGramGiveawayFunding', helper)
+
     def test_channel_view_requests_feed_reach(self):
         transport = self.source('tgnet/WaysGramTransport.java')
         chats = self.source('tgnet/WaysGramChats.java')

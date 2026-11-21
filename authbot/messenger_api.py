@@ -1072,6 +1072,23 @@ async def init_messenger_storage(database_path: Path) -> None:
                 ON channel_messages(channel_id, id DESC);
             CREATE INDEX IF NOT EXISTS idx_api_channel_author_time
                 ON channel_messages(author_telegram_id, created_at);
+            CREATE TABLE IF NOT EXISTS channel_giveaways (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                channel_id INTEGER NOT NULL,
+                sponsor_id INTEGER NOT NULL,
+                ends_at INTEGER NOT NULL,
+                prize_stars INTEGER NOT NULL,
+                winner_count INTEGER NOT NULL,
+                state TEXT NOT NULL DEFAULT 'open',
+                winners_json TEXT NOT NULL DEFAULT '[]'
+            );
+            CREATE INDEX IF NOT EXISTS idx_channel_giveaways_chat ON channel_giveaways(channel_id,id DESC);
+            CREATE INDEX IF NOT EXISTS idx_channel_giveaways_due ON channel_giveaways(ends_at) WHERE state='open';
+            CREATE TABLE IF NOT EXISTS channel_giveaway_entries (
+                giveaway_id INTEGER NOT NULL,
+                telegram_id INTEGER NOT NULL,
+                PRIMARY KEY(giveaway_id,telegram_id)
+            );
             CREATE TABLE IF NOT EXISTS channel_member_departures (
                 channel_id INTEGER NOT NULL,
                 occurred_at INTEGER NOT NULL,
@@ -9352,6 +9369,113 @@ def build_messenger_router(
         if not await cur.fetchone():
             raise HTTPException(404, "CHANNEL_NOT_FOUND")
 
+    @router.get("/api/channels/{channel_id}/giveaways")
+    async def list_channel_giveaways(channel_id: int, authorization: str | None = Header(default=None)):
+        uid = int((await current_user(authorization))["telegram_id"])
+        async with aiosqlite.connect(db_path()) as db:
+            await db.execute("BEGIN")
+            cur = await db.execute("SELECT owner_telegram_id FROM channels c WHERE c.id=? AND " + STORY_CHANNEL_ACCESS,
+                                   (channel_id, uid, uid, uid, uid))
+            owner = await cur.fetchone()
+            if owner is None:
+                raise HTTPException(404, "CHANNEL_NOT_FOUND")
+            cur = await db.execute("SELECT 1 FROM active_channel_members WHERE channel_id=? AND telegram_id=?", (channel_id, uid))
+            can_enter = uid != owner[0] and await cur.fetchone() is not None
+            cur = await db.execute("""SELECT g.id,g.ends_at,g.prize_stars,g.winner_count,g.state,g.winners_json,
+                EXISTS(SELECT 1 FROM channel_giveaway_entries e WHERE e.giveaway_id=g.id AND e.telegram_id=?)
+                FROM channel_giveaways g WHERE g.channel_id=? ORDER BY g.id DESC LIMIT 20""", (uid, channel_id))
+            rows = await cur.fetchall()
+        return {"can_create": uid == owner[0], "can_enter": can_enter, "giveaways": [
+            {"id": gid, "ends_at": end, "prize_stars": prize, "winner_count": count, "state": state,
+             "entered": bool(entered), "drawn_count": len(json.loads(winners)), "won": uid in json.loads(winners)}
+            for gid, end, prize, count, state, winners, entered in rows]}
+
+    @router.post("/api/channels/{channel_id}/giveaways", status_code=201)
+    async def create_channel_giveaway(channel_id: int, payload: dict[str, Any], authorization: str | None = Header(default=None)):
+        uid = int((await current_user(authorization))["telegram_id"])
+        ends, prize, count = (payload.get(key) for key in ("ends_at", "prize_stars", "winner_count"))
+        now = int(time.time())
+        if (any(type(v) is not int for v in (ends, prize, count)) or not now + 60 <= ends <= now + 30 * 86400
+                or not 1 <= count <= 50 or not 1 <= prize <= 10000 or count * prize > 100000):
+            raise HTTPException(400, "INVALID_GIVEAWAY")
+        async with aiosqlite.connect(db_path()) as db:
+            await db.execute("BEGIN IMMEDIATE")
+            await require_channel_inbox_owner(db, channel_id, uid)
+            cur = await db.execute("SELECT id FROM channel_giveaways WHERE channel_id=? AND state='open'", (channel_id,))
+            if await cur.fetchone():
+                raise HTTPException(409, "GIVEAWAY_ALREADY_OPEN")
+            cur = await db.execute("SELECT stars FROM accounts WHERE telegram_id=?", (uid,))
+            if (await cur.fetchone())[0] < prize * count:
+                raise HTTPException(409, "GIVEAWAY_INSUFFICIENT_STARS")
+            cur = await db.execute("INSERT INTO channel_giveaways(channel_id,sponsor_id,ends_at,prize_stars,winner_count) VALUES(?,?,?,?,?)",
+                                   (channel_id, uid, ends, prize, count))
+            gid = int(cur.lastrowid)
+            await db.commit()
+        return {"id": gid}
+
+    @router.put("/api/channels/{channel_id}/giveaways/{giveaway_id}/entry")
+    async def enter_channel_giveaway(channel_id: int, giveaway_id: int, authorization: str | None = Header(default=None)):
+        uid = int((await current_user(authorization))["telegram_id"])
+        async with aiosqlite.connect(db_path()) as db:
+            await db.execute("BEGIN IMMEDIATE")
+            cur = await db.execute("""SELECT 1 FROM channel_giveaways g JOIN channels c ON c.id=g.channel_id
+                JOIN active_channel_members m ON m.channel_id=c.id AND m.telegram_id=?
+                WHERE g.id=? AND g.channel_id=? AND g.state='open' AND g.ends_at>? AND c.owner_telegram_id<>? AND g.sponsor_id<>?
+                AND NOT EXISTS(SELECT 1 FROM channel_bans b WHERE b.channel_id=c.id AND b.telegram_id=m.telegram_id
+                AND (b.until_date=0 OR b.until_date>?))""", (uid, giveaway_id, channel_id, int(time.time()), uid, uid, int(time.time())))
+            if not await cur.fetchone():
+                raise HTTPException(404, "GIVEAWAY_NOT_OPEN")
+            await db.execute("INSERT OR IGNORE INTO channel_giveaway_entries VALUES(?,?)", (giveaway_id, uid))
+            await db.commit()
+        return {"entered": True}
+
+    async def process_due_channel_giveaways() -> None:
+        now = int(time.time())
+        async with aiosqlite.connect(db_path()) as db:
+            await db.execute("BEGIN IMMEDIATE")
+            cur = await db.execute("SELECT id,channel_id,sponsor_id,prize_stars,winner_count FROM channel_giveaways WHERE state='open' AND ends_at<=? ORDER BY ends_at LIMIT 8", (now,))
+            for gid, channel, sponsor, prize, count in await cur.fetchall():
+                cur = await db.execute("""SELECT e.telegram_id FROM channel_giveaway_entries e
+                    JOIN active_channel_members m ON m.channel_id=? AND m.telegram_id=e.telegram_id
+                    JOIN accounts a ON a.telegram_id=e.telegram_id AND a.is_banned=0
+                    JOIN channels c ON c.id=m.channel_id AND c.owner_telegram_id=?
+                    WHERE e.giveaway_id=? AND e.telegram_id<>? AND a.stars<=9223372036854775807-?
+                    AND NOT EXISTS(SELECT 1 FROM channel_bans b WHERE b.channel_id=m.channel_id AND b.telegram_id=e.telegram_id
+                        AND (b.until_date=0 OR b.until_date>?))""", (channel, sponsor, gid, sponsor, prize, now))
+                # Reservoir sampling avoids loading the entire roster into memory.
+                winners = []
+                seen = 0
+                async for (entrant,) in cur:
+                    seen += 1
+                    if len(winners) < count:
+                        winners.append(entrant)
+                    else:
+                        slot = secrets.randbelow(seen)
+                        if slot < count:
+                            winners[slot] = entrant
+                await cur.close()
+                state = "empty"
+                if winners:
+                    cur = await db.execute("UPDATE accounts SET stars=stars-? WHERE telegram_id=? AND is_banned=0 AND stars>=? RETURNING stars",
+                                           (len(winners)*prize, sponsor, len(winners)*prize))
+                    balance = await cur.fetchone()
+                    await cur.close()
+                    if balance is None:
+                        state, winners = "unfunded", []
+                    else:
+                        state = "drawn"
+                        ledger = [(sponsor, -len(winners)*prize, balance[0])]
+                        for winner in winners:
+                            cur = await db.execute("UPDATE accounts SET stars=stars+? WHERE telegram_id=? RETURNING stars", (prize, winner))
+                            ledger.append((winner, prize, (await cur.fetchone())[0]))
+                            await cur.close()
+                        await db.executemany("""INSERT INTO economy_transactions
+                            (telegram_id,asset,amount,balance_after,reason,admin_id,created_at) VALUES(?,'stars',?,?,?,NULL,?)""",
+                            [(uid, amount, remaining, f"channel_giveaway:{channel}:{gid}", now) for uid, amount, remaining in ledger])
+                await db.execute("UPDATE channel_giveaways SET state=?,winners_json=? WHERE id=?", (state, json.dumps(winners), gid))
+                await db.execute("DELETE FROM channel_giveaway_entries WHERE giveaway_id=?", (gid,))
+            await db.commit()
+
     @router.get("/api/community-boosts/{scope}/{chat_id}")
     @router.put("/api/community-boosts/{scope}/{chat_id}")
     async def community_boost(scope: Literal["group", "channel"], chat_id: int, request: Request,
@@ -11046,6 +11170,8 @@ def build_messenger_router(
                 await db.rollback()
                 raise HTTPException(status_code=404, detail="Канал не найден или вы не являетесь владельцем")
             await db.execute("DELETE FROM channel_stories WHERE channel_id=?", (channel_id,))
+            await db.execute("DELETE FROM channel_giveaway_entries WHERE giveaway_id IN (SELECT id FROM channel_giveaways WHERE channel_id=?)", (channel_id,))
+            await db.execute("DELETE FROM channel_giveaways WHERE channel_id=?", (channel_id,))
             await db.execute("DELETE FROM channel_post_views WHERE channel_id=?", (channel_id,))
             await db.execute("DELETE FROM channel_member_departures WHERE channel_id=?", (channel_id,))
             await db.execute("DELETE FROM channel_messages WHERE channel_id=?", (channel_id,))
@@ -13455,6 +13581,7 @@ def build_messenger_router(
             try:
                 await process_due_scheduled_messages()
                 await process_due_inbox_proposals()
+                await process_due_channel_giveaways()
                 await process_messages_waiting_for_online()
                 now = int(time.time())
                 if now - last_auction_settlement >= 5:

@@ -2265,3 +2265,52 @@ def test_scheduled_proposal_publishes_once_and_transfers_reward(env):
                 assert await cur.fetchall() == [(-7,), (7,)]
 
     run(scenario())
+
+
+def test_channel_giveaway_eligible_members_only_settles_once(env):
+    import aiosqlite
+    import inspect
+    import time
+
+    path, app = env
+    startup = next(fn for fn in app.router.on_startup if fn.__name__ == 'start_scheduled_message_worker')
+    worker = inspect.getclosurevars(startup).nonlocals['scheduled_message_worker']
+    settle = inspect.getclosurevars(worker).nonlocals['process_due_channel_giveaways']
+
+    async def scenario():
+        async with aiosqlite.connect(path) as db:
+            await db.execute('UPDATE accounts SET stars=20 WHERE telegram_id=101')
+            await db.commit()
+        async with await client_for(app) as client:
+            owner, member, other = headers(101), headers(102), headers(ADMIN)
+            ch = await client.post('/api/channels', headers=owner, json={'title': 'Draw', 'username': 'draw_channel', 'is_public': True})
+            base = f"/api/channels/{ch.json()['id']}"
+            root = base + '/giveaways'
+            payload = {'ends_at': int(time.time()) + 120, 'winner_count': 2, 'prize_stars': 7}
+            assert (await client.post(root, headers=member, json=payload)).status_code == 404
+            draw = await client.post(root, headers=owner, json=payload)
+            assert draw.status_code == 201
+            gid = draw.json()['id']
+            entry = f'{root}/{gid}/entry'
+            assert (await client.post(root, headers=owner, json=payload)).status_code == 409
+            assert (await client.put(entry, headers=owner)).status_code == 404
+            assert (await client.put(entry, headers=other)).status_code == 404
+            for user in (member, other):
+                assert (await client.put(base + '/membership', headers=user, json={'joined': True})).status_code == 200
+                for _ in range(2):
+                    assert (await client.put(entry, headers=user)).json() == {'entered': True}
+            assert (await client.put(base + '/membership', headers=other, json={'joined': False})).status_code == 200
+            await settle()
+            assert (await client.get(root, headers=member)).json()['giveaways'][0]['state'] == 'open'
+            async with aiosqlite.connect(path) as db:
+                await db.execute('UPDATE channel_giveaways SET ends_at=0 WHERE id=?', (gid,))
+                await db.commit()
+            await asyncio.gather(settle(), settle())
+            result = (await client.get(root, headers=member)).json()['giveaways'][0]
+            assert (result['state'], result['drawn_count'], result['won']) == ('drawn', 1, True)
+            assert (await client.get(root, headers=other)).json()['giveaways'][0]['won'] is False
+            async with aiosqlite.connect(path) as db:
+                cur = await db.execute("SELECT telegram_id,amount FROM economy_transactions WHERE reason LIKE 'channel_giveaway:%' ORDER BY telegram_id")
+                assert await cur.fetchall() == [(101, -7), (102, 7)]
+
+    run(scenario())
