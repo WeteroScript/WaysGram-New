@@ -1802,6 +1802,13 @@ async def init_messenger_storage(database_path: Path) -> None:
             await db.execute("ALTER TABLE main.channel_inbox_messages ADD COLUMN proposal_state TEXT")
         if "published_post_id" not in inbox_columns:
             await db.execute("ALTER TABLE main.channel_inbox_messages ADD COLUMN published_post_id INTEGER")
+        if "scheduled_at" not in inbox_columns:
+            await db.execute("ALTER TABLE main.channel_inbox_messages ADD COLUMN scheduled_at INTEGER")
+        if "scheduled_by" not in inbox_columns:
+            await db.execute("ALTER TABLE main.channel_inbox_messages ADD COLUMN scheduled_by INTEGER")
+        if "reward_stars" not in inbox_columns:
+            await db.execute("ALTER TABLE main.channel_inbox_messages ADD COLUMN reward_stars INTEGER NOT NULL DEFAULT 0")
+        await db.execute("CREATE INDEX IF NOT EXISTS main.idx_inbox_scheduled ON channel_inbox_messages(scheduled_at) WHERE proposal_state='scheduled'")
         cur = await db.execute("PRAGMA table_info(channels)")
         if "paid_reactions_enabled" not in {row[1] for row in await cur.fetchall()}:
             await db.execute("ALTER TABLE channels ADD COLUMN paid_reactions_enabled INTEGER NOT NULL DEFAULT 0")
@@ -9483,7 +9490,7 @@ def build_messenger_router(
             if channel is None:
                 raise HTTPException(404, "CHANNEL_NOT_FOUND")
             owner, enabled, fee = channel
-            columns = "id,direction,body,fee_stars,created_at,proposal_state,published_post_id"
+            columns = "id,direction,body,fee_stars,created_at,proposal_state,published_post_id,scheduled_at,reward_stars"
             if as_owner:
                 cur = await db.execute("SELECT 1 FROM channel_inbox_messages WHERE channel_id=? AND reader_id=? AND direction='incoming' LIMIT 1", (channel_id, reader))
                 if not await cur.fetchone():
@@ -9537,49 +9544,109 @@ def build_messenger_router(
                         (account, amount, balance[0], f"channel_inbox:{channel_id}:{message_id}", now))
             await db.commit()
         return {"id": message_id, "direction": direction, "body": body, "fee_stars": fee, "created_at": now,
-                "proposal_state": proposal_state, "published_post_id": None}
+                "proposal_state": proposal_state, "published_post_id": None, "scheduled_at": None, "reward_stars": 0}
+
+    async def publish_inbox_proposal(db: Any, channel_id: int, owner: int, proposal_id: int,
+                                     reader: int, body: str, reward: int, now: int) -> int:
+        cur = await db.execute("SELECT COUNT(*) FROM channel_messages WHERE author_telegram_id=? AND created_at>?", (owner, now - 60))
+        if (await cur.fetchone())[0] >= CHANNEL_POSTS_PER_MINUTE:
+            raise HTTPException(429, "CHANNEL_POST_RATE_LIMIT")
+        cur = await db.execute("INSERT INTO channel_messages(channel_id,author_telegram_id,body,created_at) VALUES(?,?,?,?)",
+                               (channel_id, owner, body, now))
+        post_id = int(cur.lastrowid)
+        if reward:
+            for account, amount in ((owner, -reward), (reader, reward)):
+                cur = await db.execute("""UPDATE accounts SET stars=stars+? WHERE telegram_id=? AND is_banned=0
+                    AND stars+? BETWEEN 0 AND 9223372036854775807 RETURNING stars""", (amount, account, amount))
+                balance = await cur.fetchone()
+                await cur.close()
+                if balance is None:
+                    raise HTTPException(409, "POST_PROPOSAL_REWARD_FAILED")
+                await db.execute("""INSERT INTO economy_transactions
+                    (telegram_id,asset,amount,balance_after,reason,admin_id,created_at) VALUES(?,'stars',?,?,?,NULL,?)""",
+                    (account, amount, balance[0], f"channel_proposal_reward:{channel_id}:{proposal_id}", now))
+        await db.execute("UPDATE channel_inbox_messages SET proposal_state='published',published_post_id=?,reward_stars=?,scheduled_at=NULL,scheduled_by=NULL WHERE id=?",
+                         (post_id, reward, proposal_id))
+        await record_event(db, "channel", post_id, "new_message", owner, chat_id=channel_id)
+        return post_id
 
     @router.post("/api/channels/{channel_id}/inbox/proposals/{proposal_id}/{action}")
     async def resolve_channel_post_proposal(channel_id: int, proposal_id: int,
-                                            action: Literal["publish", "decline", "withdraw"],
+                                            action: Literal["publish", "decline", "withdraw", "schedule"],
+                                            payload: dict[str, Any] | None = None,
                                             authorization: str | None = Header(default=None)):
         user = await current_user(authorization)
         uid = int(user["telegram_id"])
-        target = {"publish": "published", "decline": "declined", "withdraw": "withdrawn"}[action]
+        target = {"publish": "published", "decline": "declined", "withdraw": "withdrawn", "schedule": "scheduled"}[action]
         now = int(time.time())
+        payload = payload or {}
+        scheduled_at = payload.get("scheduled_at") if action == "schedule" else None
+        reward = payload.get("reward_stars", 0)
+        if type(reward) is not int or not 0 <= reward <= 10000 or (action not in ("publish", "schedule") and reward):
+            raise HTTPException(400, "INVALID_POST_PROPOSAL_REWARD")
         recipients = []
         async with aiosqlite.connect(db_path()) as db:
             await db.execute("BEGIN IMMEDIATE")
             if action != "withdraw":
                 await require_channel_inbox_owner(db, channel_id, uid)
-            cur = await db.execute("""SELECT m.body,m.proposal_state,m.published_post_id FROM channel_inbox_messages m
+            cur = await db.execute("""SELECT m.body,m.proposal_state,m.published_post_id,m.reader_id,m.scheduled_at,m.reward_stars FROM channel_inbox_messages m
                 JOIN channels c ON c.id=m.channel_id WHERE m.id=? AND m.channel_id=? AND m.proposal_state IS NOT NULL
                 AND (?=0 OR m.reader_id=?)""", (proposal_id, channel_id, int(action == "withdraw"), uid))
             proposal = await cur.fetchone()
             if proposal is None:
                 raise HTTPException(404, "POST_PROPOSAL_NOT_FOUND")
-            body, state, post_id = proposal
-            if state == target:
-                return {"id": proposal_id, "proposal_state": state, "published_post_id": post_id}
-            if state != "pending":
+            body, state, post_id, reader, old_schedule, old_reward = proposal
+            if state == target and (action != "schedule" or (scheduled_at, reward) == (old_schedule, old_reward)):
+                return {"id": proposal_id, "proposal_state": state, "published_post_id": post_id,
+                        "scheduled_at": old_schedule, "reward_stars": old_reward}
+            if state not in ("pending", "scheduled", "schedule_failed"):
                 raise HTTPException(409, "POST_PROPOSAL_ALREADY_RESOLVED")
+            if reward and reader == uid:
+                raise HTTPException(400, "INVALID_POST_PROPOSAL_REWARD")
+            if action == "schedule" and (type(scheduled_at) is not int or not now + 10 <= scheduled_at <= now + 30 * 86400):
+                raise HTTPException(400, "INVALID_POST_PROPOSAL_SCHEDULE")
             if action == "publish":
-                cur = await db.execute("SELECT COUNT(*) FROM channel_messages WHERE author_telegram_id=? AND created_at>?", (uid, now - 60))
-                if (await cur.fetchone())[0] >= CHANNEL_POSTS_PER_MINUTE:
-                    raise HTTPException(429, "CHANNEL_POST_RATE_LIMIT")
-                cur = await db.execute("INSERT INTO channel_messages(channel_id,author_telegram_id,body,created_at) VALUES(?,?,?,?)",
-                                       (channel_id, uid, body, now))
-                post_id = int(cur.lastrowid)
-                await record_event(db, "channel", post_id, "new_message", uid, chat_id=channel_id)
+                post_id = await publish_inbox_proposal(db, channel_id, uid, proposal_id, reader, body, reward, now)
                 cur = await db.execute("SELECT telegram_id FROM active_channel_members WHERE channel_id=? AND telegram_id<>?", (channel_id, uid))
                 recipients = [int(row[0]) for row in await cur.fetchall()]
-            await db.execute("UPDATE channel_inbox_messages SET proposal_state=?,published_post_id=? WHERE id=?",
-                             (target, post_id, proposal_id))
+            else:
+                await db.execute("UPDATE channel_inbox_messages SET proposal_state=?,scheduled_at=?,reward_stars=?,scheduled_by=? WHERE id=?",
+                                 (target, scheduled_at, reward, uid if action == "schedule" else None, proposal_id))
             await db.commit()
         if recipients:
             await deliver_push_notifications(recipients, str(user.get("display_name") or user.get("username") or "Новая публикация"),
                                              body, {"scope": "channel", "chat_id": str(channel_id), "message_id": str(post_id), "silent": "0"})
-        return {"id": proposal_id, "proposal_state": target, "published_post_id": post_id}
+        return {"id": proposal_id, "proposal_state": target, "published_post_id": post_id,
+                "scheduled_at": scheduled_at, "reward_stars": reward}
+
+    async def process_due_inbox_proposals() -> None:
+        now = int(time.time())
+        async with aiosqlite.connect(db_path()) as db:
+            await db.execute("BEGIN IMMEDIATE")
+            cur = await db.execute("""SELECT m.id,m.channel_id,c.owner_telegram_id,m.reader_id,m.body,m.reward_stars,
+                a.is_banned,c.title,m.scheduled_by FROM channel_inbox_messages m JOIN channels c ON c.id=m.channel_id
+                JOIN accounts a ON a.telegram_id=c.owner_telegram_id WHERE m.proposal_state='scheduled' AND m.scheduled_at<=?
+                ORDER BY m.scheduled_at,m.id LIMIT 16""", (now,))
+            notifications = []
+            for proposal, channel, owner, reader, body, reward, banned, title, scheduled_by in await cur.fetchall():
+                await db.execute("SAVEPOINT scheduled_proposal")
+                try:
+                    if banned or scheduled_by != owner:
+                        raise HTTPException(403, "POST_PROPOSAL_OWNER_UNAVAILABLE")
+                    post = await publish_inbox_proposal(db, channel, owner, proposal, reader, body, reward, now)
+                    cur = await db.execute("SELECT telegram_id FROM active_channel_members WHERE channel_id=? AND telegram_id<>?", (channel, owner))
+                    notifications.append(([int(row[0]) for row in await cur.fetchall()], title, body, channel, post))
+                except HTTPException as exc:
+                    await db.execute("ROLLBACK TO scheduled_proposal")
+                    if exc.status_code != 429:
+                        await db.execute("UPDATE channel_inbox_messages SET proposal_state='schedule_failed' WHERE id=?", (proposal,))
+                finally:
+                    await db.execute("RELEASE scheduled_proposal")
+            await db.commit()
+        for recipients, title, body, channel, post in notifications:
+            if recipients:
+                await deliver_push_notifications(recipients, title, body,
+                    {"scope": "channel", "chat_id": str(channel), "message_id": str(post), "silent": "0"})
 
     @router.get("/api/channels/{channel_id}/discussion-group")
     @router.put("/api/channels/{channel_id}/discussion-group")
@@ -13387,6 +13454,7 @@ def build_messenger_router(
         while True:
             try:
                 await process_due_scheduled_messages()
+                await process_due_inbox_proposals()
                 await process_messages_waiting_for_online()
                 now = int(time.time())
                 if now - last_auction_settlement >= 5:

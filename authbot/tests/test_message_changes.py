@@ -2221,3 +2221,47 @@ def test_channel_analytics_counts_actual_departures_not_retries(env):
             assert (stats['voluntary_leaves'], stats['moderated_removals']) == (1, 1)
 
     run(scenario())
+
+
+def test_scheduled_proposal_publishes_once_and_transfers_reward(env):
+    import aiosqlite
+    import inspect
+    import time
+
+    path, app = env
+    startup = next(fn for fn in app.router.on_startup if fn.__name__ == 'start_scheduled_message_worker')
+    worker = inspect.getclosurevars(startup).nonlocals['scheduled_message_worker']
+    process = inspect.getclosurevars(worker).nonlocals['process_due_inbox_proposals']
+
+    async def scenario():
+        async with aiosqlite.connect(path) as db:
+            await db.execute('UPDATE accounts SET stars=20 WHERE telegram_id=101')
+            await db.commit()
+        async with await client_for(app) as client:
+            owner, reader = headers(101), headers(102)
+            channel = await client.post('/api/channels', headers=owner, json={'title': 'Scheduled', 'username': 'scheduled_news', 'is_public': True})
+            root = f"/api/channels/{channel.json()['id']}"
+            inbox = root + '/inbox'
+            assert (await client.put(inbox + '/settings', headers=owner, json={'enabled': True, 'fee_stars': 0})).status_code == 200
+            for index, reward in enumerate((7, 10000), 1):
+                response = await client.post(inbox + '/me', headers={**reader, 'Idempotency-Key': f'scheduled-post-000{index}'},
+                                             json={'body': f'Scheduled proposal {index}', 'propose_post': True})
+                pid = response.json()['id']
+                route = f'{inbox}/proposals/{pid}/schedule'
+                payload = {'scheduled_at': int(time.time()) + 60, 'reward_stars': reward}
+                assert (await client.post(route, headers=reader, json=payload)).status_code == 404
+                assert (await client.post(route, headers=owner, json=payload)).json()['proposal_state'] == 'scheduled'
+                await process()
+                async with aiosqlite.connect(path) as db:
+                    await db.execute('UPDATE channel_inbox_messages SET scheduled_at=0 WHERE id=?', (pid,))
+                    await db.commit()
+                await asyncio.gather(process(), process())
+            posts = (await client.get(root + '/messages', headers=reader)).json()['messages']
+            assert [p['body'] for p in posts] == ['Scheduled proposal 1']
+            states = (await client.get(inbox + '/me', headers=reader)).json()['messages']
+            assert [m['proposal_state'] for m in states] == ['published', 'schedule_failed']
+            async with aiosqlite.connect(path) as db:
+                cur = await db.execute("SELECT amount FROM economy_transactions WHERE reason LIKE 'channel_proposal_reward:%' ORDER BY amount")
+                assert await cur.fetchall() == [(-7,), (7,)]
+
+    run(scenario())

@@ -139,7 +139,7 @@ class NativeMessagingSourceChecks(unittest.TestCase):
         inbox = self.source('ui/WaysGramChannelInbox.java')
         self.assertIn('put("propose_post", proposal)', inbox)
         self.assertIn('"pending".equals(state)', inbox)
-        self.assertIn('actionPath + (owner ? "publish" : "withdraw")', inbox)
+        self.assertIn('actionPath + (when > 0 ? "schedule" : "publish")', inbox)
         self.assertIn('actionPath + "decline"', inbox)
         self.assertIn('putBoolean(slot + ":proposal", proposal)', inbox)
 
