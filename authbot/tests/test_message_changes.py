@@ -1459,3 +1459,33 @@ def test_voice_privacy_rejects_direct_and_forwarded_voice_but_not_text(env):
             assert (await client.post('/api/messages', headers=sender, json={'recipient_id': 102, 'media_id': media})).status_code == 201
 
     run(scenario())
+
+
+def test_forward_privacy_controls_profile_link_for_each_viewer(env):
+    _, app = env
+
+    async def scenario():
+        async with await client_for(app) as client:
+            sender, forwarder, viewer = headers(101), headers(102), headers(ADMIN)
+            original = await client.post('/api/messages', headers=sender, json={'recipient_id': 102, 'body': 'Forward me'})
+            assert original.status_code == 201
+            mid = original.json()['id']
+            for endpoint, body in (
+                ('/api/forward', {'source_scope': 'dm', 'target_scope': 'dm', 'source_peer_id': 101, 'target_peer_id': ADMIN, 'message_ids': [mid]}),
+                (f'/api/messages/{mid}/forward', {'recipient_id': ADMIN}),
+            ):
+                assert (await client.post(endpoint, headers=forwarder, json=body)).status_code == 201
+
+            async def history():
+                return (await client.get('/api/messages?with=102', headers=viewer)).json()['messages']
+
+            assert len(await history()) == 2
+            assert all(row['forwarded_from_telegram_id'] == 101 for row in await history())
+            settings = '/api/me/privacy/forwards'
+            assert (await client.put(settings, headers=sender, json={'mode': 'nobody'})).status_code == 200
+            assert all(row['forwarded_from_telegram_id'] is None and row['forwarded_from_message_id'] is None
+                       and row['forwarded_from_display_name'] for row in await history())
+            assert (await client.put(settings, headers=sender, json={'mode': 'nobody', 'allow': [ADMIN]})).status_code == 200
+            assert all(row['forwarded_from_telegram_id'] == 101 for row in await history())
+
+    run(scenario())

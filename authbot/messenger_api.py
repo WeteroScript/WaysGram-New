@@ -4823,7 +4823,7 @@ def build_messenger_router(
         else:
             cur = await db.execute("SELECT rules FROM account_profile_privacy WHERE telegram_id=? AND setting=?", (uid, setting))
         row = await cur.fetchone()
-        return json.loads(row[0]) if row else {"mode": {"invites": "everyone", "find-by-phone": "contacts", "avatar": "everyone", "bio": "everyone", "music": "everyone", "voice": "everyone"}.get(setting, "nobody"), "allow": [], "deny": []}
+        return json.loads(row[0]) if row else {"mode": {"invites": "everyone", "find-by-phone": "contacts", "avatar": "everyone", "bio": "everyone", "music": "everyone", "voice": "everyone", "forwards": "everyone"}.get(setting, "nobody"), "allow": [], "deny": []}
 
     async def privacy_allows(db: Any, owner: int, viewer: int, setting: str) -> bool:
         if owner == viewer:
@@ -4868,7 +4868,7 @@ def build_messenger_router(
     @router.get("/api/me/privacy/{setting}")
     async def get_privacy(setting: str, authorization: str | None = Header(default=None)):
         uid = int((await current_user(authorization))["telegram_id"])
-        if setting not in ("invites", "phone", "last-seen", "find-by-phone", "avatar", "bio", "birthday", "music", "voice"):
+        if setting not in ("invites", "phone", "last-seen", "find-by-phone", "avatar", "bio", "birthday", "music", "voice", "forwards"):
             raise HTTPException(404, "PRIVACY_KEY_INVALID")
         async with aiosqlite.connect(db_path()) as db:
             return await privacy_rules(db, uid, setting)
@@ -4876,7 +4876,7 @@ def build_messenger_router(
     @router.put("/api/me/privacy/{setting}")
     async def set_privacy(setting: str, payload: dict[str, Any], authorization: str | None = Header(default=None)):
         uid = int((await current_user(authorization))["telegram_id"])
-        if setting not in ("invites", "phone", "last-seen", "find-by-phone", "avatar", "bio", "birthday", "music", "voice"):
+        if setting not in ("invites", "phone", "last-seen", "find-by-phone", "avatar", "bio", "birthday", "music", "voice", "forwards"):
             raise HTTPException(404, "PRIVACY_KEY_INVALID")
         mode = payload.get("mode")
         if mode not in ("everyone", "contacts", "nobody"):
@@ -9183,6 +9183,11 @@ def build_messenger_router(
                     (scope, *message_ids),
                 )
                 contacts = {int(row[0]): tuple(row[1:]) for row in await cur.fetchall()}
+            for item in items:
+                author = item.get("forwarded_from_telegram_id")
+                if author and not await privacy_allows(db, int(author), user_id, "forwards"):
+                    item["forwarded_from_telegram_id"] = None
+                    item["forwarded_from_message_id"] = None
         mine: dict[int, list[str]] = {}
         for message_id, reaction in rows:
             mine.setdefault(int(message_id), []).append(str(reaction))
@@ -11585,6 +11590,9 @@ def build_messenger_router(
                     cur = await db.execute("SELECT COALESCE(NULLIF(display_name,''),NULLIF(username,''),'Пользователь') FROM accounts WHERE telegram_id=?", (author_id,))
                     author = await cur.fetchone()
                     from_name, from_date = str(author[0]) if author else "Пользователь", int(item["created_at"])
+                item["forward_link_author"] = (
+                    item.get("forwarded_from_telegram_id") or (item["author_id"] if not prior_source else None)
+                ) if source_scope == "dm" and target_scope == "dm" else None
                 item["forward_name"], item["forward_date"] = from_name, from_date
                 item["media_fields"] = await media_message_fields(db, item.get("media_id"))
                 if target_scope == "dm":
@@ -11645,6 +11653,10 @@ def build_messenger_router(
                     else:
                         await db.execute("""INSERT INTO message_scoped_contacts(scope,message_id,contact_name,contact_phone,contact_email,
                             contact_first_name,contact_last_name,contact_vcard) VALUES(?,?,?,?,?,?,?,?)""", (target_scope, mid, *contact))
+                link_author = item["forward_link_author"]
+                if not drop_author and link_author:
+                    # Keep provenance for viewer-side checks, including later changes to privacy.
+                    await db.execute("UPDATE messages SET forwarded_from_telegram_id=? WHERE id=?", (link_author, mid))
                 if not drop_author:
                     await db.execute("INSERT INTO message_forward_sources(scope,message_id,from_name,from_date) VALUES(?,?,?,?)",
                                      (target_scope, mid, item["forward_name"], item["forward_date"]))
@@ -11668,6 +11680,8 @@ def build_messenger_router(
                     result_item.update(channel_id=target_peer, author_id=uid)
                 if not drop_author:
                     result_item.update(forwarded_from_display_name=item["forward_name"], forwarded_from_date=item["forward_date"])
+                    if link_author and await privacy_allows(db, int(link_author), uid, "forwards"):
+                        result_item["forwarded_from_telegram_id"] = link_author
                 created.append(result_item)
             result = {"status": "forwarded", "messages": created, "count": len(created)}
             await idempotency_store(db, uid, scope, descriptor, result, now)
@@ -11811,6 +11825,9 @@ def build_messenger_router(
                 **media_fields,
                 "created_at": now,
             }
+            if not await privacy_allows(db, forwarded_from_id, uid, "forwards"):
+                result["forwarded_from_telegram_id"] = None
+                result["forwarded_from_message_id"] = None
             _add_message_entities(result)
             await idempotency_store(db, uid, scope, descriptor, result, now)
             await db.commit()
