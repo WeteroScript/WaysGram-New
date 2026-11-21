@@ -1692,6 +1692,8 @@ async def init_messenger_storage(database_path: Path) -> None:
         cur = await db.execute("PRAGMA table_info(channels)")
         if "paid_reactions_enabled" not in {row[1] for row in await cur.fetchall()}:
             await db.execute("ALTER TABLE channels ADD COLUMN paid_reactions_enabled INTEGER NOT NULL DEFAULT 0")
+        if "default_send_restrictions" not in chat_group_columns:
+            await db.execute(f"ALTER TABLE {db_split.SCHEMA}.chat_groups ADD COLUMN default_send_restrictions INTEGER NOT NULL DEFAULT 0")
         if "members_hidden" not in chat_group_columns:
             await db.execute(f"ALTER TABLE {db_split.SCHEMA}.chat_groups ADD COLUMN members_hidden INTEGER NOT NULL DEFAULT 0")
         if "slow_mode_seconds" not in chat_group_columns:
@@ -4540,11 +4542,15 @@ def build_messenger_router(
         return member["role"] == "owner" or (member["role"] == "admin" and bool(member["admin_rights"] & bit))
 
     async def require_group_can_send(db: Any, group_id: int, uid: int, media_id: str | None = None) -> None:
-        cur = await db.execute("SELECT rights FROM group_mutes WHERE group_id=? AND telegram_id=? AND (until_date=0 OR until_date>?)",
-                               (group_id, uid, int(time.time())))
+        cur = await db.execute("""SELECT
+            CASE WHEN gm.role='member' THEN g.default_send_restrictions ELSE 0 END |
+            COALESCE((SELECT rights FROM group_mutes WHERE group_id=g.id AND telegram_id=gm.telegram_id
+                AND (until_date=0 OR until_date>?)), 0)
+            FROM chat_groups g JOIN group_members gm ON gm.group_id=g.id
+            WHERE g.id=? AND gm.telegram_id=?""", (int(time.time()), group_id, uid))
         row = await cur.fetchone()
         if row is None:
-            return
+            raise HTTPException(403, "CHAT_WRITE_FORBIDDEN")
         mask = int(row[0])
         if mask & 1:
             raise HTTPException(403, "CHAT_WRITE_FORBIDDEN")
@@ -14769,7 +14775,7 @@ def build_messenger_router(
             membership = await require_group_member(db, group_id, uid)
             cur = await db.execute(
                 """SELECT g.id,g.username,g.title,g.description,g.owner_telegram_id,g.created_at,
-                          g.slow_mode_seconds,g.members_hidden,
+                          g.slow_mode_seconds,g.members_hidden,g.default_send_restrictions,
                           (SELECT COUNT(*) FROM group_members m WHERE m.group_id=g.id) AS member_count
                    FROM chat_groups g WHERE g.id=?""",
                 (group_id,),
@@ -14857,6 +14863,22 @@ def build_messenger_router(
                 await db.execute(f"UPDATE chat_groups SET {key}=? WHERE id=?", (value, group_id))
             await db.commit()
         return {"id": group_id, **fields}
+
+    @router.put("/api/groups/{group_id}/send-permissions")
+    async def set_group_send_permissions(group_id: int, payload: dict[str, Any],
+                                         authorization: str | None = Header(default=None)):
+        uid = int((await current_user(authorization))["telegram_id"])
+        mask = payload.get("default_send_restrictions")
+        if type(mask) is not int or not 0 <= mask <= 63:
+            raise HTTPException(400, "INVALID_GROUP_SEND_RESTRICTIONS")
+        async with aiosqlite.connect(db_path()) as db:
+            await db.execute("BEGIN IMMEDIATE")
+            membership = await require_group_member(db, group_id, uid)
+            if not group_has_right(membership, 1):
+                raise HTTPException(403, "GROUP_CHANGE_INFO_REQUIRED")
+            await db.execute("UPDATE chat_groups SET default_send_restrictions=? WHERE id=?", (mask, group_id))
+            await db.commit()
+        return {"default_send_restrictions": mask}
 
     @router.put("/api/groups/{group_id}/member-visibility")
     async def set_group_member_visibility(group_id: int, payload: dict[str, Any],

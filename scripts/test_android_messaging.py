@@ -90,6 +90,13 @@ class NativeMessagingSourceChecks(unittest.TestCase):
         self.assertIn('"/api/groups/" + group, true', helper)
         self.assertIn('data.optLong("messages_remaining"), data.optLong("unique_authors")', helper)
 
+    def test_group_send_permissions_uses_supported_restrictions_mask(self):
+        editor = self.source('ui/ChatEditActivity.java')
+        helper = self.source('ui/WaysGramPaidReactions.java')
+        self.assertIn('WaysGramPaidReactions.showGroupSendPermissions', editor)
+        self.assertIn('path + "/send-permissions"', helper)
+        self.assertIn('put("default_send_restrictions", updated)', helper)
+
     def test_group_roster_visibility_uses_server_setting(self):
         editor = self.source('ui/ChatEditActivity.java')
         self.assertIn('currentChat.creator && !ChatObject.isChannel(currentChat)', editor)

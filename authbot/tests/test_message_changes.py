@@ -1190,6 +1190,19 @@ def test_group_mute_blocks_sending_without_removing_read_access(env):
             assert (await client.post(path + '/messages', headers=member, json={'media_id': photo})).status_code == 403
             assert (await client.post(path + '/messages', headers=member, json={'media_id': voice})).status_code == 201
 
+            defaults = path + '/send-permissions'
+            assert (await client.put(mute, headers=owner, json={'until_date': None})).status_code == 200
+            assert (await client.put(defaults, headers=member, json={'default_send_restrictions': 2})).status_code == 403
+            assert (await client.put(defaults, headers=owner, json={'default_send_restrictions': 2})).status_code == 200
+            assert (await client.get(path, headers=member)).json()['default_send_restrictions'] == 2
+            assert (await client.post(path + '/messages', headers=member, json={'media_id': photo})).status_code == 403
+            assert (await client.post(path + '/messages', headers=member, json={'media_id': voice})).status_code == 201
+            assert (await client.put(defaults, headers=owner, json={'default_send_restrictions': 1})).status_code == 200
+            assert (await client.post(path + '/messages', headers=member, json={'body': 'Blocked'})).status_code == 403
+            assert (await client.post(path + '/messages', headers=owner, json={'body': 'Admin bypass'})).status_code == 201
+            assert (await client.put(defaults, headers=owner, json={'default_send_restrictions': 0})).status_code == 200
+            assert (await client.post(path + '/messages', headers=member, json={'media_id': photo})).status_code == 201
+
 
     run(scenario())
 
