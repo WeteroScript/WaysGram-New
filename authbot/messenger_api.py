@@ -655,6 +655,11 @@ async def init_messenger_storage(database_path: Path) -> None:
             );
             CREATE INDEX IF NOT EXISTS idx_api_user_presence_seen
                 ON api_user_presence(last_seen_at);
+            CREATE TABLE IF NOT EXISTS account_inactivity_deletion (
+                telegram_id INTEGER PRIMARY KEY,
+                days INTEGER NOT NULL CHECK(days IN (30,90,180,365,548,730)),
+                enabled_at INTEGER NOT NULL
+            );
             CREATE TABLE IF NOT EXISTS push_devices (
                 token_hash TEXT PRIMARY KEY,
                 token_value TEXT NOT NULL,
@@ -4728,6 +4733,56 @@ def build_messenger_router(
         row = await cur.fetchone()
         return str(row[0]) if row else None
 
+    @router.get("/api/me/inactivity-deletion")
+    async def inactivity_deletion_state(authorization: str | None = Header(default=None)):
+        uid = int((await current_user(authorization))["telegram_id"])
+        async with aiosqlite.connect(db_path()) as db:
+            cur = await db.execute("SELECT days FROM account_inactivity_deletion WHERE telegram_id=?", (uid,))
+            row = await cur.fetchone()
+            return {"days": row[0] if row else 0, "available": await rotation_number(db, uid) is not None}
+
+    @router.put("/api/me/inactivity-deletion")
+    async def set_inactivity_deletion(payload: dict[str, Any], authorization: str | None = Header(default=None)):
+        uid = int((await current_user(authorization))["telegram_id"])
+        days = payload.get("days")
+        if type(days) is not int or days not in (0, 30, 90, 180, 365, 548, 730):
+            raise HTTPException(400, "INACTIVITY_PERIOD_INVALID")
+        if days and payload.get("confirm") is not True:
+            raise HTTPException(400, "INACTIVITY_CONFIRMATION_REQUIRED")
+        async with aiosqlite.connect(db_path()) as db:
+            await db.execute("BEGIN IMMEDIATE")
+            cur = await db.execute("""SELECT 1 FROM api_sessions s JOIN accounts a ON a.telegram_id=s.telegram_id
+                WHERE s.token_hash=? AND s.telegram_id=? AND s.expires_at>? AND a.is_banned=0""",
+                (_token_hash(authorization[7:].strip()), uid, int(time.time())))
+            if not await cur.fetchone():
+                raise HTTPException(401, "AUTH_SESSION_INVALID")
+            if days:
+                if await rotation_number(db, uid) is None:
+                    raise HTTPException(403, "INACTIVITY_DELETION_UNAVAILABLE")
+                await db.execute("""INSERT INTO account_inactivity_deletion VALUES(?,?,?)
+                    ON CONFLICT(telegram_id) DO UPDATE SET days=excluded.days,enabled_at=excluded.enabled_at""",
+                    (uid, days, int(time.time())))
+            else:
+                await db.execute("DELETE FROM account_inactivity_deletion WHERE telegram_id=?", (uid,))
+            await db.commit()
+        return {"days": days}
+
+    async def process_inactive_accounts(now: int) -> None:
+        async with aiosqlite.connect(db_path()) as db:
+            cur = await db.execute("""SELECT d.telegram_id,n.number FROM account_inactivity_deletion d
+                JOIN accounts a ON a.telegram_id=d.telegram_id
+                JOIN numbers n ON n.telegram_id=d.telegram_id
+                LEFT JOIN api_user_presence p ON p.telegram_id=d.telegram_id
+                WHERE n.owner_telegram_id=n.telegram_id AND n.provider_ref='internal' AND a.is_banned=0
+                AND MAX(d.enabled_at,COALESCE(p.last_seen_at,0))+d.days*86400<=?
+                ORDER BY MAX(d.enabled_at,COALESCE(p.last_seen_at,0))+d.days*86400 LIMIT 20""", (now,))
+            due = await cur.fetchall()
+        for uid, number in due:
+            try:
+                await auth_store.delete_number(number, uid, inactive_at=now)
+            except Exception as exc:
+                LOGGER.warning("Inactive account deletion failed (%s)", type(exc).__name__)
+
     @router.get("/api/me/rotate-number")
     async def virtual_number_rotation_state(authorization: str | None = Header(default=None)):
         uid = int((await current_user(authorization))["telegram_id"])
@@ -4876,6 +4931,8 @@ def build_messenger_router(
             SET virtual_number=excluded.virtual_number,updated_at=excluded.updated_at""", (uid, phone, now, now))
         await db.execute("INSERT INTO api_sessions(token_hash,telegram_id,expires_at,created_at) VALUES(?,?,?,?)",
                          (_token_hash(token), uid, now + SESSION_TTL, now))
+        await db.execute("""INSERT INTO api_user_presence(telegram_id,last_seen_at) VALUES(?,?)
+            ON CONFLICT(telegram_id) DO UPDATE SET last_seen_at=excluded.last_seen_at""", (uid, now))
         cur = await db.execute("SELECT * FROM accounts WHERE telegram_id=?", (uid,))
         account = await cur.fetchone()
         await db.commit()
@@ -12429,6 +12486,7 @@ def build_messenger_router(
     async def scheduled_message_worker() -> None:
         last_auction_settlement = 0
         last_live_cleanup = -60.0
+        last_account_cleanup = None
         while True:
             try:
                 await process_due_scheduled_messages()
@@ -12456,6 +12514,12 @@ def build_messenger_router(
                         last_live_cleanup = monotonic_now
                 except Exception as exc:
                     LOGGER.warning("Message expiry cleanup failed (%s)", type(exc).__name__)
+            if last_account_cleanup is None or monotonic_now - last_account_cleanup >= 3600:
+                last_account_cleanup = monotonic_now
+                try:
+                    await process_inactive_accounts(int(time.time()))
+                except Exception as exc:
+                    LOGGER.warning("Inactive account scan failed (%s)", type(exc).__name__)
             await asyncio.sleep(1.0)
 
     @router.on_event("startup")

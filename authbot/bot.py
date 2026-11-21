@@ -497,7 +497,7 @@ class Store:
             await db.commit()
             return account_id
 
-    async def delete_number(self, number: str, owner_telegram_id: int) -> bool:
+    async def delete_number(self, number: str, owner_telegram_id: int, *, inactive_at: int | None = None) -> bool:
         async with aiosqlite.connect(self.path) as db:
             await db.execute("BEGIN IMMEDIATE")
             cur = await db.execute(
@@ -510,6 +510,18 @@ class Store:
                 await db.rollback()
                 return False
             account_id = int(row[0])
+            if inactive_at is not None:
+                cur = await db.execute("""SELECT 1 FROM account_inactivity_deletion d
+                    JOIN accounts a ON a.telegram_id=d.telegram_id
+                    JOIN numbers n ON n.telegram_id=d.telegram_id
+                    LEFT JOIN api_user_presence p ON p.telegram_id=d.telegram_id
+                    WHERE d.telegram_id=? AND n.number=? AND n.owner_telegram_id=n.telegram_id
+                    AND n.provider_ref='internal' AND a.is_banned=0
+                    AND MAX(d.enabled_at,COALESCE(p.last_seen_at,0))+d.days*86400<=?""",
+                    (account_id, number, inactive_at))
+                if not await cur.fetchone():
+                    return False
+                await db.execute("INSERT OR IGNORE INTO retired_virtual_numbers VALUES(?)", (number,))
             await db.execute("DELETE FROM auth_codes WHERE number=?", (number,))
             await db.execute("DELETE FROM otp_webhook_receipts WHERE number=?", (number,))
             await db.execute("DELETE FROM api_login_request_log WHERE phone=?", (number,))
@@ -519,7 +531,7 @@ class Store:
                 "forwarded_from_telegram_id", "requested_by_telegram_id",
                 "stopped_by_telegram_id", "from_telegram_id", "to_telegram_id",
                 "bidder_telegram_id", "current_bidder_id", "actor_id",
-                "pinned_by", "created_by", "admin_id",
+                "pinned_by", "created_by", "admin_id", "user_low", "user_high",
             }
             for schema in ("main", "messenger"):
                 cur = await db.execute(

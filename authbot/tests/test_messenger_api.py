@@ -9324,3 +9324,46 @@ def test_rotate_virtual_number_keeps_account_and_retires_old_login(api_env):
                 assert db.execute('UPDATE numbers SET number=? WHERE number=?', (old, new)).rowcount == 0
 
     run(scenario())
+
+
+def test_inactivity_deletion_is_opt_in_and_rechecks_activity_under_lock(api_env):
+    path, store, _, app = api_env
+    number = add_account(api_env, 81001, 'alpha')
+    untouched = add_account(api_env, 81002, 'beta')
+    add_session(path, 81001, 'inactivity-session')
+
+    async def scenario():
+        async with await client_for(app) as client:
+            auth = {'Authorization': 'Bearer inactivity-session'}
+            route = '/api/me/inactivity-deletion'
+            assert (await client.get(route, headers=auth)).json() == {'days': 0, 'available': True}
+            assert (await client.put(route, headers=auth, json={'days': 30})).status_code == 400
+            assert (await client.put(route, headers=auth, json={'days': 30, 'confirm': True})).json() == {'days': 30}
+            now = int(time.time())
+            with db_split.sqlite_connect(path) as db:
+                db.execute('UPDATE account_inactivity_deletion SET enabled_at=? WHERE telegram_id=81001', (now-31*86400,))
+                db.commit()
+            assert not await store.delete_number(number, 81001, inactive_at=now)
+            assert not await store.delete_number(untouched, 81002, inactive_at=now+730*86400)
+            with db_split.sqlite_connect(path) as db:
+                db.execute('UPDATE api_user_presence SET last_seen_at=? WHERE telegram_id=81001', (now-31*86400,))
+                db.commit()
+            for start in app.router.on_startup:
+                await start()
+            try:
+                for _ in range(50):
+                    if not await store.resolve_number(number):
+                        break
+                    await asyncio.sleep(.05)
+                else:
+                    raise AssertionError('inactive account was not removed')
+                assert await store.resolve_number(untouched)
+                assert (await client.get('/api/me', headers=auth)).status_code == 401
+                with db_split.sqlite_connect(path) as db:
+                    assert db.execute('SELECT 1 FROM retired_virtual_numbers WHERE number=?', (number,)).fetchone()
+                    assert db.execute('SELECT 1 FROM accounts WHERE telegram_id=81001').fetchone() is None
+            finally:
+                for stop in app.router.on_shutdown:
+                    await stop()
+
+    run(scenario())
