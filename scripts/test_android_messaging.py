@@ -60,6 +60,17 @@ class NativeMessagingSourceChecks(unittest.TestCase):
         self.assertIn('!waysGramBroadcast && ChatObject.canManageCalls(chat)', channel_ui)
         self.assertIn('status.expires = lastSeen', self.source('tgnet/WaysGramMapper.java'))
 
+    def test_channel_story_recorder_and_profile_use_server(self):
+        transport = self.source('tgnet/WaysGramTransport.java')
+        stories = self.source('tgnet/WaysGramStories.java')
+        chats = self.source('tgnet/WaysGramChats.java')
+        profile = self.source('ui/ProfileActivity.java')
+        self.assertIn('WaysGramStories.handle(account, request, selfId)', transport)
+        self.assertIn('WaysGramMedia.uploadFor(account, send.media)', stories)
+        self.assertIn('WaysGramApi.post(account, path(channelId), body)', stories)
+        self.assertIn('full.stories = WaysGramStories.active', chats)
+        self.assertIn('if (canAddStory)', profile)
+
     def test_basic_group_admin_editor_uses_native_group_request(self):
         ui = self.source('ui/ChatRightsEditActivity.java')
         controller = self.source('messenger/MessagesController.java')

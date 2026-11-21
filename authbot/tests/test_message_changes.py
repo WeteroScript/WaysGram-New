@@ -1355,3 +1355,48 @@ def test_channel_creation_visibility_and_subscriber_lookup(env):
             assert (await client.put(route, headers=owner, json={'is_public': False})).json()['is_public'] is False
 
     run(scenario())
+
+
+def test_channel_story_publish_expire_and_delete(env):
+    import sqlite3
+    import uuid
+
+    db_path, app = env
+    media = uuid.uuid4().hex
+
+    async def scenario():
+        async with await client_for(app) as client:
+            owner, subscriber = headers(101), headers(102)
+            channel = await client.post('/api/channels', headers=owner, json={'title': 'Stories', 'is_public': False})
+            assert channel.status_code == 201
+            base = f"/api/channels/{channel.json()['id']}"
+            path = base + '/stories'
+            with sqlite3.connect(db_path.with_name('waysgram_messenger.sqlite3')) as db:
+                db.execute('''INSERT INTO media_assets (id,owner_telegram_id,storage_name,mime_type,size_bytes,created_at)
+                    VALUES(?,101,?,'image/png',5,1)''', (media, media))
+            storage = db_path.parent / 'waysgram_media'
+            storage.mkdir(exist_ok=True)
+            (storage / media).write_bytes(b'story')
+            media_path = '/api/media/' + media
+            body = {'media_id': media, 'random_id': 42, 'caption': 'Hello', 'period': 21600}
+            assert (await client.get(path + '/can-post', headers=owner)).json()['count_remains'] == 20
+            assert (await client.post(path, headers=subscriber, json=body)).status_code == 403
+            created = await client.post(path, headers=owner, json=body)
+            assert created.status_code == 201, created.text
+            story = created.json()
+            assert story['expires_at'] - story['created_at'] == 21600
+            assert (await client.post(path, headers=owner, json=body)).json()['id'] == story['id']
+            assert (await client.get(path, headers=subscriber)).status_code == 403
+            assert (await client.get(media_path, headers=subscriber)).status_code == 404
+            assert (await client.post(base + '/members', headers=owner, json={'user_ids': [102]})).status_code == 201
+            assert (await client.get(path, headers=subscriber)).json()['stories'][0]['caption'] == 'Hello'
+            assert (await client.get(media_path, headers=subscriber)).content == b'story'
+            with sqlite3.connect(db_path) as db:
+                db.execute('UPDATE channel_stories SET expires_at=1 WHERE id=?', (story['id'],))
+            assert (await client.get(path, headers=subscriber)).json()['stories'] == []
+            assert (await client.get(media_path, headers=subscriber)).status_code == 404
+            assert (await client.get(path + '?mode=archive', headers=owner)).json()['stories'][0]['id'] == story['id']
+            assert (await client.post(path + '/delete', headers=owner, json={'ids': [story['id']]})).json()['ids'] == [story['id']]
+            assert (await client.get(path + '?mode=archive', headers=owner)).json()['stories'] == []
+
+    run(scenario())
