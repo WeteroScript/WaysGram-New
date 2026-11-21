@@ -759,3 +759,28 @@ def test_message_cards_in_group_and_channel(env) -> None:
                 assert (await client.post(update, headers=headers(102), json={'votes': [0]})).status_code == 404
 
     run(scenario())
+
+
+def test_group_and_channel_settings_put(env) -> None:
+    _, app = env
+
+    async def scenario():
+        async with await client_for(app) as client:
+            group = await client.post('/api/groups', headers=headers(101), json={'title': 'Group'})
+            channel = await client.post('/api/channels', headers=headers(101), json={'title': 'Channel', 'username': 'settings_news', 'description': 'Initial'})
+            assert group.status_code == channel.status_code == 201
+            gid, cid = group.json()['id'], channel.json()['id']
+            group_path, channel_path = f'/api/groups/{gid}', f'/api/channels/{cid}'
+            await client.post(f'{group_path}/members', headers=headers(101), json={'telegram_id': 102})
+            assert (await client.get(channel_path, headers=headers(102))).json()['description'] == 'Initial'
+            for path in (group_path, channel_path):
+                data = {'title': 'Renamed', 'description': 'New description'}
+                assert (await client.put(path, headers=headers(102), json=data)).status_code == 403
+                assert (await client.put(path, headers=headers(101), json={'title': ' '})).status_code == 400
+                response = await client.put(path, headers=headers(101), json=data)
+                assert response.status_code == 200, response.text
+                fetched = (await client.get(path, headers=headers(102))).json()
+                assert all(fetched[key] == value for key, value in data.items())
+            assert (await client.put(channel_path, headers=headers(101), json={'username': 'renamed_news'})).status_code == 200
+
+    run(scenario())

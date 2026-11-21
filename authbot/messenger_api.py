@@ -1605,6 +1605,8 @@ async def init_messenger_storage(database_path: Path) -> None:
                 f"ALTER TABLE {db_split.SCHEMA}.channels "
                 "ADD COLUMN is_public INTEGER NOT NULL DEFAULT 1 CHECK(is_public IN (0,1))"
             )
+        if "description" not in channel_columns:
+            await db.execute(f"ALTER TABLE {db_split.SCHEMA}.channels ADD COLUMN description TEXT NOT NULL DEFAULT ''")
         if "invite_token" not in channel_columns:
             await db.execute(f"ALTER TABLE {db_split.SCHEMA}.channels ADD COLUMN invite_token TEXT")
         await db.execute(
@@ -4250,7 +4252,8 @@ def build_messenger_router(
             cur = await db.execute(
                 """SELECT ch.id,
                           CASE WHEN ch.is_public=1 THEN ch.username ELSE '' END AS username,
-                          ch.title,ch.owner_telegram_id,ch.is_public,
+                          ch.title,ch.description,ch.owner_telegram_id,ch.is_public,
+                          (SELECT COUNT(*) FROM channel_members m WHERE m.channel_id=ch.id) AS member_count,
                           owner.username AS owner_username
                    FROM channels ch LEFT JOIN accounts owner
                      ON owner.telegram_id=ch.owner_telegram_id
@@ -8065,6 +8068,9 @@ def build_messenger_router(
         user = await current_user(authorization)
         title = payload.get("title")
         username = str(payload.get("username", "")).strip().lstrip("@").lower()
+        description = payload.get("description", "")
+        if not isinstance(description, str) or len(description.strip()) > 512:
+            raise HTTPException(400, "Описание канала слишком длинное")
         is_public = payload.get("is_public", True)
         if not isinstance(is_public, bool):
             raise HTTPException(status_code=400, detail="is_public должен быть true или false")
@@ -8082,9 +8088,9 @@ def build_messenger_router(
                 await db.execute("BEGIN IMMEDIATE")
                 cur = await db.execute(
                     """INSERT INTO channels
-                       (username,title,owner_telegram_id,created_at,is_public,invite_token)
-                       VALUES(?,?,?,?,?,?)""",
-                    (username, title.strip(), owner_id, now, int(is_public), invite_token),
+                       (username,title,owner_telegram_id,created_at,is_public,invite_token,description)
+                       VALUES(?,?,?,?,?,?,?)""",
+                    (username, title.strip(), owner_id, now, int(is_public), invite_token, description.strip()),
                 )
                 channel_id = int(cur.lastrowid)
                 await db.execute(
@@ -8176,6 +8182,7 @@ def build_messenger_router(
         channel["labels"] = await entity_labels("channel", channel_id)
         return channel
 
+    @router.put("/api/channels/{channel_id}")
     @router.patch("/api/channels/{channel_id}")
     async def update_channel(
         channel_id: int,
@@ -8186,7 +8193,7 @@ def build_messenger_router(
         channel = await channel_row(channel_id)
         if int(channel["owner_telegram_id"]) != int(user["telegram_id"]):
             raise HTTPException(status_code=403, detail="Изменять канал может только владелец")
-        if not payload or not ({"title", "username"} & payload.keys()):
+        if not payload or not ({"title", "username", "description"} & payload.keys()):
             raise HTTPException(status_code=400, detail="Нет полей для изменения")
         is_public = bool(channel.get("is_public", 1))
         if not is_public and "username" in payload:
@@ -8204,17 +8211,15 @@ def build_messenger_router(
             if not re.fullmatch(r"[a-z][a-z0-9_]{0,31}", new_username):
                 raise HTTPException(status_code=400, detail="Username канала: латиница, цифры и _, первый символ — буква")
             username = new_username
+        description = payload.get("description", channel["description"])
+        if not isinstance(description, str) or len(description.strip()) > 512:
+            raise HTTPException(400, "Описание канала слишком длинное")
         try:
             async with aiosqlite.connect(db_path()) as db:
-                if is_public:
-                    await db.execute(
-                        "UPDATE channels SET username=?,title=? WHERE id=?",
-                        (username, title, channel_id),
-                    )
-                else:
-                    # channel_row intentionally hides private usernames; never write that redacted value
-                    # back into the database when changing a private channel's title.
-                    await db.execute("UPDATE channels SET title=? WHERE id=?", (title, channel_id))
+                await db.execute("BEGIN IMMEDIATE")
+                for key, value in (("title", title), ("username", username), ("description", description.strip())):
+                    if key in payload:
+                        await db.execute(f"UPDATE channels SET {key}=? WHERE id=?", (value, channel_id))
                 await db.commit()
         except aiosqlite.IntegrityError as exc:
             raise HTTPException(status_code=409, detail="Username канала уже занят") from exc
@@ -8222,6 +8227,7 @@ def build_messenger_router(
             "id": channel_id,
             "username": username if is_public else "",
             "title": title,
+            "description": description.strip(),
             "owner_telegram_id": int(channel["owner_telegram_id"]),
             "is_public": is_public,
         }
@@ -13167,6 +13173,30 @@ def build_messenger_router(
             item["labels"] = await entity_labels("account", int(item["telegram_id"]))
             result["members"].append(item)
         return result
+
+    @router.put("/api/groups/{group_id}")
+    async def update_group(group_id: int, payload: dict[str, Any],
+                           authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        uid = int((await current_user(authorization))["telegram_id"])
+        fields = {}
+        for key, limit in (("title", 80), ("description", 512)):
+            if key not in payload:
+                continue
+            value = payload[key]
+            if not isinstance(value, str) or len(value.strip()) > limit or (key == "title" and not value.strip()):
+                raise HTTPException(400, "Некорректное название или описание группы")
+            fields[key] = value.strip()
+        if not fields:
+            raise HTTPException(400, "Нет полей для изменения")
+        async with aiosqlite.connect(db_path()) as db:
+            await db.execute("BEGIN IMMEDIATE")
+            membership = await require_group_member(db, group_id, uid)
+            if membership["role"] not in ("owner", "admin"):
+                raise HTTPException(403, "Изменять группу может только владелец или администратор")
+            for key, value in fields.items():
+                await db.execute(f"UPDATE chat_groups SET {key}=? WHERE id=?", (value, group_id))
+            await db.commit()
+        return {"id": group_id, **fields}
 
     @router.put("/api/groups/{group_id}/slow-mode")
     async def update_group_slow_mode(
