@@ -23,6 +23,13 @@ class NativeMessagingSourceChecks(unittest.TestCase):
     def source(self, path):
         return self.archive.read(BASE + path).decode('utf-8')
 
+    def test_call_privacy_preferences_do_not_claim_call_support(self):
+        profile = self.source('tgnet/WaysGramProfile.java')
+        controls = self.source('ui/PrivacyControlActivity.java')
+        self.assertIn('TL_inputPrivacyKeyPhoneCall) return "calls"', profile)
+        self.assertIn('TL_inputPrivacyKeyPhoneP2P) return "calls-p2p"', profile)
+        self.assertEqual(controls.count('R.string.WaysGramCallsPrivacyPending'), 2)
+
     def test_account_inactivity_deletion_requires_explicit_confirmation(self):
         settings = self.source('ui/PrivacySettingsActivity.java')
         self.assertIn('WAYS_GRAM_INACTIVITY_PATH = "/api/me/inactivity-deletion"', settings)

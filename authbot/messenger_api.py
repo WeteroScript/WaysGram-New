@@ -5115,7 +5115,7 @@ def build_messenger_router(
         else:
             cur = await db.execute("SELECT rules FROM account_profile_privacy WHERE telegram_id=? AND setting=?", (uid, setting))
         row = await cur.fetchone()
-        return json.loads(row[0]) if row else {"mode": {"invites": "everyone", "find-by-phone": "contacts", "avatar": "everyone", "bio": "everyone", "music": "everyone", "voice": "everyone", "forwards": "everyone", "gift-autosave": "everyone"}.get(setting, "nobody"), "allow": [], "deny": []}
+        return json.loads(row[0]) if row else {"mode": {"invites": "everyone", "find-by-phone": "contacts", "avatar": "everyone", "bio": "everyone", "music": "everyone", "voice": "everyone", "forwards": "everyone", "gift-autosave": "everyone", "calls": "everyone"}.get(setting, "nobody"), "allow": [], "deny": []}
 
     async def privacy_allows(db: Any, owner: int, viewer: int, setting: str) -> bool:
         if owner == viewer:
@@ -5160,7 +5160,7 @@ def build_messenger_router(
     @router.get("/api/me/privacy/{setting}")
     async def get_privacy(setting: str, authorization: str | None = Header(default=None)):
         uid = int((await current_user(authorization))["telegram_id"])
-        if setting not in ("invites", "phone", "last-seen", "find-by-phone", "avatar", "bio", "birthday", "music", "voice", "forwards", "gift-autosave"):
+        if setting not in ("invites", "phone", "last-seen", "find-by-phone", "avatar", "bio", "birthday", "music", "voice", "forwards", "gift-autosave", "calls", "calls-p2p"):
             raise HTTPException(404, "PRIVACY_KEY_INVALID")
         async with aiosqlite.connect(db_path()) as db:
             return await privacy_rules(db, uid, setting)
@@ -5168,7 +5168,7 @@ def build_messenger_router(
     @router.put("/api/me/privacy/{setting}")
     async def set_privacy(setting: str, payload: dict[str, Any], authorization: str | None = Header(default=None)):
         uid = int((await current_user(authorization))["telegram_id"])
-        if setting not in ("invites", "phone", "last-seen", "find-by-phone", "avatar", "bio", "birthday", "music", "voice", "forwards", "gift-autosave"):
+        if setting not in ("invites", "phone", "last-seen", "find-by-phone", "avatar", "bio", "birthday", "music", "voice", "forwards", "gift-autosave", "calls", "calls-p2p"):
             raise HTTPException(404, "PRIVACY_KEY_INVALID")
         mode = payload.get("mode")
         if mode not in ("everyone", "contacts", "nobody"):

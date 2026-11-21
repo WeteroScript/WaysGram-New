@@ -1595,3 +1595,26 @@ def test_default_auto_delete_is_inherited_once_by_new_private_chats(env):
             assert rows == {existing: None, still_existing: None, first: 2592000, second: 2592000, after_off: None}
 
     run(scenario())
+
+
+def test_call_privacy_preferences_are_independent_and_account_scoped(env):
+    _, app = env
+
+    async def scenario():
+        async with await client_for(app) as client:
+            owner, other = headers(101), headers(102)
+            calls = '/api/me/privacy/calls'
+            p2p = '/api/me/privacy/calls-p2p'
+            assert (await client.get(calls, headers=owner)).json()['mode'] == 'everyone'
+            assert (await client.get(p2p, headers=owner)).json()['mode'] == 'nobody'
+            rules = {'mode': 'contacts', 'allow': [102], 'deny': [ADMIN]}
+            assert (await client.put(calls, headers=owner, json=rules)).json() == rules
+            assert (await client.get(calls, headers=owner)).json() == rules
+            assert (await client.get(calls, headers=other)).json()['mode'] == 'everyone'
+            assert (await client.put(p2p, headers=owner, json={'mode': 'contacts'})).status_code == 200
+            assert (await client.get(p2p, headers=owner)).json() == {'mode': 'contacts', 'allow': [], 'deny': []}
+            assert (await client.get(p2p, headers=other)).json()['mode'] == 'nobody'
+            assert (await client.put(p2p, headers=owner, json={'mode': 'invalid'})).status_code == 400
+            assert (await client.get(calls)).status_code == 401
+
+    run(scenario())
