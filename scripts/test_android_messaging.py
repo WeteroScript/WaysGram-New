@@ -376,6 +376,15 @@ class NativeMessagingSourceChecks(unittest.TestCase):
         self.assertIn('WaysGramTransport.ENABLED && location.venue_type != null ? location.venue_type', utils)
         self.assertIn('TlUtils.toInputMediaGeo(location)', self.source('messenger/SendMessagesHelper.java'))
 
+    def test_native_location_accepts_default_sender_but_not_alternate_identity(self):
+        transport = self.source('tgnet/WaysGramTransport.java')
+        location = transport.split('if (send.media instanceof TLRPC.TL_inputMediaGeoPoint', 1)[1].split('JSONArray captionEntities', 1)[0]
+        self.assertIn('!usesDefaultLocationSender(send.send_as, send.peer, selfId)', location)
+        self.assertNotIn('send.send_as != null', location)
+        helper = transport.split('private static boolean usesDefaultLocationSender', 1)[1].split('private static TLObject', 1)[0]
+        self.assertIn('sender.user_id == selfId', helper)
+        self.assertIn('sender.channel_id == target.channel_id', helper)
+
     def test_native_text_edit_uses_supported_put_and_shows_actual_error(self):
         api = self.source('tgnet/WaysGramApi.java')
         bridge = self.source('tgnet/WaysGramMessages.java')
