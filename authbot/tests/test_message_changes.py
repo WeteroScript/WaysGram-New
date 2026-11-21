@@ -2092,3 +2092,36 @@ def test_group_topics_have_separate_history_and_enforce_membership_and_closure(e
             assert (await client.get(topic + '/messages', headers=member)).status_code == 404
 
     run(scenario())
+
+
+def test_group_antispam_blocks_bursts_and_repeats_but_not_retries_or_admins(env):
+    _, app = env
+
+    async def scenario():
+        async with await client_for(app) as client:
+            owner, member = headers(101), headers(102)
+            created = await client.post('/api/groups', headers=owner, json={'title': 'Anti-spam', 'member_ids': [102]})
+            base = f"/api/groups/{created.json()['id']}"
+            msg = base + '/messages'
+            setting = {'default_send_restrictions': 0, 'anti_spam_enabled': True}
+            assert (await client.put(base + '/send-permissions', headers=member, json=setting)).status_code == 403
+            assert (await client.put(base + '/send-permissions', headers=owner, json=setting)).json()['anti_spam_enabled'] is True
+            assert (await client.get(base, headers=member)).json()['anti_spam_enabled'] is True
+            body = {'body': 'Repeated promotional offer'}
+            key = {**member, 'Idempotency-Key': 'antispam-message-01'}
+            first = await client.post(msg, headers=key, json=body)
+            assert first.status_code == 201
+            assert (await client.post(msg, headers=member, json={'body': 'REPEATED   promotional offer'})).status_code == 201
+            repeat = await client.post(msg, headers=member, json=body)
+            assert repeat.status_code == 429 and repeat.json()['detail'] == 'GROUP_ANTI_SPAM_REPEAT'
+            assert (await client.post(msg, headers=key, json=body)).json()['id'] == first.json()['id']
+            for i in range(6):
+                assert (await client.post(msg, headers=member, json={'body': f'Distinct message {i}'})).status_code == 201
+            burst = await client.post(msg, headers=member, json={'body': 'One too many'})
+            assert burst.status_code == 429 and burst.json()['detail'] == 'GROUP_ANTI_SPAM_BURST'
+            for _ in range(3):
+                assert (await client.post(msg, headers=owner, json=body)).status_code == 201
+            assert (await client.put(base + '/send-permissions', headers=owner, json={**setting, 'anti_spam_enabled': False})).status_code == 200
+            assert (await client.post(msg, headers=member, json=body)).status_code == 201
+
+    run(scenario())

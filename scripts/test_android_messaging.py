@@ -163,6 +163,8 @@ class NativeMessagingSourceChecks(unittest.TestCase):
         self.assertIn('WaysGramPaidReactions.showGroupSendPermissions', editor)
         self.assertIn('path + "/send-permissions"', helper)
         self.assertIn('put("default_send_restrictions", updated)', helper)
+        self.assertIn('data.has("anti_spam_enabled")', helper)
+        self.assertIn('payload.put("anti_spam_enabled", filter)', helper)
 
     def test_group_roster_visibility_uses_server_setting(self):
         editor = self.source('ui/ChatEditActivity.java')

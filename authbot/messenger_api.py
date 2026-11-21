@@ -1783,6 +1783,8 @@ async def init_messenger_storage(database_path: Path) -> None:
         cur = await db.execute("PRAGMA table_info(channels)")
         if "paid_reactions_enabled" not in {row[1] for row in await cur.fetchall()}:
             await db.execute("ALTER TABLE channels ADD COLUMN paid_reactions_enabled INTEGER NOT NULL DEFAULT 0")
+        if "anti_spam_enabled" not in chat_group_columns:
+            await db.execute(f"ALTER TABLE {db_split.SCHEMA}.chat_groups ADD COLUMN anti_spam_enabled INTEGER NOT NULL DEFAULT 0")
         if "default_send_restrictions" not in chat_group_columns:
             await db.execute(f"ALTER TABLE {db_split.SCHEMA}.chat_groups ADD COLUMN default_send_restrictions INTEGER NOT NULL DEFAULT 0")
         if "members_hidden" not in chat_group_columns:
@@ -4675,6 +4677,26 @@ def build_messenger_router(
                 bit = 32
             if mask & bit:
                 raise HTTPException(403, "CHAT_WRITE_FORBIDDEN")
+
+    async def require_group_anti_spam(db: Any, group_id: int, uid: int, member: dict[str, Any],
+                                      now: int, units: int = 1, body: str = "") -> None:
+        if member["role"] != "member":
+            return
+        cur = await db.execute("SELECT anti_spam_enabled FROM chat_groups WHERE id=?", (group_id,))
+        if not (await cur.fetchone() or (0,))[0]:
+            return
+        cur = await db.execute("""SELECT COUNT(*) FROM group_messages WHERE group_id=? AND sender_telegram_id=?
+            AND created_at>? AND (media_album_id IS NULL OR media_album_index=0)""", (group_id, uid, now - 10))
+        if (await cur.fetchone())[0] + units > 8:
+            raise HTTPException(429, "GROUP_ANTI_SPAM_BURST", headers={"Retry-After": "10"})
+        normalized = " ".join(unicodedata.normalize("NFKC", body).casefold().split())
+        if len(normalized) < 16:
+            return
+        cur = await db.execute("""SELECT body FROM group_messages WHERE group_id=? AND sender_telegram_id=?
+            AND created_at>? AND media_id IS NULL ORDER BY id DESC LIMIT 60""", (group_id, uid, now - 60))
+        matches = sum(" ".join(unicodedata.normalize("NFKC", row[0]).casefold().split()) == normalized for row in await cur.fetchall())
+        if matches >= 2:
+            raise HTTPException(429, "GROUP_ANTI_SPAM_REPEAT", headers={"Retry-After": "60"})
 
     async def require_group_member(
         db: Any, group_id: int, telegram_id: int
@@ -12613,6 +12635,7 @@ def build_messenger_router(
             elif target_scope == "group":
                 member = await require_group_member(db, target_peer, uid)
                 await require_group_can_send(db, target_peer, uid)
+                await require_group_anti_spam(db, target_peer, uid, member, now, units=len(ids))
                 table, sender_col, limit = "group_messages", "sender_telegram_id", DM_MESSAGES_PER_MINUTE
                 cur = await db.execute("SELECT slow_mode_seconds FROM chat_groups WHERE id=?", (target_peer,))
                 slow = int((await cur.fetchone())[0])
@@ -15280,7 +15303,7 @@ def build_messenger_router(
             membership = await require_group_member(db, group_id, uid)
             cur = await db.execute(
                 """SELECT g.id,g.username,g.title,g.description,g.owner_telegram_id,g.created_at,
-                          g.slow_mode_seconds,g.members_hidden,g.default_send_restrictions,
+                          g.slow_mode_seconds,g.members_hidden,g.default_send_restrictions,g.anti_spam_enabled,
                           (SELECT COUNT(*) FROM group_members m WHERE m.group_id=g.id) AS member_count
                    FROM chat_groups g WHERE g.id=?""",
                 (group_id,),
@@ -15309,6 +15332,7 @@ def build_messenger_router(
                 recent_requesters = [r["telegram_id"] for r in rows]
         result = dict(group)
         result["members_hidden"] = bool(result["members_hidden"])
+        result["anti_spam_enabled"] = bool(result["anti_spam_enabled"])
         result["labels"] = await entity_labels("group", group_id)
         result["my_role"] = membership["role"]
         result["admin_rights"] = membership["admin_rights"] if membership["role"] in ("owner", "admin") else 0
@@ -15467,14 +15491,19 @@ def build_messenger_router(
         mask = payload.get("default_send_restrictions")
         if type(mask) is not int or not 0 <= mask <= 63:
             raise HTTPException(400, "INVALID_GROUP_SEND_RESTRICTIONS")
+        if "anti_spam_enabled" in payload and type(payload["anti_spam_enabled"]) is not bool:
+            raise HTTPException(400, "INVALID_GROUP_ANTI_SPAM_SETTING")
         async with aiosqlite.connect(db_path()) as db:
             await db.execute("BEGIN IMMEDIATE")
             membership = await require_group_member(db, group_id, uid)
             if not group_has_right(membership, 1):
                 raise HTTPException(403, "GROUP_CHANGE_INFO_REQUIRED")
-            await db.execute("UPDATE chat_groups SET default_send_restrictions=? WHERE id=?", (mask, group_id))
+            await db.execute("UPDATE chat_groups SET default_send_restrictions=?,anti_spam_enabled=COALESCE(?,anti_spam_enabled) WHERE id=?",
+                             (mask, payload.get("anti_spam_enabled"), group_id))
+            cur = await db.execute("SELECT anti_spam_enabled FROM chat_groups WHERE id=?", (group_id,))
+            enabled = bool((await cur.fetchone())[0])
             await db.commit()
-        return {"default_send_restrictions": mask}
+        return {"default_send_restrictions": mask, "anti_spam_enabled": enabled}
 
     @router.put("/api/groups/{group_id}/member-visibility")
     async def set_group_member_visibility(group_id: int, payload: dict[str, Any],
@@ -16384,6 +16413,7 @@ def build_messenger_router(
             if previous is not None:
                 await db.rollback()
                 return previous
+            await require_group_anti_spam(db, group_id, uid, membership, now, body=body if not media_id else "")
             if topic_id is not None and (await get_group_topic_row(db, group_id, topic_id))["closed"]:
                 raise HTTPException(403, "GROUP_TOPIC_CLOSED")
             cur = await db.execute(
@@ -16555,6 +16585,7 @@ def build_messenger_router(
                 await db.rollback()
                 return previous
 
+            await require_group_anti_spam(db, group_id, uid, membership, now)
             cur = await db.execute("SELECT slow_mode_seconds FROM chat_groups WHERE id=?", (group_id,))
             group_settings = await cur.fetchone()
             slow_mode_seconds = int(group_settings[0]) if group_settings else 0
