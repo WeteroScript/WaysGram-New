@@ -4741,7 +4741,7 @@ def build_messenger_router(
 
     async def worn_gift_status(db: Any, uid: int) -> dict[str, Any] | None:
         cur = await db.execute(
-            "SELECT id,serial_number,telegram_gift_id,gift_name,attributes_json FROM user_gifts WHERE owner_telegram_id=? AND profile_worn=1",
+            "SELECT id,serial_number,telegram_gift_id,gift_name,attributes_json FROM user_gifts WHERE owner_telegram_id=? AND profile_worn=1 AND profile_hidden=0",
             (uid,),
         )
         row = await cur.fetchone()
@@ -4790,7 +4790,8 @@ def build_messenger_router(
                 if not (int(gift[1] or 0) > 0 or _has_collectible_traits(attrs)):
                     raise HTTPException(status_code=409, detail="Носить можно только коллекционный подарок")
                 await db.execute("UPDATE user_gifts SET profile_worn=0 WHERE owner_telegram_id=? AND profile_worn=1", (uid,))
-            await db.execute("UPDATE user_gifts SET profile_worn=? WHERE id=?", (int(worn), gift[0]))
+            await db.execute("""UPDATE user_gifts SET profile_worn=?,
+                profile_hidden=CASE WHEN ? THEN 0 ELSE profile_hidden END WHERE id=?""", (int(worn), worn, gift[0]))
             status = await worn_gift_status(db, uid)
             await db.commit()
         return {"worn_gift": status}
@@ -5347,8 +5348,9 @@ def build_messenger_router(
         async with aiosqlite.connect(db_path()) as db:
             await db.execute("BEGIN IMMEDIATE")
             cur = await db.execute("""UPDATE user_gifts SET profile_hidden=?,
-                profile_pinned=CASE WHEN ? THEN profile_pinned ELSE 0 END
-                WHERE serial_number=? AND owner_telegram_id=?""", (not visible, visible, serial_number.upper(), uid))
+                profile_pinned=CASE WHEN ? THEN profile_pinned ELSE 0 END,
+                profile_worn=CASE WHEN ? THEN profile_worn ELSE 0 END
+                WHERE serial_number=? AND owner_telegram_id=?""", (not visible, visible, visible, serial_number.upper(), uid))
             if cur.rowcount != 1:
                 raise HTTPException(404, "GIFT_NOT_FOUND")
             await db.commit()

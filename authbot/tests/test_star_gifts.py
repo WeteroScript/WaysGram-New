@@ -2630,6 +2630,14 @@ def test_worn_gift_is_public_exclusive_and_clears_on_transfer(env) -> None:
             assert (await wear(2)).json()["worn_gift"]["title"] == "Gift 2"
             assert (await wear(1, False)).json()["worn_gift"]["title"] == "Gift 2"
             assert (await client.get("/api/users/101", headers=headers(102))).json()["worn_gift"]["title"] == "Gift 2"
+            visibility = f"/api/me/gifts/WG-{2:012X}/visibility"
+            assert (await client.put(visibility, headers=headers(101), json={"visible": False})).status_code == 200
+            assert (await client.get("/api/users/101", headers=headers(102))).json()["worn_gift"] is None
+            public = (await client.get("/api/users/101/gifts", headers=headers(102))).json()["gifts"]
+            assert all(item["serial_number"] != f"WG-{2:012X}" for item in public)
+            assert (await wear(2)).json()["worn_gift"]["title"] == "Gift 2"
+            public = (await client.get("/api/users/101/gifts", headers=headers(102))).json()["gifts"]
+            assert any(item["serial_number"] == f"WG-{2:012X}" for item in public)
             assert (await wear(2, False)).json()["worn_gift"] is None
             assert (await wear(2)).status_code == 200
             assert (await wear(4, uid=102)).status_code == 200
