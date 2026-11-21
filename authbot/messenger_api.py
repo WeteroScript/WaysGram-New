@@ -1270,6 +1270,12 @@ async def init_messenger_storage(database_path: Path) -> None:
                 slow_mode_seconds INTEGER NOT NULL DEFAULT 0
                     CHECK(slow_mode_seconds IN (0,5,10,15,30,60,120,300))
             );
+            CREATE TABLE IF NOT EXISTS profile_channels (
+                telegram_id INTEGER PRIMARY KEY, channel_id INTEGER NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS account_invite_privacy (
+                telegram_id INTEGER PRIMARY KEY, rules TEXT NOT NULL
+            );
             CREATE TABLE IF NOT EXISTS group_mutes (
                 group_id INTEGER NOT NULL, telegram_id INTEGER NOT NULL, until_date INTEGER NOT NULL,
                 PRIMARY KEY(group_id,telegram_id)
@@ -4748,6 +4754,74 @@ def build_messenger_router(
             await db.commit()
         return {"worn_gift": status}
 
+    async def profile_channel(db: Any, uid: int, viewer: int) -> dict[str, Any] | None:
+        cur = await db.execute("""SELECT c.id,c.title,c.username,c.owner_telegram_id,c.is_public
+            FROM profile_channels p JOIN channels c ON c.id=p.channel_id
+            WHERE p.telegram_id=? AND c.owner_telegram_id=? AND c.is_public=1 AND NOT EXISTS (
+                SELECT 1 FROM channel_bans b WHERE b.channel_id=c.id AND b.telegram_id=?
+                AND (b.until_date=0 OR b.until_date>?))""", (uid, uid, viewer, int(time.time())))
+        row = await cur.fetchone()
+        return dict(zip((column[0] for column in cur.description), row)) if row else None
+
+    @router.put("/api/me/profile-channel")
+    async def set_profile_channel(payload: dict[str, Any], authorization: str | None = Header(default=None)):
+        uid = int((await current_user(authorization))["telegram_id"])
+        channel_id = payload.get("channel_id")
+        if type(channel_id) is not int or not 0 <= channel_id < 2**63:
+            raise HTTPException(400, "CHANNEL_INVALID")
+        async with aiosqlite.connect(db_path()) as db:
+            await db.execute("BEGIN IMMEDIATE")
+            if channel_id:
+                cur = await db.execute("SELECT 1 FROM channels WHERE id=? AND owner_telegram_id=? AND is_public=1 AND username<>''", (channel_id, uid))
+                if not await cur.fetchone():
+                    raise HTTPException(403, "CHANNEL_INVALID")
+                await db.execute("INSERT INTO profile_channels VALUES(?,?) ON CONFLICT(telegram_id) DO UPDATE SET channel_id=excluded.channel_id", (uid, channel_id))
+            else:
+                await db.execute("DELETE FROM profile_channels WHERE telegram_id=?", (uid,))
+            await db.commit()
+        return {"channel_id": channel_id}
+
+    async def invite_privacy(db: Any, uid: int) -> dict[str, Any]:
+        cur = await db.execute("SELECT rules FROM account_invite_privacy WHERE telegram_id=?", (uid,))
+        row = await cur.fetchone()
+        return json.loads(row[0]) if row else {"mode": "everyone", "allow": [], "deny": []}
+
+    async def require_invite_privacy(db: Any, actor: int, target: int) -> None:
+        if actor == target:
+            return
+        rules = await invite_privacy(db, target)
+        if actor not in rules["deny"]:
+            if actor in rules["allow"] or rules["mode"] == "everyone":
+                return
+            if rules["mode"] == "contacts":
+                cur = await db.execute("SELECT 1 FROM contacts WHERE owner_telegram_id=? AND contact_telegram_id=?", (target, actor))
+                if await cur.fetchone():
+                    return
+        raise HTTPException(403, "USER_PRIVACY_RESTRICTED")
+
+    @router.get("/api/me/privacy/invites")
+    async def get_invite_privacy(authorization: str | None = Header(default=None)):
+        uid = int((await current_user(authorization))["telegram_id"])
+        async with aiosqlite.connect(db_path()) as db:
+            return await invite_privacy(db, uid)
+
+    @router.put("/api/me/privacy/invites")
+    async def set_invite_privacy(payload: dict[str, Any], authorization: str | None = Header(default=None)):
+        uid = int((await current_user(authorization))["telegram_id"])
+        mode = payload.get("mode")
+        if mode not in ("everyone", "contacts", "nobody"):
+            raise HTTPException(400, "PRIVACY_RULE_INVALID")
+        result = {"mode": mode}
+        for key in ("allow", "deny"):
+            ids = payload.get(key, [])
+            if not isinstance(ids, list) or len(ids) > 200 or any(type(i) is not int or not 0 < i < 2**63 for i in ids):
+                raise HTTPException(400, "PRIVACY_RULE_INVALID")
+            result[key] = list(dict.fromkeys(ids))
+        async with aiosqlite.connect(db_path()) as db:
+            await db.execute("INSERT INTO account_invite_privacy VALUES(?,?) ON CONFLICT(telegram_id) DO UPDATE SET rules=excluded.rules", (uid, json.dumps(result)))
+            await db.commit()
+        return result
+
     @router.get("/api/me")
     async def get_me(authorization: str | None = Header(default=None)) -> dict[str, Any]:
         user = await current_user(authorization)
@@ -4763,6 +4837,7 @@ def build_messenger_router(
             if re.fullmatch(r"\+[1-9]\d{7,14}", number):
                 result["phone"] = number
         async with aiosqlite.connect(db_path()) as db:
+            result["personal_channel"] = await profile_channel(db, int(user["telegram_id"]), int(user["telegram_id"]))
             result["worn_gift"] = await worn_gift_status(db, int(user["telegram_id"]))
             result.update(await profile_rating(db, int(user["telegram_id"]), now=int(time.time()), include_pending=True))
         result["is_admin"] = is_admin_user(user)
@@ -5507,10 +5582,12 @@ def build_messenger_router(
                 (user_id, viewer_id),
             )
             common_contacts = [dict(item) for item in await cur.fetchall()]
+            personal_channel = await profile_channel(db, user_id, viewer_id)
             status = await worn_gift_status(db, user_id)
             rating = await profile_rating(db, user_id, now=int(time.time()), include_pending=viewer_id == user_id)
         profile = dict(row)
         profile.update(rating)
+        profile["personal_channel"] = personal_channel
         profile["worn_gift"] = status
         profile["labels"] = await entity_labels("account", user_id)
         for contact in common_contacts:
@@ -8641,6 +8718,7 @@ def build_messenger_router(
                 raise HTTPException(403, "Нет права приглашать участников канала")
             for target in targets:
                 await require_channel_not_banned(db, channel_id, target)
+                await require_invite_privacy(db, uid, target)
                 cur = await db.execute("""SELECT 1 FROM accounts WHERE telegram_id=? AND is_banned=0
                     AND NOT EXISTS(SELECT 1 FROM blocked_users WHERE
                         (owner_telegram_id=? AND blocked_telegram_id=?) OR
@@ -14220,6 +14298,7 @@ def build_messenger_router(
         uid = int(user["telegram_id"])
         async with aiosqlite.connect(db_path()) as db:
             db.row_factory = aiosqlite.Row
+            await db.execute("BEGIN IMMEDIATE")
             membership = await require_group_member(db, group_id, uid)
             if not group_has_right(membership, 2):
                 raise HTTPException(status_code=403, detail="Добавлять участников могут администраторы группы")
@@ -14246,6 +14325,7 @@ def build_messenger_router(
             target = await cur.fetchone()
             if not target or target["is_banned"]:
                 raise HTTPException(status_code=404, detail="Пользователь не найден или заблокирован")
+            await require_invite_privacy(db, uid, target_id)
             now = int(time.time())
             cur = await db.execute(
                 """INSERT OR IGNORE INTO group_members(group_id,telegram_id,role,joined_at)

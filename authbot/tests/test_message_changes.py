@@ -1188,3 +1188,32 @@ def test_group_mute_blocks_sending_without_removing_read_access(env):
 
 
     run(scenario())
+
+
+def test_profile_channel_and_invite_privacy(env):
+    _, app = env
+
+    async def scenario():
+        async with await client_for(app) as client:
+            owner, other = headers(101), headers(102)
+            channel = await client.post('/api/channels', headers=owner, json={'username': 'profilechannel', 'title': 'Profile channel'})
+            assert channel.status_code == 201
+            cid = channel.json()['id']
+            route = '/api/me/profile-channel'
+            assert (await client.put(route, headers=other, json={'channel_id': cid})).status_code == 403
+            assert (await client.put(route, headers=owner, json={'channel_id': cid})).status_code == 200
+            profile = await client.get('/api/users/101', headers=other)
+            assert profile.json()['personal_channel']['id'] == cid
+            assert (await client.put(route, headers=owner, json={'channel_id': 0})).status_code == 200
+            assert (await client.get('/api/users/101', headers=other)).json()['personal_channel'] is None
+
+            privacy = '/api/me/privacy/invites'
+            assert (await client.put(privacy, headers=other, json={'mode': 'contacts'})).status_code == 200
+            group = await client.post('/api/groups', headers=owner, json={'title': 'Invite privacy'})
+            route = f"/api/groups/{group.json()['id']}/members"
+            assert (await client.post(route, headers=owner, json={'telegram_id': 102})).json()['detail'] == 'USER_PRIVACY_RESTRICTED'
+            assert (await client.put(privacy, headers=other, json={'mode': 'contacts', 'allow': [101]})).status_code == 200
+            assert (await client.get(privacy, headers=other)).json()['allow'] == [101]
+            assert (await client.post(route, headers=owner, json={'telegram_id': 102})).status_code == 201
+
+    run(scenario())
