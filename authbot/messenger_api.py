@@ -1449,6 +1449,12 @@ async def init_messenger_storage(database_path: Path) -> None:
                 assigned_at INTEGER NOT NULL
             );
             CREATE INDEX IF NOT EXISTS idx_community_boosts_chat ON community_boosts(scope,chat_id);
+            CREATE TABLE IF NOT EXISTS group_topic_followers (
+                group_id INTEGER NOT NULL,
+                topic_id INTEGER NOT NULL,
+                telegram_id INTEGER NOT NULL,
+                PRIMARY KEY(group_id,topic_id,telegram_id)
+            );
             CREATE TABLE IF NOT EXISTS group_topics (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 group_id INTEGER NOT NULL,
@@ -2975,6 +2981,7 @@ def build_messenger_router(
         if not recipients:
             return True
         quiet = data.get("silent") == "1"
+        topic_push = data.get("scope") == "group_topic"
         credentials = None
         if not quiet:
             credentials = _firebase_service_account()
@@ -2983,8 +2990,17 @@ def build_messenger_router(
         placeholders = ",".join("?" for _ in recipients)
         try:
             async with aiosqlite.connect(db_path()) as db:
+                if topic_push:
+                    cur = await db.execute("""SELECT f.telegram_id FROM group_topic_followers f
+                        JOIN group_members m ON m.group_id=f.group_id AND m.telegram_id=f.telegram_id
+                        JOIN group_topics t ON t.id=f.topic_id AND t.group_id=f.group_id AND t.deleted_at IS NULL
+                        JOIN group_messages msg ON msg.group_id=t.group_id AND msg.topic_id=t.id AND msg.id=?
+                        WHERE f.group_id=? AND f.topic_id=? AND f.telegram_id=?""",
+                        (data.get("message_id"), data.get("chat_id"), data.get("topic_id"), recipients[0]))
+                    if not await cur.fetchone():
+                        return True
                 cur = await db.execute(
-                    f"""SELECT d.token_hash,d.token_value,MAX(d.quiet_push)
+                    f"""SELECT d.token_hash,d.token_value,MAX(d.quiet_push),MIN(d.telegram_id)
                         FROM push_devices d
                         JOIN api_sessions s
                           ON s.token_hash=d.session_token_hash
@@ -3025,21 +3041,22 @@ def build_messenger_router(
                     "notification": {"channel_id": "waysgram_messages"},
                 },
             }
-            if quiet:
+            if quiet or topic_push:
                 # Data-only pushes are displayed by a compatible client on its
                 # quiet channel. Older clients receive no push rather than sound.
                 notification_data["title"] = str(title or "WaysGram")[:80]
                 notification_data["body"] = str(body or "Новое сообщение")[:180]
-                notification_message = {"data": notification_data, "android": {"priority": "NORMAL"}}
+                notification_message = {"data": notification_data, "android": {"priority": "NORMAL" if quiet else "HIGH"}}
             delivered = True
             async with httpx.AsyncClient(timeout=httpx.Timeout(8.0)) as client:
-                for token_hash, token_value, quiet_push in devices:
+                for token_hash, token_value, quiet_push, device_account in devices:
                     if quiet and not quiet_push:
                         continue
                     response = await client.post(
                         f"https://fcm.googleapis.com/v1/projects/{quote(project_id, safe='')}/messages:send",
                         headers={"Authorization": f"Bearer {access_token}"},
-                        json={"message": {**notification_message, "token": str(token_value)}},
+                        json={"message": {**notification_message, "token": str(token_value),
+                            **({"data": {**notification_data, "account_id": str(device_account)}} if topic_push else {})}},
                     )
                     if response.status_code == 404:
                         async with aiosqlite.connect(db_path()) as db:
@@ -15744,6 +15761,7 @@ def build_messenger_router(
             topic = await get_group_topic_row(db, group_id, topic_id)
             if request.method == "DELETE":
                 await db.execute("UPDATE group_topics SET deleted_at=?,closed=1 WHERE id=? AND group_id=?", (int(time.time()), topic_id, group_id))
+                await db.execute("DELETE FROM group_topic_followers WHERE group_id=? AND topic_id=?", (group_id, topic_id))
                 await db.commit()
                 return {"deleted": True}
             payload = payload or {}
@@ -15757,6 +15775,24 @@ def build_messenger_router(
                 raise HTTPException(409, "GROUP_TOPIC_TITLE_EXISTS") from e
             await db.commit()
         return {**topic, "title": title, "closed": closed}
+
+    @router.put("/api/groups/{group_id}/topics/{topic_id}/notifications")
+    async def set_group_topic_notifications(group_id: int, topic_id: int, payload: dict[str, Any],
+                                            authorization: str | None = Header(default=None)):
+        uid = int((await current_user(authorization))["telegram_id"])
+        enabled = payload.get("enabled")
+        if type(enabled) is not bool:
+            raise HTTPException(400, "INVALID_TOPIC_NOTIFICATIONS")
+        async with aiosqlite.connect(db_path()) as db:
+            await db.execute("BEGIN IMMEDIATE")
+            await require_group_member(db, group_id, uid)
+            await get_group_topic_row(db, group_id, topic_id)
+            if enabled:
+                await db.execute("INSERT OR IGNORE INTO group_topic_followers VALUES(?,?,?)", (group_id, topic_id, uid))
+            else:
+                await db.execute("DELETE FROM group_topic_followers WHERE group_id=? AND topic_id=? AND telegram_id=?", (group_id, topic_id, uid))
+            await db.commit()
+        return {"notifications_enabled": enabled}
 
     @router.put("/api/groups/{group_id}/topics/{topic_id}/pin")
     async def set_group_topic_pin(group_id: int, topic_id: int, payload: dict[str, Any],
@@ -15794,7 +15830,10 @@ def build_messenger_router(
                 WHERE m.group_id=? AND m.topic_id=? AND (?=0 OR m.id<?) ORDER BY m.id DESC LIMIT ?""",
                 (group_id, topic_id, before_id, before_id, limit + 1))
             rows = await cur.fetchall()
+            cur = await db.execute("SELECT 1 FROM group_topic_followers WHERE group_id=? AND topic_id=? AND telegram_id=?", (group_id, topic_id, uid))
+            notifications_enabled = await cur.fetchone() is not None
         return {"topic": topic, "can_manage": group_has_right(member, 1), "can_pin": group_has_right(member, 8),
+                "notifications_enabled": notifications_enabled,
                 "messages": [dict(row) for row in reversed(rows[:limit])],
                 "next_before_id": rows[limit - 1]["id"] if len(rows) > limit else 0}
 
@@ -15916,6 +15955,7 @@ def build_messenger_router(
                 await db.execute(f"DELETE FROM {table} WHERE group_id=?", (group_id,))
             await db.execute("DELETE FROM channel_discussion_groups WHERE group_id=?", (group_id,))
             await db.execute("DELETE FROM channel_post_comments WHERE group_id=?", (group_id,))
+            await db.execute("DELETE FROM group_topic_followers WHERE group_id=?", (group_id,))
             await db.execute("DELETE FROM group_topics WHERE group_id=?", (group_id,))
             await db.execute("DELETE FROM community_boosts WHERE scope='group' AND chat_id=?", (group_id,))
             await db.execute("DELETE FROM chat_groups WHERE id=?", (group_id,))
@@ -16483,6 +16523,7 @@ def build_messenger_router(
                     raise HTTPException(status_code=409, detail="Владелец не может покинуть группу без передачи владения")
             elif actor["role"] != "owner" and (not group_has_right(actor, 4) or target["role"] != "member"):
                 raise HTTPException(status_code=403, detail="Недостаточно прав для удаления участника")
+            await db.execute("DELETE FROM group_topic_followers WHERE group_id=? AND telegram_id=?", (group_id, telegram_id))
             cur = await db.execute(
                 "DELETE FROM group_members WHERE group_id=? AND telegram_id=?",
                 (group_id, telegram_id),
@@ -16890,8 +16931,19 @@ def build_messenger_router(
             if card:
                 result["card"] = card
             await idempotency_store(db, uid, scope, descriptor, result, now)
+            queued = False
+            if topic_id is not None and not silent:
+                cur = await db.execute("""SELECT f.telegram_id FROM group_topic_followers f
+                    JOIN group_members m ON m.group_id=f.group_id AND m.telegram_id=f.telegram_id
+                    WHERE f.group_id=? AND f.topic_id=? AND f.telegram_id<>?""", (group_id, topic_id, uid))
+                for (follower,) in await cur.fetchall():
+                    queued |= await enqueue_push(db, uid, int(follower), "WaysGram", "Новое сообщение в теме",
+                        {"scope": "group_topic", "chat_id": str(group_id), "topic_id": str(topic_id),
+                         "message_id": str(message_id), "silent": "0"}, now)
             await db.commit()
         if topic_id is not None:
+            if queued:
+                push_wakeup.set()
             return result
         async with aiosqlite.connect(db_path()) as db:
             cur = await db.execute(

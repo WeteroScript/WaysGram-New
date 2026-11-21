@@ -85,6 +85,15 @@ class NativeMessagingSourceChecks(unittest.TestCase):
         self.assertIn('if (offer.optBoolean("unlocked"))', payment)
         self.assertIn('viewer.openPhoto', payment)
 
+    def test_topic_notifications_open_the_matching_account_topic(self):
+        topics = self.source('ui/WaysGramGroupTopics.java')
+        push = self.source('messenger/waysgram/WaysGramPushNotifications.java')
+        launch = self.source('ui/LaunchActivity.java')
+        self.assertIn('path + "/notifications"', topics)
+        self.assertIn('launchIntent.putExtra("waysgram_topic_recipient", recipient)', push)
+        self.assertIn('getClientUserId() == wanted', launch)
+        self.assertIn('WaysGramGroupTopics.openTopic(this, currentAccount, group, pushedTopic)', self.source('ui/ChatActivity.java'))
+
     def test_channel_giveaways_have_owner_creation_and_member_entry(self):
         chat = self.source('ui/ChatActivity.java')
         helper = self.source('ui/WaysGramPaidReactions.java')

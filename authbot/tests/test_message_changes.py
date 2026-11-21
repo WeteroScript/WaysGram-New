@@ -2354,3 +2354,38 @@ def test_topic_attachment_and_pin_are_scoped_and_permission_checked(env):
             assert (await client.get(url, headers=member)).status_code == 404
 
     run(scenario())
+
+
+def test_topic_notifications_are_opt_in_scoped_and_queued_once(env, monkeypatch):
+    import aiosqlite
+    import json
+    import messenger_api
+
+    path, app = env
+    monkeypatch.setattr(messenger_api, '_firebase_service_account', lambda: {'project_id': 'test'})
+
+    async def scenario():
+        async with await client_for(app) as client:
+            owner, member, outsider = headers(101), headers(102), headers(ADMIN)
+            group = await client.post('/api/groups', headers=owner, json={'title': 'Notify', 'member_ids': [102]})
+            root = f"/api/groups/{group.json()['id']}"
+            ids = [(await client.post(root + '/topics', headers=owner, json={'title': name})).json()['id'] for name in ('Followed', 'Other')]
+            first, second = [root + f'/topics/{tid}' for tid in ids]
+            notifications = first + '/notifications'
+            assert (await client.get(first + '/messages', headers=member)).json()['notifications_enabled'] is False
+            assert (await client.put(notifications, headers=outsider, json={'enabled': True})).status_code == 403
+            assert (await client.put(notifications, headers=member, json={'enabled': True})).json()['notifications_enabled'] is True
+            assert (await client.post(second + '/messages', headers=owner, json={'body': 'Other topic'})).status_code == 201
+            key = {**owner, 'Idempotency-Key': 'topic-notify-test-01'}
+            for _ in range(2):
+                response = await client.post(first + '/messages', headers=key, json={'body': 'Private preview excluded'})
+                assert response.status_code == 201
+            assert (await client.put(notifications, headers=member, json={'enabled': False})).json()['notifications_enabled'] is False
+            assert (await client.post(first + '/messages', headers=owner, json={'body': 'No push'})).status_code == 201
+            async with aiosqlite.connect(path) as db:
+                cur = await db.execute("SELECT recipient_telegram_id,body,data_json FROM push_outbox")
+                rows = await cur.fetchall()
+                assert len(rows) == 1 and rows[0][0] == 102 and rows[0][1] != 'Private preview excluded'
+                assert json.loads(rows[0][2])['topic_id'] == str(ids[0])
+
+    run(scenario())
