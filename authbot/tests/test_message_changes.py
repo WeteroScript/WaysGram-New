@@ -1701,3 +1701,36 @@ def test_live_dm_event_wakes_waiting_recipient_and_exact_fetch_includes_peer(env
             assert [message['body'] for message in exact['messages']] == ['Live DM']
 
     run(scenario())
+
+
+def test_channel_paid_reactions_are_opt_in_atomic_and_idempotent(env):
+    import aiosqlite
+
+    path, app = env
+
+    async def scenario():
+        async with aiosqlite.connect(path) as db:
+            await db.execute('UPDATE accounts SET stars=20 WHERE telegram_id=102')
+            await db.commit()
+        async with await client_for(app) as client:
+            owner, reader = headers(101), headers(102)
+            channel = await client.post('/api/channels', headers=owner,
+                                        json={'title': 'News', 'username': 'paid_news', 'is_public': True})
+            base = f"/api/channels/{channel.json()['id']}"
+            post = await client.post(base + '/messages', headers=owner, json={'body': 'News'})
+            url = base + f"/messages/{post.json()['id']}/paid-reactions"
+            key = {**reader, 'Idempotency-Key': 'paid-reaction-0001'}
+            assert (await client.post(url, headers=key, json={'stars': 5})).status_code == 403
+            assert (await client.put(base + '/paid-reactions', headers=reader, json={'enabled': True})).status_code == 404
+            assert (await client.put(base + '/paid-reactions', headers=owner, json={'enabled': True})).status_code == 200
+            results = await asyncio.gather(*(client.post(url, headers=key, json={'stars': 5}) for _ in range(2)))
+            assert [r.json() for r in results] == [{'stars': 5, 'balance_after': 15}] * 2
+            assert (await client.post(url, headers=key, json={'stars': 6})).status_code == 409
+            assert (await client.post(url, headers={**reader, 'Idempotency-Key': 'paid-reaction-0002'}, json={'stars': 16})).status_code == 409
+            assert (await client.get(url, headers=owner)).json() == {'total_stars': 5, 'my_stars': 0}
+            assert (await client.get(url, headers=reader)).json() == {'total_stars': 5, 'my_stars': 5}
+        async with aiosqlite.connect(path) as db:
+            cur = await db.execute("SELECT telegram_id,amount FROM economy_transactions WHERE reason LIKE 'channel_paid_reaction:%' ORDER BY telegram_id")
+            assert await cur.fetchall() == [(101, 5), (102, -5)]
+
+    run(scenario())

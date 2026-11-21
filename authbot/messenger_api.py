@@ -1019,6 +1019,17 @@ async def init_messenger_storage(database_path: Path) -> None:
                 ON channel_messages(channel_id, id DESC);
             CREATE INDEX IF NOT EXISTS idx_api_channel_author_time
                 ON channel_messages(author_telegram_id, created_at);
+            CREATE TABLE IF NOT EXISTS channel_paid_reactions (
+                sender_id INTEGER NOT NULL,
+                operation_key TEXT NOT NULL,
+                channel_id INTEGER NOT NULL,
+                message_id INTEGER NOT NULL,
+                stars INTEGER NOT NULL CHECK(stars BETWEEN 1 AND 10000),
+                sender_balance INTEGER NOT NULL,
+                PRIMARY KEY(sender_id,operation_key)
+            );
+            CREATE INDEX IF NOT EXISTS idx_channel_paid_reactions_post
+                ON channel_paid_reactions(channel_id,message_id);
             CREATE TABLE IF NOT EXISTS api_idempotency_records (
                 telegram_id INTEGER NOT NULL,
                 scope TEXT NOT NULL,
@@ -1678,6 +1689,9 @@ async def init_messenger_storage(database_path: Path) -> None:
             )
         cur = await db.execute(f"PRAGMA {db_split.SCHEMA}.table_info(chat_groups)")
         chat_group_columns = {str(row[1]) for row in await cur.fetchall()}
+        cur = await db.execute("PRAGMA table_info(channels)")
+        if "paid_reactions_enabled" not in {row[1] for row in await cur.fetchall()}:
+            await db.execute("ALTER TABLE channels ADD COLUMN paid_reactions_enabled INTEGER NOT NULL DEFAULT 0")
         if "slow_mode_seconds" not in chat_group_columns:
             await db.execute(
                 f"ALTER TABLE {db_split.SCHEMA}.chat_groups "
@@ -9157,8 +9171,86 @@ def build_messenger_router(
                 pending = await cur.fetchall()
                 channel["requests_pending"] = pending[0][1] if pending else 0
                 channel["recent_requesters"] = [row[0] for row in pending]
+            cur = await db.execute("SELECT paid_reactions_enabled FROM channels WHERE id=?", (channel_id,))
+            channel["paid_reactions_enabled"] = bool((await cur.fetchone() or (0,))[0])
         channel["labels"] = await entity_labels("channel", channel_id)
         return channel
+
+    @router.put("/api/channels/{channel_id}/paid-reactions")
+    async def set_channel_paid_reactions(channel_id: int, payload: dict[str, Any],
+                                         authorization: str | None = Header(default=None)):
+        uid = int((await current_user(authorization))["telegram_id"])
+        enabled = payload.get("enabled")
+        if type(enabled) is not bool:
+            raise HTTPException(400, "INVALID_PAID_REACTIONS_SETTING")
+        async with aiosqlite.connect(db_path()) as db:
+            cur = await db.execute("UPDATE channels SET paid_reactions_enabled=? WHERE id=? AND owner_telegram_id=?",
+                                   (int(enabled), channel_id, uid))
+            if not cur.rowcount:
+                raise HTTPException(404, "CHANNEL_NOT_FOUND")
+            await db.commit()
+        return {"enabled": enabled}
+
+    @router.get("/api/channels/{channel_id}/messages/{message_id}/paid-reactions")
+    async def get_channel_paid_reactions(channel_id: int, message_id: int, authorization: str | None = Header(default=None)):
+        uid = int((await current_user(authorization))["telegram_id"])
+        await require_channel_access(channel_id, uid)
+        async with aiosqlite.connect(db_path()) as db:
+            cur = await db.execute("""SELECT COALESCE(SUM(r.stars),0),
+                COALESCE(SUM(CASE WHEN r.sender_id=? THEN r.stars ELSE 0 END),0)
+                FROM channel_messages m LEFT JOIN channel_paid_reactions r
+                ON r.channel_id=m.channel_id AND r.message_id=m.id
+                WHERE m.channel_id=? AND m.id=? GROUP BY m.id""", (uid, channel_id, message_id))
+            row = await cur.fetchone()
+        if row is None:
+            raise HTTPException(404, "CHANNEL_POST_NOT_FOUND")
+        return {"total_stars": row[0], "my_stars": row[1]}
+
+    @router.post("/api/channels/{channel_id}/messages/{message_id}/paid-reactions")
+    async def send_channel_paid_reaction(channel_id: int, message_id: int, payload: dict[str, Any],
+                                         authorization: str | None = Header(default=None),
+                                         key: str | None = Header(default=None, alias="Idempotency-Key")):
+        uid = int((await current_user(authorization))["telegram_id"])
+        stars = payload.get("stars")
+        if type(stars) is not int or not 1 <= stars <= 10000 or not key or not re.fullmatch(r"[A-Za-z0-9_-]{16,128}", key):
+            raise HTTPException(400, "INVALID_PAID_REACTION")
+        async with aiosqlite.connect(db_path()) as db:
+            await db.execute("BEGIN IMMEDIATE")
+            cur = await db.execute("SELECT channel_id,message_id,stars,sender_balance FROM channel_paid_reactions WHERE sender_id=? AND operation_key=?", (uid, key))
+            previous = await cur.fetchone()
+            if previous is not None:
+                if tuple(previous[:3]) != (channel_id, message_id, stars):
+                    raise HTTPException(409, "IDEMPOTENCY_KEY_CONFLICT")
+                return {"stars": stars, "balance_after": previous[3]}
+            await require_channel_access(channel_id, uid)
+            cur = await db.execute("""SELECT c.owner_telegram_id,c.paid_reactions_enabled,a.is_banned
+                FROM channels c JOIN channel_messages m ON m.channel_id=c.id
+                JOIN accounts a ON a.telegram_id=c.owner_telegram_id WHERE c.id=? AND m.id=?""", (channel_id, message_id))
+            target = await cur.fetchone()
+            if target is None:
+                raise HTTPException(404, "CHANNEL_POST_NOT_FOUND")
+            owner, enabled, banned = target
+            if not enabled or banned or owner == uid:
+                raise HTTPException(403, "PAID_REACTIONS_UNAVAILABLE")
+            now = int(time.time())
+            reason = f"channel_paid_reaction:{channel_id}:{message_id}"
+            sender_balance = None
+            for account_id, amount in ((uid, -stars), (owner, stars)):
+                cur = await db.execute("UPDATE accounts SET stars=stars+? WHERE telegram_id=? AND is_banned=0 AND stars+? BETWEEN 0 AND 9223372036854775807 RETURNING stars",
+                                       (amount, account_id, amount))
+                balance = await cur.fetchone()
+                await cur.close()
+                if balance is None:
+                    raise HTTPException(409, "PAID_REACTION_TRANSFER_FAILED")
+                if account_id == uid:
+                    sender_balance = balance[0]
+                await db.execute("""INSERT INTO economy_transactions
+                    (telegram_id,asset,amount,balance_after,reason,admin_id,created_at) VALUES(?,'stars',?,?,?,NULL,?)""",
+                    (account_id, amount, balance[0], reason, now))
+            await db.execute("INSERT INTO channel_paid_reactions VALUES(?,?,?,?,?,?)",
+                             (uid, key, channel_id, message_id, stars, sender_balance))
+            await db.commit()
+        return {"stars": stars, "balance_after": sender_balance}
 
     @router.put("/api/channels/{channel_id}")
     @router.patch("/api/channels/{channel_id}")
