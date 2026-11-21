@@ -9246,3 +9246,42 @@ def test_forwarded_video_cover_remains_scoped_to_destination_chat(api_env) -> No
             assert (await client.get(f"/api/media/{video.json()['id']}", headers=outsider)).status_code == 404
 
     run(scenario())
+
+
+def test_cloud_password_requires_otp_and_single_use_login_challenge(api_env):
+    path, store, _, app = api_env
+    number = add_account(api_env, 81001, 'alpha')
+
+    async def scenario():
+        async with await client_for(app) as client:
+            async def issue(code):
+                with db_split.sqlite_connect(path) as db:
+                    db.execute('UPDATE numbers SET last_code_requested_at=0 WHERE number=?', (number,))
+                    db.commit()
+                assert await store.save_code(number, code, 300)
+
+            code_endpoint = '/api/auth/verify-code'
+            password_endpoint = '/api/auth/verify-password'
+            await issue('111111')
+            login = (await client.post(code_endpoint, json={'phone': number, 'code': '111111'})).json()
+            auth = {'Authorization': 'Bearer ' + login['token']}
+            settings = '/api/me/cloud-password'
+            password = 'correct horse battery staple'
+            assert (await client.get(settings, headers=auth)).json() == {'enabled': False}
+            assert (await client.put(settings, headers=auth, json={'new_password': password, 'code': '111111'})).status_code == 401
+            await issue('222222')
+            assert (await client.put(settings, headers=auth, json={'new_password': password, 'code': '222222'})).json() == {'enabled': True}
+            await issue('333333')
+            data = {'phone': number, 'code': '333333'}
+            challenge = (await client.post(code_endpoint, json=data)).json()
+            assert challenge['status'] == 'password_required' and 'token' not in challenge
+            assert (await client.post(code_endpoint, json=data)).status_code == 401
+            body = {'challenge': challenge['challenge'], 'password': 'wrong password'}
+            assert (await client.post(password_endpoint, json=body)).json()['detail'] == 'CLOUD_PASSWORD_INCORRECT'
+            body['password'] = password
+            assert (await client.post(password_endpoint, json=body)).json()['user']['id'] == 81001
+            assert (await client.post(password_endpoint, json=body)).json()['detail'] == 'CLOUD_PASSWORD_CHALLENGE_INVALID'
+            await issue('444444')
+            assert (await client.put(settings, headers=auth, json={'new_password': None, 'code': '444444', 'current_password': password})).json() == {'enabled': False}
+
+    run(scenario())

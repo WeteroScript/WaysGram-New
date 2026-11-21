@@ -726,6 +726,20 @@ async def init_messenger_storage(database_path: Path) -> None:
                 ON translation_requests(telegram_id,created_at);
             CREATE INDEX IF NOT EXISTS idx_api_sessions_user
                 ON api_sessions(telegram_id, expires_at);
+            CREATE TABLE IF NOT EXISTS api_cloud_passwords (
+                telegram_id INTEGER PRIMARY KEY,
+                salt BLOB NOT NULL,
+                verifier BLOB NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS api_password_challenges (
+                token_hash TEXT PRIMARY KEY,
+                telegram_id INTEGER NOT NULL,
+                phone TEXT NOT NULL,
+                expires_at INTEGER NOT NULL,
+                attempts INTEGER NOT NULL DEFAULT 0
+            );
+            CREATE INDEX IF NOT EXISTS idx_password_challenges_expiry ON api_password_challenges(expires_at);
+            CREATE INDEX IF NOT EXISTS idx_password_challenges_account ON api_password_challenges(telegram_id);
             CREATE TABLE IF NOT EXISTS api_login_request_log (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 phone TEXT NOT NULL,
@@ -4688,6 +4702,72 @@ def build_messenger_router(
             "message": "Код подготовлен. Откройте AuthWaysGram_bot и нажмите «Получить код».",
         }
 
+    def valid_cloud_password(value: Any) -> bool:
+        if not isinstance(value, str) or not 8 <= len(value) <= 128:
+            return False
+        try:
+            value.encode("utf-8")
+        except UnicodeError:
+            return False
+        return True
+
+    password_work = asyncio.Semaphore(4)
+
+    async def cloud_verifier(password: str, salt: bytes) -> bytes:
+        async with password_work:
+            return await asyncio.to_thread(hashlib.pbkdf2_hmac, "sha256", password.encode("utf-8"), salt, 600_000)
+
+    async def cloud_password_row(db: Any, uid: int):
+        cur = await db.execute("SELECT salt,verifier FROM api_cloud_passwords WHERE telegram_id=?", (uid,))
+        row = await cur.fetchone()
+        return tuple(row) if row else None
+
+    @router.get("/api/me/cloud-password")
+    async def cloud_password_state(authorization: str | None = Header(default=None)):
+        uid = int((await current_user(authorization))["telegram_id"])
+        async with aiosqlite.connect(db_path()) as db:
+            return {"enabled": await cloud_password_row(db, uid) is not None}
+
+    @router.put("/api/me/cloud-password")
+    async def change_cloud_password(payload: dict[str, Any], authorization: str | None = Header(default=None)):
+        user = await current_user(authorization)
+        uid = int(user["telegram_id"])
+        new_password = payload.get("new_password")
+        code = payload.get("code")
+        if "new_password" not in payload or (new_password is not None and not valid_cloud_password(new_password)):
+            raise HTTPException(400, "CLOUD_PASSWORD_INVALID")
+        if not isinstance(code, str) or not re.fullmatch(r"[0-9]{6}", code):
+            raise HTTPException(400, "CLOUD_PASSWORD_CODE_INVALID")
+        phone = await auth_store.get_number(uid)
+        owner = await auth_store.resolve_number(phone) if phone else None
+        if not owner or not owner.get("verified") or int(owner["telegram_id"]) != uid or not await auth_store.verify_code(phone, code):
+            raise HTTPException(401, "CLOUD_PASSWORD_CODE_INVALID")
+        async with aiosqlite.connect(db_path()) as db:
+            current = await cloud_password_row(db, uid)
+        if current:
+            password = payload.get("current_password")
+            if not valid_cloud_password(password) or not hmac.compare_digest(await cloud_verifier(password, current[0]), current[1]):
+                raise HTTPException(403, "CLOUD_PASSWORD_INCORRECT")
+        salt = secrets.token_bytes(16) if new_password is not None else None
+        verifier = await cloud_verifier(new_password, salt) if salt is not None else None
+        async with aiosqlite.connect(db_path()) as db:
+            await db.execute("BEGIN IMMEDIATE")
+            if await cloud_password_row(db, uid) != current:
+                raise HTTPException(409, "CLOUD_PASSWORD_CHANGED")
+            cur = await db.execute("""SELECT 1 FROM api_sessions s JOIN accounts a ON a.telegram_id=s.telegram_id
+                WHERE s.telegram_id=? AND s.token_hash=? AND s.expires_at>? AND a.is_banned=0""",
+                (uid, _token_hash(authorization[7:].strip()), int(time.time())))
+            if not await cur.fetchone():
+                raise HTTPException(401, "AUTH_SESSION_INVALID")
+            if salt is None:
+                await db.execute("DELETE FROM api_cloud_passwords WHERE telegram_id=?", (uid,))
+            else:
+                await db.execute("""INSERT INTO api_cloud_passwords VALUES(?,?,?) ON CONFLICT(telegram_id)
+                    DO UPDATE SET salt=excluded.salt,verifier=excluded.verifier""", (uid, salt, verifier))
+            await db.execute("DELETE FROM api_password_challenges WHERE telegram_id=?", (uid,))
+            await db.commit()
+        return {"enabled": salt is not None}
+
     @router.post("/api/auth/verify-code")
     async def verify_login_code(payload: dict[str, Any]) -> dict[str, Any]:
         phone = str(payload.get("phone", payload.get("number", ""))).strip()
@@ -4703,32 +4783,71 @@ def build_messenger_router(
         if not await auth_store.verify_code(phone, code):
             raise HTTPException(status_code=401, detail="Неверный, истёкший или уже использованный код")
 
-        now = int(time.time())
-        token = secrets.token_urlsafe(36)
         async with aiosqlite.connect(db_path()) as db:
             db.row_factory = aiosqlite.Row
-            await db.execute(
-                """INSERT OR IGNORE INTO accounts
-                   (telegram_id,virtual_number,created_at,updated_at)
-                   VALUES(?,?,?,?)""",
-                (telegram_id, phone, now, now),
-            )
-            await db.execute(
-                "UPDATE accounts SET virtual_number=?,updated_at=? WHERE telegram_id=?",
-                (phone, now, telegram_id),
-            )
-            await db.execute(
-                "INSERT INTO api_sessions(token_hash,telegram_id,expires_at,created_at) VALUES(?,?,?,?)",
-                (_token_hash(token), telegram_id, now + SESSION_TTL, now),
-            )
-            cur = await db.execute("SELECT * FROM accounts WHERE telegram_id=?", (telegram_id,))
-            account = await cur.fetchone()
+            await db.execute("BEGIN IMMEDIATE")
+            now = int(time.time())
+            await require_login_number(db, telegram_id, phone)
+            if await cloud_password_row(db, telegram_id):
+                challenge = secrets.token_urlsafe(32)
+                await db.execute("DELETE FROM api_password_challenges WHERE expires_at<=?", (now,))
+                await db.execute("INSERT INTO api_password_challenges VALUES(?,?,?,?,0)",
+                                 (_token_hash(challenge), telegram_id, phone, now + 300))
+                await db.commit()
+                return {"status": "password_required", "challenge": challenge, "expires_at": now + 300}
+            return await issue_login_session(db, telegram_id, phone, now)
+
+    async def require_login_number(db: Any, uid: int, phone: str) -> None:
+        cur = await db.execute("""SELECT 1 FROM numbers n JOIN users u ON u.telegram_id=n.telegram_id
+            LEFT JOIN users owner ON owner.telegram_id=n.owner_telegram_id
+            LEFT JOIN accounts a ON a.telegram_id=n.telegram_id
+            WHERE n.telegram_id=? AND n.number=? AND u.verified=1
+            AND COALESCE(owner.verified, u.verified)=1 AND COALESCE(a.is_banned,0)=0""", (uid, phone))
+        if not await cur.fetchone():
+            raise HTTPException(401, "AUTH_NUMBER_INVALID")
+
+    async def issue_login_session(db: Any, uid: int, phone: str, now: int) -> dict[str, Any]:
+        token = secrets.token_urlsafe(36)
+        await db.execute("""INSERT INTO accounts (telegram_id,virtual_number,created_at,updated_at)
+            VALUES(?,?,?,?) ON CONFLICT(telegram_id) DO UPDATE
+            SET virtual_number=excluded.virtual_number,updated_at=excluded.updated_at""", (uid, phone, now, now))
+        await db.execute("INSERT INTO api_sessions(token_hash,telegram_id,expires_at,created_at) VALUES(?,?,?,?)",
+                         (_token_hash(token), uid, now + SESSION_TTL, now))
+        cur = await db.execute("SELECT * FROM accounts WHERE telegram_id=?", (uid,))
+        account = await cur.fetchone()
+        await db.commit()
+        return {"token": token, "expires_at": now + SESSION_TTL, "user": _public_account(account, include_phone=True)}
+
+    @router.post("/api/auth/verify-password")
+    async def verify_login_password(payload: dict[str, Any]) -> dict[str, Any]:
+        challenge, password = payload.get("challenge"), payload.get("password")
+        if not isinstance(challenge, str) or not re.fullmatch(r"[A-Za-z0-9_-]{43}", challenge) or not valid_cloud_password(password):
+            raise HTTPException(400, "CLOUD_PASSWORD_INVALID")
+        key = _token_hash(challenge)
+        async with aiosqlite.connect(db_path()) as db:
+            await db.execute("BEGIN IMMEDIATE")
+            cur = await db.execute("""UPDATE api_password_challenges SET attempts=attempts+1
+                WHERE token_hash=? AND expires_at>? AND attempts<5 RETURNING telegram_id,phone""", (key, int(time.time())))
+            row = await cur.fetchone()
+            await cur.close()
+            if not row:
+                raise HTTPException(401, "CLOUD_PASSWORD_CHALLENGE_INVALID")
+            uid, phone = row
+            current = await cloud_password_row(db, uid)
             await db.commit()
-        return {
-            "token": token,
-            "expires_at": now + SESSION_TTL,
-            "user": _public_account(account, include_phone=True),
-        }
+        if not current or not hmac.compare_digest(await cloud_verifier(password, current[0]), current[1]):
+            raise HTTPException(401, "CLOUD_PASSWORD_INCORRECT")
+        async with aiosqlite.connect(db_path()) as db:
+            db.row_factory = aiosqlite.Row
+            await db.execute("BEGIN IMMEDIATE")
+            now = int(time.time())
+            if await cloud_password_row(db, uid) != current:
+                raise HTTPException(401, "CLOUD_PASSWORD_CHALLENGE_INVALID")
+            await require_login_number(db, uid, phone)
+            result = await db.execute("DELETE FROM api_password_challenges WHERE token_hash=? AND expires_at>?", (key, now))
+            if result.rowcount != 1:
+                raise HTTPException(401, "CLOUD_PASSWORD_CHALLENGE_INVALID")
+            return await issue_login_session(db, uid, phone, now)
 
     @router.post("/api/auth/refresh")
     async def refresh_session(authorization: str | None = Header(default=None)) -> dict[str, Any]:
