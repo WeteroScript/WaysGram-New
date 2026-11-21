@@ -258,10 +258,10 @@ class AndroidGiftSourceChecks(unittest.TestCase):
     def test_worn_pattern_uses_resolved_artwork_not_an_unloaded_status_id(self):
         profile = self.source("ui/ProfileActivity.java")
         bridge = self.source("tgnet/WaysGramProfile.java")
-        self.assertIn("WaysGramProfile.wornPatternDocumentId(currentAccount, status.collectible_id)", profile)
-        self.assertIn("topView.setBackgroundEmojiId(patternId", profile)
-        self.assertIn("readyWornPatterns.put(key, pattern.id)", bridge)
-        self.assertIn("!ready.isEmpty() || patternChanged", bridge)
+        self.assertIn("WaysGramProfile.wornPatternDocument(currentAccount, status.collectible_id)", profile)
+        self.assertIn("emoji.set(document, AnimatedEmojiDrawable.CACHE_TYPE_ALERT_PREVIEW_STATIC", profile)
+        self.assertIn("ColorUtils.calculateContrast(tint", profile)
+        self.assertIn("rememberWornPattern(account, gift.optLong", bridge)
 
     def test_star_rating_uses_native_profile_badge_and_server_thresholds(self):
         profile = self.source("ui/ProfileActivity.java")
@@ -288,7 +288,10 @@ class AndroidGiftSourceChecks(unittest.TestCase):
         self.assertIn("cover.setWaysGramGifts(nativeGifts)", controller)
         self.assertIn("gift.pinned_to_top && !gift.unsaved", cover)
         self.assertIn("maxCount = waysGram ? 6", cover)
-        self.assertIn("giftIds.add(((TLRPC.TL_emojiStatusCollectible) emojiStatus).collectible_id)", cover)
+        self.assertIn("if (!waysGram && emojiStatus instanceof TLRPC.TL_emojiStatusCollectible)", cover)
+        self.assertIn("findWaysGramGift(gift.id)", profile)
+        self.assertIn(".set(saved, null).show()", profile)
+        self.assertIn('!gift.slug.startsWith("waysgram://")', cover)
 
     def test_gift_batch_only_selects_eligible_regular_gifts_and_uses_internal_api(self):
         page = self.source("ui/Gifts/ProfileGiftsContainer.java")

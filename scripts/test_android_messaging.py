@@ -411,6 +411,9 @@ class NativeMessagingSourceChecks(unittest.TestCase):
         start = helper.index('public int editMessage(MessageObject messageObject, String message,')
         end = helper.index('public int editRichMessage(', start)
         self.assertIn('AlertsCreator.showSimpleAlert(fragment, detail)', helper[start:end])
+        self.assertIn('processUpdateArray(updates.updates, null, null, false, updates.date)', helper[start:end])
+        self.assertIn('processUpdateArray(updatesArr, null, null, false, updates.date)', helper)
+        self.assertIn('if (updates.updates.isEmpty())', edit)
 
     def test_native_forward_and_private_delete_use_server(self):
         transport = self.source('tgnet/WaysGramTransport.java')
