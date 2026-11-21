@@ -1128,3 +1128,26 @@ def test_private_channel_join_requests_require_owner_approval(env):
             assert (await client.get(path, headers=owner)).json()['requests_pending'] == 0
 
     run(scenario())
+
+
+def test_group_admin_rights_are_independent(env):
+    _, app = env
+
+    async def scenario():
+        async with await client_for(app) as client:
+            owner, admin = headers(101), headers(102)
+            group = await client.post('/api/groups', headers=owner, json={'title': 'Group rights'})
+            assert group.status_code == 201
+            path = f"/api/groups/{group.json()['id']}"
+            assert (await client.post(path + '/members', headers=owner, json={'telegram_id': 102})).status_code == 201
+            assert (await client.post(path + '/admins', headers=owner, json={'telegram_id': 102, 'rights': 2})).status_code == 201
+            assert (await client.post(path + '/admins', headers=owner, json={'telegram_id': 102})).status_code == 201
+            assert (await client.get(path, headers=admin)).json()['admin_rights'] == 2
+            assert (await client.post(path + '/invites', headers=admin, json={})).status_code == 201
+            assert (await client.put(path, headers=admin, json={'title': 'Denied'})).status_code == 403
+            assert (await client.put(path + '/slow-mode', headers=admin, json={'seconds': 5})).status_code == 403
+            assert (await client.post(path + '/admins', headers=owner, json={'telegram_id': 102, 'rights': 1})).status_code == 201
+            assert (await client.put(path, headers=admin, json={'title': 'Allowed'})).status_code == 200
+            assert (await client.post(path + '/invites', headers=admin, json={})).status_code == 403
+
+    run(scenario())

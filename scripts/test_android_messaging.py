@@ -112,7 +112,7 @@ class NativeMessagingSourceChecks(unittest.TestCase):
         self.assertIn('Never erase a good local snapshot', media)
         self.assertIn('loadPinnedMessages(dialog_id, 0, 0)', chat)
         self.assertIn('full.can_pin_message = !WaysGramBotFather.is(userId)', profile)
-        self.assertIn('chat.admin_rights.pin_messages = true', chats)
+        self.assertIn('chat.admin_rights.pin_messages = (rights & 8) != 0', chats)
         self.assertIn('rights.pin_messages = (mask & 8) != 0', chats)
 
     def test_pin_refresh_retry_and_pinned_screen_reconcile(self):

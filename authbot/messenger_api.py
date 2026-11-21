@@ -1611,6 +1611,9 @@ async def init_messenger_storage(database_path: Path) -> None:
                 "ADD COLUMN slow_mode_seconds INTEGER NOT NULL DEFAULT 0 "
                 "CHECK(slow_mode_seconds IN (0,5,10,15,30,60,120,300))"
             )
+        cur = await db.execute(f"PRAGMA {db_split.SCHEMA}.table_info(group_members)")
+        if "admin_rights" not in {str(row[1]) for row in await cur.fetchall()}:
+            await db.execute(f"ALTER TABLE {db_split.SCHEMA}.group_members ADD COLUMN admin_rights INTEGER NOT NULL DEFAULT 63")
         cur = await db.execute(f"PRAGMA {db_split.SCHEMA}.table_info(group_invites)")
         group_invite_columns = {str(row[1]) for row in await cur.fetchall()}
         if "require_approval" not in group_invite_columns:
@@ -4391,12 +4394,16 @@ def build_messenger_router(
             )
             return await cur.fetchone() is not None
 
+    # Group rights: change info, invite/review, remove members, pin, delete others' messages, slow mode.
+    def group_has_right(member: dict[str, Any], bit: int) -> bool:
+        return member["role"] == "owner" or (member["role"] == "admin" and bool(member["admin_rights"] & bit))
+
     async def require_group_member(
         db: Any, group_id: int, telegram_id: int
     ) -> dict[str, Any]:
         db.row_factory = aiosqlite.Row
         cur = await db.execute(
-            """SELECT gm.role,g.title,g.username,g.owner_telegram_id
+            """SELECT gm.role,gm.admin_rights,g.title,g.username,g.owner_telegram_id
                FROM group_members gm JOIN chat_groups g ON g.id=gm.group_id
                WHERE gm.group_id=? AND gm.telegram_id=?""",
             (group_id, telegram_id),
@@ -11917,7 +11924,7 @@ def build_messenger_router(
                 event_user_b = int(message["recipient_telegram_id"])
             elif scope == "group":
                 membership = await require_group_member(db, chat_id, user_id)
-                if membership["role"] not in ("owner", "admin"):
+                if not group_has_right(membership, 8):
                     await db.rollback()
                     raise HTTPException(status_code=403, detail="Закреплять сообщения могут только администраторы группы")
                 cur = await db.execute(
@@ -12180,7 +12187,7 @@ def build_messenger_router(
                     raise HTTPException(status_code=404, detail="Собеседник не найден")
             elif scope == "group":
                 member = await require_group_member(db, peer_id, uid)
-                if member["role"] not in ("owner", "admin"):
+                if not group_has_right(member, 8):
                     raise HTTPException(status_code=403, detail="Закреплять сообщения могут только администраторы группы")
             else:
                 cur = await db.execute(
@@ -12754,7 +12761,7 @@ def build_messenger_router(
             if row is None:
                 await db.rollback()
                 raise HTTPException(status_code=404, detail="Сообщение не найдено")
-            if int(row[0]) != uid and member["role"] not in ("owner", "admin"):
+            if int(row[0]) != uid and not group_has_right(member, 16):
                 await db.rollback()
                 raise HTTPException(status_code=403, detail="Удалять чужие сообщения могут только администраторы")
             await db.execute("DELETE FROM group_messages WHERE id=?", (message_id,))
@@ -13533,7 +13540,7 @@ def build_messenger_router(
             db.row_factory = aiosqlite.Row
             cur = await db.execute(
                 """SELECT g.id,g.username,g.title,g.description,g.owner_telegram_id,
-                          gm.role,gm.joined_at,
+                          gm.role,gm.admin_rights,gm.joined_at,
                           (SELECT COUNT(*) FROM group_members m WHERE m.group_id=g.id) AS member_count,
                           (SELECT COUNT(*) FROM group_messages x WHERE x.group_id=g.id) AS message_count,
                           COALESCE((SELECT rm.last_read_id FROM read_markers rm
@@ -13628,7 +13635,7 @@ def build_messenger_router(
             members = await cur.fetchall()
             pending = 0
             recent_requesters = []
-            if membership["role"] in ("owner", "admin"):
+            if group_has_right(membership, 2):
                 cur = await db.execute("""SELECT r.telegram_id,COUNT(*) OVER () AS total
                     FROM group_join_requests r JOIN accounts a ON a.telegram_id=r.telegram_id
                     WHERE r.group_id=? AND r.status='pending' AND a.is_banned=0
@@ -13639,6 +13646,7 @@ def build_messenger_router(
         result = dict(group)
         result["labels"] = await entity_labels("group", group_id)
         result["my_role"] = membership["role"]
+        result["admin_rights"] = membership["admin_rights"]
         result["my_telegram_id"] = uid
         result["requests_pending"] = pending
         result["recent_requesters"] = recent_requesters
@@ -13666,7 +13674,7 @@ def build_messenger_router(
         async with aiosqlite.connect(db_path()) as db:
             await db.execute("BEGIN IMMEDIATE")
             membership = await require_group_member(db, group_id, uid)
-            if membership["role"] not in ("owner", "admin"):
+            if not group_has_right(membership, 1):
                 raise HTTPException(403, "Изменять группу может только владелец или администратор")
             for key, value in fields.items():
                 await db.execute(f"UPDATE chat_groups SET {key}=? WHERE id=?", (value, group_id))
@@ -13716,7 +13724,7 @@ def build_messenger_router(
         async with aiosqlite.connect(db_path()) as db:
             await db.execute("BEGIN IMMEDIATE")
             member = await require_group_member(db, group_id, uid)
-            if member["role"] not in ("owner", "admin"):
+            if not group_has_right(member, 32):
                 await db.rollback()
                 raise HTTPException(status_code=403, detail="Настраивать медленный режим могут только администраторы группы")
             await db.execute(
@@ -13735,7 +13743,7 @@ def build_messenger_router(
         async with aiosqlite.connect(db_path()) as db:
             db.row_factory = aiosqlite.Row
             member = await require_group_member(db, group_id, uid)
-            if member["role"] not in ("owner", "admin") or (admin_id != uid and member["role"] != "owner"):
+            if not group_has_right(member, 2) or (admin_id != uid and member["role"] != "owner"):
                 raise HTTPException(403, "Нет доступа к списку приглашений")
             where = "group_id=? AND created_by=? AND share_token IS NOT NULL AND (revoked_at IS NOT NULL)=?"
             args = (group_id, admin_id, int(revoked))
@@ -13780,7 +13788,7 @@ def build_messenger_router(
             db.row_factory = aiosqlite.Row
             await db.execute("BEGIN IMMEDIATE")
             member = await require_group_member(db, group_id, uid)
-            if member["role"] not in ("owner", "admin"):
+            if not group_has_right(member, 2):
                 raise HTTPException(403, "Нет права редактировать приглашение")
             assignments = ",".join(f"{k}=?" for k in payload)
             cur = await db.execute(f"""UPDATE group_invites SET {assignments}
@@ -13832,7 +13840,7 @@ def build_messenger_router(
         async with aiosqlite.connect(db_path()) as db:
             await db.execute("BEGIN IMMEDIATE")
             member = await require_group_member(db, group_id, uid)
-            if member["role"] not in ("owner", "admin"):
+            if not group_has_right(member, 2):
                 await db.rollback()
                 raise HTTPException(status_code=403, detail="Создавать приглашения могут только администраторы группы")
             await db.execute(
@@ -13985,7 +13993,7 @@ def build_messenger_router(
         async with aiosqlite.connect(db_path()) as db:
             db.row_factory = aiosqlite.Row
             member = await require_group_member(db, group_id, uid)
-            if member["role"] not in ("owner", "admin"):
+            if not group_has_right(member, 2):
                 raise HTTPException(status_code=403, detail="Просматривать заявки могут только администраторы группы")
             token_hash = None
             if invite_token is not None:
@@ -14022,7 +14030,7 @@ def build_messenger_router(
             db.row_factory = aiosqlite.Row
             await db.execute("BEGIN IMMEDIATE")
             member = await require_group_member(db, group_id, uid)
-            if member["role"] not in ("owner", "admin"):
+            if not group_has_right(member, 2):
                 await db.rollback()
                 raise HTTPException(status_code=403, detail="Одобрять заявки могут только администраторы группы")
             cur = await db.execute(
@@ -14085,7 +14093,7 @@ def build_messenger_router(
         async with aiosqlite.connect(db_path()) as db:
             await db.execute("BEGIN IMMEDIATE")
             member = await require_group_member(db, group_id, uid)
-            if member["role"] not in ("owner", "admin"):
+            if not group_has_right(member, 2):
                 await db.rollback()
                 raise HTTPException(status_code=403, detail="Отклонять заявки могут только администраторы группы")
             cur = await db.execute(
@@ -14113,7 +14121,7 @@ def build_messenger_router(
         async with aiosqlite.connect(db_path()) as db:
             await db.execute("BEGIN IMMEDIATE")
             member = await require_group_member(db, group_id, uid)
-            if member["role"] not in ("owner", "admin"):
+            if not group_has_right(member, 2):
                 await db.rollback()
                 raise HTTPException(status_code=403, detail="Отзывать приглашения могут только администраторы группы")
             cur = await db.execute(
@@ -14141,7 +14149,7 @@ def build_messenger_router(
             await db.execute("BEGIN IMMEDIATE")
             member = await require_group_member(db, group_id, uid)
             owner = member["role"] == "owner"
-            if not owner and (member["role"] != "admin" or admin_id not in (None, uid)):
+            if not owner and (not group_has_right(member, 2) or admin_id not in (None, uid)):
                 raise HTTPException(403, "Нет права удалять приглашения")
             where = "group_id=? AND revoked_at IS NOT NULL"
             args = [group_id]
@@ -14173,7 +14181,7 @@ def build_messenger_router(
         async with aiosqlite.connect(db_path()) as db:
             db.row_factory = aiosqlite.Row
             membership = await require_group_member(db, group_id, uid)
-            if membership["role"] not in ("owner", "admin"):
+            if not group_has_right(membership, 2):
                 raise HTTPException(status_code=403, detail="Добавлять участников могут администраторы группы")
             target_id = 0
             if payload.get("telegram_id") is not None:
@@ -14227,7 +14235,7 @@ def build_messenger_router(
             if telegram_id == uid:
                 if target["role"] == "owner":
                     raise HTTPException(status_code=409, detail="Владелец не может покинуть группу без передачи владения")
-            elif actor["role"] != "owner" and (actor["role"] != "admin" or target["role"] != "member"):
+            elif actor["role"] != "owner" and (not group_has_right(actor, 4) or target["role"] != "member"):
                 raise HTTPException(status_code=403, detail="Недостаточно прав для удаления участника")
             cur = await db.execute(
                 "DELETE FROM group_members WHERE group_id=? AND telegram_id=?",
@@ -14250,8 +14258,12 @@ def build_messenger_router(
             target_id = 0
         if target_id <= 0:
             raise HTTPException(status_code=400, detail="Некорректный Telegram ID")
+        rights = payload.get("rights")
+        if rights is not None and (type(rights) is not int or not 1 <= rights <= 63):
+            raise HTTPException(400, "Некорректные права администратора")
         async with aiosqlite.connect(db_path()) as db:
             db.row_factory = aiosqlite.Row
+            await db.execute("BEGIN IMMEDIATE")
             owner = await require_group_member(db, group_id, uid)
             if owner["role"] != "owner":
                 raise HTTPException(status_code=403, detail="Назначать администраторов может только владелец")
@@ -14259,8 +14271,8 @@ def build_messenger_router(
             if target["role"] == "owner":
                 raise HTTPException(status_code=409, detail="Владелец уже обладает полными правами")
             await db.execute(
-                "UPDATE group_members SET role='admin' WHERE group_id=? AND telegram_id=?",
-                (group_id, target_id),
+                "UPDATE group_members SET role='admin',admin_rights=? WHERE group_id=? AND telegram_id=?",
+                (rights if rights is not None else target["admin_rights"] if target["role"] == "admin" else 63, group_id, target_id),
             )
             await db.commit()
         return {"group_id": group_id, "telegram_id": target_id, "role": "admin"}
