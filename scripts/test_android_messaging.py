@@ -23,6 +23,13 @@ class NativeMessagingSourceChecks(unittest.TestCase):
     def source(self, path):
         return self.archive.read(BASE + path).decode('utf-8')
 
+    def test_admin_labels_decorate_settings_header(self):
+        settings = self.source('ui/SettingsActivity.java')
+        self.assertIn('WaysGramPeerBadges.decorate(', settings)
+        self.assertIn('currentAccount, user.id, UserObject.getUserName(user), settingsBadgeChanged', settings)
+        self.assertIn('settingsBadgeTick.run();', settings)
+        self.assertIn('cancelRunOnUIThread(settingsBadgeTick);', settings)
+
     def test_worn_gift_header_does_not_reuse_model_as_pattern(self):
         artwork = self.source('tgnet/WaysGramProfile.java')
         header = self.source('ui/ProfileActivity.java')
