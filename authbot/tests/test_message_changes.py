@@ -1078,9 +1078,20 @@ def test_additional_channel_invites_limit_and_revoke_independently(env):
             active = (await client.get(path, headers=owner)).json()['invites']
             assert active[0]['uses'] == 1 and active[0]['label'] == 'One use'
             endpoint = path + '/' + link.rsplit('/', 1)[-1]
+            assert (await client.patch(endpoint, headers=member, json={'label': 'Denied'})).status_code == 403
+            edited = await client.patch(endpoint, headers=owner, json={'label': 'Updated', 'max_uses': 2, 'expires_at': None})
+            assert edited.status_code == 200 and edited.json()['uses'] == 1
+            assert edited.json()['label'] == 'Updated' and edited.json()['expires_at'] is None
+            assert (await client.post('/api/channels/join', headers=guest, json={'invite_link': link})).status_code == 200
+            cleanup = path.rsplit('/', 1)[0] + '/revoked-invites'
+            params = {'invite_token': link.rsplit('/', 1)[-1]}
+            assert (await client.delete(cleanup, headers=owner, params=params)).status_code == 404
             assert (await client.delete(endpoint, headers=member)).status_code == 403
             assert (await client.delete(endpoint, headers=owner)).status_code == 200
             assert (await client.get(path, headers=owner, params={'revoked': 'true'})).json()['count'] == 1
+            assert (await client.patch(endpoint, headers=owner, json={'label': 'Denied'})).status_code == 404
+            assert (await client.delete(cleanup, headers=member, params=params)).status_code == 403
+            assert (await client.delete(cleanup, headers=owner, params=params)).json()['deleted'] == 1
             assert (await client.get(create.json()['invite_link'])).status_code == 200
             assert (await client.get(path.rsplit('/', 1)[0], headers=member)).status_code == 200
 

@@ -8282,6 +8282,48 @@ def build_messenger_router(
             row["invite_link"] = base + row.pop("token")
         return {"count": count, "invites": rows}
 
+    @router.patch("/api/channels/{channel_id}/invites/{token}")
+    async def edit_extra_channel_invite(channel_id: int, token: str, payload: dict[str, Any],
+                                        authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        uid = int((await current_user(authorization))["telegram_id"])
+        validate_invite_edit(payload)
+        if payload.pop("require_approval", False):
+            raise HTTPException(400, "Заявки на вступление в канал пока не поддерживаются")
+        if not payload:
+            raise HTTPException(400, "Нет полей для изменения")
+        async with aiosqlite.connect(db_path()) as db:
+            db.row_factory = aiosqlite.Row
+            await db.execute("BEGIN IMMEDIATE")
+            cur = await db.execute("SELECT 1 FROM channels WHERE id=? AND owner_telegram_id=?", (channel_id, uid))
+            if not await cur.fetchone():
+                raise HTTPException(403, "Редактировать ссылки может только владелец канала")
+            assignments = ",".join(f"{key}=?" for key in payload)
+            cur = await db.execute(f"""UPDATE channel_invites SET {assignments}
+                WHERE channel_id=? AND token=? AND revoked_at IS NULL
+                RETURNING created_by,created_at,expires_at,max_uses,uses,label""", (*payload.values(), channel_id, token))
+            row = await cur.fetchone()
+            if row is None:
+                raise HTTPException(404, "Действующая ссылка не найдена")
+            await db.commit()
+        return dict(row)
+
+    @router.delete("/api/channels/{channel_id}/revoked-invites")
+    async def delete_revoked_channel_invites(channel_id: int, admin_id: int | None = None, invite_token: str | None = None,
+                                              authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        uid = int((await current_user(authorization))["telegram_id"])
+        async with aiosqlite.connect(db_path()) as db:
+            await db.execute("BEGIN IMMEDIATE")
+            cur = await db.execute("SELECT 1 FROM channels WHERE id=? AND owner_telegram_id=?", (channel_id, uid))
+            if not await cur.fetchone():
+                raise HTTPException(403, "Удалять ссылки может только владелец канала")
+            cur = await db.execute("""DELETE FROM channel_invites WHERE channel_id=? AND revoked_at IS NOT NULL
+                AND (? IS NULL OR token=?) AND (? IS NULL OR created_by=?)""",
+                (channel_id, invite_token, invite_token, admin_id, admin_id))
+            if invite_token is not None and cur.rowcount == 0:
+                raise HTTPException(404, "Отозванная ссылка не найдена")
+            await db.commit()
+        return {"deleted": cur.rowcount}
+
     @router.delete("/api/channels/{channel_id}/invites/{token}")
     async def revoke_extra_channel_invite(channel_id: int, token: str,
                                           authorization: str | None = Header(default=None)) -> dict[str, Any]:
@@ -13631,12 +13673,7 @@ def build_messenger_router(
             invites.append(item)
         return {"count": count, "invites": invites}
 
-    @router.patch("/api/groups/{group_id}/invites/{invite_token}")
-    async def edit_group_invite(group_id: int, invite_token: str, payload: dict[str, Any],
-                                authorization: str | None = Header(default=None)) -> dict[str, Any]:
-        uid = int((await current_user(authorization))["telegram_id"])
-        if not re.fullmatch(r"[A-Za-z0-9_-]{20,128}", invite_token):
-            raise HTTPException(404, "Приглашение не найдено")
+    def validate_invite_edit(payload: dict[str, Any]) -> None:
         if not payload or not payload.keys() <= {"expires_at", "max_uses", "require_approval", "label"}:
             raise HTTPException(400, "Недопустимые параметры приглашения")
         now = int(time.time())
@@ -13648,6 +13685,14 @@ def build_messenger_router(
         }
         if any(not checks[k](v) for k, v in payload.items()):
             raise HTTPException(400, "Недопустимые параметры приглашения")
+
+    @router.patch("/api/groups/{group_id}/invites/{invite_token}")
+    async def edit_group_invite(group_id: int, invite_token: str, payload: dict[str, Any],
+                                authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        uid = int((await current_user(authorization))["telegram_id"])
+        if not re.fullmatch(r"[A-Za-z0-9_-]{20,128}", invite_token):
+            raise HTTPException(404, "Приглашение не найдено")
+        validate_invite_edit(payload)
         async with aiosqlite.connect(db_path()) as db:
             db.row_factory = aiosqlite.Row
             await db.execute("BEGIN IMMEDIATE")
