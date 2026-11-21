@@ -2010,3 +2010,43 @@ def test_channel_inbox_is_private_and_requires_current_confirmed_fee(env):
             assert await cur.fetchall() == [(101, 6), (102, -6)]
 
     run(scenario())
+
+
+def test_reader_post_proposals_require_owner_approval_and_publish_once(env):
+    _, app = env
+
+    async def scenario():
+        async with await client_for(app) as client:
+            owner, reader, other = headers(101), headers(102), headers(ADMIN)
+            channel = await client.post('/api/channels', headers=owner,
+                                        json={'title': 'Proposals', 'username': 'post_proposals', 'is_public': True})
+            base = f"/api/channels/{channel.json()['id']}"
+            inbox = base + '/inbox'
+            assert (await client.put(inbox + '/settings', headers=owner, json={'enabled': True, 'fee_stars': 0})).status_code == 200
+
+            async def propose(suffix):
+                key = {**reader, 'Idempotency-Key': f'proposed-post-{suffix}'}
+                payload = {'body': 'Publish this text', 'propose_post': True}
+                response = await client.post(inbox + '/me', headers=key, json=payload)
+                assert response.status_code == 200 and response.json()['proposal_state'] == 'pending'
+                assert (await client.post(inbox + '/me', headers=key, json={**payload, 'propose_post': False})).status_code == 409
+                return f"{inbox}/proposals/{response.json()['id']}"
+
+            path = await propose('0001')
+            assert (await client.get(base + '/messages', headers=other)).json()['messages'] == []
+            assert (await client.post(path + '/publish', headers=reader)).status_code == 404
+            assert (await client.post(path + '/withdraw', headers=other)).status_code == 404
+            results = await asyncio.gather(*(client.post(path + '/publish', headers=owner) for _ in range(2)))
+            assert results[0].status_code == results[1].status_code == 200 and results[0].json() == results[1].json()
+            published = (await client.get(base + '/messages', headers=reader)).json()['messages']
+            assert [(row['id'], row['body']) for row in published] == [(results[0].json()['published_post_id'], 'Publish this text')]
+            assert (await client.post(path + '/withdraw', headers=reader)).status_code == 409
+            path = await propose('0002')
+            assert (await client.post(path + '/withdraw', headers=reader)).json()['proposal_state'] == 'withdrawn'
+            assert (await client.post(path + '/publish', headers=owner)).status_code == 409
+            path = await propose('0003')
+            assert (await client.post(path + '/decline', headers=owner)).json()['proposal_state'] == 'declined'
+            messages = (await client.get(inbox + '/me', headers=reader)).json()['messages']
+            assert [m['proposal_state'] for m in messages] == ['published', 'withdrawn', 'declined']
+
+    run(scenario())

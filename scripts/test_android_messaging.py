@@ -93,10 +93,18 @@ class NativeMessagingSourceChecks(unittest.TestCase):
         self.assertIn('WaysGramChannelInbox.settings(this, currentAccount, chatId)', edit)
         self.assertIn('root + "/me"', inbox)
         self.assertIn('root + "/threads/"', inbox)
-        self.assertIn('if (fee > 0) confirm(', inbox)
+        self.assertIn('if (fee > 0 || proposal) confirm(', inbox)
         self.assertLess(inbox.index('putString(slot, key)'), inbox.index('request("POST", path'))
         self.assertIn('put("approved_fee_stars", fee), token, 15000, key', inbox)
         self.assertIn('status == 402 ? R.string.WaysGramInboxFeeChanged', inbox)
+
+    def test_channel_post_proposals_use_inbox_and_explicit_owner_actions(self):
+        inbox = self.source('ui/WaysGramChannelInbox.java')
+        self.assertIn('put("propose_post", proposal)', inbox)
+        self.assertIn('"pending".equals(state)', inbox)
+        self.assertIn('actionPath + (owner ? "publish" : "withdraw")', inbox)
+        self.assertIn('actionPath + "decline"', inbox)
+        self.assertIn('putBoolean(slot + ":proposal", proposal)', inbox)
 
     def test_channel_discussions_use_owned_groups_and_real_comment_threads(self):
         chat = self.source('ui/ChatActivity.java')

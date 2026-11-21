@@ -1760,6 +1760,12 @@ async def init_messenger_storage(database_path: Path) -> None:
             )
         cur = await db.execute(f"PRAGMA {db_split.SCHEMA}.table_info(chat_groups)")
         chat_group_columns = {str(row[1]) for row in await cur.fetchall()}
+        cur = await db.execute("PRAGMA main.table_info(channel_inbox_messages)")
+        inbox_columns = {row[1] for row in await cur.fetchall()}
+        if "proposal_state" not in inbox_columns:
+            await db.execute("ALTER TABLE main.channel_inbox_messages ADD COLUMN proposal_state TEXT")
+        if "published_post_id" not in inbox_columns:
+            await db.execute("ALTER TABLE main.channel_inbox_messages ADD COLUMN published_post_id INTEGER")
         cur = await db.execute("PRAGMA table_info(channels)")
         if "paid_reactions_enabled" not in {row[1] for row in await cur.fetchall()}:
             await db.execute("ALTER TABLE channels ADD COLUMN paid_reactions_enabled INTEGER NOT NULL DEFAULT 0")
@@ -9305,7 +9311,7 @@ def build_messenger_router(
             await db.execute("BEGIN")
             await require_channel_inbox_owner(db, channel_id, uid)
             db.row_factory = aiosqlite.Row
-            cur = await db.execute("""SELECT m.id,m.reader_id,a.display_name AS reader_name,m.direction,m.body,m.created_at
+            cur = await db.execute("""SELECT m.id,m.reader_id,a.display_name AS reader_name,m.direction,m.body,m.created_at,m.proposal_state
                 FROM (SELECT MAX(id) AS id FROM channel_inbox_messages WHERE channel_id=? GROUP BY reader_id) t
                 JOIN channel_inbox_messages m ON m.id=t.id LEFT JOIN accounts a ON a.telegram_id=m.reader_id
                 WHERE (?=0 OR m.id<?) ORDER BY m.id DESC LIMIT ?""", (channel_id, before_id, before_id, limit + 1))
@@ -9349,7 +9355,7 @@ def build_messenger_router(
             if channel is None:
                 raise HTTPException(404, "CHANNEL_NOT_FOUND")
             owner, enabled, fee = channel
-            columns = "id,direction,body,fee_stars,created_at"
+            columns = "id,direction,body,fee_stars,created_at,proposal_state,published_post_id"
             if as_owner:
                 cur = await db.execute("SELECT 1 FROM channel_inbox_messages WHERE channel_id=? AND reader_id=? AND direction='incoming' LIMIT 1", (channel_id, reader))
                 if not await cur.fetchone():
@@ -9363,13 +9369,16 @@ def build_messenger_router(
                         "can_send": as_owner or (bool(enabled) and reader != owner), "fee_stars": 0 if as_owner else fee}
             body = (payload or {}).get("body")
             approved = (payload or {}).get("approved_fee_stars", 0)
+            proposal = (payload or {}).get("propose_post", False)
+            if type(proposal) is not bool or (as_owner and proposal):
+                raise HTTPException(400, "INVALID_POST_PROPOSAL")
             if not isinstance(body, str) or type(approved) is not int or not key or not re.fullmatch(r"[A-Za-z0-9_-]{16,128}", key):
                 raise HTTPException(400, "INVALID_CHANNEL_INBOX_MESSAGE")
             body = _message_body(body)
             cur = await db.execute(f"SELECT {columns} FROM channel_inbox_messages WHERE channel_id=? AND reader_id=? AND direction=? AND operation_key=?", (channel_id, reader, direction, key))
             prior = await cur.fetchone()
             if prior is not None:
-                if (prior["body"], prior["fee_stars"]) != (body, approved):
+                if (prior["body"], prior["fee_stars"], prior["proposal_state"] is not None) != (body, approved, proposal):
                     raise HTTPException(409, "IDEMPOTENCY_KEY_CONFLICT")
                 return dict(prior)
             if as_owner:
@@ -9383,8 +9392,9 @@ def build_messenger_router(
             cur = await db.execute(f"SELECT COUNT(*) FROM channel_inbox_messages WHERE {field}=? AND direction=? AND created_at>?", (target, direction, now - 60))
             if (await cur.fetchone())[0] >= 20:
                 raise HTTPException(429, "CHANNEL_INBOX_RATE_LIMIT")
-            cur = await db.execute("INSERT INTO channel_inbox_messages(channel_id,reader_id,direction,body,fee_stars,created_at,operation_key) VALUES(?,?,?,?,?,?,?)",
-                                   (channel_id, reader, direction, body, fee, now, key))
+            proposal_state = "pending" if proposal else None
+            cur = await db.execute("INSERT INTO channel_inbox_messages(channel_id,reader_id,direction,body,fee_stars,created_at,operation_key,proposal_state) VALUES(?,?,?,?,?,?,?,?)",
+                                   (channel_id, reader, direction, body, fee, now, key, proposal_state))
             message_id = int(cur.lastrowid)
             if fee:
                 for account, amount in ((reader, -fee), (owner, fee)):
@@ -9398,7 +9408,50 @@ def build_messenger_router(
                         (telegram_id,asset,amount,balance_after,reason,admin_id,created_at) VALUES(?,'stars',?,?,?,NULL,?)""",
                         (account, amount, balance[0], f"channel_inbox:{channel_id}:{message_id}", now))
             await db.commit()
-        return {"id": message_id, "direction": direction, "body": body, "fee_stars": fee, "created_at": now}
+        return {"id": message_id, "direction": direction, "body": body, "fee_stars": fee, "created_at": now,
+                "proposal_state": proposal_state, "published_post_id": None}
+
+    @router.post("/api/channels/{channel_id}/inbox/proposals/{proposal_id}/{action}")
+    async def resolve_channel_post_proposal(channel_id: int, proposal_id: int,
+                                            action: Literal["publish", "decline", "withdraw"],
+                                            authorization: str | None = Header(default=None)):
+        user = await current_user(authorization)
+        uid = int(user["telegram_id"])
+        target = {"publish": "published", "decline": "declined", "withdraw": "withdrawn"}[action]
+        now = int(time.time())
+        recipients = []
+        async with aiosqlite.connect(db_path()) as db:
+            await db.execute("BEGIN IMMEDIATE")
+            if action != "withdraw":
+                await require_channel_inbox_owner(db, channel_id, uid)
+            cur = await db.execute("""SELECT m.body,m.proposal_state,m.published_post_id FROM channel_inbox_messages m
+                JOIN channels c ON c.id=m.channel_id WHERE m.id=? AND m.channel_id=? AND m.proposal_state IS NOT NULL
+                AND (?=0 OR m.reader_id=?)""", (proposal_id, channel_id, int(action == "withdraw"), uid))
+            proposal = await cur.fetchone()
+            if proposal is None:
+                raise HTTPException(404, "POST_PROPOSAL_NOT_FOUND")
+            body, state, post_id = proposal
+            if state == target:
+                return {"id": proposal_id, "proposal_state": state, "published_post_id": post_id}
+            if state != "pending":
+                raise HTTPException(409, "POST_PROPOSAL_ALREADY_RESOLVED")
+            if action == "publish":
+                cur = await db.execute("SELECT COUNT(*) FROM channel_messages WHERE author_telegram_id=? AND created_at>?", (uid, now - 60))
+                if (await cur.fetchone())[0] >= CHANNEL_POSTS_PER_MINUTE:
+                    raise HTTPException(429, "CHANNEL_POST_RATE_LIMIT")
+                cur = await db.execute("INSERT INTO channel_messages(channel_id,author_telegram_id,body,created_at) VALUES(?,?,?,?)",
+                                       (channel_id, uid, body, now))
+                post_id = int(cur.lastrowid)
+                await record_event(db, "channel", post_id, "new_message", uid, chat_id=channel_id)
+                cur = await db.execute("SELECT telegram_id FROM active_channel_members WHERE channel_id=? AND telegram_id<>?", (channel_id, uid))
+                recipients = [int(row[0]) for row in await cur.fetchall()]
+            await db.execute("UPDATE channel_inbox_messages SET proposal_state=?,published_post_id=? WHERE id=?",
+                             (target, post_id, proposal_id))
+            await db.commit()
+        if recipients:
+            await deliver_push_notifications(recipients, str(user.get("display_name") or user.get("username") or "Новая публикация"),
+                                             body, {"scope": "channel", "chat_id": str(channel_id), "message_id": str(post_id), "silent": "0"})
+        return {"id": proposal_id, "proposal_state": target, "published_post_id": post_id}
 
     @router.get("/api/channels/{channel_id}/discussion-group")
     @router.put("/api/channels/{channel_id}/discussion-group")

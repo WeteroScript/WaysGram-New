@@ -6,4 +6,10 @@ Channel inboxes are off by default. The owner (not regular channel admins) can c
 - Owner: `GET /api/channels/{id}/inbox` lists threads. `GET` / `POST /api/channels/{id}/inbox/threads/{reader_id}` reads or replies to an existing thread. Replies are free and appear as channel replies without a personal sender ID. List endpoints support `before_id`, `limit`, and `next_before_id`.
 - Send with `{"body":"…","approved_fee_stars":6}` and an `Idempotency-Key` of 16–128 ASCII letters, digits, underscores or hyphens. Confirm the exact current fee before sending; a changed fee returns HTTP 402 and is never automatically accepted. Zero can be omitted for free sends. Retry with the same key, body and fee on an ambiguous outcome. A completed operation returns its original message and never charges twice.
 
-In Android, owners configure the inbox in the channel editor and read/reply via **Channel messages** in the chat menu. Readers use **Message channel** in the same menu. Text only; no push notifications, proposed posts, or delegated inbox admin permissions yet.
+In Android, owners configure the inbox in the channel editor and read/reply via **Channel messages** in the chat menu. Readers use **Message channel** in the same menu. Text only; no inbox push notifications or delegated admin permissions yet.
+
+## Post proposals
+
+Readers can choose **Propose a post** under **Actions** in their channel thread. Send `propose_post: true` with the normal inbox payload; the same fee and idempotency rules apply. The reader explicitly consents to publication of the submitted text. The fee covers sending to the inbox, not a publication reward or deposit, and is not refunded if declined or withdrawn.
+
+`POST /api/channels/{id}/inbox/proposals/{proposal_id}/{action}` takes `publish` or `decline` from the owner, or `withdraw` from the author. A pending proposal can be resolved only once. Publishing immediately creates a normal channel post and returns its ID; simultaneous or repeated approval does not create another post. Scheduling, counteroffers and rewards are not supported yet.
