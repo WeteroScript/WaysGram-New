@@ -1142,6 +1142,8 @@ def test_group_admin_rights_are_independent(env):
             assert (await client.post(path + '/members', headers=owner, json={'telegram_id': 102})).status_code == 201
             assert (await client.post(path + '/admins', headers=owner, json={'telegram_id': 102, 'rights': 2})).status_code == 201
             assert (await client.post(path + '/admins', headers=owner, json={'telegram_id': 102})).status_code == 201
+            roster = (await client.get(path, headers=owner)).json()['members']
+            assert next(member for member in roster if member['telegram_id'] == 102)['admin_rights'] == 2
             assert (await client.get(path, headers=admin)).json()['admin_rights'] == 2
             assert (await client.post(path + '/invites', headers=admin, json={})).status_code == 201
             assert (await client.put(path, headers=admin, json={'title': 'Denied'})).status_code == 403

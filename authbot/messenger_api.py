@@ -13625,7 +13625,8 @@ def build_messenger_router(
             )
             group = await cur.fetchone()
             cur = await db.execute(
-                """SELECT gm.telegram_id,gm.role,gm.joined_at,a.username,a.display_name,a.avatar_media_id
+                """SELECT gm.telegram_id,gm.role,gm.joined_at,a.username,a.display_name,a.avatar_media_id,
+                          CASE WHEN gm.role IN ('owner','admin') THEN gm.admin_rights ELSE 0 END AS admin_rights
                    FROM group_members gm LEFT JOIN accounts a ON a.telegram_id=gm.telegram_id
                    WHERE gm.group_id=? ORDER BY
                    CASE gm.role WHEN 'owner' THEN 0 WHEN 'admin' THEN 1 ELSE 2 END,
@@ -13646,7 +13647,7 @@ def build_messenger_router(
         result = dict(group)
         result["labels"] = await entity_labels("group", group_id)
         result["my_role"] = membership["role"]
-        result["admin_rights"] = membership["admin_rights"]
+        result["admin_rights"] = membership["admin_rights"] if membership["role"] in ("owner", "admin") else 0
         result["my_telegram_id"] = uid
         result["requests_pending"] = pending
         result["recent_requesters"] = recent_requesters
@@ -14270,12 +14271,13 @@ def build_messenger_router(
             target = await require_group_member(db, group_id, target_id)
             if target["role"] == "owner":
                 raise HTTPException(status_code=409, detail="Владелец уже обладает полными правами")
+            effective_rights = rights if rights is not None else (target["admin_rights"] if target["role"] == "admin" else 63)
             await db.execute(
                 "UPDATE group_members SET role='admin',admin_rights=? WHERE group_id=? AND telegram_id=?",
-                (rights if rights is not None else target["admin_rights"] if target["role"] == "admin" else 63, group_id, target_id),
+                (effective_rights, group_id, target_id),
             )
             await db.commit()
-        return {"group_id": group_id, "telegram_id": target_id, "role": "admin"}
+        return {"group_id": group_id, "telegram_id": target_id, "role": "admin", "admin_rights": effective_rights}
 
     @router.delete("/api/groups/{group_id}/admins/{telegram_id}")
     async def demote_group_admin(
