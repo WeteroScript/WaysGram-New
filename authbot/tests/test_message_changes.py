@@ -1507,3 +1507,50 @@ def test_blocked_users_list_and_unblock_restore_dm_access(env):
             assert (await client.post('/api/messages', headers=peer, json={'recipient_id': 101, 'body': 'Allowed'})).status_code == 201
 
     run(scenario())
+
+
+def test_dm_auto_delete_applies_to_new_messages_and_syncs_both_participants(env):
+    import db_split
+
+    path, app = env
+
+    async def scenario():
+        async with await client_for(app) as client:
+            async def send(sender, recipient, body):
+                response = await client.post('/api/messages', headers=headers(sender), json={'recipient_id': recipient, 'body': body})
+                assert response.status_code == 201
+                return response.json()['id']
+
+            old = await send(101, 102, 'old')
+            route = '/api/chats/102/auto-delete'
+            assert (await client.put(route, headers=headers(101), json={'seconds': True})).status_code == 400
+            assert (await client.put(route, headers=headers(101), json={'seconds': 86400})).status_code == 200
+            assert (await client.get('/api/chats/101/auto-delete', headers=headers(102))).json() == {'seconds': 86400}
+            due = await send(102, 101, 'expires')
+            assert (await client.put(route, headers=headers(101), json={'seconds': 0})).status_code == 200
+            new = await send(101, 102, 'not expiring')
+            with db_split.sqlite_connect(path) as db:
+                rows = dict(db.execute('SELECT id,auto_delete_at-created_at FROM messages WHERE id IN (?,?,?)', (old, due, new)))
+                assert rows == {old: None, due: 86400, new: None}
+                db.execute('UPDATE messages SET auto_delete_at=1 WHERE id=?', (due,))
+                db.commit()
+            cursor = (await client.get('/api/events', headers=headers(101))).json()['latest_id']
+            for start in app.router.on_startup:
+                await start()
+            try:
+                for _ in range(50):
+                    events = (await client.get(f'/api/events?after_id={cursor}', headers=headers(101))).json()['events']
+                    if any(e['kind'] == 'delete' and e['message_id'] == due for e in events):
+                        break
+                    await asyncio.sleep(.05)
+                else:
+                    raise AssertionError('expiry worker did not publish deletion')
+                events = (await client.get(f'/api/events?after_id={cursor}', headers=headers(102))).json()['events']
+                assert any(e['kind'] == 'delete' and e['message_id'] == due for e in events)
+                listed = (await client.get('/api/messages?with=102', headers=headers(101))).json()['messages']
+                assert {row['id'] for row in listed} & {old, due, new} == {old, new}
+            finally:
+                for stop in app.router.on_shutdown:
+                    await stop()
+
+    run(scenario())

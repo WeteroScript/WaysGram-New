@@ -748,6 +748,12 @@ async def init_messenger_storage(database_path: Path) -> None:
                 media_album_index INTEGER NOT NULL DEFAULT 0,
                 media_album_count INTEGER NOT NULL DEFAULT 0
             );
+            CREATE TABLE IF NOT EXISTS dm_auto_delete (
+                user_low INTEGER NOT NULL,
+                user_high INTEGER NOT NULL,
+                seconds INTEGER NOT NULL CHECK(seconds IN (86400,604800,2592000)),
+                PRIMARY KEY(user_low,user_high)
+            );
             CREATE TABLE IF NOT EXISTS message_gifts (
                 message_id INTEGER PRIMARY KEY REFERENCES messages(id) ON DELETE CASCADE,
                 serial_number TEXT NOT NULL,
@@ -1762,6 +1768,20 @@ async def init_messenger_storage(database_path: Path) -> None:
             if "reply_to_id" not in columns:
                 await db.execute(f"ALTER TABLE {db_split.SCHEMA}.{table_name} ADD COLUMN reply_to_id INTEGER")
             if table_name == "messages":
+                if "auto_delete_at" not in columns:
+                    await db.execute(f"ALTER TABLE {db_split.SCHEMA}.messages ADD COLUMN auto_delete_at INTEGER")
+                await db.execute(f"""CREATE INDEX IF NOT EXISTS {db_split.SCHEMA}.idx_dm_auto_delete
+                    ON messages(auto_delete_at) WHERE auto_delete_at IS NOT NULL""")
+                await db.execute(f"""CREATE TRIGGER IF NOT EXISTS {db_split.SCHEMA}.stamp_dm_auto_delete
+                    AFTER INSERT ON messages BEGIN
+                    UPDATE messages SET auto_delete_at=NEW.created_at+(
+                        SELECT seconds FROM dm_auto_delete
+                        WHERE user_low=MIN(NEW.sender_telegram_id,NEW.recipient_telegram_id)
+                          AND user_high=MAX(NEW.sender_telegram_id,NEW.recipient_telegram_id))
+                    WHERE id=NEW.id AND EXISTS (SELECT 1 FROM dm_auto_delete
+                        WHERE user_low=MIN(NEW.sender_telegram_id,NEW.recipient_telegram_id)
+                          AND user_high=MAX(NEW.sender_telegram_id,NEW.recipient_telegram_id));
+                    END""")
                 if "forwarded_from_telegram_id" not in columns:
                     await db.execute(f"ALTER TABLE {db_split.SCHEMA}.messages ADD COLUMN forwarded_from_telegram_id INTEGER")
                 if "forwarded_from_message_id" not in columns:
@@ -11924,6 +11944,53 @@ def build_messenger_router(
             (scope, chat_id, user_a, user_b, message_id, kind, actor_id, int(time.time())),
         )
 
+    @router.get("/api/chats/{peer_id}/auto-delete")
+    async def get_dm_auto_delete(peer_id: int, authorization: str | None = Header(default=None)):
+        uid = int((await current_user(authorization))["telegram_id"])
+        if not 0 < peer_id < 2**63 or peer_id == uid:
+            raise HTTPException(400, "PEER_ID_INVALID")
+        async with aiosqlite.connect(db_path()) as db:
+            cur = await db.execute("SELECT seconds FROM dm_auto_delete WHERE user_low=? AND user_high=?", sorted((uid, peer_id)))
+            row = await cur.fetchone()
+        return {"seconds": row[0] if row else 0}
+
+    @router.put("/api/chats/{peer_id}/auto-delete")
+    async def set_dm_auto_delete(peer_id: int, payload: dict[str, Any], authorization: str | None = Header(default=None)):
+        uid = int((await current_user(authorization))["telegram_id"])
+        seconds = payload.get("seconds")
+        if not 0 < peer_id < 2**63 or peer_id == uid:
+            raise HTTPException(400, "PEER_ID_INVALID")
+        if type(seconds) is not int or seconds not in (0, 86400, 604800, 2592000):
+            raise HTTPException(400, "AUTO_DELETE_INVALID")
+        async with aiosqlite.connect(db_path()) as db:
+            await db.execute("BEGIN IMMEDIATE")
+            cur = await db.execute("SELECT 1 FROM accounts WHERE telegram_id=? AND is_banned=0", (peer_id,))
+            if not await cur.fetchone():
+                raise HTTPException(404, "PEER_NOT_FOUND")
+            cur = await db.execute("SELECT 1 FROM blocked_users WHERE (owner_telegram_id=? AND blocked_telegram_id=?) OR (owner_telegram_id=? AND blocked_telegram_id=?)", (uid, peer_id, peer_id, uid))
+            if await cur.fetchone():
+                raise HTTPException(403, "PEER_BLOCKED")
+            pair = sorted((uid, peer_id))
+            if seconds:
+                await db.execute("""INSERT INTO dm_auto_delete VALUES(?,?,?)
+                    ON CONFLICT(user_low,user_high) DO UPDATE SET seconds=excluded.seconds""", (*pair, seconds))
+            else:
+                await db.execute("DELETE FROM dm_auto_delete WHERE user_low=? AND user_high=?", pair)
+            await db.commit()
+        return {"seconds": seconds}
+
+    async def expire_dm_messages(db: Any, now: int) -> int:
+        cur = await db.execute("""SELECT id,sender_telegram_id,recipient_telegram_id FROM messages
+            WHERE auto_delete_at<=? ORDER BY auto_delete_at,id LIMIT 500""", (now,))
+        rows = await cur.fetchall()
+        for message_id, sender, recipient in rows:
+            for table in ("message_hidden_for", "message_gifts", "message_contacts", "message_locations", "dm_pin_overrides"):
+                await db.execute(f"DELETE FROM {table} WHERE message_id=?", (message_id,))
+            await db.execute("DELETE FROM pinned_messages WHERE scope='dm' AND chat_id=0 AND message_id=?", (message_id,))
+            await db.execute("DELETE FROM messages WHERE id=?", (message_id,))
+            await record_event(db, "dm", message_id, "delete", 0, user_a=sender, user_b=recipient)
+        return len(rows)
+
     async def process_due_scheduled_messages() -> None:
         now = int(time.time())
         notifications: list[tuple[int, int, str, str, int, bool]] = []
@@ -12144,13 +12211,15 @@ def build_messenger_router(
             if monotonic_now - last_live_cleanup >= 60:
                 try:
                     async with aiosqlite.connect(db_path()) as db:
-                        count = await _expire_live_locations(db, int(time.time()))
+                        await db.execute("BEGIN IMMEDIATE")
+                        count = max(await _expire_live_locations(db, int(time.time())),
+                                    await expire_dm_messages(db, int(time.time())))
                         await db.commit()
                     # Continue bounded batches on the next pass when there is a backlog.
                     if count < 500:
                         last_live_cleanup = monotonic_now
                 except Exception as exc:
-                    LOGGER.warning("Live location cleanup failed (%s)", type(exc).__name__)
+                    LOGGER.warning("Message expiry cleanup failed (%s)", type(exc).__name__)
             await asyncio.sleep(1.0)
 
     @router.on_event("startup")

@@ -35,6 +35,7 @@ SCHEMA = "messenger"
 MESSENGER_TABLES = frozenset(
     {
         "messages",
+        "dm_auto_delete",
         "push_outbox",
         "message_gifts",
         "message_contacts",
