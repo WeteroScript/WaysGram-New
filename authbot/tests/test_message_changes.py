@@ -840,6 +840,10 @@ def test_profile_music_publish_reorder_and_remove(env):
             assert await tracks('?offset=1&limit=1') == (2, [a])
             assert (await save(b, after_id=a)).status_code == 200
             assert await tracks() == (2, [a, b])
+            assert (await client.put("/api/me/privacy/music", headers=headers(101), json={"mode": "nobody"})).status_code == 200
+            assert await tracks() == (0, [])
+            assert await tracks(viewer=101) == (2, [a, b])
+            assert (await client.put("/api/me/privacy/music", headers=headers(101), json={"mode": "everyone"})).status_code == 200
             assert (await client.delete('/api/media/storage/' + a, headers=headers(101))).status_code == 409
             assert (await client.post('/api/blocks', headers=headers(101), json={'user_id': 102})).status_code == 201
             assert await tracks() == (0, [])
@@ -1398,5 +1402,29 @@ def test_channel_story_publish_expire_and_delete(env):
             assert (await client.get(path + '?mode=archive', headers=owner)).json()['stories'][0]['id'] == story['id']
             assert (await client.post(path + '/delete', headers=owner, json={'ids': [story['id']]})).json()['ids'] == [story['id']]
             assert (await client.get(path + '?mode=archive', headers=owner)).json()['stories'] == []
+
+    run(scenario())
+
+
+def test_profile_birthday_and_bio_privacy(env):
+    _, app = env
+
+    async def scenario():
+        async with await client_for(app) as client:
+            owner, other = headers(101), headers(102)
+            assert (await client.put('/api/me', headers=owner, json={'bio': 'Private bio'})).status_code == 200
+            endpoint = '/api/me/birthday'
+            assert (await client.put(endpoint, headers=owner, json={'birthday': {'day': 30, 'month': 2}})).status_code == 400
+            birthday = {'day': 29, 'month': 2, 'year': None}
+            assert (await client.put(endpoint, headers=owner, json={'birthday': birthday})).json()['birthday'] == birthday
+            assert (await client.get('/api/me', headers=owner)).json()['birthday'] == birthday
+            assert 'birthday' not in (await client.get('/api/users/101', headers=other)).json()
+            assert (await client.put('/api/me/privacy/birthday', headers=owner, json={'mode': 'nobody', 'allow': [102]})).status_code == 200
+            assert (await client.put('/api/me/privacy/bio', headers=owner, json={'mode': 'nobody'})).status_code == 200
+            profile = (await client.get('/api/users/101', headers=other)).json()
+            assert profile['birthday'] == birthday and profile['bio'] == ''
+            contact = await client.post('/api/contacts', headers=other, json={'user_id': 101})
+            assert contact.json()['contact']['bio'] == ''
+            assert (await client.put(endpoint, headers=owner, json={'birthday': None})).json()['birthday'] is None
 
     run(scenario())

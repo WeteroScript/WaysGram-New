@@ -1285,6 +1285,9 @@ async def init_messenger_storage(database_path: Path) -> None:
             CREATE TABLE IF NOT EXISTS phone_lookup_limits (
                 telegram_id INTEGER PRIMARY KEY, minute INTEGER NOT NULL, attempts INTEGER NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS profile_birthdays (
+                telegram_id INTEGER PRIMARY KEY, day INTEGER NOT NULL, month INTEGER NOT NULL, year INTEGER
+            );
             CREATE TABLE IF NOT EXISTS account_profile_privacy (
                 telegram_id INTEGER NOT NULL, setting TEXT NOT NULL, rules TEXT NOT NULL,
                 PRIMARY KEY (telegram_id, setting)
@@ -4082,6 +4085,9 @@ def build_messenger_router(
                             authorization: str | None = Header(default=None)) -> dict[str, Any]:
         uid = int((await current_user(authorization))["telegram_id"])
         async with aiosqlite.connect(db_path()) as db:
+            await db.execute("BEGIN")
+            if not await privacy_allows(db, user_id, uid, "music"):
+                return {"count": 0, "tracks": []}
             db.row_factory = aiosqlite.Row
             cur = await db.execute("""SELECT a.id AS media_id,a.mime_type AS media_type,
                 a.original_name AS media_name,a.media_kind,a.media_metadata,a.size_bytes
@@ -4157,7 +4163,7 @@ def build_messenger_router(
                       (b.owner_telegram_id=p.user_id AND b.blocked_telegram_id=?) OR
                       (b.owner_telegram_id=? AND b.blocked_telegram_id=p.user_id))""",
                     (media_id, media["owner_telegram_id"], uid, uid))
-                allowed = await cur.fetchone() is not None
+                allowed = await cur.fetchone() is not None and await privacy_allows(db, int(media["owner_telegram_id"]), uid, "music")
             if not allowed:
                 cur = await db.execute(
                     """SELECT 1 FROM messages
@@ -4817,7 +4823,7 @@ def build_messenger_router(
         else:
             cur = await db.execute("SELECT rules FROM account_profile_privacy WHERE telegram_id=? AND setting=?", (uid, setting))
         row = await cur.fetchone()
-        return json.loads(row[0]) if row else {"mode": {"invites": "everyone", "find-by-phone": "contacts", "avatar": "everyone"}.get(setting, "nobody"), "allow": [], "deny": []}
+        return json.loads(row[0]) if row else {"mode": {"invites": "everyone", "find-by-phone": "contacts", "avatar": "everyone", "bio": "everyone", "music": "everyone"}.get(setting, "nobody"), "allow": [], "deny": []}
 
     async def privacy_allows(db: Any, owner: int, viewer: int, setting: str) -> bool:
         if owner == viewer:
@@ -4846,6 +4852,8 @@ def build_messenger_router(
                 owner = int(item.get("id") or item["telegram_id"])
                 if not await privacy_allows(db, owner, viewer, "avatar"):
                     item["avatar_media_id"] = ""
+            if item.get("bio") and not await privacy_allows(db, int(item.get("id") or item["telegram_id"]), viewer, "bio"):
+                item["bio"] = ""
             result.append(item)
         return result
 
@@ -4856,7 +4864,7 @@ def build_messenger_router(
     @router.get("/api/me/privacy/{setting}")
     async def get_privacy(setting: str, authorization: str | None = Header(default=None)):
         uid = int((await current_user(authorization))["telegram_id"])
-        if setting not in ("invites", "phone", "last-seen", "find-by-phone", "avatar"):
+        if setting not in ("invites", "phone", "last-seen", "find-by-phone", "avatar", "bio", "birthday", "music"):
             raise HTTPException(404, "PRIVACY_KEY_INVALID")
         async with aiosqlite.connect(db_path()) as db:
             return await privacy_rules(db, uid, setting)
@@ -4864,7 +4872,7 @@ def build_messenger_router(
     @router.put("/api/me/privacy/{setting}")
     async def set_privacy(setting: str, payload: dict[str, Any], authorization: str | None = Header(default=None)):
         uid = int((await current_user(authorization))["telegram_id"])
-        if setting not in ("invites", "phone", "last-seen", "find-by-phone", "avatar"):
+        if setting not in ("invites", "phone", "last-seen", "find-by-phone", "avatar", "bio", "birthday", "music"):
             raise HTTPException(404, "PRIVACY_KEY_INVALID")
         mode = payload.get("mode")
         if mode not in ("everyone", "contacts", "nobody"):
@@ -4883,6 +4891,38 @@ def build_messenger_router(
             await db.commit()
         return result
 
+    async def profile_birthday(db: Any, uid: int) -> dict[str, Any] | None:
+        cur = await db.execute("SELECT day,month,year FROM profile_birthdays WHERE telegram_id=?", (uid,))
+        row = await cur.fetchone()
+        return {"day": row[0], "month": row[1], "year": row[2]} if row else None
+
+    @router.put("/api/me/birthday")
+    async def update_birthday(payload: dict[str, Any], authorization: str | None = Header(default=None)):
+        from datetime import date
+
+        uid = int((await current_user(authorization))["telegram_id"])
+        if "birthday" not in payload:
+            raise HTTPException(400, "BIRTHDAY_INVALID")
+        birthday = payload["birthday"]
+        if birthday is not None:
+            if not isinstance(birthday, dict):
+                raise HTTPException(400, "BIRTHDAY_INVALID")
+            day, month, year = (birthday.get(key) for key in ("day", "month", "year"))
+            try:
+                if type(day) is not int or type(month) is not int or (year is not None and (type(year) is not int or year < 1900)):
+                    raise ValueError
+                if date(2000 if year is None else year, month, day) > date.today():
+                    raise ValueError
+            except (ValueError, OverflowError):
+                raise HTTPException(400, "BIRTHDAY_INVALID")
+        async with aiosqlite.connect(db_path()) as db:
+            if birthday is None:
+                await db.execute("DELETE FROM profile_birthdays WHERE telegram_id=?", (uid,))
+            else:
+                await db.execute("INSERT INTO profile_birthdays VALUES(?,?,?,?) ON CONFLICT(telegram_id) DO UPDATE SET day=excluded.day,month=excluded.month,year=excluded.year", (uid, day, month, year))
+            await db.commit()
+            return {"birthday": await profile_birthday(db, uid)}
+
     @router.get("/api/me")
     async def get_me(authorization: str | None = Header(default=None)) -> dict[str, Any]:
         user = await current_user(authorization)
@@ -4898,6 +4938,7 @@ def build_messenger_router(
             if re.fullmatch(r"\+[1-9]\d{7,14}", number):
                 result["phone"] = number
         async with aiosqlite.connect(db_path()) as db:
+            result["birthday"] = await profile_birthday(db, int(user["telegram_id"]))
             result["personal_channel"] = await profile_channel(db, int(user["telegram_id"]), int(user["telegram_id"]))
             result["worn_gift"] = await worn_gift_status(db, int(user["telegram_id"]))
             result.update(await profile_rating(db, int(user["telegram_id"]), now=int(time.time()), include_pending=True))
@@ -5676,6 +5717,8 @@ def build_messenger_router(
             )
             common_contacts = await avatar_visible_rows(db, await cur.fetchall(), viewer_id)
             visible = {}
+            if await privacy_allows(db, user_id, viewer_id, "birthday"):
+                visible["birthday"] = await profile_birthday(db, user_id)
             if await privacy_allows(db, user_id, viewer_id, "phone"):
                 cur = await db.execute("SELECT virtual_number FROM accounts WHERE telegram_id=?", (user_id,))
                 phone = str((await cur.fetchone())[0] or "").strip()
