@@ -754,6 +754,15 @@ async def init_messenger_storage(database_path: Path) -> None:
                 seconds INTEGER NOT NULL CHECK(seconds IN (86400,604800,2592000)),
                 PRIMARY KEY(user_low,user_high)
             );
+            CREATE TABLE IF NOT EXISTS dm_auto_delete_defaults (
+                telegram_id INTEGER PRIMARY KEY,
+                seconds INTEGER NOT NULL CHECK(seconds IN (86400,604800,2592000))
+            );
+            CREATE TABLE IF NOT EXISTS dm_auto_delete_seen (
+                user_low INTEGER NOT NULL,
+                user_high INTEGER NOT NULL,
+                PRIMARY KEY(user_low,user_high)
+            );
             CREATE TABLE IF NOT EXISTS message_gifts (
                 message_id INTEGER PRIMARY KEY REFERENCES messages(id) ON DELETE CASCADE,
                 serial_number TEXT NOT NULL,
@@ -1772,8 +1781,26 @@ async def init_messenger_storage(database_path: Path) -> None:
                     await db.execute(f"ALTER TABLE {db_split.SCHEMA}.messages ADD COLUMN auto_delete_at INTEGER")
                 await db.execute(f"""CREATE INDEX IF NOT EXISTS {db_split.SCHEMA}.idx_dm_auto_delete
                     ON messages(auto_delete_at) WHERE auto_delete_at IS NOT NULL""")
-                await db.execute(f"""CREATE TRIGGER IF NOT EXISTS {db_split.SCHEMA}.stamp_dm_auto_delete
-                    AFTER INSERT ON messages BEGIN
+                auto_delete_v2 = await db.execute(f"SELECT 1 FROM {db_split.SCHEMA}.sqlite_master WHERE type='trigger' AND name='stamp_dm_auto_delete_v2'")
+                if not await auto_delete_v2.fetchone():
+                    await db.execute(f"DROP TRIGGER IF EXISTS {db_split.SCHEMA}.stamp_dm_auto_delete")
+                    await db.execute(f"""INSERT OR IGNORE INTO {db_split.SCHEMA}.dm_auto_delete_seen
+                        SELECT MIN(sender_telegram_id,recipient_telegram_id), MAX(sender_telegram_id,recipient_telegram_id)
+                        FROM {db_split.SCHEMA}.messages WHERE sender_telegram_id<>recipient_telegram_id""")
+                    await db.execute(f"""INSERT OR IGNORE INTO {db_split.SCHEMA}.dm_auto_delete_seen
+                        SELECT user_low,user_high FROM {db_split.SCHEMA}.dm_auto_delete""")
+                await db.execute(f"""CREATE TRIGGER IF NOT EXISTS {db_split.SCHEMA}.stamp_dm_auto_delete_v2
+                    AFTER INSERT ON messages WHEN NEW.sender_telegram_id<>NEW.recipient_telegram_id BEGIN
+                    INSERT OR IGNORE INTO dm_auto_delete
+                    SELECT MIN(NEW.sender_telegram_id,NEW.recipient_telegram_id),
+                           MAX(NEW.sender_telegram_id,NEW.recipient_telegram_id), seconds
+                    FROM dm_auto_delete_defaults WHERE telegram_id=NEW.sender_telegram_id
+                    AND NOT EXISTS (SELECT 1 FROM dm_auto_delete_seen
+                        WHERE user_low=MIN(NEW.sender_telegram_id,NEW.recipient_telegram_id)
+                          AND user_high=MAX(NEW.sender_telegram_id,NEW.recipient_telegram_id));
+                    INSERT OR IGNORE INTO dm_auto_delete_seen VALUES (
+                        MIN(NEW.sender_telegram_id,NEW.recipient_telegram_id),
+                        MAX(NEW.sender_telegram_id,NEW.recipient_telegram_id));
                     UPDATE messages SET auto_delete_at=NEW.created_at+(
                         SELECT seconds FROM dm_auto_delete
                         WHERE user_low=MIN(NEW.sender_telegram_id,NEW.recipient_telegram_id)
@@ -11949,6 +11976,29 @@ def build_messenger_router(
             (scope, chat_id, user_a, user_b, message_id, kind, actor_id, int(time.time())),
         )
 
+    @router.get("/api/me/auto-delete")
+    async def get_default_auto_delete(authorization: str | None = Header(default=None)):
+        uid = int((await current_user(authorization))["telegram_id"])
+        async with aiosqlite.connect(db_path()) as db:
+            cur = await db.execute("SELECT seconds FROM dm_auto_delete_defaults WHERE telegram_id=?", (uid,))
+            row = await cur.fetchone()
+        return {"seconds": row[0] if row else 0}
+
+    @router.put("/api/me/auto-delete")
+    async def set_default_auto_delete(payload: dict[str, Any], authorization: str | None = Header(default=None)):
+        uid = int((await current_user(authorization))["telegram_id"])
+        seconds = payload.get("seconds")
+        if type(seconds) is not int or seconds not in (0, 86400, 604800, 2592000):
+            raise HTTPException(400, "AUTO_DELETE_INVALID")
+        async with aiosqlite.connect(db_path()) as db:
+            if seconds:
+                await db.execute("""INSERT INTO dm_auto_delete_defaults VALUES(?,?)
+                    ON CONFLICT(telegram_id) DO UPDATE SET seconds=excluded.seconds""", (uid, seconds))
+            else:
+                await db.execute("DELETE FROM dm_auto_delete_defaults WHERE telegram_id=?", (uid,))
+            await db.commit()
+        return {"seconds": seconds}
+
     @router.get("/api/chats/{peer_id}/auto-delete")
     async def get_dm_auto_delete(peer_id: int, authorization: str | None = Header(default=None)):
         uid = int((await current_user(authorization))["telegram_id"])
@@ -11974,6 +12024,7 @@ def build_messenger_router(
             if await cur.fetchone():
                 raise HTTPException(403, "PEER_BLOCKED")
             pair = sorted((uid, peer_id))
+            await db.execute("INSERT OR IGNORE INTO dm_auto_delete_seen VALUES(?,?)", pair)
             if seconds:
                 await db.execute("""INSERT INTO dm_auto_delete VALUES(?,?,?)
                     ON CONFLICT(user_low,user_high) DO UPDATE SET seconds=excluded.seconds""", (*pair, seconds))

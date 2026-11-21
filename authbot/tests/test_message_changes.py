@@ -1556,3 +1556,42 @@ def test_dm_auto_delete_applies_to_new_messages_and_syncs_both_participants(env)
                     await stop()
 
     run(scenario())
+
+
+def test_default_auto_delete_is_inherited_once_by_new_private_chats(env):
+    import db_split
+
+    path, app = env
+    pair = sorted((102, ADMIN))
+    with db_split.sqlite_connect(path) as db:
+        db.execute('DELETE FROM messages WHERE MIN(sender_telegram_id,recipient_telegram_id)=? AND MAX(sender_telegram_id,recipient_telegram_id)=?', pair)
+        db.execute('DELETE FROM dm_auto_delete_seen WHERE user_low=? AND user_high=?', pair)
+        db.commit()
+
+    async def scenario():
+        async with await client_for(app) as client:
+            async def send(sender, recipient):
+                response = await client.post('/api/messages', headers=headers(sender), json={'recipient_id': recipient, 'body': 'TTL check'})
+                assert response.status_code == 201
+                return response.json()['id']
+
+            route = '/api/me/auto-delete'
+            assert (await client.get(route, headers=headers(102))).json() == {'seconds': 0}
+            existing = await send(102, 101)
+            assert (await client.put(route, headers=headers(102), json={'seconds': 2678400})).status_code == 400
+            assert (await client.put(route, headers=headers(102), json={'seconds': 2592000})).status_code == 200
+            assert (await client.get(route, headers=headers(102))).json() == {'seconds': 2592000}
+            assert (await client.get(route, headers=headers(ADMIN))).json() == {'seconds': 0}
+            still_existing = await send(102, 101)
+            first = await send(102, ADMIN)
+            timer = f'/api/chats/{ADMIN}/auto-delete'
+            assert (await client.get(timer, headers=headers(102))).json() == {'seconds': 2592000}
+            assert (await client.put(route, headers=headers(102), json={'seconds': 604800})).status_code == 200
+            second = await send(ADMIN, 102)
+            assert (await client.put('/api/chats/102/auto-delete', headers=headers(ADMIN), json={'seconds': 0})).status_code == 200
+            after_off = await send(102, ADMIN)
+            with db_split.sqlite_connect(path) as db:
+                rows = dict(db.execute('SELECT id,auto_delete_at-created_at FROM messages WHERE id IN (?,?,?,?,?)', (existing, still_existing, first, second, after_off)))
+            assert rows == {existing: None, still_existing: None, first: 2592000, second: 2592000, after_off: None}
+
+    run(scenario())

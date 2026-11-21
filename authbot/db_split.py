@@ -36,6 +36,8 @@ MESSENGER_TABLES = frozenset(
     {
         "messages",
         "dm_auto_delete",
+        "dm_auto_delete_defaults",
+        "dm_auto_delete_seen",
         "push_outbox",
         "message_gifts",
         "message_contacts",

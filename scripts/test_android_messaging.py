@@ -23,6 +23,16 @@ class NativeMessagingSourceChecks(unittest.TestCase):
     def source(self, path):
         return self.archive.read(BASE + path).decode('utf-8')
 
+    def test_global_auto_delete_uses_confirmed_default_and_supported_durations(self):
+        transport = self.source('tgnet/WaysGramTransport.java')
+        settings = self.source('ui/AutoDeleteMessagesActivity.java')
+        popup = self.source('ui/Components/AutoDeletePopupWrapper.java')
+        self.assertIn('WaysGramApi.get(account, "/api/me/auto-delete").optInt("seconds")', transport)
+        self.assertIn('WaysGramApi.put(account, "/api/me/auto-delete", body)', transport)
+        self.assertLess(settings.index('if (!(response instanceof TLRPC.TL_boolTrue))'), settings.index('getUserConfig().setGlobalTtl(minutes)'))
+        self.assertIn('(WaysGramTransport.ENABLED ? 30 : 31)', settings)
+        self.assertIn('(waysGramTimer ? 30 : 31)', popup)
+
     def test_private_auto_delete_uses_server_and_applies_after_success(self):
         transport = self.source('tgnet/WaysGramTransport.java')
         profile = self.source('tgnet/WaysGramProfile.java')
