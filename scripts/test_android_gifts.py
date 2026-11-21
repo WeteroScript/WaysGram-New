@@ -289,7 +289,9 @@ class AndroidGiftSourceChecks(unittest.TestCase):
         self.assertIn("gift.pinned_to_top && !gift.unsaved", cover)
         self.assertIn("maxCount = waysGram ? 6", cover)
         self.assertIn("if (!waysGram && emojiStatus instanceof TLRPC.TL_emojiStatusCollectible)", cover)
-        self.assertIn("findWaysGramGift(gift.id)", profile)
+        self.assertIn("showWaysGramProfileGift(gift.id, gift.slug)", profile)
+        self.assertIn("showWaysGramProfileGift(status.collectible_id, status.slug)", profile)
+        self.assertIn("giftsView.findWaysGramGift(id, slug)", profile)
         self.assertIn(".set(saved, null).show()", profile)
         self.assertIn('!gift.slug.startsWith("waysgram://")', cover)
 
