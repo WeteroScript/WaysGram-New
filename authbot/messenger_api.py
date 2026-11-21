@@ -1692,6 +1692,8 @@ async def init_messenger_storage(database_path: Path) -> None:
         cur = await db.execute("PRAGMA table_info(channels)")
         if "paid_reactions_enabled" not in {row[1] for row in await cur.fetchall()}:
             await db.execute("ALTER TABLE channels ADD COLUMN paid_reactions_enabled INTEGER NOT NULL DEFAULT 0")
+        if "members_hidden" not in chat_group_columns:
+            await db.execute(f"ALTER TABLE {db_split.SCHEMA}.chat_groups ADD COLUMN members_hidden INTEGER NOT NULL DEFAULT 0")
         if "slow_mode_seconds" not in chat_group_columns:
             await db.execute(
                 f"ALTER TABLE {db_split.SCHEMA}.chat_groups "
@@ -14767,20 +14769,21 @@ def build_messenger_router(
             membership = await require_group_member(db, group_id, uid)
             cur = await db.execute(
                 """SELECT g.id,g.username,g.title,g.description,g.owner_telegram_id,g.created_at,
-                          g.slow_mode_seconds,
+                          g.slow_mode_seconds,g.members_hidden,
                           (SELECT COUNT(*) FROM group_members m WHERE m.group_id=g.id) AS member_count
                    FROM chat_groups g WHERE g.id=?""",
                 (group_id,),
             )
             group = await cur.fetchone()
+            restricted_roster = bool(group["members_hidden"]) and membership["role"] == "member"
             cur = await db.execute(
                 """SELECT gm.telegram_id,gm.role,gm.joined_at,a.username,a.display_name,a.avatar_media_id,
                           CASE WHEN gm.role IN ('owner','admin') THEN gm.admin_rights ELSE 0 END AS admin_rights
                    FROM group_members gm LEFT JOIN accounts a ON a.telegram_id=gm.telegram_id
-                   WHERE gm.group_id=? ORDER BY
+                   WHERE gm.group_id=? AND (?=0 OR gm.telegram_id=? OR gm.role IN ('owner','admin')) ORDER BY
                    CASE gm.role WHEN 'owner' THEN 0 WHEN 'admin' THEN 1 ELSE 2 END,
                    gm.joined_at LIMIT 200""",
-                (group_id,),
+                (group_id, int(restricted_roster), uid),
             )
             members = await avatar_visible_rows(db, await cur.fetchall(), uid)
             pending = 0
@@ -14794,6 +14797,7 @@ def build_messenger_router(
                 pending = rows[0]["total"] if rows else 0
                 recent_requesters = [r["telegram_id"] for r in rows]
         result = dict(group)
+        result["members_hidden"] = bool(result["members_hidden"])
         result["labels"] = await entity_labels("group", group_id)
         result["my_role"] = membership["role"]
         result["admin_rights"] = membership["admin_rights"] if membership["role"] in ("owner", "admin") else 0
@@ -14830,6 +14834,21 @@ def build_messenger_router(
                 await db.execute(f"UPDATE chat_groups SET {key}=? WHERE id=?", (value, group_id))
             await db.commit()
         return {"id": group_id, **fields}
+
+    @router.put("/api/groups/{group_id}/member-visibility")
+    async def set_group_member_visibility(group_id: int, payload: dict[str, Any],
+                                          authorization: str | None = Header(default=None)):
+        uid = int((await current_user(authorization))["telegram_id"])
+        hidden = payload.get("members_hidden")
+        if type(hidden) is not bool:
+            raise HTTPException(400, "INVALID_MEMBER_VISIBILITY")
+        async with aiosqlite.connect(db_path()) as db:
+            cur = await db.execute("UPDATE chat_groups SET members_hidden=? WHERE id=? AND owner_telegram_id=?",
+                                   (int(hidden), group_id, uid))
+            if not cur.rowcount:
+                raise HTTPException(404, "GROUP_NOT_FOUND")
+            await db.commit()
+        return {"members_hidden": hidden}
 
     @router.delete("/api/groups/{group_id}")
     async def delete_group(group_id: int, authorization: str | None = Header(default=None)) -> dict[str, bool]:

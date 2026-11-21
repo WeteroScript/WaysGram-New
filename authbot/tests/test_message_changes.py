@@ -1742,3 +1742,34 @@ def test_channel_paid_reactions_are_opt_in_atomic_and_idempotent(env):
             assert await cur.fetchall() == [(101, 5), (102, -5)]
 
     run(scenario())
+
+
+def test_group_hidden_roster_preserves_counts_and_admin_access(env):
+    _, app = env
+
+    async def scenario():
+        async with await client_for(app) as client:
+            owner, member, other = headers(101), headers(102), headers(ADMIN)
+            created = await client.post('/api/groups', headers=owner, json={'title': 'Private roster', 'member_ids': [102, ADMIN]})
+            assert created.status_code == 201 and created.json()['member_count'] == 3
+            base = f"/api/groups/{created.json()['id']}"
+            setting = base + '/member-visibility'
+            async def roster(who):
+                result = (await client.get(base, headers=who)).json()
+                assert result['member_count'] == 3
+                return {m['telegram_id'] for m in result['members']}
+
+            everyone = {101, 102, ADMIN}
+            assert await roster(member) == everyone
+            assert (await client.put(setting, headers=member, json={'members_hidden': True})).status_code == 404
+            assert (await client.put(setting, headers=owner, json={'members_hidden': 'true'})).status_code == 400
+            assert (await client.put(setting, headers=owner, json={'members_hidden': True})).status_code == 200
+            assert await roster(member) == {101, 102}
+            assert await roster(other) == {101, ADMIN}
+            assert await roster(owner) == everyone
+            assert (await client.post(base + '/admins', headers=owner, json={'telegram_id': ADMIN})).status_code in (200, 201)
+            assert await roster(other) == everyone
+            assert (await client.put(setting, headers=owner, json={'members_hidden': False})).status_code == 200
+            assert await roster(member) == everyone
+
+    run(scenario())

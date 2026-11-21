@@ -83,6 +83,13 @@ class NativeMessagingSourceChecks(unittest.TestCase):
         self.assertIn('int[] days = {7, 30, 90}', helper)
         self.assertIn('data.optLong("paid_reaction_stars")', helper)
 
+    def test_group_roster_visibility_uses_server_setting(self):
+        editor = self.source('ui/ChatEditActivity.java')
+        self.assertIn('currentChat.creator && !ChatObject.isChannel(currentChat)', editor)
+        self.assertIn('groupRosterVisibility(null)', editor)
+        self.assertIn('request("PUT", group + "/member-visibility"', editor)
+        self.assertIn('put("members_hidden", hide)', editor)
+
     def test_secret_numbers_are_grouped_and_valid_at_login(self):
         login = self.source('ui/LoginActivity.java')
         picker = self.source('ui/CountrySelectActivity.java')
