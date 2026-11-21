@@ -63,6 +63,17 @@ class NativeMessagingSourceChecks(unittest.TestCase):
         self.assertIn('!org.telegram.tgnet.WaysGramTransport.ENABLED && ChatObject.isBoostSupported(currentChat)', chat)
         self.assertIn('!org.telegram.tgnet.WaysGramTransport.ENABLED && ChatObject.isChannelAndNotMegaGroup(currentChat) && !ChatObject.isCommunity(currentChat)', edit)
 
+    def test_paid_channel_reactions_require_confirmation_and_reuse_pending_key(self):
+        menu = self.source('ui/ChatActivity.java')
+        edit = self.source('ui/ChatEditActivity.java')
+        payment = self.source('ui/WaysGramPaidReactions.java')
+        self.assertIn('WaysGramPaidReactions.showPost', menu)
+        self.assertIn('WaysGramPaidReactions.showSetting', edit)
+        self.assertIn('retryKey != null ? retryKey : UUID.randomUUID().toString()', payment)
+        self.assertLess(payment.index('putString(slot, key)'), payment.index('request("POST", path'))
+        self.assertIn('put("stars", amount), token, 15000, key', payment)
+        self.assertIn('data.optLong("total_stars"), data.optLong("my_stars")', payment)
+
     def test_secret_numbers_are_grouped_and_valid_at_login(self):
         login = self.source('ui/LoginActivity.java')
         picker = self.source('ui/CountrySelectActivity.java')

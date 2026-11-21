@@ -1,6 +1,6 @@
 # Channel paid reactions
 
-Server implementation; Android is not yet wired. Uses internal WaysGram Stars, not Telegram Stars or payments.
+Android: the owner can enable paid reactions in channel settings. The context menu on a published channel post shows totals and lets readers choose and confirm a contribution. The pending key is kept locally so an ambiguous payment can be retried without a second debit. Uses internal WaysGram Stars, not Telegram Stars or payments.
 
 - `GET /api/channels/{id}` includes `paid_reactions_enabled` (off by default).
 - Owner: `PUT /api/channels/{id}/paid-reactions` with `{"enabled":true}`.
