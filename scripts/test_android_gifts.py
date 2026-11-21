@@ -345,7 +345,11 @@ class AndroidGiftSourceChecks(unittest.TestCase):
         layout = self.source("ui/Components/SharedMediaLayout.java")
         tabs = layout.split("public void updateTabs(boolean animated)", 1)[1].split("private void startStopVisibleGifs", 1)[0]
         self.assertIn("hasMedia[0] > 0", tabs)
-        self.assertIn("hasWaysGramGifts && org.telegram.tgnet.WaysGramTransport.ENABLED", tabs)
+        self.assertIn("waysGramGiftsController.hasVisibleGifts()", tabs)
+        controller = self.source("messenger/waysgram/WaysGramProfileGiftsController.java")
+        self.assertIn("boolean visible = !nativeGifts.isEmpty()", controller)
+        self.assertIn("if (hasVisibleGifts != visible)", controller)
+        self.assertIn("waysGramProfileOwner > 0 && org.telegram.tgnet.WaysGramTransport.ENABLED", tabs)
         self.assertIn("hasPhotoVideoTab != scrollSlidingTextTabStrip.hasTab(TAB_PHOTOVIDEO)", tabs)
         self.assertIn("if (hasPhotoVideoTab)", tabs)
         self.assertLess(tabs.index("tabs.add(new Pair(TAB_PHOTOVIDEO"),
