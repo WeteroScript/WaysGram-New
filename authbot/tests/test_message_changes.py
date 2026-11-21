@@ -1863,3 +1863,52 @@ def test_channel_paid_media_requires_purchase_and_charges_once(env):
             assert await cur.fetchall() == [(101, 5), (102, -5)]
 
     run(scenario())
+
+
+def test_paid_channel_subscription_expires_without_converting_to_free_membership(env):
+    import aiosqlite
+
+    path, app = env
+
+    async def scenario():
+        async with aiosqlite.connect(path) as db:
+            await db.execute('UPDATE accounts SET stars=20 WHERE telegram_id=102')
+            await db.commit()
+        async with await client_for(app) as client:
+            owner, buyer = headers(101), headers(102)
+            channel = await client.post('/api/channels', headers=owner, json={'title': 'Subscriber news', 'is_public': False})
+            cid = channel.json()['id']
+            base = f'/api/channels/{cid}'
+            assert (await client.post(base + '/messages', headers=owner, json={'body': 'Private news'})).status_code == 201
+            offer = await client.put(base + '/subscription-offer', headers=owner, json={'price_stars': 6})
+            assert offer.status_code == 200
+            token = offer.json()['token']
+            assert (await client.get(base + '/subscription-offer', headers=owner)).json() == offer.json()
+            assert (await client.get(base + '/subscription-offer', headers=buyer)).status_code == 404
+            url = '/api/channel-subscriptions/' + token
+            assert (await client.get(url, headers=buyer)).json()['already_has_access'] is False
+            pay = {**buyer, 'Idempotency-Key': 'subscription-0001'}
+            assert (await client.get(base + '/messages', headers=buyer)).status_code == 403
+            assert (await client.post(url, headers=pay, json={'approved_price_stars': 5})).status_code == 402
+            responses = await asyncio.gather(*(client.post(url, headers=pay, json={'approved_price_stars': 6}) for _ in range(2)))
+            assert responses[0].status_code == responses[1].status_code == 200
+            assert responses[0].json() == responses[1].json()
+            assert (await client.get(base + '/messages', headers=buyer)).json()['messages'][0]['body'] == 'Private news'
+            assert (await client.put(base + '/membership', headers=buyer, json={'joined': True})).status_code == 200
+            assert (await client.get(url, headers=buyer)).json()['already_has_access'] is True
+            async with aiosqlite.connect(path) as db:
+                await db.execute('UPDATE channel_subscriptions SET expires_at=0 WHERE channel_id=? AND telegram_id=102', (cid,))
+                await db.commit()
+            assert (await client.get(base + '/messages', headers=buyer)).status_code == 403
+            assert not (await client.get('/api/channels', headers=buyer)).json()['channels']
+            assert (await client.get(url, headers=buyer)).json()['already_has_access'] is False
+            assert (await client.post(url, headers=pay, json={'approved_price_stars': 6})).json() == responses[0].json()
+            assert (await client.get(base + '/messages', headers=buyer)).status_code == 403
+            renewal = await client.post(url, headers={**buyer, 'Idempotency-Key': 'subscription-0002'}, json={'approved_price_stars': 6})
+            assert renewal.status_code == 200
+            assert (await client.get(base + '/messages', headers=buyer)).status_code == 200
+        async with aiosqlite.connect(path) as db:
+            cur = await db.execute("SELECT telegram_id,SUM(amount),COUNT(*) FROM economy_transactions WHERE reason=? GROUP BY telegram_id ORDER BY telegram_id", (f'channel_subscription:{cid}',))
+            assert await cur.fetchall() == [(101, 12, 2), (102, -12, 2)]
+
+    run(scenario())
