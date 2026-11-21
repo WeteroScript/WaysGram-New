@@ -1249,3 +1249,32 @@ def test_profile_phone_and_last_seen_visibility(env):
             assert 'last_seen_at' in await profile()
 
     run(scenario())
+
+
+def test_find_by_phone_is_separate_from_number_visibility(env):
+    import sqlite3
+
+    db_path, app = env
+
+    async def scenario():
+        async with await client_for(app) as client:
+            owner, viewer = headers(101), headers(102)
+            phone = '+48123456789'
+            with sqlite3.connect(db_path) as db:
+                db.execute('UPDATE accounts SET virtual_number=? WHERE telegram_id=101', (phone,))
+            route = '/api/contacts/resolve-phone'
+            settings = '/api/me/privacy/find-by-phone'
+            assert (await client.get(settings, headers=owner)).json()['mode'] == 'contacts'
+            hidden = await client.post(route, headers=viewer, json={'phone': phone})
+            missing = await client.post(route, headers=viewer, json={'phone': '+48123456780'})
+            assert hidden.status_code == missing.status_code == 404
+            assert hidden.json() == missing.json()
+            assert (await client.post('/api/contacts', headers=owner, json={'user_id': 102})).status_code == 201
+            visible = await client.post(route, headers=viewer, json={'phone': phone.lstrip('+')})
+            assert visible.status_code == 200 and visible.json()['id'] == 101
+            assert 'phone' not in visible.json()
+            assert 'phone' not in (await client.get('/api/users/101', headers=viewer)).json()
+            assert (await client.put(settings, headers=owner, json={'mode': 'nobody'})).status_code == 200
+            assert (await client.post(route, headers=viewer, json={'phone': phone})).status_code == 404
+
+    run(scenario())

@@ -1273,6 +1273,9 @@ async def init_messenger_storage(database_path: Path) -> None:
             CREATE TABLE IF NOT EXISTS profile_channels (
                 telegram_id INTEGER PRIMARY KEY, channel_id INTEGER NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS phone_lookup_limits (
+                telegram_id INTEGER PRIMARY KEY, minute INTEGER NOT NULL, attempts INTEGER NOT NULL
+            );
             CREATE TABLE IF NOT EXISTS account_profile_privacy (
                 telegram_id INTEGER NOT NULL, setting TEXT NOT NULL, rules TEXT NOT NULL,
                 PRIMARY KEY (telegram_id, setting)
@@ -4791,7 +4794,7 @@ def build_messenger_router(
         else:
             cur = await db.execute("SELECT rules FROM account_profile_privacy WHERE telegram_id=? AND setting=?", (uid, setting))
         row = await cur.fetchone()
-        return json.loads(row[0]) if row else {"mode": "everyone" if setting == "invites" else "nobody", "allow": [], "deny": []}
+        return json.loads(row[0]) if row else {"mode": {"invites": "everyone", "find-by-phone": "contacts"}.get(setting, "nobody"), "allow": [], "deny": []}
 
     async def privacy_allows(db: Any, owner: int, viewer: int, setting: str) -> bool:
         if owner == viewer:
@@ -4819,7 +4822,7 @@ def build_messenger_router(
     @router.get("/api/me/privacy/{setting}")
     async def get_privacy(setting: str, authorization: str | None = Header(default=None)):
         uid = int((await current_user(authorization))["telegram_id"])
-        if setting not in ("invites", "phone", "last-seen"):
+        if setting not in ("invites", "phone", "last-seen", "find-by-phone"):
             raise HTTPException(404, "PRIVACY_KEY_INVALID")
         async with aiosqlite.connect(db_path()) as db:
             return await privacy_rules(db, uid, setting)
@@ -4827,7 +4830,7 @@ def build_messenger_router(
     @router.put("/api/me/privacy/{setting}")
     async def set_privacy(setting: str, payload: dict[str, Any], authorization: str | None = Header(default=None)):
         uid = int((await current_user(authorization))["telegram_id"])
-        if setting not in ("invites", "phone", "last-seen"):
+        if setting not in ("invites", "phone", "last-seen", "find-by-phone"):
             raise HTTPException(404, "PRIVACY_KEY_INVALID")
         mode = payload.get("mode")
         if mode not in ("everyone", "contacts", "nobody"):
@@ -5359,6 +5362,36 @@ def build_messenger_router(
             item["labels"] = await entity_labels("account", int(item["id"]))
             users.append(item)
         return {"users": users}
+
+    @router.post("/api/contacts/resolve-phone")
+    async def resolve_contact_phone(payload: dict[str, Any], authorization: str | None = Header(default=None)):
+        uid = int((await current_user(authorization))["telegram_id"])
+        phone = payload.get("phone")
+        if not isinstance(phone, str) or not re.fullmatch(r"\+?[1-9]\d{7,14}", phone):
+            raise HTTPException(400, "PHONE_NUMBER_INVALID")
+        phone = "+" + phone.lstrip("+")
+        minute = int(time.time()) // 60
+        async with aiosqlite.connect(db_path()) as db:
+            db.row_factory = aiosqlite.Row
+            cur = await db.execute("""INSERT INTO phone_lookup_limits(telegram_id,minute,attempts) VALUES(?,?,1)
+                ON CONFLICT(telegram_id) DO UPDATE SET
+                    attempts=CASE WHEN minute=excluded.minute THEN attempts+1 ELSE 1 END,
+                    minute=excluded.minute
+                WHERE minute<>excluded.minute OR attempts<20""", (uid, minute))
+            allowed = cur.rowcount == 1
+            await db.commit()
+            if not allowed:
+                raise HTTPException(429, "FLOOD_WAIT_60", headers={"Retry-After": "60"})
+            await db.execute("BEGIN")
+            cur = await db.execute("""SELECT telegram_id AS id,username,display_name,avatar_media_id
+                FROM accounts WHERE is_banned=0 AND telegram_id IN (
+                    SELECT telegram_id FROM accounts WHERE virtual_number=?
+                    UNION SELECT telegram_id FROM numbers WHERE number=?
+                ) LIMIT 2""", (phone, phone))
+            matches = await cur.fetchall()
+            if len(matches) != 1 or not await privacy_allows(db, int(matches[0]["id"]), uid, "find-by-phone"):
+                raise HTTPException(404, "PHONE_NOT_OCCUPIED")
+            return dict(matches[0])
 
     @router.get("/api/contacts")
     async def list_contacts(authorization: str | None = Header(default=None)) -> dict[str, Any]:
