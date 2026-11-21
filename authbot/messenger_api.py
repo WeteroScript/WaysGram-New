@@ -1273,6 +1273,10 @@ async def init_messenger_storage(database_path: Path) -> None:
             CREATE TABLE IF NOT EXISTS profile_channels (
                 telegram_id INTEGER PRIMARY KEY, channel_id INTEGER NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS account_profile_privacy (
+                telegram_id INTEGER NOT NULL, setting TEXT NOT NULL, rules TEXT NOT NULL,
+                PRIMARY KEY (telegram_id, setting)
+            );
             CREATE TABLE IF NOT EXISTS account_invite_privacy (
                 telegram_id INTEGER PRIMARY KEY, rules TEXT NOT NULL
             );
@@ -4781,33 +4785,50 @@ def build_messenger_router(
             await db.commit()
         return {"channel_id": channel_id}
 
-    async def invite_privacy(db: Any, uid: int) -> dict[str, Any]:
-        cur = await db.execute("SELECT rules FROM account_invite_privacy WHERE telegram_id=?", (uid,))
+    async def privacy_rules(db: Any, uid: int, setting: str) -> dict[str, Any]:
+        if setting == "invites":
+            cur = await db.execute("SELECT rules FROM account_invite_privacy WHERE telegram_id=?", (uid,))
+        else:
+            cur = await db.execute("SELECT rules FROM account_profile_privacy WHERE telegram_id=? AND setting=?", (uid, setting))
         row = await cur.fetchone()
-        return json.loads(row[0]) if row else {"mode": "everyone", "allow": [], "deny": []}
+        return json.loads(row[0]) if row else {"mode": "everyone" if setting == "invites" else "nobody", "allow": [], "deny": []}
+
+    async def privacy_allows(db: Any, owner: int, viewer: int, setting: str) -> bool:
+        if owner == viewer:
+            return True
+        if setting != "invites":
+            cur = await db.execute("""SELECT 1 FROM blocked_users WHERE
+                (owner_telegram_id=? AND blocked_telegram_id=?) OR
+                (owner_telegram_id=? AND blocked_telegram_id=?)""", (owner, viewer, viewer, owner))
+            if await cur.fetchone():
+                return False
+        rules = await privacy_rules(db, owner, setting)
+        if viewer in rules["deny"]:
+            return False
+        if viewer in rules["allow"] or rules["mode"] == "everyone":
+            return True
+        if rules["mode"] == "contacts":
+            cur = await db.execute("SELECT 1 FROM contacts WHERE owner_telegram_id=? AND contact_telegram_id=?", (owner, viewer))
+            return await cur.fetchone() is not None
+        return False
 
     async def require_invite_privacy(db: Any, actor: int, target: int) -> None:
-        if actor == target:
-            return
-        rules = await invite_privacy(db, target)
-        if actor not in rules["deny"]:
-            if actor in rules["allow"] or rules["mode"] == "everyone":
-                return
-            if rules["mode"] == "contacts":
-                cur = await db.execute("SELECT 1 FROM contacts WHERE owner_telegram_id=? AND contact_telegram_id=?", (target, actor))
-                if await cur.fetchone():
-                    return
-        raise HTTPException(403, "USER_PRIVACY_RESTRICTED")
+        if not await privacy_allows(db, target, actor, "invites"):
+            raise HTTPException(403, "USER_PRIVACY_RESTRICTED")
 
-    @router.get("/api/me/privacy/invites")
-    async def get_invite_privacy(authorization: str | None = Header(default=None)):
+    @router.get("/api/me/privacy/{setting}")
+    async def get_privacy(setting: str, authorization: str | None = Header(default=None)):
         uid = int((await current_user(authorization))["telegram_id"])
+        if setting not in ("invites", "phone", "last-seen"):
+            raise HTTPException(404, "PRIVACY_KEY_INVALID")
         async with aiosqlite.connect(db_path()) as db:
-            return await invite_privacy(db, uid)
+            return await privacy_rules(db, uid, setting)
 
-    @router.put("/api/me/privacy/invites")
-    async def set_invite_privacy(payload: dict[str, Any], authorization: str | None = Header(default=None)):
+    @router.put("/api/me/privacy/{setting}")
+    async def set_privacy(setting: str, payload: dict[str, Any], authorization: str | None = Header(default=None)):
         uid = int((await current_user(authorization))["telegram_id"])
+        if setting not in ("invites", "phone", "last-seen"):
+            raise HTTPException(404, "PRIVACY_KEY_INVALID")
         mode = payload.get("mode")
         if mode not in ("everyone", "contacts", "nobody"):
             raise HTTPException(400, "PRIVACY_RULE_INVALID")
@@ -4818,7 +4839,10 @@ def build_messenger_router(
                 raise HTTPException(400, "PRIVACY_RULE_INVALID")
             result[key] = list(dict.fromkeys(ids))
         async with aiosqlite.connect(db_path()) as db:
-            await db.execute("INSERT INTO account_invite_privacy VALUES(?,?) ON CONFLICT(telegram_id) DO UPDATE SET rules=excluded.rules", (uid, json.dumps(result)))
+            if setting == "invites":
+                await db.execute("INSERT INTO account_invite_privacy VALUES(?,?) ON CONFLICT(telegram_id) DO UPDATE SET rules=excluded.rules", (uid, json.dumps(result)))
+            else:
+                await db.execute("INSERT INTO account_profile_privacy VALUES(?,?,?) ON CONFLICT(telegram_id,setting) DO UPDATE SET rules=excluded.rules", (uid, setting, json.dumps(result)))
             await db.commit()
         return result
 
@@ -5582,11 +5606,27 @@ def build_messenger_router(
                 (user_id, viewer_id),
             )
             common_contacts = [dict(item) for item in await cur.fetchall()]
+            visible = {}
+            if await privacy_allows(db, user_id, viewer_id, "phone"):
+                cur = await db.execute("SELECT virtual_number FROM accounts WHERE telegram_id=?", (user_id,))
+                phone = str((await cur.fetchone())[0] or "").strip()
+                if not re.fullmatch(r"\+[1-9]\d{7,14}", phone):
+                    cur = await db.execute("SELECT number FROM numbers WHERE telegram_id=?", (user_id,))
+                    number = await cur.fetchone()
+                    phone = str(number[0] or "").strip() if number else ""
+                if re.fullmatch(r"\+[1-9]\d{7,14}", phone):
+                    visible["phone"] = phone
+            if await privacy_allows(db, user_id, viewer_id, "last-seen"):
+                cur = await db.execute("SELECT last_seen_at FROM api_user_presence WHERE telegram_id=?", (user_id,))
+                presence = await cur.fetchone()
+                if presence:
+                    visible["last_seen_at"] = int(presence[0])
             personal_channel = await profile_channel(db, user_id, viewer_id)
             status = await worn_gift_status(db, user_id)
             rating = await profile_rating(db, user_id, now=int(time.time()), include_pending=viewer_id == user_id)
         profile = dict(row)
         profile.update(rating)
+        profile.update(visible)
         profile["personal_channel"] = personal_channel
         profile["worn_gift"] = status
         profile["labels"] = await entity_labels("account", user_id)

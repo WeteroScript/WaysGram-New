@@ -1217,3 +1217,35 @@ def test_profile_channel_and_invite_privacy(env):
             assert (await client.post(route, headers=owner, json={'telegram_id': 102})).status_code == 201
 
     run(scenario())
+
+
+def test_profile_phone_and_last_seen_visibility(env):
+    import sqlite3
+
+    db_path, app = env
+
+    async def scenario():
+        async with await client_for(app) as client:
+            owner, viewer = headers(101), headers(102)
+            with sqlite3.connect(db_path) as db:
+                db.execute("UPDATE accounts SET virtual_number=? WHERE telegram_id=101", ('+48123456789',))
+            await client.get('/api/me', headers=owner)
+
+            async def profile():
+                response = await client.get('/api/users/101', headers=viewer)
+                assert response.status_code == 200
+                return response.json()
+
+            assert 'phone' not in await profile()
+            assert 'last_seen_at' not in await profile()
+            for setting in ('phone', 'last-seen'):
+                response = await client.put('/api/me/privacy/' + setting, headers=owner, json={'mode': 'nobody', 'allow': [102]})
+                assert response.status_code == 200
+            visible = await profile()
+            assert visible['phone'] == '+48123456789'
+            assert visible['last_seen_at'] > 0
+            assert (await client.put('/api/me/privacy/phone', headers=owner, json={'mode': 'everyone', 'deny': [102]})).status_code == 200
+            assert 'phone' not in await profile()
+            assert 'last_seen_at' in await profile()
+
+    run(scenario())
