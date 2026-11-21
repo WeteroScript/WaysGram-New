@@ -2201,3 +2201,23 @@ def test_channel_post_views_deduplicate_and_respect_channel_access(env):
             assert (await client.post(url, headers=reader, json=viewed)).json()['views'] == [0, 1, 0, 0]
 
     run(scenario())
+
+
+def test_channel_analytics_counts_actual_departures_not_retries(env):
+    _, app = env
+
+    async def scenario():
+        async with await client_for(app) as client:
+            owner, reader = headers(101), headers(102)
+            channel = await client.post('/api/channels', headers=owner,
+                                        json={'title': 'Churn', 'username': 'churn_news', 'is_public': True})
+            base = f"/api/channels/{channel.json()['id']}"
+            membership = base + '/membership'
+            for joined in (False, True, False, False, True):
+                assert (await client.put(membership, headers=reader, json={'joined': joined})).status_code == 200
+            for _ in range(2):
+                assert (await client.put(base + '/members/102/ban', headers=owner, json={'banned': True})).status_code == 200
+            stats = (await client.get(base + '/analytics?days=7', headers=owner)).json()
+            assert (stats['voluntary_leaves'], stats['moderated_removals']) == (1, 1)
+
+    run(scenario())

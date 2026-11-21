@@ -1072,6 +1072,13 @@ async def init_messenger_storage(database_path: Path) -> None:
                 ON channel_messages(channel_id, id DESC);
             CREATE INDEX IF NOT EXISTS idx_api_channel_author_time
                 ON channel_messages(author_telegram_id, created_at);
+            CREATE TABLE IF NOT EXISTS channel_member_departures (
+                channel_id INTEGER NOT NULL,
+                occurred_at INTEGER NOT NULL,
+                voluntary INTEGER NOT NULL CHECK(voluntary IN (0,1)),
+                departures INTEGER NOT NULL DEFAULT 1,
+                PRIMARY KEY(channel_id,occurred_at,voluntary)
+            );
             CREATE TABLE IF NOT EXISTS channel_post_views (
                 channel_id INTEGER NOT NULL,
                 message_id INTEGER NOT NULL,
@@ -9753,6 +9760,10 @@ def build_messenger_router(
             cur = await db.execute("""SELECT COUNT(*),COUNT(DISTINCT viewer_id) FROM channel_post_views
                 WHERE channel_id=? AND last_seen_at>=?""", (channel_id, since))
             post_views, reached_accounts = await cur.fetchone()
+            cur = await db.execute("""SELECT COALESCE(SUM(CASE WHEN voluntary=1 THEN departures ELSE 0 END),0),
+                COALESCE(SUM(CASE WHEN voluntary=0 THEN departures ELSE 0 END),0)
+                FROM channel_member_departures WHERE channel_id=? AND occurred_at BETWEEN ? AND ?""", (channel_id, since, now))
+            voluntary_leaves, moderated_removals = await cur.fetchone()
             # Count only settled credits, including those for posts that have since been deleted.
             patterns = (f"channel_paid_reaction:{channel_id}:*", f"channel_paid_media:{channel_id}:*",
                         f"channel_subscription:{channel_id}", f"channel_inbox:{channel_id}:*")
@@ -9768,6 +9779,7 @@ def build_messenger_router(
         return {"days": int(days), "since": since, "as_of": now, "members": members,
                 "current_members_joined": recent_members, "published_posts_remaining": posts,
                 "unique_post_views": post_views, "reached_accounts": reached_accounts,
+                "voluntary_leaves": voluntary_leaves, "moderated_removals": moderated_removals,
                 "paid_reaction_purchases": purchases, "paid_reaction_stars": reaction_stars,
                 "paid_media_stars": media_stars, "subscription_stars": subscription_stars, "inbox_stars": inbox_stars,
                 "total_revenue_stars": reaction_stars + media_stars + subscription_stars + inbox_stars}
@@ -9982,6 +9994,13 @@ def build_messenger_router(
             "is_public": is_public,
         }
 
+    async def record_channel_departure(db: Any, channel_id: int, uid: int, voluntary: bool) -> None:
+        # Record only actual transitions out of the active roster. Retrying a leave or ban is a no-op.
+        await db.execute("""INSERT INTO channel_member_departures(channel_id,occurred_at,voluntary)
+            SELECT channel_id,?,? FROM active_channel_members WHERE channel_id=? AND telegram_id=?
+            ON CONFLICT(channel_id,occurred_at,voluntary) DO UPDATE SET departures=departures+1""",
+            (int(time.time()), int(voluntary), channel_id, uid))
+
     @router.put("/api/channels/{channel_id}/membership")
     async def set_channel_membership(channel_id: int, payload: dict[str, Any],
                                      authorization: str | None = Header(default=None)) -> dict[str, Any]:
@@ -10007,6 +10026,7 @@ def build_messenger_router(
             else:
                 if uid == channel[1]:
                     raise HTTPException(409, "Владелец не может покинуть канал")
+                await record_channel_departure(db, channel_id, uid, True)
                 await db.execute("DELETE FROM channel_admins WHERE channel_id=? AND telegram_id=?", (channel_id, uid))
                 await db.execute("DELETE FROM channel_members WHERE channel_id=? AND telegram_id=?", (channel_id, uid))
                 await db.execute("DELETE FROM channel_subscriptions WHERE channel_id=? AND telegram_id=?", (channel_id, uid))
@@ -10230,6 +10250,7 @@ def build_messenger_router(
                 cur = await db.execute("SELECT 1 FROM accounts WHERE telegram_id=?", (target_id,))
                 if not await cur.fetchone():
                     raise HTTPException(404, "Пользователь не найден")
+                await record_channel_departure(db, channel_id, target_id, False)
                 await db.execute("""INSERT INTO channel_bans(channel_id,telegram_id,created_at,until_date) VALUES(?,?,?,?)
                     ON CONFLICT(channel_id,telegram_id) DO UPDATE SET created_at=excluded.created_at,until_date=excluded.until_date""",
                     (channel_id, target_id, now, until_date))
@@ -10959,6 +10980,7 @@ def build_messenger_router(
                 raise HTTPException(status_code=404, detail="Канал не найден или вы не являетесь владельцем")
             await db.execute("DELETE FROM channel_stories WHERE channel_id=?", (channel_id,))
             await db.execute("DELETE FROM channel_post_views WHERE channel_id=?", (channel_id,))
+            await db.execute("DELETE FROM channel_member_departures WHERE channel_id=?", (channel_id,))
             await db.execute("DELETE FROM channel_messages WHERE channel_id=?", (channel_id,))
             await db.execute("DELETE FROM channel_admins WHERE channel_id=?", (channel_id,))
             await db.execute("DELETE FROM channel_join_requests WHERE channel_id=?", (channel_id,))

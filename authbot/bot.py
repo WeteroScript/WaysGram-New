@@ -2763,6 +2763,7 @@ async def admin_callback(callback: CallbackQuery) -> None:
                 channel_ids = [int(row[0]) for row in await cur.fetchall()]
                 for channel_id in channel_ids:
                     await db.execute("DELETE FROM channel_post_views WHERE channel_id=?", (channel_id,))
+                    await db.execute("DELETE FROM channel_member_departures WHERE channel_id=?", (channel_id,))
                     await db.execute("DELETE FROM channel_messages WHERE channel_id=?", (channel_id,))
                     await db.execute("DELETE FROM channel_admins WHERE channel_id=?", (channel_id,))
                     await db.execute("DELETE FROM channel_members WHERE channel_id=?", (channel_id,))
@@ -3340,6 +3341,7 @@ async def admin_callback(callback: CallbackQuery) -> None:
                 await callback.message.answer("Канал уже удалён или не найден.")
                 return
             await db.execute("DELETE FROM channel_post_views WHERE channel_id=?", (channel_id,))
+            await db.execute("DELETE FROM channel_member_departures WHERE channel_id=?", (channel_id,))
             await db.execute("DELETE FROM channel_messages WHERE channel_id=?", (channel_id,))
             await db.execute("DELETE FROM channel_admins WHERE channel_id=?", (channel_id,))
             await db.execute("DELETE FROM channels WHERE id=?", (channel_id,))
