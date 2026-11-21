@@ -8174,6 +8174,31 @@ def build_messenger_router(
             result["invite_link"] = _external_api_base_url(request) + f"/api/channels/invites/{invite_token}"
         return result
 
+    @router.get("/api/channels/{channel_id}/invite")
+    @router.post("/api/channels/{channel_id}/invite")
+    async def manage_channel_invite(channel_id: int, request: Request,
+                                    authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        uid = int((await current_user(authorization))["telegram_id"])
+        async with aiosqlite.connect(db_path()) as db:
+            await db.execute("BEGIN IMMEDIATE")
+            cur = await db.execute("SELECT owner_telegram_id,is_public,invite_token,created_at FROM channels WHERE id=?", (channel_id,))
+            channel = await cur.fetchone()
+            if channel is None:
+                raise HTTPException(404, "Канал не найден")
+            if channel[0] != uid:
+                raise HTTPException(403, "Управлять ссылкой может только владелец канала")
+            if channel[1]:
+                raise HTTPException(409, "Приглашение доступно только для приватного канала")
+            token = channel[2]
+            if request.method == "POST":
+                token = secrets.token_urlsafe(32)
+                await db.execute("UPDATE channels SET invite_token=? WHERE id=?", (token, channel_id))
+            if not token:
+                raise HTTPException(404, "Ссылка не найдена")
+            await db.commit()
+        return {"invite_link": _external_api_base_url(request) + f"/api/channels/invites/{token}",
+                "created_at": channel[3]}
+
     @router.get("/api/channels/invites/{invite_token}", name="preview_channel_invite")
     async def preview_channel_invite(invite_token: str) -> dict[str, Any]:
         if not re.fullmatch(r"[A-Za-z0-9_-]{20,128}", invite_token):
@@ -13665,13 +13690,17 @@ def build_messenger_router(
                 raise HTTPException(status_code=403, detail="Отзывать приглашения могут только администраторы группы")
             cur = await db.execute(
                 """UPDATE group_invites SET revoked_at=?
-                   WHERE token_hash=? AND group_id=? AND revoked_at IS NULL""",
+                   WHERE token_hash=? AND group_id=? AND revoked_at IS NULL
+                   RETURNING created_by,created_at,expires_at,max_uses,uses,require_approval""",
                 (now, token_hash, group_id),
             )
+            invite = await cur.fetchone()
             await db.commit()
-        if cur.rowcount != 1:
+        if invite is None:
             raise HTTPException(status_code=404, detail="Активное приглашение не найдено")
-        return {"status": "revoked", "group_id": group_id}
+        return {"status": "revoked", "group_id": group_id, "created_by": invite[0],
+                "created_at": invite[1], "expires_at": invite[2], "max_uses": invite[3],
+                "uses": invite[4], "require_approval": bool(invite[5])}
 
     @router.post("/api/groups/{group_id}/members", status_code=201)
     async def add_group_member(

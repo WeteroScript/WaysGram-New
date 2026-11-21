@@ -847,3 +847,30 @@ def test_profile_music_publish_reorder_and_remove(env):
             assert await tracks(viewer=101) == (1, [b])
 
     run(scenario())
+
+
+def test_private_channel_invite_rotation_preserves_membership(env):
+    _, app = env
+
+    async def scenario():
+        async with await client_for(app) as client:
+            owner, member, guest = headers(101), headers(102), headers(ADMIN)
+            created = await client.post('/api/channels', headers=owner, json={'title': 'Invite rotation', 'is_public': False})
+            assert created.status_code == 201, created.text
+            data = created.json()
+            path = f"/api/channels/{data['id']}/invite"
+            old = data['invite_link']
+            assert (await client.get(path, headers=owner)).json()['invite_link'] == old
+            assert (await client.post('/api/channels/join', headers=member, json={'invite_link': old})).status_code == 200
+            assert (await client.get(path, headers=member)).status_code == 403
+            assert (await client.post(path, headers=member)).status_code == 403
+            rotated = await client.post(path, headers=owner)
+            assert rotated.status_code == 200
+            new = rotated.json()['invite_link']
+            assert new != old
+            assert (await client.get(old)).status_code == 404
+            assert (await client.post('/api/channels/join', headers=guest, json={'invite_link': old})).status_code == 404
+            assert (await client.get(path.rsplit('/', 1)[0], headers=member)).status_code == 200
+            assert (await client.post('/api/channels/join', headers=guest, json={'invite_link': new})).status_code == 200
+
+    run(scenario())
