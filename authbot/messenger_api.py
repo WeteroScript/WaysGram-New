@@ -4129,6 +4129,7 @@ def build_messenger_router(
             if media is None:
                 raise HTTPException(status_code=404, detail="Изображение не найдено")
 
+            is_avatar = False
             allowed = int(media["owner_telegram_id"]) == uid
             if not allowed:
                 cur = await db.execute("""SELECT 1 FROM profile_music p WHERE p.media_id=?
@@ -4217,8 +4218,10 @@ def build_messenger_router(
                 )
                 allowed = await cur.fetchone() is not None
             if not allowed:
-                cur = await db.execute("SELECT 1 FROM accounts WHERE avatar_media_id=? LIMIT 1", (media_id,))
-                allowed = await cur.fetchone() is not None
+                owner = int(media["owner_telegram_id"])
+                cur = await db.execute("SELECT 1 FROM accounts WHERE telegram_id=? AND avatar_media_id=? AND is_banned=0", (owner, media_id))
+                is_avatar = await cur.fetchone() is not None
+                allowed = is_avatar and await privacy_allows(db, owner, uid, "avatar")
             if not allowed:
                 raise HTTPException(status_code=404, detail="Изображение не найдено")
 
@@ -4244,7 +4247,7 @@ def build_messenger_router(
         )
         response_headers = {
             "Accept-Ranges": "bytes",
-            "Cache-Control": "private, max-age=3600",
+            "Cache-Control": "private, no-store" if is_avatar else "private, max-age=3600",
             "X-Content-Type-Options": "nosniff",
             "Content-Security-Policy": "default-src 'none'; sandbox",
             "Content-Disposition": content_disposition,
@@ -4794,7 +4797,7 @@ def build_messenger_router(
         else:
             cur = await db.execute("SELECT rules FROM account_profile_privacy WHERE telegram_id=? AND setting=?", (uid, setting))
         row = await cur.fetchone()
-        return json.loads(row[0]) if row else {"mode": {"invites": "everyone", "find-by-phone": "contacts"}.get(setting, "nobody"), "allow": [], "deny": []}
+        return json.loads(row[0]) if row else {"mode": {"invites": "everyone", "find-by-phone": "contacts", "avatar": "everyone"}.get(setting, "nobody"), "allow": [], "deny": []}
 
     async def privacy_allows(db: Any, owner: int, viewer: int, setting: str) -> bool:
         if owner == viewer:
@@ -4815,6 +4818,17 @@ def build_messenger_router(
             return await cur.fetchone() is not None
         return False
 
+    async def avatar_visible_rows(db: Any, rows: Any, viewer: int) -> list[dict[str, Any]]:
+        result = []
+        for row in rows:
+            item = dict(row)
+            if item.get("avatar_media_id"):
+                owner = int(item.get("id") or item["telegram_id"])
+                if not await privacy_allows(db, owner, viewer, "avatar"):
+                    item["avatar_media_id"] = ""
+            result.append(item)
+        return result
+
     async def require_invite_privacy(db: Any, actor: int, target: int) -> None:
         if not await privacy_allows(db, target, actor, "invites"):
             raise HTTPException(403, "USER_PRIVACY_RESTRICTED")
@@ -4822,7 +4836,7 @@ def build_messenger_router(
     @router.get("/api/me/privacy/{setting}")
     async def get_privacy(setting: str, authorization: str | None = Header(default=None)):
         uid = int((await current_user(authorization))["telegram_id"])
-        if setting not in ("invites", "phone", "last-seen", "find-by-phone"):
+        if setting not in ("invites", "phone", "last-seen", "find-by-phone", "avatar"):
             raise HTTPException(404, "PRIVACY_KEY_INVALID")
         async with aiosqlite.connect(db_path()) as db:
             return await privacy_rules(db, uid, setting)
@@ -4830,7 +4844,7 @@ def build_messenger_router(
     @router.put("/api/me/privacy/{setting}")
     async def set_privacy(setting: str, payload: dict[str, Any], authorization: str | None = Header(default=None)):
         uid = int((await current_user(authorization))["telegram_id"])
-        if setting not in ("invites", "phone", "last-seen", "find-by-phone"):
+        if setting not in ("invites", "phone", "last-seen", "find-by-phone", "avatar"):
             raise HTTPException(404, "PRIVACY_KEY_INVALID")
         mode = payload.get("mode")
         if mode not in ("everyone", "contacts", "nobody"):
@@ -4977,7 +4991,7 @@ def build_messenger_router(
             rows = await cur.fetchall()
         return {"transactions": [dict(row) for row in rows]}
 
-    async def gift_inventory(owner_id: int, limit: int | None, offset: int, *, public: bool) -> dict[str, Any]:
+    async def gift_inventory(owner_id: int, limit: int | None, offset: int, *, public: bool, viewer_id: int | None = None) -> dict[str, Any]:
         """The same paginated inventory for the owner and for a profile visitor."""
         async with aiosqlite.connect(db_path()) as db:
             db.row_factory = aiosqlite.Row
@@ -5185,7 +5199,7 @@ def build_messenger_router(
                                     "id": int(acquisition["sender_account_id"]),
                                     "username": acquisition["username"],
                                     "display_name": acquisition["display_name"],
-                                    "avatar_media_id": acquisition["avatar_media_id"],
+                                    "avatar_media_id": acquisition["avatar_media_id"] if await privacy_allows(gift_db, sender, viewer_id if viewer_id is not None else owner_id, "avatar") else "",
                                 }
                         text = str(acquisition["body"] or "").strip()
                         if text != "Подарок WaysGram":
@@ -5309,7 +5323,7 @@ def build_messenger_router(
             cur = await db.execute("SELECT 1 FROM accounts WHERE telegram_id=? AND is_banned=0", (user_id,))
             if await cur.fetchone() is None:
                 raise HTTPException(status_code=404, detail="Пользователь не найден")
-        return await gift_inventory(user_id, limit, offset, public=user_id != int(viewer["telegram_id"]))
+        return await gift_inventory(user_id, limit, offset, public=user_id != int(viewer["telegram_id"]), viewer_id=int(viewer["telegram_id"]))
 
     @router.get("/api/me/gifts/transactions")
     async def my_gift_transactions(authorization: str | None = Header(default=None)) -> dict[str, Any]:
@@ -5336,7 +5350,7 @@ def build_messenger_router(
         q: str = Query(default="", max_length=64),
         authorization: str | None = Header(default=None),
     ) -> dict[str, Any]:
-        await current_user(authorization)
+        uid = int((await current_user(authorization))["telegram_id"])
         q = q.strip().lstrip("@")
         if not q:
             return {"users": []}
@@ -5355,7 +5369,7 @@ def build_messenger_router(
                        ORDER BY CASE WHEN username = ? COLLATE NOCASE THEN 0 ELSE 1 END, telegram_id DESC LIMIT 30""",
                     (f"%{q}%", f"%{q}%", q),
                 )
-            rows = await cur.fetchall()
+            rows = await avatar_visible_rows(db, await cur.fetchall(), uid)
         users = []
         for row in rows:
             item = dict(row)
@@ -5391,7 +5405,7 @@ def build_messenger_router(
             matches = await cur.fetchall()
             if len(matches) != 1 or not await privacy_allows(db, int(matches[0]["id"]), uid, "find-by-phone"):
                 raise HTTPException(404, "PHONE_NOT_OCCUPIED")
-            return dict(matches[0])
+            return (await avatar_visible_rows(db, matches, uid))[0]
 
     @router.get("/api/contacts")
     async def list_contacts(authorization: str | None = Header(default=None)) -> dict[str, Any]:
@@ -5409,7 +5423,7 @@ def build_messenger_router(
                    ORDER BY lower(a.display_name),lower(a.username),a.telegram_id""",
                 (uid,),
             )
-            rows = await cur.fetchall()
+            rows = await avatar_visible_rows(db, await cur.fetchall(), uid)
         contacts = []
         for row in rows:
             item = dict(row)
@@ -5445,6 +5459,7 @@ def build_messenger_router(
                 (uid, value, now),
             )
             added = cur.rowcount == 1
+            contact = (await avatar_visible_rows(db, [contact], uid))[0]
             await db.commit()
         return {
             "status": "added" if added else "already_exists",
@@ -5525,7 +5540,7 @@ def build_messenger_router(
                    ORDER BY b.created_at DESC,b.blocked_telegram_id""",
                 (uid,),
             )
-            rows = await cur.fetchall()
+            rows = await avatar_visible_rows(db, await cur.fetchall(), uid)
         blocked_users = []
         for row in rows:
             item = dict(row)
@@ -5574,6 +5589,7 @@ def build_messenger_router(
                       (sender_telegram_id=? AND recipient_telegram_id=?))""",
                 (now, uid, uid, target_id, target_id, uid),
             )
+            target = (await avatar_visible_rows(db, [target], uid))[0]
             await db.commit()
         return {
             "status": "blocked" if added else "already_blocked",
@@ -5638,7 +5654,7 @@ def build_messenger_router(
                    LIMIT 50""",
                 (user_id, viewer_id),
             )
-            common_contacts = [dict(item) for item in await cur.fetchall()]
+            common_contacts = await avatar_visible_rows(db, await cur.fetchall(), viewer_id)
             visible = {}
             if await privacy_allows(db, user_id, viewer_id, "phone"):
                 cur = await db.execute("SELECT virtual_number FROM accounts WHERE telegram_id=?", (user_id,))
@@ -5657,7 +5673,7 @@ def build_messenger_router(
             personal_channel = await profile_channel(db, user_id, viewer_id)
             status = await worn_gift_status(db, user_id)
             rating = await profile_rating(db, user_id, now=int(time.time()), include_pending=viewer_id == user_id)
-        profile = dict(row)
+            profile = (await avatar_visible_rows(db, [row], viewer_id))[0]
         profile.update(rating)
         profile.update(visible)
         profile["personal_channel"] = personal_channel
@@ -5665,7 +5681,7 @@ def build_messenger_router(
         profile["labels"] = await entity_labels("account", user_id)
         for contact in common_contacts:
             contact["labels"] = await entity_labels("account", int(contact["id"]))
-        profile["gifts"] = (await gift_inventory(user_id, None, 0, public=user_id != viewer_id))["gifts"]
+        profile["gifts"] = (await gift_inventory(user_id, None, 0, public=user_id != viewer_id, viewer_id=viewer_id))["gifts"]
         profile["common_groups"] = common_groups
         profile["common_contacts"] = common_contacts
         return profile
@@ -8635,7 +8651,7 @@ def build_messenger_router(
             cur = await db.execute("SELECT r.telegram_id,r.requested_at,a.username,a.display_name,a.avatar_media_id " + base
                 + " AND (r.requested_at,r.telegram_id)>(?,?) ORDER BY r.requested_at,r.telegram_id LIMIT ?",
                 args + (max(0, after_date), max(0, after_user), max(1, min(200, limit))))
-            return {"count": count, "requests": [dict(row) for row in await cur.fetchall()]}
+            return {"count": count, "requests": await avatar_visible_rows(db, await cur.fetchall(), uid)}
 
     @router.post("/api/channels/{channel_id}/join-requests/{target_id}/{action}")
     async def review_channel_join_request(channel_id: int, target_id: int, action: Literal["approve", "decline"],
@@ -8832,7 +8848,7 @@ def build_messenger_router(
                 CASE WHEN c.owner_telegram_id=m.telegram_id THEN 'owner' WHEN ca.telegram_id IS NOT NULL THEN 'admin' ELSE 'member' END AS role
                 {base} ORDER BY m.{date} DESC,m.telegram_id LIMIT ? OFFSET ?""",
                 args + (max(1, min(200, limit)), max(0, offset)))
-            rows = await cur.fetchall()
+            rows = await avatar_visible_rows(db, await cur.fetchall(), uid)
         return {"count": count, "members": [dict(row) for row in rows]}
 
     @router.put("/api/channels/{channel_id}/members/{target_id}/ban")
@@ -8892,7 +8908,7 @@ def build_messenger_router(
                    ORDER BY ca.created_at,ca.telegram_id""",
                 (channel_id,),
             )
-            rows = await cur.fetchall()
+            rows = await avatar_visible_rows(db, await cur.fetchall(), uid)
         role = "owner" if uid == owner_id else (
             "admin" if any(int(row["telegram_id"]) == uid for row in rows) else "member"
         )
@@ -13713,7 +13729,7 @@ def build_messenger_router(
                 ORDER BY message.id DESC LIMIT 100""",
                 (uid, uid, uid, uid, uid, uid, uid, uid, uid),
             )
-            rows = await cur.fetchall()
+            rows = await avatar_visible_rows(db, await cur.fetchall(), uid)
         conversations = []
         for row in rows:
             item = dict(row)
@@ -13823,7 +13839,7 @@ def build_messenger_router(
                    gm.joined_at LIMIT 200""",
                 (group_id,),
             )
-            members = await cur.fetchall()
+            members = await avatar_visible_rows(db, await cur.fetchall(), uid)
             pending = 0
             recent_requesters = []
             if group_has_right(membership, 2):
@@ -14205,7 +14221,7 @@ def build_messenger_router(
             cur = await db.execute("SELECT r.telegram_id,r.requested_at,a.username,a.display_name,a.avatar_media_id "
                                    + base + " AND (r.requested_at,r.telegram_id)>(?,?) ORDER BY r.requested_at,r.telegram_id LIMIT ?",
                                    args + (max(0, after_date), max(0, after_user), max(1, min(200, limit))))
-            rows = [dict(row) for row in await cur.fetchall()]
+            rows = await avatar_visible_rows(db, await cur.fetchall(), uid)
         return {"group_id": group_id, "requests": rows, "count": count}
 
     @router.post("/api/groups/{group_id}/join-requests/{telegram_id}/approve")

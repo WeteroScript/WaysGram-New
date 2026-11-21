@@ -1278,3 +1278,35 @@ def test_find_by_phone_is_separate_from_number_visibility(env):
             assert (await client.post(route, headers=viewer, json={'phone': phone})).status_code == 404
 
     run(scenario())
+
+
+def test_avatar_privacy_hides_profile_search_and_direct_download(env):
+    import sqlite3
+    import uuid
+
+    db_path, app = env
+    media = uuid.uuid4().hex
+
+    async def scenario():
+        async with await client_for(app) as client:
+            owner, viewer = headers(101), headers(102)
+            storage = db_path.parent / 'waysgram_media'
+            storage.mkdir(exist_ok=True)
+            (storage / media).write_bytes(b'avatar')
+            with sqlite3.connect(db_path.with_name('waysgram_messenger.sqlite3')) as db:
+                db.execute('''INSERT INTO media_assets (id,owner_telegram_id,storage_name,mime_type,size_bytes,created_at)
+                    VALUES(?,101,?,'image/png',6,1)''', (media, media))
+            assert (await client.put('/api/me/avatar', headers=owner, json={'media_id': media})).status_code == 200
+            media_path = '/api/media/' + media
+            allowed = await client.get(media_path, headers=viewer)
+            assert allowed.status_code == 200 and 'no-store' in allowed.headers['cache-control']
+            setting = '/api/me/privacy/avatar'
+            assert (await client.put(setting, headers=owner, json={'mode': 'nobody'})).status_code == 200
+            assert (await client.get('/api/users/101', headers=viewer)).json()['avatar_media_id'] == ''
+            assert (await client.get('/api/users?q=101', headers=viewer)).json()['users'][0]['avatar_media_id'] == ''
+            assert (await client.get(media_path, headers={**viewer, 'Range': 'bytes=0-1'})).status_code == 404
+            assert (await client.get(media_path, headers=owner)).status_code == 200
+            assert (await client.put(setting, headers=owner, json={'mode': 'nobody', 'allow': [102]})).status_code == 200
+            assert (await client.get(media_path, headers=viewer)).status_code == 200
+
+    run(scenario())
