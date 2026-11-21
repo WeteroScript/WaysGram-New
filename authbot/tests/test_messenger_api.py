@@ -426,7 +426,7 @@ def test_direct_message_long_poll_returns_new_message(api_env) -> None:
             assert messages[0]["id"] == next_message.json()["id"]
             assert messages[0]["body"] == "arrived during long poll"
 
-            event_response = await asyncio.wait_for(pending_events, timeout=3)
+            event_response = await asyncio.wait_for(pending_events, timeout=2)
             assert event_response.status_code == 200
             assert any(
                 event["kind"] == "new_message"
@@ -695,6 +695,25 @@ def test_scheduled_direct_messages_send_once_and_can_be_cancelled(api_env) -> No
                 assert replay.json()["id"] == scheduled.json()["id"]
 
                 scheduled_id = scheduled.json()["id"]
+                edit_url = f"/api/messages/scheduled/{scheduled_id}"
+                new_time = due_at + 60
+                assert (await client.patch(edit_url, headers={
+                    "Authorization": "Bearer schedule-recipient-session",
+                }, json={"scheduled_at": new_time})).status_code == 404
+                for invalid_time in (True, due_at - 120, due_at + 31 * 86400):
+                    assert (await client.patch(edit_url, headers=sender,
+                                               json={"scheduled_at": invalid_time})).status_code == 400
+                assert (await client.patch(edit_url, headers=sender, json={
+                    "peer_id": 89201, "scheduled_at": new_time,
+                })).status_code == 404
+                edited = await client.patch(edit_url, headers=sender, json={
+                    "peer_id": 89202, "scheduled_at": new_time,
+                })
+                assert edited.status_code == 200
+                assert edited.json()["scheduled_at"] == new_time
+                assert edited.json()["native_id"] == scheduled_id * 2
+                assert edited.json()["body"] == payload["body"]
+                assert edited.json()["silent"]
                 listing = await client.get(
                     "/api/messages/scheduled?with=89202",
                     headers=sender,
@@ -702,6 +721,8 @@ def test_scheduled_direct_messages_send_once_and_can_be_cancelled(api_env) -> No
                 assert listing.status_code == 200
                 assert listing.json()["count"] == 1
                 assert listing.json()["scheduled_messages"][0]["id"] == scheduled_id
+                assert listing.json()["scheduled_messages"][0]["scheduled_at"] == new_time
+                assert listing.json()["scheduled_messages"][0]["silent"]
 
                 with db_split.sqlite_connect(path) as db:
                     db.execute(
@@ -764,6 +785,10 @@ def test_scheduled_direct_messages_send_once_and_can_be_cancelled(api_env) -> No
                     "**scheduled** message"
                 ]
 
+                assert (await client.patch(edit_url, headers=sender, json={
+                    "scheduled_at": int(time.time()) + 60,
+                })).status_code == 404
+
                 recurring = await client.post(
                     "/api/messages/schedule",
                     headers=sender,
@@ -777,6 +802,28 @@ def test_scheduled_direct_messages_send_once_and_can_be_cancelled(api_env) -> No
                 )
                 assert recurring.status_code == 201
                 assert recurring.json()["repeat_interval_seconds"] == 86400
+                recurring_time = int(time.time()) + 120
+                moved = await client.patch(
+                    f"/api/messages/scheduled/{recurring.json()['id']}", headers=sender,
+                    json={"peer_id": 89202, "scheduled_at": recurring_time},
+                )
+                assert moved.status_code == 200
+                assert moved.json()["scheduled_at"] == recurring_time
+                assert moved.json()["repeat_interval_seconds"] == 86400
+                assert moved.json()["silent"]
+                recurring_url = f"/api/messages/scheduled/{recurring.json()['id']}"
+                for invalid in (None, True, 14 * 86400):
+                    response = await client.patch(recurring_url, headers=sender, json={
+                        "scheduled_at": recurring_time, "repeat_interval_seconds": invalid,
+                    })
+                    assert response.status_code == 400
+                for repeat in (604800, 0, 86400):
+                    response = await client.patch(recurring_url, headers=sender, json={
+                        "scheduled_at": recurring_time, "repeat_interval_seconds": repeat,
+                    })
+                    assert response.status_code == 200
+                    assert response.json()["repeat_interval_seconds"] == repeat
+                    assert response.json()["silent"]
                 with db_split.sqlite_connect(path) as db:
                     db.execute(
                         "UPDATE scheduled_messages SET scheduled_at=? WHERE id=?",
@@ -1279,6 +1326,18 @@ def test_direct_messages_and_channel_permissions(api_env) -> None:
             assert sent.json()["status"] == "sent"
             assert sent.json()["sender_id"] == 82001
             assert replay.json()["id"] == sent.json()["id"]
+
+            inbox = await client.get("/api/conversations", headers=recipient)
+            assert inbox.status_code == 200
+            conversation = inbox.json()["conversations"][0]
+            assert conversation["id"] == 82001
+            assert conversation["last_message_id"] == sent.json()["id"]
+            assert conversation["unread_count"] == 1
+            catchup = await client.get(
+                f"/api/messages?with=82001&after_id={conversation['my_read_id']}", headers=recipient,
+            )
+            assert catchup.status_code == 200
+            assert [m["id"] for m in catchup.json()["messages"]] == [sent.json()["id"]]
 
             changed_replay = await client.post(
                 "/api/messages",
@@ -2287,6 +2346,10 @@ def test_group_and_channel_long_poll_return_incremental_messages(api_env) -> Non
             )
             assert joined.status_code == 201
 
+            empty_group = await client.get(f"/api/groups/{group_id}/messages", headers=member)
+            assert empty_group.status_code == 200
+            assert empty_group.json()["messages"] == []
+
             group_initial = await client.post(
                 f"/api/groups/{group_id}/messages",
                 headers=owner,
@@ -2335,6 +2398,10 @@ def test_group_and_channel_long_poll_return_incremental_messages(api_env) -> Non
             )
             assert channel.status_code == 201
             channel_id = channel.json()["id"]
+
+            empty_channel = await client.get(f"/api/channels/{channel_id}/messages", headers=owner)
+            assert empty_channel.status_code == 200
+            assert empty_channel.json()["messages"] == []
 
             channel_initial = await client.post(
                 f"/api/channels/{channel_id}/messages",
@@ -4355,6 +4422,35 @@ def test_atomic_reaction_sets_are_retry_safe_private_and_scoped(api_env) -> None
                 removed = await client.put(endpoint, headers=second, json={**key, "reactions": []})
                 assert removed.status_code == 200 and removed.json()["my_reactions"] == []
                 assert removed.json()["reactions"] == [{"reaction": "👍", "count": 1}]
+
+                # A big single reaction is returned as a one-shot unread animation
+                # event, not persisted into ordinary history summaries.
+                big_endpoint = endpoint + "/v2"
+                big_payload = {**key, "reactions": ["🔥"], "big": True}
+                big = await client.put(big_endpoint, headers=second, json=big_payload)
+                assert big.status_code == 200, big.text
+                assert big.json()["recent_reactions"] == [{
+                    "user_id": 97002, "reaction": "🔥", "big": True, "unread": True,
+                    "date": big.json()["recent_reactions"][0]["date"],
+                }]
+                assert big.json()["reactions"] == [
+                    {"reaction": "👍", "count": 1},
+                    {"reaction": "🔥", "count": 1},
+                ]
+                repeated_big = await client.put(big_endpoint, headers=second, json=big_payload)
+                assert repeated_big.status_code == 200
+                assert repeated_big.json()["status"] == "unchanged"
+                assert repeated_big.json()["recent_reactions"] == []
+                assert (await client.put(
+                    big_endpoint, headers=second, json={**key, "reactions": [], "big": False}
+                )).status_code == 200
+                assert (await client.put(
+                    big_endpoint, headers=second, json={**key, "reactions": ["👍"], "big": "true"}
+                )).status_code == 400
+                assert (await client.put(
+                    big_endpoint, headers=second, json={**key, "reactions": ["👍", "❤️"], "big": True}
+                )).status_code == 400
+
                 for invalid in (None, "👍", ["🔥"], ["👍", "👍"], ["👍", "❤️", "😂", "😮"], [True], [{}]):
                     assert (await client.put(endpoint, headers=second, json={**key, "reactions": invalid})).status_code == 400
                 denied = await client.put(endpoint, headers=h(97003), json={**key, "reactions": ["👍"]})
@@ -5489,6 +5585,13 @@ def test_group_invite_join_requests_require_admin_approval(api_env) -> None:
             )
             assert promoted.status_code == 201
 
+            permanent = await client.post(f"/api/groups/{group_id}/invites", headers=admin,
+                                          json={"expires_in_seconds": None})
+            assert permanent.status_code == 201 and permanent.json()["expires_at"] is None
+            short = await client.post(f"/api/groups/{group_id}/invites", headers=admin,
+                                      json={"expires_in_seconds": 60})
+            assert short.status_code == 201 and short.json()["expires_at"] > 0
+
             invite = await client.post(
                 f"/api/groups/{group_id}/invites", headers=admin,
                 json={"expires_in_hours": 24, "max_uses": 1, "require_approval": True},
@@ -5524,10 +5627,25 @@ def test_group_invite_join_requests_require_admin_approval(api_env) -> None:
             assert listed.status_code == 200
             assert listed.json()["count"] == 1
             assert listed.json()["requests"][0]["telegram_id"] == 95804
+            filtered = await client.get(f"/api/groups/{group_id}/join-requests", headers=admin,
+                                        params={"invite_token": token, "q": "APPROVAL_GUEST", "limit": 1})
+            assert filtered.status_code == 200 and filtered.json()["count"] == 1
+            item = filtered.json()["requests"][0]
+            next_page = await client.get(f"/api/groups/{group_id}/join-requests", headers=admin,
+                                         params={"after_date": item["requested_at"], "after_user": item["telegram_id"]})
+            assert next_page.json()["count"] == 1 and next_page.json()["requests"] == []
+            other_token = permanent.json()["invite_link"].rsplit("/", 1)[-1]
+            empty = await client.get(f"/api/groups/{group_id}/join-requests", headers=admin,
+                                     params={"invite_token": other_token})
+            assert empty.json()["count"] == 0
             denied_list = await client.get(
                 f"/api/groups/{group_id}/join-requests", headers=member,
             )
             assert denied_list.status_code == 403
+
+            admin_details = (await client.get(f"/api/groups/{group_id}", headers=admin)).json()
+            assert admin_details["requests_pending"] == 1
+            assert admin_details["recent_requesters"] == [95804]
 
             denied_approve = await client.post(
                 f"/api/groups/{group_id}/join-requests/95804/approve", headers=member,
@@ -5568,6 +5686,9 @@ def test_group_invite_join_requests_require_admin_approval(api_env) -> None:
             )
             assert declined_request.status_code == 200
             assert declined_request.json()["join_requested"] is True
+            member_details = (await client.get(f"/api/groups/{group_id}", headers=guest)).json()
+            assert member_details["requests_pending"] == 0
+            assert member_details["recent_requesters"] == []
             declined = await client.post(
                 f"/api/groups/{group_id}/join-requests/95803/decline", headers=owner,
             )
@@ -7174,6 +7295,7 @@ def test_forward_batch_enforces_limits_and_cleans_all_scopes(api_env) -> None:
             for malformed in ({**base, 'message_ids': [one, one]}, {**base, 'message_ids': [True]},
                               {**base, 'message_ids': list(range(1, 22))}, {**base, 'silent': 'false'}):
                 assert (await client.post('/api/forward', headers=h(87201), json=malformed)).status_code == 400
+
             with db_split.sqlite_connect(path) as db:
                 for i in range(messenger_api.CHANNEL_POSTS_PER_MINUTE - 1):
                     db.execute('INSERT INTO channel_messages(channel_id,author_telegram_id,body,created_at) VALUES(?,?,?,?)', (channel, 87201, str(i), int(time.time())))
@@ -8802,4 +8924,476 @@ def test_live_location_block_check_is_part_of_the_read_snapshot(api_env) -> None
                 db.execute('INSERT INTO blocked_users(owner_telegram_id,blocked_telegram_id,created_at) VALUES(?,?,?)', (98502,98501,int(time.time())))
                 db.commit()
             assert (await client.get('/api/messages/live-location?with=98501',headers=h(98502))).json() == {'locations':[], 'count':0}
+    run(scenario())
+
+def test_edit_message_can_remove_single_attachment_but_not_album_member(api_env) -> None:
+    path, _store, _bot, app = api_env
+    for uid in (98701, 98702, 98703):
+        add_account(api_env, uid, f"remove_media_{uid}")
+        add_session(path, uid, f"remove-media-{uid}")
+
+    image = BytesIO()
+    Image.new("RGB", (5, 4), (30, 90, 150)).save(image, format="PNG")
+    image_bytes = image.getvalue()
+
+    async def scenario() -> None:
+        async with await client_for(app) as client:
+            h = lambda uid: {"Authorization": f"Bearer remove-media-{uid}"}
+            uploaded = await client.post(
+                "/api/media/documents",
+                headers={**h(98701), "Content-Type": "text/plain", "X-Filename": "attachment.txt"},
+                content=b"attachment payload",
+            )
+            assert uploaded.status_code == 201, uploaded.text
+            sent = await client.post("/api/messages", headers=h(98701), json={
+                "recipient_id": 98702, "body": "Keep this caption", "media_id": uploaded.json()["id"],
+            })
+            assert sent.status_code == 201, sent.text
+            message_id = sent.json()["id"]
+
+            removed = await client.put(
+                f"/api/messages/{message_id}/media/v2",
+                headers=h(98701),
+                json={"remove_media": True},
+            )
+            assert removed.status_code == 200, removed.text
+            assert removed.json()["media_removed"] is True
+            history = await client.get("/api/messages?with=98701", headers=h(98702))
+            assert history.status_code == 200, history.text
+            row = next(item for item in history.json()["messages"] if item["id"] == message_id)
+            assert row["media_id"] is None
+            assert row["body"] == "Keep this caption"
+
+            # A recipient may not edit the sender's attachment.
+            second_upload = await client.post(
+                "/api/media/documents",
+                headers={**h(98701), "Content-Type": "text/plain", "X-Filename": "second.txt"},
+                content=b"second attachment",
+            )
+            assert second_upload.status_code == 201, second_upload.text
+            second = await client.post("/api/messages", headers=h(98701), json={
+                "recipient_id": 98702, "body": "Protected attachment", "media_id": second_upload.json()["id"],
+            })
+            assert second.status_code == 201, second.text
+            denied = await client.put(
+                f"/api/messages/{second.json()['id']}/media/v2",
+                headers=h(98702),
+                json={"remove_media": True},
+            )
+            assert denied.status_code == 403, denied.text
+
+            # An album is one logical message group; removing one member would corrupt it.
+            album_ids = []
+            for index in range(3):
+                upload = await client.post(
+                    "/api/media/images",
+                    headers={**h(98701), "Content-Type": "image/png"},
+                    content=image_bytes,
+                )
+                assert upload.status_code == 201, upload.text
+                album_ids.append(upload.json()["id"])
+            album = await client.post("/api/messages/album", headers={
+                **h(98701), "Idempotency-Key": "remove-media-album-0001",
+            }, json={"recipient_id": 98702, "media_ids": album_ids, "body": "Album caption"})
+            assert album.status_code == 201, album.text
+            original_album = album.json()["messages"]
+            album_id = album.json()["album_id"]
+            member_id = original_album[0]["id"]
+            album_remove = await client.put(
+                f"/api/messages/{member_id}/media/v2",
+                headers=h(98701),
+                json={"remove_media": True},
+            )
+            assert album_remove.status_code == 200, album_remove.text
+            assert album_remove.json()["media_removed"] is True
+            album_history = (await client.get("/api/messages?with=98701", headers=h(98702))).json()["messages"]
+            detached = next(item for item in album_history if item["id"] == member_id)
+            assert detached["media_id"] is None
+            assert detached["body"] == "Album caption"
+            survivors = [item for item in album_history if item["id"] in {row["id"] for row in original_album[1:]}]
+            assert len(survivors) == 2
+            assert all(item["media_album_id"] == album_id and item["media_album_count"] == 2 for item in survivors)
+            assert sorted(item["media_album_index"] for item in survivors) == [0, 1]
+
+    run(scenario())
+
+
+
+def test_media_spoiler_and_video_cover_metadata_access(api_env) -> None:
+    path, _auth_store, _fake_bot, app = api_env
+    add_account(api_env, 99101, "media_cover_owner")
+    add_account(api_env, 99102, "media_cover_receiver")
+    add_account(api_env, 99103, "media_cover_outsider")
+    add_session(path, 99101, "media-cover-owner-session")
+    add_session(path, 99102, "media-cover-receiver-session")
+    add_session(path, 99103, "media-cover-outsider-session")
+
+    def encoded(value: dict) -> str:
+        return base64.b64encode(json.dumps(value).encode("utf-8")).decode("ascii")
+
+    async def scenario() -> None:
+        headers = lambda token: {"Authorization": f"Bearer {token}"}
+        async with await client_for(app) as client:
+            owner = headers("media-cover-owner-session")
+            receiver = headers("media-cover-receiver-session")
+            outsider = headers("media-cover-outsider-session")
+
+            cover = await client.post(
+                "/api/media/images",
+                headers={**owner, "Content-Type": "image/png"},
+                content=test_preview_png(),
+            )
+            assert cover.status_code == 201, cover.text
+            cover_id = cover.json()["id"]
+            assert json.loads(cover.json()["media_metadata"]) == {}
+
+            video_metadata = {
+                "duration": 8,
+                "width": 1280,
+                "height": 720,
+                "spoiler": True,
+                "video_cover_media_id": cover_id,
+            }
+            video_bytes = b"\x00\x00\x00\x18ftypisom" + (b"\x00" * 8)
+            video = await client.post(
+                "/api/media/documents",
+                headers={
+                    **owner,
+                    "Content-Type": "video/mp4",
+                    "X-Filename": "covered-video.mp4",
+                    "X-Media-Kind": "video",
+                    "X-Media-Metadata": encoded(video_metadata),
+                },
+                content=video_bytes,
+            )
+            assert video.status_code == 201, video.text
+            video_id = video.json()["id"]
+            assert json.loads(video.json()["media_metadata"]) == video_metadata
+
+            sent = await client.post(
+                "/api/messages",
+                headers=owner,
+                json={"recipient_id": 99102, "media_id": video_id},
+            )
+            assert sent.status_code == 201, sent.text
+            message_id = sent.json()["id"]
+
+            history = await client.get(
+                "/api/messages",
+                headers=receiver,
+                params={"with": 99101, "message_ids": str(message_id)},
+            )
+            assert history.status_code == 200, history.text
+            item = history.json()["messages"][0]
+            assert item["media_id"] == video_id
+            assert json.loads(item["media_metadata"]) == video_metadata
+
+            # The recipient can fetch the separately stored cover because it is
+            # linked to a visible video message in this DM.
+            visible_cover = await client.get(f"/api/media/{cover_id}", headers=receiver)
+            assert visible_cover.status_code == 200
+            with Image.open(BytesIO(visible_cover.content)) as cover_image:
+                assert cover_image.size == (16, 16)
+
+            replacement_cover = await client.post(
+                "/api/media/images",
+                headers={**owner, "Content-Type": "image/png"},
+                content=test_preview_png(),
+            )
+            assert replacement_cover.status_code == 201, replacement_cover.text
+            replacement_cover_id = replacement_cover.json()["id"]
+            edited_metadata = {"spoiler": False, "video_cover_media_id": replacement_cover_id}
+            edited = await client.put(
+                f"/api/messages/{message_id}/media/v2",
+                headers=owner,
+                json={"media_id": video_id, "media_metadata": edited_metadata},
+            )
+            assert edited.status_code == 200, edited.text
+            edited_history = await client.get(
+                "/api/messages",
+                headers=receiver,
+                params={"with": 99101, "message_ids": str(message_id)},
+            )
+            assert edited_history.status_code == 200, edited_history.text
+            assert json.loads(edited_history.json()["messages"][0]["media_metadata"]) == {
+                "video_cover_media_id": replacement_cover_id,
+            }
+            assert (await client.get(f"/api/media/{cover_id}", headers=receiver)).status_code == 404
+            assert (await client.get(f"/api/media/{replacement_cover_id}", headers=receiver)).status_code == 200
+
+            # The link must not make the cover public to unrelated accounts.
+            hidden_from_outsider = await client.get(f"/api/media/{cover_id}", headers=outsider)
+            assert hidden_from_outsider.status_code == 404
+
+            # A receiver who hides the parent message loses access to its cover.
+            hidden = await client.delete(f"/api/messages/{message_id}?for=me", headers=receiver)
+            assert hidden.status_code == 200, hidden.text
+            no_longer_visible = await client.get(f"/api/media/{replacement_cover_id}", headers=receiver)
+            assert no_longer_visible.status_code == 404
+
+            # An account cannot attach somebody else's uploaded image as a cover.
+            other_video = await client.post(
+                "/api/media/documents",
+                headers={
+                    **outsider,
+                    "Content-Type": "video/mp4",
+                    "X-Filename": "foreign-cover.mp4",
+                    "X-Media-Kind": "video",
+                    "X-Media-Metadata": encoded({"video_cover_media_id": cover_id}),
+                },
+                content=video_bytes,
+            )
+            assert other_video.status_code == 404
+
+            invalid_image_spoiler = await client.post(
+                "/api/media/images",
+                headers={
+                    **owner,
+                    "Content-Type": "image/png",
+                    "X-Media-Metadata": encoded({"spoiler": "true"}),
+                },
+                content=test_preview_png(),
+            )
+            assert invalid_image_spoiler.status_code == 400
+
+    run(scenario())
+
+
+
+def test_forwarded_video_cover_remains_scoped_to_destination_chat(api_env) -> None:
+    path, _auth_store, _fake_bot, app = api_env
+    add_account(api_env, 99111, "cover_forward_sender")
+    add_account(api_env, 99112, "cover_forward_recipient")
+    add_account(api_env, 99113, "cover_forward_outsider")
+    add_session(path, 99111, "cover-forward-sender-session")
+    add_session(path, 99112, "cover-forward-recipient-session")
+    add_session(path, 99113, "cover-forward-outsider-session")
+
+    def encoded(value: dict) -> str:
+        return base64.b64encode(json.dumps(value).encode("utf-8")).decode("ascii")
+
+    async def scenario() -> None:
+        headers = lambda token: {"Authorization": f"Bearer {token}"}
+        sender = headers("cover-forward-sender-session")
+        recipient = headers("cover-forward-recipient-session")
+        outsider = headers("cover-forward-outsider-session")
+        async with await client_for(app) as client:
+            cover = await client.post(
+                "/api/media/images",
+                headers={**sender, "Content-Type": "image/png"},
+                content=test_preview_png(),
+            )
+            assert cover.status_code == 201, cover.text
+            cover_id = cover.json()["id"]
+            metadata = {"spoiler": True, "video_cover_media_id": cover_id}
+            video = await client.post(
+                "/api/media/documents",
+                headers={
+                    **sender,
+                    "Content-Type": "video/mp4",
+                    "X-Filename": "forward-covered-video.mp4",
+                    "X-Media-Kind": "video",
+                    "X-Media-Metadata": encoded(metadata),
+                },
+                content=b"\x00\x00\x00\x18ftypisom" + (b"\x00" * 8),
+            )
+            assert video.status_code == 201, video.text
+            sent = await client.post(
+                "/api/messages",
+                headers=sender,
+                json={"recipient_id": 99112, "media_id": video.json()["id"]},
+            )
+            assert sent.status_code == 201, sent.text
+            source_message_id = sent.json()["id"]
+
+            group = await client.post(
+                "/api/groups",
+                headers=recipient,
+                json={"title": "Forwarded video cover"},
+            )
+            assert group.status_code == 201, group.text
+            group_id = group.json()["id"]
+            forwarded = await client.post(
+                "/api/forward",
+                headers=recipient,
+                json={
+                    "source_scope": "dm",
+                    "source_peer_id": 99111,
+                    "target_scope": "group",
+                    "target_peer_id": group_id,
+                    "message_ids": [source_message_id],
+                    "silent": True,
+                },
+            )
+            assert forwarded.status_code == 201, forwarded.text
+            forwarded_message = forwarded.json()["messages"][0]
+            assert forwarded_message["media_id"] == video.json()["id"]
+            assert json.loads(forwarded_message["media_metadata"]) == metadata
+
+            group_history = await client.get(
+                f"/api/groups/{group_id}/messages",
+                headers=recipient,
+            )
+            assert group_history.status_code == 200, group_history.text
+            group_message = group_history.json()["messages"][0]
+            assert json.loads(group_message["media_metadata"]) == metadata
+            visible_to_group_member = await client.get(f"/api/media/{cover_id}", headers=recipient)
+            assert visible_to_group_member.status_code == 200
+            assert (await client.get(f"/api/media/{cover_id}", headers=outsider)).status_code == 404
+
+            # Forwarding does not make the standalone cover public or transfer its ownership.
+            assert (await client.get(f"/api/media/{cover_id}", headers=sender)).status_code == 200
+            assert (await client.get(f"/api/media/{video.json()['id']}", headers=outsider)).status_code == 404
+
+    run(scenario())
+
+
+def test_cloud_password_requires_otp_and_single_use_login_challenge(api_env):
+    path, store, _, app = api_env
+    number = add_account(api_env, 81001, 'alpha')
+
+    async def scenario():
+        async with await client_for(app) as client:
+            async def issue(code):
+                with db_split.sqlite_connect(path) as db:
+                    db.execute('UPDATE numbers SET last_code_requested_at=0 WHERE number=?', (number,))
+                    db.commit()
+                assert await store.save_code(number, code, 300)
+
+            code_endpoint = '/api/auth/verify-code'
+            password_endpoint = '/api/auth/verify-password'
+            await issue('111111')
+            login = (await client.post(code_endpoint, json={'phone': number, 'code': '111111'})).json()
+            auth = {'Authorization': 'Bearer ' + login['token']}
+            settings = '/api/me/cloud-password'
+            password = 'correct horse battery staple'
+            assert (await client.get(settings, headers=auth)).json() == {'enabled': False}
+            assert (await client.put(settings, headers=auth, json={'new_password': password, 'code': '111111'})).status_code == 401
+            await issue('222222')
+            assert (await client.put(settings, headers=auth, json={'new_password': password, 'code': '222222'})).json() == {'enabled': True}
+            await issue('333333')
+            data = {'phone': number, 'code': '333333'}
+            challenge = (await client.post(code_endpoint, json=data)).json()
+            assert challenge['status'] == 'password_required' and 'token' not in challenge
+            assert (await client.post(code_endpoint, json=data)).status_code == 401
+            body = {'challenge': challenge['challenge'], 'password': 'wrong password'}
+            assert (await client.post(password_endpoint, json=body)).json()['detail'] == 'CLOUD_PASSWORD_INCORRECT'
+            body['password'] = password
+            assert (await client.post(password_endpoint, json=body)).json()['user']['id'] == 81001
+            assert (await client.post(password_endpoint, json=body)).json()['detail'] == 'CLOUD_PASSWORD_CHALLENGE_INVALID'
+            await issue('444444')
+            assert (await client.put(settings, headers=auth, json={'new_password': None, 'code': '444444', 'current_password': password})).json() == {'enabled': False}
+
+    run(scenario())
+
+
+def test_rotate_virtual_number_keeps_account_and_retires_old_login(api_env):
+    path, store, _, app = api_env
+    old = add_account(api_env, 81001, 'alpha')
+
+    async def scenario():
+        async with await client_for(app) as client:
+            async def code_for(number, code):
+                with db_split.sqlite_connect(path) as db:
+                    db.execute('UPDATE numbers SET last_code_requested_at=0 WHERE number=?', (number,))
+                    db.commit()
+                assert await store.save_code(number, code, 300)
+
+            await code_for(old, '111111')
+            verify = '/api/auth/verify-code'
+            session = (await client.post(verify, json={'phone': old, 'code': '111111'})).json()
+            auth = {'Authorization': 'Bearer ' + session['token']}
+            route = '/api/me/rotate-number'
+            assert (await client.post(route, headers=auth, json={'code': '111111'})).status_code == 401
+            await code_for(old, '222222')
+            assert (await client.get(route, headers=auth)).json() == {'phone': old, 'password_required': False}
+            assert (await client.post(route, headers=auth, json={'phone': '+12000000000', 'code': '222222'})).status_code == 409
+            rotated = await client.post(route, headers=auth, json={'phone': old, 'code': '222222'})
+            assert rotated.status_code == 200
+            user = rotated.json()['user']
+            assert user['id'] == 81001 and user['username'] == 'alpha'
+            new = user['phone']
+            assert new != old
+            assert (await client.get('/api/me', headers=auth)).json()['phone'] == new
+            assert not await store.resolve_number(old)
+            assert (await client.post(verify, json={'phone': old, 'code': '222222'})).status_code == 401
+            await code_for(new, '333333')
+            assert (await client.post(verify, json={'phone': new, 'code': '333333'})).json()['user']['id'] == 81001
+            with db_split.sqlite_connect(path) as db:
+                assert db.execute('SELECT 1 FROM retired_virtual_numbers WHERE number=?', (old,)).fetchone()
+                assert db.execute('UPDATE numbers SET number=? WHERE number=?', (old, new)).rowcount == 0
+
+    run(scenario())
+
+
+def test_inactivity_deletion_is_opt_in_and_rechecks_activity_under_lock(api_env):
+    path, store, _, app = api_env
+    number = add_account(api_env, 81001, 'alpha')
+    untouched = add_account(api_env, 81002, 'beta')
+    add_session(path, 81001, 'inactivity-session')
+
+    async def scenario():
+        async with await client_for(app) as client:
+            auth = {'Authorization': 'Bearer inactivity-session'}
+            route = '/api/me/inactivity-deletion'
+            assert (await client.get(route, headers=auth)).json() == {'days': 0, 'available': True}
+            assert (await client.put(route, headers=auth, json={'days': 30})).status_code == 400
+            assert (await client.put(route, headers=auth, json={'days': 30, 'confirm': True})).json() == {'days': 30}
+            assert (await client.put(route, headers=auth, json={'days': 0})).json() == {'days': 0}
+            assert not await store.delete_number(number, 81001, inactive_at=int(time.time())+730*86400)
+            assert (await client.put(route, headers=auth, json={'days': 30, 'confirm': True})).status_code == 200
+            now = int(time.time())
+            with db_split.sqlite_connect(path) as db:
+                db.execute('UPDATE account_inactivity_deletion SET enabled_at=? WHERE telegram_id=81001', (now-31*86400,))
+                db.commit()
+            assert not await store.delete_number(number, 81001, inactive_at=now)
+            assert not await store.delete_number(untouched, 81002, inactive_at=now+730*86400)
+            with db_split.sqlite_connect(path) as db:
+                db.execute('UPDATE api_user_presence SET last_seen_at=? WHERE telegram_id=81001', (now-31*86400,))
+                db.commit()
+            for start in app.router.on_startup:
+                await start()
+            try:
+                for _ in range(50):
+                    if not await store.resolve_number(number):
+                        break
+                    await asyncio.sleep(.05)
+                else:
+                    raise AssertionError('inactive account was not removed')
+                assert await store.resolve_number(untouched)
+                assert (await client.get('/api/me', headers=auth)).status_code == 401
+                with db_split.sqlite_connect(path) as db:
+                    assert db.execute('SELECT 1 FROM retired_virtual_numbers WHERE number=?', (number,)).fetchone()
+                    assert db.execute('SELECT 1 FROM accounts WHERE telegram_id=81001').fetchone() is None
+            finally:
+                for stop in app.router.on_shutdown:
+                    await stop()
+
+    run(scenario())
+
+
+def test_secret_numbers_support_admin_creation_and_otp_login(api_env):
+    _, store, _, app = api_env
+    numbers = ('+111', '+999', '+0', '+333', '+666')
+
+    async def scenario():
+        async with await client_for(app) as client:
+            owned = []
+            for number in numbers:
+                assert bot_module.normalize_admin_number(number) == number
+                assert bot_module.normalize_admin_number(number[1:]) == number
+                uid = await bot_module.admin_create_account(number, 0, 0)
+                owned.append((number, uid))
+                assert (await client.post('/api/auth/request-code', json={'phone': number})).status_code == 200
+                code, _ = await store.latest_code(number)
+                logged_in = (await client.post('/api/auth/verify-code', json={'phone': number, 'code': code})).json()
+                assert logged_in['user']['id'] == uid and logged_in['user']['phone'] == number
+                auth = {'Authorization': 'Bearer ' + logged_in['token']}
+                assert (await client.get('/api/me', headers=auth)).json()['phone'] == number
+            categories = bot_module.account_number_rows(owned, 'code', 'ru')
+            assert [row[0].text for row in categories] == ['Секрет']
+            assert [row[0].text for row in bot_module.account_number_rows(owned, 'code', 'ru', secret=True)] == list(numbers)
+            assert (await client.post('/api/auth/request-code', json={'phone': '+222'})).status_code == 400
+            assert bot_module.normalize_admin_number('+222') is None
+
     run(scenario())

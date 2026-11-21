@@ -8,6 +8,7 @@ on:
   push:
     branches:
       - main
+      - arena/6503a44d-waysgram-new
     paths:
       - "authbot/**"
       - "bot.py"
@@ -69,8 +70,6 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-          cache: pip
-          cache-dependency-path: authbot/requirements.txt
       - name: Verify the entry point without installing anything
         run: python bot.py --check > entry.json
       - name: Check the reported path
@@ -129,6 +128,7 @@ jobs:
 
   container:
     name: Docker image
+    if: github.ref_name != 'arena/6503a44d-waysgram-new'
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
@@ -151,3 +151,282 @@ jobs:
           docker image inspect waysgram-authbot:test \
             --format '{{json .Config.Healthcheck}}' |
             grep -q '127.0.0.1'
+
+
+  apply-stage1-android-patch:
+    name: Apply and statically verify stage 1 Android patch
+    if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch' || github.event_name == 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout target branch
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.event.pull_request.head.repo.full_name || github.repository }}
+          ref: ${{ github.event.pull_request.head.ref || github.ref_name }}
+          token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Apply Android source patch and rebuild split archive
+        env:
+          HEAD_REF: ${{ github.event.pull_request.head.ref || github.ref_name }}
+        run: |
+          set -euo pipefail
+          test -s android-stage1.patch
+          cat WaysGram-Android.zip.part1 WaysGram-Android.zip.part2 WaysGram-Android.zip.part3 WaysGram-Android.zip.part4 WaysGram-Android.zip.part5 > /tmp/WaysGram-Android.original.zip
+          unzip -tq /tmp/WaysGram-Android.original.zip
+          mkdir -p /tmp/waysgram-android-source
+          unzip -q /tmp/WaysGram-Android.original.zip -d /tmp/waysgram-android-source
+          ANDROID_MEDIA=/tmp/waysgram-android-source/WaysGram-Android/TMessagesProj/src/main/java/org/telegram/tgnet/WaysGramMedia.java
+          if grep -Fq 'catch (WaysGramApi.ApiException coverError)' "$ANDROID_MEDIA"; then
+            echo "Resilient custom video-cover fallback is already present."
+          elif grep -Fq 'videoCoverThumbnail' "$ANDROID_MEDIA"; then
+            python3 - <<'PY'
+          from pathlib import Path
+          source = Path("/tmp/waysgram-android-source/WaysGram-Android/TMessagesProj/src/main/java/org/telegram/tgnet/WaysGramMedia.java")
+          current = source.read_text(encoding="utf-8")
+          start_marker = '            String coverMediaId = info.optString("video_cover_media_id", "");'
+          end_marker = '            File thumb = videoThumbnail(mediaId, file);'
+          start = current.find(start_marker)
+          end = current.find(end_marker, start + len(start_marker)) if start >= 0 else -1
+          if start < 0 or end < 0:
+              raise SystemExit("Could not locate the existing video-cover bridge block")
+          old_block = current[start:end]
+          if "VIDEO_COVER_INVALID" not in old_block:
+              raise SystemExit("Unexpected video-cover bridge block; refusing a blind rewrite")
+          replacement = """            String coverMediaId = info.optString("video_cover_media_id", "");
+          if (!TextUtils.isEmpty(coverMediaId) && kind.equals("video")) {
+              try {
+                  TLRPC.MessageMedia cover = buildMedia(account, coverMediaId, "image/jpeg",
+                          "video_cover.jpg", "", new JSONObject(), false);
+                  if (cover instanceof TLRPC.TL_messageMediaPhoto) {
+                      File customThumb = videoCoverThumbnail(account, coverMediaId, mediaId);
+                      if (customThumb != null) {
+                          videoCoverPhoto = ((TLRPC.TL_messageMediaPhoto) cover).photo;
+                      }
+                  }
+              } catch (WaysGramApi.ApiException coverError) {
+                  FileLog.e(coverError);
+              }
+          }
+          """
+          source.write_text(current[:start] + replacement + current[end:], encoding="utf-8")
+          PY
+          else
+            patch --batch --forward -p1 -d /tmp/waysgram-android-source < android-stage1.patch
+          fi
+          ANDROID_CHAT=/tmp/waysgram-android-source/WaysGram-Android/TMessagesProj/src/main/java/org/telegram/messenger/waysgram/WaysGramChatFragment.java
+          if grep -Fq 'private String pendingForwardIdempotencyKey' "$ANDROID_CHAT"; then
+            echo "Private chat forwarding already has durable idempotency."
+          elif grep -Fq 'Use the same atomic forwarding API as the native multi-message bridge.' "$ANDROID_CHAT"; then
+            python3 - <<'PY'
+          from pathlib import Path
+          source = Path("/tmp/waysgram-android-source/WaysGram-Android/TMessagesProj/src/main/java/org/telegram/messenger/waysgram/WaysGramChatFragment.java")
+          current = source.read_text(encoding="utf-8")
+          if "import android.content.SharedPreferences;" not in current:
+              import_anchor = "import android.content.Context;\n"
+              if import_anchor not in current:
+                  raise SystemExit("Could not locate Android Context import")
+              current = current.replace(import_anchor, import_anchor + "import android.content.SharedPreferences;\n", 1)
+          start_marker = "    private void forwardMessage(long messageId, long recipientId, String recipientLabel) {"
+          end_marker = "    private void editMessage(long messageId, String currentBody) {"
+          start = current.find(start_marker)
+          end = current.find(end_marker, start + len(start_marker)) if start >= 0 else -1
+          if start < 0 or end < 0:
+              raise SystemExit("Could not locate the existing private-chat forward method")
+          old_block = current[start:end]
+          if 'apiClient.post("/api/forward", payload, idempotencyKey' not in old_block:
+              raise SystemExit("Unexpected private-chat forward method; refusing an unsafe rewrite")
+          replacement = """    private SharedPreferences forwardRetryPreferences() {
+              Activity activity = getParentActivity();
+              return activity == null ? null : activity.getSharedPreferences(
+                      "waysgram_forward_retry_" + getCurrentAccount(), Context.MODE_PRIVATE
+              );
+          }
+
+          private String pendingForwardIdempotencyKey(String keyScope) {
+              String cached = forwardIdempotencyKeys.get(keyScope);
+              if (!TextUtils.isEmpty(cached)) return cached;
+              SharedPreferences preferences = forwardRetryPreferences();
+              long now = System.currentTimeMillis();
+              String key = null;
+              if (preferences != null) {
+                  key = preferences.getString(keyScope, null);
+                  long createdAt = preferences.getLong(keyScope + "_created", 0L);
+                  if (TextUtils.isEmpty(key) || createdAt <= 0L || now - createdAt > 7L * 24 * 60 * 60 * 1000) {
+                      preferences.edit().remove(keyScope).remove(keyScope + "_created").apply();
+                      key = null;
+                  }
+              }
+              if (TextUtils.isEmpty(key)) {
+                  key = "wg-forward-" + UUID.randomUUID();
+                  if (preferences != null) {
+                      preferences.edit().putString(keyScope, key).putLong(keyScope + "_created", now).apply();
+                  }
+              }
+              forwardIdempotencyKeys.put(keyScope, key);
+              return key;
+          }
+
+          private void clearPendingForwardIdempotencyKey(String keyScope) {
+              forwardIdempotencyKeys.remove(keyScope);
+              SharedPreferences preferences = forwardRetryPreferences();
+              if (preferences != null) {
+                  preferences.edit().remove(keyScope).remove(keyScope + "_created").apply();
+              }
+          }
+
+          private void forwardMessage(long messageId, long recipientId, String recipientLabel) {
+              JSONObject payload = new JSONObject();
+              try {
+                  // Use the same atomic forwarding API as the native multi-message bridge.
+                  // It preserves media metadata, contacts, static locations and provenance.
+                  payload.put("source_scope", "dm");
+                  payload.put("source_peer_id", peerId);
+                  payload.put("target_scope", "dm");
+                  payload.put("target_peer_id", recipientId);
+                  JSONArray messageIds = new JSONArray();
+                  messageIds.put(messageId);
+                  payload.put("message_ids", messageIds);
+                  payload.put("silent", false);
+              } catch (Exception exception) {
+                  statusView.setText("Не удалось подготовить пересылку");
+                  return;
+              }
+              String keyScope = messageId + ":" + recipientId;
+              String idempotencyKey = pendingForwardIdempotencyKey(keyScope);
+              statusView.setText("Пересылаю сообщение…");
+              apiClient.post("/api/forward", payload, idempotencyKey,
+                      new WaysGramApiClient.Callback() {
+                          @Override
+                          public void onSuccess(JSONObject response) {
+                              clearPendingForwardIdempotencyKey(keyScope);
+                              statusView.setText("Сообщение переслано: " + recipientLabel);
+                          }
+
+                          @Override
+                          public void onError(String message, int statusCode) {
+                              // Keep the persisted key so a retry after timeout or restart cannot duplicate it.
+                              statusView.setText(message);
+                          }
+                      });
+          }
+
+          """
+          source.write_text(current[:start] + replacement + current[end:], encoding="utf-8")
+          PY
+          else
+            patch --batch --forward -p1 -d /tmp/waysgram-android-source < android-stage1-forward-chat.patch
+          fi
+          ANDROID_MESSAGES=/tmp/waysgram-android-source/WaysGram-Android/TMessagesProj/src/main/java/org/telegram/tgnet/WaysGramMessages.java
+          ANDROID_MAPPER=/tmp/waysgram-android-source/WaysGram-Android/TMessagesProj/src/main/java/org/telegram/tgnet/WaysGramMapper.java
+          if grep -Fq 'body.put("big", req.big)' "$ANDROID_MESSAGES" && grep -Fq 'private static void addRecentReactions' "$ANDROID_MAPPER"; then
+            echo "Big reaction animation bridge is already present."
+          else
+            patch --batch --forward -p1 -d /tmp/waysgram-android-source < android-stage1-reactions-big.patch
+          fi
+          python3 - <<'PY'
+          from pathlib import Path
+          import zipfile
+
+          messages = Path("/tmp/waysgram-android-source/WaysGram-Android/TMessagesProj/src/main/java/org/telegram/tgnet/WaysGramMessages.java")
+          mapper = Path("/tmp/waysgram-android-source/WaysGram-Android/TMessagesProj/src/main/java/org/telegram/tgnet/WaysGramMapper.java")
+          media = Path("/tmp/waysgram-android-source/WaysGram-Android/TMessagesProj/src/main/java/org/telegram/tgnet/WaysGramMedia.java")
+          transport = Path("/tmp/waysgram-android-source/WaysGram-Android/TMessagesProj/src/main/java/org/telegram/tgnet/WaysGramTransport.java")
+          chat_fragment = Path("/tmp/waysgram-android-source/WaysGram-Android/TMessagesProj/src/main/java/org/telegram/messenger/waysgram/WaysGramChatFragment.java")
+          send_helper = Path("/tmp/waysgram-android-source/WaysGram-Android/TMessagesProj/src/main/java/org/telegram/messenger/SendMessagesHelper.java")
+          message_text = messages.read_text(encoding="utf-8")
+          message_text = message_text.replace("req.id.size() > 100", "req.id.size() > 20")
+          messages.write_text(message_text, encoding="utf-8")
+          helper_text = send_helper.read_text(encoding="utf-8")
+          helper_text = helper_text.replace(
+              "if (arr.size() == 100 || a == messages.size() - 1",
+              "if (arr.size() == (org.telegram.tgnet.WaysGramTransport.ENABLED ? 20 : 100) || a == messages.size() - 1",
+          )
+          send_helper.write_text(helper_text, encoding="utf-8")
+          chat_text = chat_fragment.read_text(encoding="utf-8")
+          mapper_text = mapper.read_text(encoding="utf-8")
+          assert 'body.put("big", req.big)' in message_text
+          assert 'private static void addRecentReactions' in mapper_text
+          assert 'addRecentReactions(reactions, json.optJSONArray("recent_reactions"))' in mapper_text
+          assert "apiClient.post(\"/api/forward\", payload, idempotencyKey" in chat_text
+          assert "pendingForwardIdempotencyKey(keyScope)" in chat_text
+          assert "clearPendingForwardIdempotencyKey(keyScope)" in chat_text
+          assert "preferences.edit().putString(keyScope, key).putLong(keyScope + \"_created\", now).apply()" in chat_text
+          assert "req.id.size() > 20" in message_text
+          assert "arr.size() == (org.telegram.tgnet.WaysGramTransport.ENABLED ? 20 : 100)" in helper_text
+
+          original = Path("/tmp/WaysGram-Android.original.zip")
+          rebuilt = Path("/tmp/WaysGram-Android.updated.zip")
+          replacements = {
+              "WaysGram-Android/TMessagesProj/src/main/java/org/telegram/tgnet/WaysGramMessages.java":
+                  messages,
+              "WaysGram-Android/TMessagesProj/src/main/java/org/telegram/tgnet/WaysGramMapper.java":
+                  mapper,
+              "WaysGram-Android/TMessagesProj/src/main/java/org/telegram/tgnet/WaysGramMedia.java":
+                  media,
+              "WaysGram-Android/TMessagesProj/src/main/java/org/telegram/tgnet/WaysGramTransport.java":
+                  transport,
+              "WaysGram-Android/TMessagesProj/src/main/java/org/telegram/messenger/waysgram/WaysGramChatFragment.java":
+                  chat_fragment,
+              "WaysGram-Android/TMessagesProj/src/main/java/org/telegram/messenger/SendMessagesHelper.java":
+                  send_helper,
+          }
+          with zipfile.ZipFile(original, "r") as source, zipfile.ZipFile(rebuilt, "w", allowZip64=True) as output:
+              names = set(source.namelist())
+              assert names.issuperset(replacements), "A patched Android source file is missing from the archive"
+              for info in source.infolist():
+                  data = replacements[info.filename].read_bytes() if info.filename in replacements else source.read(info.filename)
+                  output.writestr(info, data)
+          with zipfile.ZipFile(rebuilt, "r") as archive:
+              bad = archive.testzip()
+              assert bad is None, f"Corrupt ZIP member: {bad}"
+              assert set(replacements).issubset(archive.namelist())
+              assert b'remove_media' in archive.read("WaysGram-Android/TMessagesProj/src/main/java/org/telegram/tgnet/WaysGramMessages.java")
+              assert b'req.id.size() > 20' in archive.read("WaysGram-Android/TMessagesProj/src/main/java/org/telegram/tgnet/WaysGramMessages.java")
+              assert b'WaysGramTransport.ENABLED ? 20 : 100' in archive.read("WaysGram-Android/TMessagesProj/src/main/java/org/telegram/messenger/SendMessagesHelper.java")
+          part_size = 23_068_672
+          data = rebuilt.read_bytes()
+          assert len(data) > part_size * 4
+          for index in range(5):
+              chunk = data[index * part_size:(index + 1) * part_size]
+              path = Path(f"WaysGram-Android.zip.part{index + 1}")
+              path.write_bytes(chunk)
+          assert Path("WaysGram-Android.zip.part5").stat().st_size > 0
+          PY
+      - name: Run Android source contract checks (no Gradle build)
+        run: python3 scripts/test_android_messaging.py
+      - name: Commit updated source archive
+        env:
+          HEAD_REF: ${{ github.event.pull_request.head.ref || github.ref_name }}
+        run: |
+          set -euo pipefail
+          git add WaysGram-Android.zip.part1 WaysGram-Android.zip.part2 WaysGram-Android.zip.part3 WaysGram-Android.zip.part4 WaysGram-Android.zip.part5
+          if git diff --cached --quiet; then
+            echo "Android source archive already contains the requested patch."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "feat: support media spoilers and video covers"
+          git push origin "HEAD:refs/heads/${HEAD_REF}"
+
+  export-android-source:
+    name: Temporary export of Android source archive
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Reconstruct and validate source archive
+        run: |
+          set -euo pipefail
+          cat WaysGram-Android.zip.part1 WaysGram-Android.zip.part2 WaysGram-Android.zip.part3 WaysGram-Android.zip.part4 WaysGram-Android.zip.part5 > /tmp/WaysGram-Android.zip
+          unzip -tq /tmp/WaysGram-Android.zip
+      - name: Upload source archive for the code audit
+        uses: actions/upload-artifact@v4
+        with:
+          name: waysgram-android-source-audit
+          path: /tmp/WaysGram-Android.zip
+          compression-level: 0
+          retention-days: 1

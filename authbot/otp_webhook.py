@@ -12,6 +12,8 @@ from typing import Mapping
 
 MAX_BODY_BYTES = 64 * 1024
 MAX_TIMESTAMP_SKEW_SECONDS = 300
+from virtual_numbers import SECRET_NUMBERS
+
 PHONE_RE = re.compile(r"^\+1[0-9]{10}$")
 CODE_RE = re.compile(r"^[0-9]{6}$")
 
@@ -128,9 +130,9 @@ def parse_telesrv_delivery(
     # telesrv normalizes phone numbers to digits before calling the delivery
     # provider (for example, 15550009301). AuthBot stores the same virtual
     # number in +1XXXXXXXXXX form, so canonicalize both representations.
-    if re.fullmatch(r"1[0-9]{10}", number):
+    if "+" + number in SECRET_NUMBERS or re.fullmatch(r"1[0-9]{10}", number):
         number = "+" + number
-    elif not PHONE_RE.fullmatch(number):
+    elif number not in SECRET_NUMBERS and not PHONE_RE.fullmatch(number):
         raise OtpWebhookError(
             "Recipient is not an assigned WaysGram virtual number",
             status_code=422,

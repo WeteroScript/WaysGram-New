@@ -1845,6 +1845,23 @@ def test_gift_sell_refunds_half_of_the_purchase_price(env) -> None:
     run(scenario())
 
 
+def test_collectible_cannot_be_sold_for_refund(env) -> None:
+    _path, app = env
+
+    async def scenario() -> None:
+        await bot_module.set_telegram_gift_values("g1", price=100, supply=1)
+        async with await client_for(app) as client:
+            bought = await client.post("/api/telegram/gifts/g1/purchase", headers=headers(101), json={})
+            serial = bought.json()["gift"]["serial_number"]
+            upgraded = await client.post(f"/api/gifts/{serial}/upgrade", headers=headers(101))
+            assert upgraded.status_code == 200
+            sold = await client.post(f"/api/gifts/{serial}/sell", headers=headers(101))
+            assert sold.status_code == 409
+            assert (await client.get("/api/me", headers=headers(101))).json()["stars"] == 4875
+
+    run(scenario())
+
+
 def test_gift_sell_is_limited_to_the_first_week(env) -> None:
     path, app = env
 
@@ -1904,21 +1921,21 @@ def test_gift_that_is_up_for_sale_cannot_be_sold_back(env) -> None:
     run(scenario())
 
 
-def test_upgrade_costs_fixed_25_stars_without_a_catalog_upgrade_price(env) -> None:
-    path, app = env
+def test_upgrade_rejects_gift_without_telegram_upgrade_capability(env) -> None:
+    _path, app = env
 
     async def scenario() -> None:
-        # The fake catalog has no upgrade_star_count for g2; WaysGram still upgrades it.
         await bot_module.set_telegram_gift_values("g2", price=100, supply=1)
         async with await client_for(app) as client:
             bought = await client.post("/api/telegram/gifts/g2/purchase", headers=headers(101), json={})
             serial = bought.json()["gift"]["serial_number"]
+            preview = await client.get(f"/api/gifts/{serial}/upgrade-preview", headers=headers(101))
             upgraded = await client.post(f"/api/gifts/{serial}/upgrade", headers=headers(101))
-            assert upgraded.status_code == 200
-            assert upgraded.json()["price_stars"] == 25
-            assert upgraded.json()["upgrade_star_count"] == 25
-            assert upgraded.json()["upgrade_level"] == 1
-            assert upgraded.json()["stars_balance"] == 5000 - 100 - 25
+            assert preview.status_code == upgraded.status_code == 409
+            inventory = (await client.get("/api/me/gifts", headers=headers(101))).json()["gifts"]
+            assert inventory[0]["can_upgrade"] is False
+            assert inventory[0]["upgrade_level"] == 0
+            assert (await client.get("/api/me", headers=headers(101))).json()["stars"] == 4900
 
     run(scenario())
 
@@ -1960,6 +1977,10 @@ def test_collectibles_are_numbered_inside_their_own_collection(env) -> None:
                 "/api/telegram/gifts/g2/purchase", headers=headers(101), json={}
             )
             other_serial = other.json()["gift"]["serial_number"]
+            with db_split.sqlite_connect(path) as db:
+                db.execute("UPDATE telegram_gift_catalog SET upgrade_star_count=12 WHERE gift_id='g2'")
+                db.commit()
+
 
             numbers = {}
             for index, serial in enumerate(serials):
@@ -2416,8 +2437,7 @@ def test_sample_only_catalog_does_not_replace_rolled_attribute(env) -> None:
     run(scenario())
 
 
-def test_gift_outside_the_telegram_catalog_still_upgrades(env) -> None:
-    """A WaysGram-only gift has no Telegram models, but the upgrade is WaysGram's own."""
+def test_unverified_waysgram_only_gift_cannot_upgrade(env) -> None:
     path, app = env
 
     async def scenario() -> None:
@@ -2433,16 +2453,11 @@ def test_gift_outside_the_telegram_catalog_still_upgrades(env) -> None:
             await db.commit()
         async with await client_for(app) as client:
             upgraded = await client.post("/api/gifts/WG-000000000001/upgrade", headers=headers(101))
-            assert upgraded.status_code == 200, upgraded.text
-            payload = upgraded.json()
-            assert payload["upgrade_level"] == 1
-            traits = payload["attributes"]["collectible_traits"]
-            # The fallback pool publishes a model, a pattern and a backdrop for every gift.
-            assert traits["model"]["name"]
-            assert traits["pattern"]["name"]
+            assert upgraded.status_code == 409, upgraded.text
             inventory = (await client.get("/api/me/gifts", headers=headers(101))).json()["gifts"]
             stored = next(item for item in inventory if item["serial_number"] == "WG-000000000001")
-            assert stored["upgrade_level"] == 1
+            assert stored["upgrade_level"] == 0
+            assert stored["can_upgrade"] is False
 
     run(scenario())
 
@@ -2589,6 +2604,135 @@ def test_sent_gift_enqueues_one_durable_push_with_idempotency(env, monkeypatch) 
                 rows = db.execute("SELECT sender_telegram_id,recipient_telegram_id,data_json FROM push_outbox").fetchall()
             assert len(rows) == 1 and rows[0][:2] == (101, 102)
             assert json.loads(rows[0][2])["type"] == "gift"
+    run(scenario())
+
+
+def test_shared_customization_is_bounded_and_reusable(env):
+    _, app = env
+    payload = {"name": "Blue", "image0": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aR/sAAAAASUVORK5CYII=", "image1": ""}
+
+    async def scenario():
+        async with await client_for(app) as client:
+            path = "/api/customizations"
+            assert (await client.post(path, json=payload)).status_code == 401
+            assert (await client.post(path, headers=headers(101), json={**payload, "name": " "})).status_code == 400
+            assert (await client.post(path, headers=headers(101), json={**payload, "image0": "broken!"})).status_code == 400
+            assert (await client.post(path, headers=headers(101), content=b"x" * 355001)).status_code == 413
+            shared = await client.post(path, headers=headers(101), json=payload)
+            assert shared.status_code == 200, shared.text
+            token = shared.json()["token"]
+            assert len(token) == 32
+            assert (await client.post(path, headers=headers(101), json=payload)).json()["token"] == token
+            assert (await client.get(f"{path}/{token}")).status_code == 401
+            assert (await client.get(f"{path}/{token}", headers=headers(102))).json() == payload
+            assert (await client.get(f"{path}/bad", headers=headers(102))).status_code == 404
+
+    run(scenario())
+
+
+def test_worn_pattern_recovers_legacy_model_id_by_exact_name(env, monkeypatch):
+    path, app = env
+    serial = "WG-000000000010"
+    traits = {"model": {"name": "Model", "document_id": 10},
+              "pattern": {"name": "Actual Pattern", "document_id": 10}}
+    with db_split.sqlite_connect(path) as db:
+        db.execute(
+            "INSERT INTO user_gifts(serial_number,gift_name,telegram_gift_id,owner_telegram_id,acquired_at,upgrade_level,profile_worn,attributes_json) VALUES(?,?,?,101,1,1,1,?)",
+            (serial, "Legacy gift", "100", json.dumps({"collectible_traits": traits})),
+        )
+        db.commit()
+
+    async def documents(db, gift_id):
+        return {"pattern": [{"name": "Other", "document_id": 11, "position": 0},
+                            {"name": "Actual Pattern", "document_id": 12, "position": 1}]}
+
+    monkeypatch.setattr(messenger_api, "_gift_attribute_documents", documents)
+
+    async def scenario():
+        async with await client_for(app) as client:
+            response = await client.get("/api/users/101", headers=headers(102))
+            assert response.status_code == 200, response.text
+            worn = response.json()["worn_gift"]["traits"]
+            assert worn["model"]["document_id"] == 10
+            assert worn["pattern"]["document_id"] == 12
+
+    run(scenario())
+
+
+def test_worn_gift_is_public_exclusive_and_clears_on_transfer(env) -> None:
+    path, app = env
+    with db_split.sqlite_connect(path) as db:
+        db.executemany(
+            "INSERT INTO user_gifts(serial_number,gift_name,owner_telegram_id,acquired_at,upgrade_level) VALUES(?,?,?,1,?)",
+            [(f"WG-{i:012X}", f"Gift {i}", uid, level) for i, uid, level in (
+                (1, 101, 1), (2, 101, 1), (3, 101, 0), (4, 102, 1),
+            )],
+        )
+        db.commit()
+
+    async def scenario() -> None:
+        async with await client_for(app) as client:
+            async def wear(i, value=True, uid=101):
+                return await client.put(f"/api/me/gifts/WG-{i:012X}/wear", headers=headers(uid), json={"worn": value})
+
+            assert (await wear(3)).status_code == 409
+            assert (await wear(1, uid=102)).status_code == 404
+            assert (await wear(1, value="true")).status_code == 400
+            assert (await wear(1)).json()["worn_gift"]["title"] == "Gift 1"
+            assert (await wear(2)).json()["worn_gift"]["title"] == "Gift 2"
+            assert (await wear(1, False)).json()["worn_gift"]["title"] == "Gift 2"
+            assert (await client.get("/api/users/101", headers=headers(102))).json()["worn_gift"]["title"] == "Gift 2"
+            visibility = f"/api/me/gifts/WG-{2:012X}/visibility"
+            assert (await client.put(visibility, headers=headers(101), json={"visible": False})).status_code == 200
+            assert (await client.get("/api/users/101", headers=headers(102))).json()["worn_gift"] is None
+            public = (await client.get("/api/users/101/gifts", headers=headers(102))).json()["gifts"]
+            assert all(item["serial_number"] != f"WG-{2:012X}" for item in public)
+            assert (await wear(2)).json()["worn_gift"]["title"] == "Gift 2"
+            public = (await client.get("/api/users/101/gifts", headers=headers(102))).json()["gifts"]
+            assert any(item["serial_number"] == f"WG-{2:012X}" for item in public)
+            assert (await wear(2, False)).json()["worn_gift"] is None
+            assert (await wear(2)).status_code == 200
+            assert (await wear(4, uid=102)).status_code == 200
+            with db_split.sqlite_connect(path) as db:
+                db.execute("UPDATE user_gifts SET owner_telegram_id=102 WHERE serial_number='WG-000000000002'")
+                db.commit()
+            assert (await client.get("/api/me", headers=headers(101))).json()["worn_gift"] is None
+            assert (await client.get("/api/me", headers=headers(102))).json()["worn_gift"]["title"] == "Gift 4"
+
+    run(scenario())
+
+
+def test_profile_pins_require_owned_collectibles_and_survive_paging(env) -> None:
+    path, app = env
+    with db_split.sqlite_connect(path) as db:
+        db.executemany(
+            "INSERT INTO user_gifts(serial_number,gift_name,owner_telegram_id,acquired_at,upgrade_level) VALUES(?,?,101,1,?)",
+            [(f"WG-{i:012X}", "Gift", int(i != 8)) for i in range(1, 9)],
+        )
+        db.commit()
+
+    async def scenario() -> None:
+        async with await client_for(app) as client:
+            async def pin(i, value=True, uid=101):
+                return await client.put(f"/api/me/gifts/WG-{i:012X}/pin", headers=headers(uid), json={"pinned": value})
+
+            assert (await pin(1, uid=102)).status_code == 404
+            assert (await pin(8)).status_code == 409
+            for i in (1, 2, 3, 4, 5, 6, 6):
+                assert (await pin(i)).status_code == 200
+            assert (await pin(7)).status_code == 409
+            public = await client.get("/api/users/101/gifts?limit=6", headers=headers(102))
+            rows = public.json()["gifts"]
+            assert all(gift["profile_pinned"] for gift in rows)
+            assert {gift["serial_number"] for gift in rows} == {f"WG-{i:012X}" for i in range(1, 7)}
+            assert (await pin(1, False)).status_code == 200
+            assert (await pin(7)).status_code == 200
+            with db_split.sqlite_connect(path) as db:
+                db.execute("UPDATE user_gifts SET owner_telegram_id=102 WHERE serial_number='WG-000000000007'")
+                db.commit()
+            recipient = await client.get("/api/me/gifts", headers=headers(102))
+            assert recipient.json()["gifts"][0]["profile_pinned"] == 0
+
     run(scenario())
 
 
@@ -2932,3 +3076,98 @@ def test_new_rolls_never_infer_artwork_from_an_unrelated_row() -> None:
     messenger_api._enrich_traits_documents(traits, {"models": [["Actual", 10], ["Other", 20]]}, rows)
     assert "document_id" not in traits["model"]
     assert traits["pattern"]["document_id"] == 3
+
+
+def test_inventory_uses_live_waysgram_shop_stock(env):
+    path, app = env
+    with db_split.sqlite_connect(path) as db:
+        db.execute("""INSERT INTO user_gifts(serial_number,telegram_gift_id,gift_name,owner_telegram_id,acquired_at,upgrade_level)
+                      VALUES('WG-000000000001','stock-test','Gift',101,1,1)""")
+        db.execute("INSERT INTO telegram_gift_prices(gift_id,price_stars,supply,sold) VALUES('stock-test',25,2000,123)")
+        db.commit()
+
+    async def scenario():
+        async with await client_for(app) as client:
+            for url, viewer in [('/api/me/gifts', 101), ('/api/users/101/gifts', 102)]:
+                response = await client.get(url, headers=headers(viewer))
+                assert response.status_code == 200, response.text
+                gift = response.json()['gifts'][0]
+                assert (gift['shop_remaining'], gift['shop_supply']) == (1877, 2000)
+
+    run(scenario())
+
+
+def test_gift_autosave_keeps_hidden_gifts_in_owner_inventory(env):
+    _, app = env
+
+    async def scenario():
+        await bot_module.set_telegram_gift_values('g1', price=1, supply=2)
+        async with await client_for(app) as client:
+            sender, owner = headers(101), headers(102)
+            assert (await client.put('/api/me/privacy/gift-autosave', headers=owner, json={'mode': 'nobody'})).status_code == 200
+            bought = await client.post('/api/telegram/gifts/g1/purchase', headers=sender, json={})
+            assert bought.status_code == 201 or bought.status_code == 200
+            serial = bought.json()['gift']['serial_number']
+            sent = await client.post('/api/messages/gift', headers=sender, json={'recipient_id': 102, 'serial_number': serial})
+            assert sent.status_code == 201
+            assert (await client.get('/api/users/102/gifts', headers=sender)).json()['total'] == 0
+            assert (await client.get('/api/me/gifts', headers=owner)).json()['gifts'][0]['profile_hidden'] == 1
+            endpoint = f'/api/me/gifts/{serial}/visibility'
+            assert (await client.put(endpoint, headers=sender, json={'visible': True})).status_code == 404
+            assert (await client.put(endpoint, headers=owner, json={'visible': True})).status_code == 200
+            assert (await client.get('/api/users/102/gifts', headers=sender)).json()['total'] == 1
+
+    run(scenario())
+
+
+def test_blocked_sender_cannot_deliver_gifts_through_any_route(env):
+    _, app = env
+
+    async def scenario():
+        await bot_module.set_telegram_gift_values('g1', price=1, supply=2)
+        async with await client_for(app) as client:
+            sender, recipient = headers(101), headers(102)
+            buy = '/api/telegram/gifts/g1/purchase'
+            assert (await client.post('/api/blocks', headers=recipient, json={'user_id': 101})).status_code == 201
+            assert (await client.post(buy, headers=sender, json={'recipient_id': 102, 'hide_name': True})).status_code == 403
+            serial = (await client.post(buy, headers=sender, json={})).json()['gift']['serial_number']
+            delivery = {'recipient_id': 102, 'serial_number': serial}
+            for route in ('/api/gifts/transfer', '/api/messages/gift'):
+                assert (await client.post(route, headers=sender, json=delivery)).status_code == 403
+            mine = (await client.get('/api/me/gifts', headers=sender)).json()['gifts']
+            assert [gift['serial_number'] for gift in mine] == [serial]
+            assert (await client.get('/api/me/gifts', headers=recipient)).json()['total'] == 0
+            assert (await client.delete('/api/blocks/101', headers=recipient)).status_code == 200
+            assert (await client.post('/api/gifts/transfer', headers=sender, json=delivery)).status_code == 200
+            assert (await client.post(buy, headers=sender, json={'recipient_id': 102})).status_code in (200, 201)
+
+    run(scenario())
+
+
+def test_recipient_gift_type_filter_applies_before_purchase_and_transfer(env):
+    path, app = env
+    serial = 'WG-000000000045'
+    with db_split.sqlite_connect(path) as db:
+        db.execute('INSERT INTO user_gifts(serial_number,gift_name,owner_telegram_id,acquired_at,upgrade_level) VALUES(?,?,?,?,?)',
+                   (serial, 'Collectible', 101, 1_800_000_000, 1))
+        db.commit()
+
+    async def scenario():
+        await bot_module.set_telegram_gift_values('g1', price=1, supply=1)
+        async with await client_for(app) as client:
+            sender, owner = headers(101), headers(102)
+            settings = '/api/me/gift-receive'
+            assert (await client.get(settings, headers=owner)).json()['allowed_types'] == ['regular', 'collectible']
+            assert (await client.put(settings, headers=owner, json={'allowed_types': ['unknown']})).status_code == 400
+            assert (await client.put(settings, headers=owner, json={'allowed_types': ['collectible']})).status_code == 200
+            route = '/api/telegram/gifts/g1/purchase'
+            assert (await client.post(route, headers=sender, json={'recipient_id': 102})).json()['detail'] == 'GIFT_TYPE_FORBIDDEN'
+            assert (await client.put(settings, headers=owner, json={'allowed_types': ['regular']})).status_code == 200
+            delivery = {'recipient_id': 102, 'serial_number': serial}
+            for endpoint in ('/api/gifts/transfer', '/api/messages/gift'):
+                assert (await client.post(endpoint, headers=sender, json=delivery)).json()['detail'] == 'GIFT_TYPE_FORBIDDEN'
+            assert (await client.post(route, headers=sender, json={'recipient_id': 102})).status_code in (200, 201)
+            assert (await client.put(settings, headers=owner, json={'allowed_types': ['collectible']})).status_code == 200
+            assert (await client.post('/api/gifts/transfer', headers=sender, json=delivery)).status_code == 200
+
+    run(scenario())

@@ -23,6 +23,19 @@ class AndroidGiftSourceChecks(unittest.TestCase):
     def source(self, name):
         return self.archive.read(BASE + name).decode("utf-8")
 
+    def test_waysgram_incoming_gift_settings_use_live_server_preferences(self):
+        settings = self.source("ui/PrivacySettingsActivity.java")
+        controls = self.source("ui/PrivacyControlActivity.java")
+        self.assertIn('"/api/me/gift-receive"', settings)
+        self.assertIn('WaysGramApi.request("GET", WAYS_GRAM_GIFT_RECEIVE_PATH', settings)
+        self.assertIn('WaysGramApi.request("PUT", WAYS_GRAM_GIFT_RECEIVE_PATH', settings)
+        self.assertIn('new JSONObject().put("allowed_types", types)', settings)
+        self.assertIn('choices[selected] = "✓ " + choices[selected]', settings)
+        for resource in ('values', 'values-ru'):
+            strings = self.archive.read(f'WaysGram-Android/TMessagesProj/src/main/res/{resource}/strings.xml')
+            self.assertEqual(strings.count(b'name="WaysGramGiftReceiveTitle"'), 1)
+        self.assertIn('android.text.TextUtils.isEmpty(WaysGramApi.getToken(currentAccount))) {\n            giftTypesHeaderRow', controls)
+
     def test_profile_uses_actual_owner_and_supports_nested_scrolling(self):
         layout = self.source("ui/Components/SharedMediaLayout.java")
         self.assertIn('getArguments().getLong("user_id", 0)', layout)
@@ -108,7 +121,7 @@ class AndroidGiftSourceChecks(unittest.TestCase):
         self.assertIn('final TL_stars.StarGift gift = getGift()', sheet[serial_start:serial_start + 450])
         self.assertIn('if (isWaysGramGift() || userStarGiftRepolling', sheet)
         self.assertIn('walletTransaction == null && !isWaysGramGift()', sheet)
-        self.assertIn('if (messageObject != null && !isWaysGramGift() && showQuantity)', sheet)
+        self.assertIn('else if (messageObject != null && showQuantity)', sheet)
         self.assertIn('if (!isWaysGramGift() && attr.rarity instanceof', sheet)
         self.assertIn('if (permille < 0) return ""', sheet)
         profile = self.source("messenger/waysgram/WaysGramProfileGiftsController.java")
@@ -120,10 +133,8 @@ class AndroidGiftSourceChecks(unittest.TestCase):
         start = sheet.index("// WaysGram upgrade: a fixed 25 Stars")
         end = sheet.index("if (savedStarGift.refunded)", start)
         block = sheet[start:end]
-        self.assertIn('savedStarGift.gift instanceof TL_stars.TL_starGift)', block)
-        self.assertIn('savedStarGift.gift instanceof TL_stars.TL_starGiftUnique', block)
+        self.assertIn('savedStarGift.can_upgrade && savedStarGift.gift instanceof TL_stars.TL_starGift)', block)
         self.assertIn('new WaysGramAnimatedStarSpan(button)', block)
-        self.assertIn('button.setOnClickListener(v -> openWaysGramTransfer())', block)
         self.assertIn('Улучшить за 25 звёзд', block)
         self.assertIn('class WaysGramAnimatedStarSpan extends ReplacementSpan', sheet)
         self.assertIn('canvas.drawPath(star, ink)', sheet)
@@ -164,11 +175,14 @@ class AndroidGiftSourceChecks(unittest.TestCase):
 
     def test_nft_profile_transfer_is_internal_and_retains_retry_key(self):
         sheet = self.source("ui/Stars/StarGiftSheet.java")
-        start = sheet.index("private void openWaysGramTransfer()")
+        start = sheet.index("private boolean canTransferWaysGramGift()")
         end = sheet.index("public void onTransferClick", start)
         block = sheet[start:end]
         self.assertIn('TL_stars.TL_starGiftUnique', block)
-        self.assertIn('!myProfile', block)
+        self.assertIn('return myProfile && walletCollectible == null', block)
+        self.assertIn('topView.setWaysGramTransferOnly(canTransfer)', sheet)
+        self.assertIn('this::openWaysGramTransfer)', sheet)
+        self.assertIn('if (isWaysGramGift()) {\n            openWaysGramTransfer();', sheet)
         self.assertIn('UserSelectorBottomSheet.TYPE_TRANSFER', block)
         self.assertNotIn('addTONOption', block)
         self.assertIn('recipient <= 0', block)
@@ -235,6 +249,126 @@ class AndroidGiftSourceChecks(unittest.TestCase):
         prefetch_start = attributes.index('public static void startServerPrefetch()')
         prefetch_end = attributes.index('public static void retryFailed()', prefetch_start)
         self.assertIn('WaysGramApi.NETWORK.execute', attributes[prefetch_start:prefetch_end])
+
+    def test_gift_edit_menu_animates_both_directions_and_upgrade_respects_eligibility(self):
+        container = self.source("ui/Gifts/ProfileGiftsContainer.java")
+        self.assertIn('ItemOptions.makeOptions(parent.fragment, v)', container)
+        self.assertIn('ValueAnimator.ofFloat(waysGramCheckProgress, active ? 1f : 0f)', container)
+        controller = self.source("messenger/waysgram/WaysGramProfileGiftsController.java")
+        self.assertIn('!isCollectible && !isListed && !isAuctioned && optBooleanLike(item, "can_upgrade")', controller)
+
+    def test_waysgram_wear_changes_native_profile_status_via_internal_api(self):
+        sheet = self.source("ui/Stars/StarGiftSheet.java")
+        self.assertIn('"/api/me/gifts/" + serial + "/wear"', sheet)
+        self.assertIn('TL_updateUserEmojiStatus', sheet)
+        self.assertIn('R.string.Gift2ActionWearOff', sheet)
+        mapper = self.source("tgnet/WaysGramMapper.java")
+        self.assertIn('user.emoji_status = wornGiftStatus(json.optJSONObject("worn_gift"))', mapper)
+        profile = self.source("ui/ProfileActivity.java")
+        self.assertIn('isWaysGramWornGift(status)', profile)
+        self.assertIn('R.drawable.filled_crown_on', profile)
+
+    def test_worn_pattern_uses_resolved_artwork_not_an_unloaded_status_id(self):
+        profile = self.source("ui/ProfileActivity.java")
+        bridge = self.source("tgnet/WaysGramProfile.java")
+        self.assertIn("WaysGramProfile.wornPatternDocument(currentAccount, status.collectible_id)", profile)
+        self.assertIn("emoji.set(document, AnimatedEmojiDrawable.CACHE_TYPE_ALERT_PREVIEW_STATIC", profile)
+        self.assertIn("ColorUtils.calculateContrast(tint", profile)
+        self.assertIn("rememberWornPattern(account, gift.optLong", bridge)
+
+    def test_star_rating_uses_native_profile_badge_and_server_thresholds(self):
+        profile = self.source("ui/ProfileActivity.java")
+        bridge = self.source("tgnet/WaysGramProfile.java")
+        self.assertIn("ratingView.set(userInfo.stars_rating)", profile)
+        self.assertIn('full.stars_rating = readStarRating(json.optJSONObject("stars_rating"))', bridge)
+        self.assertIn('rating.current_level_stars = value.optLong("current_level_stars")', bridge)
+        self.assertIn('full.stars_my_pending_rating_date = json.optInt("stars_my_pending_rating_date")', bridge)
+
+    def test_waysgram_collectible_pin_uses_internal_profile_route(self):
+        sheet = self.source("ui/Stars/StarGiftSheet.java")
+        self.assertIn('this::toggleWaysGramPin', sheet)
+        self.assertIn('"/api/me/gifts/" + serial + "/pin"', sheet)
+        controller = self.source("messenger/waysgram/WaysGramProfileGiftsController.java")
+        self.assertIn('savedGift.pinned_to_top = isCollectible && optBooleanLike(item, "profile_pinned")', controller)
+
+    def test_waysgram_pins_render_on_native_profile_cover_before_opening_gifts(self):
+        profile = self.source("ui/ProfileActivity.java")
+        media = self.source("ui/Components/SharedMediaLayout.java")
+        controller = self.source("messenger/waysgram/WaysGramProfileGiftsController.java")
+        cover = self.source("ui/Stars/ProfileGiftsView.java")
+        self.assertIn("sharedMediaLayout.loadWaysGramProfileCover()", profile)
+        self.assertIn("ensureWaysGramGifts();\n        waysGramGiftsController.refresh();", media)
+        self.assertIn("cover.setWaysGramGifts(nativeGifts)", controller)
+        self.assertIn("gift.pinned_to_top && !gift.unsaved", cover)
+        self.assertIn("maxCount = waysGram ? 6", cover)
+        self.assertIn("if (!waysGram && emojiStatus instanceof TLRPC.TL_emojiStatusCollectible)", cover)
+        self.assertIn("showWaysGramProfileGift(gift.id, gift.slug)", profile)
+        self.assertIn("showWaysGramProfileGift(status.collectible_id, status.slug)", profile)
+        self.assertIn("giftsView.findWaysGramGift(id, slug)", profile)
+        self.assertIn(".set(saved, null).show()", profile)
+        self.assertIn('!gift.slug.startsWith("waysgram://")', cover)
+
+    def test_gift_batch_only_selects_eligible_regular_gifts_and_uses_internal_api(self):
+        page = self.source("ui/Gifts/ProfileGiftsContainer.java")
+        for fragment in ("GiftBatchMode.UPGRADE", "GiftBatchMode.SELL", "gift.gift instanceof TL_stars.TL_starGift",
+                         "WaysGramGiftSell.canSell(gift, currentAccount)", "if (!selectedGiftSerials.remove(serial))",
+                         "Общая стоимость:", '"/upgrade" : "/sell"', '"wg-batch-" + java.util.UUID.randomUUID()'):
+            self.assertIn(fragment, page)
+        cells = self.source("ui/Gifts/GiftSheet.java")
+        self.assertIn("setWaysGramBatchMark", cells)
+        self.assertIn("0xff34a853", cells)
+
+    def test_batch_buttons_follow_visible_profile_bottom_above_main_tabs(self):
+        page = self.source("ui/Gifts/ProfileGiftsContainer.java")
+        media = self.source("ui/Components/SharedMediaLayout.java")
+        profile = self.source("ui/ProfileActivity.java")
+        self.assertIn("giftBatchMode == null ? View.GONE : View.VISIBLE", page)
+        self.assertIn("setEnabled(!giftBatchBusy && !selectedGiftSerials.isEmpty())", page)
+        self.assertIn("setTranslationY(-hiddenBottom - parent.inventoryBottomInset)", page)
+        self.assertIn("parent.inventoryBottomInset + dp(giftBatchMode != null ? 72 : 12)", page)
+        self.assertEqual(media.count("waysGramGiftsContainer.setInventoryBottomInset(pagesPaddingBottom)"), 2)
+        self.assertIn("setPagesPaddingBottom(navigationBarHeight + additionNavigationBarHeight)", profile)
+
+    def test_profile_nested_scroll_can_reach_gift_grid_and_return_to_header(self):
+        profile = self.source("ui/ProfileActivity.java")
+        media = self.source("ui/Components/SharedMediaLayout.java")
+        self.assertIn("return waysGramGiftsContainer.getCurrentListView()", media)
+        self.assertIn("top <= 0 && innerListView != null && dyUnconsumed != 0", profile)
+        self.assertIn("innerListView.canScrollVertically(Integer.signum(dyUnconsumed))", profile)
+        self.assertIn("innerListView.scrollBy(0, consumed[1])", profile)
+
+    def test_shop_price_sort_is_persistent_and_uses_a_vector_icon(self):
+        import xml.etree.ElementTree as ET
+        sheet = self.source("ui/Gifts/GiftSheet.java")
+        for fragment in ('getBoolean(PRICE_DESCENDING, false)', 'putBoolean(PRICE_DESCENDING, descending).apply()',
+                         'topView.addView(sortButton', '.addChecked(priceDescending', '.addChecked(!priceDescending',
+                         'items.subList(firstGift, items.size()).sort', 'Long.compare(shopPrice(b), shopPrice(a))',
+                         'Long.compare(shopPrice(a), shopPrice(b))', 'return gift.resell_min_stars'):
+            self.assertIn(fragment, sheet)
+        for key in ('WaysGramGiftSortPrice', 'WaysGramGiftSortAscending', 'WaysGramGiftSortDescending'):
+            self.assertIn(f'context.getString(R.string.{key})', sheet)
+            for language in ('values', 'values-ru'):
+                resources = ET.fromstring(self.archive.read(
+                    f'WaysGram-Android/TMessagesProj/src/main/res/{language}/waysgram_gift_sort.xml'))
+                self.assertTrue(resources.find(f"string[@name='{key}']").text.strip())
+        path = 'WaysGram-Android/TMessagesProj/src/main/res/drawable/waysgram_gift_sort.xml'
+        icon = ET.fromstring(self.archive.read(path))
+        self.assertEqual(icon.tag, 'vector')
+        self.assertIsNotNone(icon.find('path'))
+
+    def test_waysgram_profile_keeps_media_and_gifts_as_separate_tabs(self):
+        layout = self.source("ui/Components/SharedMediaLayout.java")
+        tabs = layout.split("public void updateTabs(boolean animated)", 1)[1].split("private void startStopVisibleGifs", 1)[0]
+        self.assertIn("hasMedia[0] > 0", tabs)
+        self.assertIn("waysGramGiftsController.hasVisibleGifts()", tabs)
+        controller = self.source("messenger/waysgram/WaysGramProfileGiftsController.java")
+        self.assertIn("boolean visible = !nativeGifts.isEmpty()", controller)
+        self.assertIn("if (hasVisibleGifts != visible)", controller)
+        self.assertIn("waysGramProfileOwner > 0 && org.telegram.tgnet.WaysGramTransport.ENABLED", tabs)
+        self.assertIn("hasPhotoVideoTab != scrollSlidingTextTabStrip.hasTab(TAB_PHOTOVIDEO)", tabs)
+        self.assertIn("if (hasPhotoVideoTab)", tabs)
+        self.assertLess(tabs.index("tabs.add(new Pair(TAB_PHOTOVIDEO"),
+                        tabs.index("tabs.add(new Pair(TAB_WAYSGRAM_GIFTS"))
 
     def test_profile_labels_refresh_does_not_reload_gifts(self):
         profile = self.source("messenger/waysgram/WaysGramUserProfileFragment.java")

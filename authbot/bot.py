@@ -8,6 +8,7 @@ import os
 import random
 import re
 import secrets
+from virtual_numbers import SECRET_NUMBERS, is_virtual_number
 import time
 from pathlib import Path
 from typing import Any
@@ -32,6 +33,8 @@ from otp_webhook import OtpWebhookError, parse_telesrv_delivery
 from pydantic import BaseModel, Field
 import uvicorn
 from cryptography.fernet import Fernet, InvalidToken
+import gift_upgrades
+from messenger_api import _assign_unique_number, _gift_attribute_rows, _gift_supports_upgrade, _normalise_attribute_name
 from messenger_api import build_messenger_router, init_messenger_storage, sync_telegram_gifts, _telegram_gift_metadata
 from telegram_mtproto import TelegramMTProtoGiftCatalog
 
@@ -64,7 +67,6 @@ WELCOME_DM_TEXT = (
     "Добро пожаловать в WaysGram! ✨"
 )
 
-PHONE_RE = re.compile(r"^\+[1-9]\d{7,14}$")
 OTP_RE = re.compile(r"^\d{6}$")
 EMOJI = ["🐱", "🐶", "🦊", "🐼", "🐸", "🐵", "🐧", "🐰", "🦁", "🐨", "🐯", "🐹"]
 
@@ -243,6 +245,15 @@ class Store:
                     created_at INTEGER NOT NULL,
                     last_code_requested_at INTEGER NOT NULL DEFAULT 0
                 );
+                CREATE TABLE IF NOT EXISTS retired_virtual_numbers (
+                    number TEXT PRIMARY KEY
+                );
+                CREATE TRIGGER IF NOT EXISTS prevent_retired_number_insert BEFORE INSERT ON numbers
+                WHEN EXISTS(SELECT 1 FROM retired_virtual_numbers WHERE number=NEW.number)
+                BEGIN SELECT RAISE(IGNORE); END;
+                CREATE TRIGGER IF NOT EXISTS prevent_retired_number_update BEFORE UPDATE OF number ON numbers
+                WHEN EXISTS(SELECT 1 FROM retired_virtual_numbers WHERE number=NEW.number)
+                BEGIN SELECT RAISE(IGNORE); END;
                 CREATE TABLE IF NOT EXISTS auth_codes (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     number TEXT NOT NULL,
@@ -486,7 +497,7 @@ class Store:
             await db.commit()
             return account_id
 
-    async def delete_number(self, number: str, owner_telegram_id: int) -> bool:
+    async def delete_number(self, number: str, owner_telegram_id: int, *, inactive_at: int | None = None) -> bool:
         async with aiosqlite.connect(self.path) as db:
             await db.execute("BEGIN IMMEDIATE")
             cur = await db.execute(
@@ -499,6 +510,18 @@ class Store:
                 await db.rollback()
                 return False
             account_id = int(row[0])
+            if inactive_at is not None:
+                cur = await db.execute("""SELECT 1 FROM account_inactivity_deletion d
+                    JOIN accounts a ON a.telegram_id=d.telegram_id
+                    JOIN numbers n ON n.telegram_id=d.telegram_id
+                    LEFT JOIN api_user_presence p ON p.telegram_id=d.telegram_id
+                    WHERE d.telegram_id=? AND n.number=? AND n.owner_telegram_id=n.telegram_id
+                    AND n.provider_ref='internal' AND a.is_banned=0
+                    AND MAX(d.enabled_at,COALESCE(p.last_seen_at,0))+d.days*86400<=?""",
+                    (account_id, number, inactive_at))
+                if not await cur.fetchone():
+                    return False
+                await db.execute("INSERT OR IGNORE INTO retired_virtual_numbers VALUES(?)", (number,))
             await db.execute("DELETE FROM auth_codes WHERE number=?", (number,))
             await db.execute("DELETE FROM otp_webhook_receipts WHERE number=?", (number,))
             await db.execute("DELETE FROM api_login_request_log WHERE phone=?", (number,))
@@ -508,7 +531,7 @@ class Store:
                 "forwarded_from_telegram_id", "requested_by_telegram_id",
                 "stopped_by_telegram_id", "from_telegram_id", "to_telegram_id",
                 "bidder_telegram_id", "current_bidder_id", "actor_id",
-                "pinned_by", "created_by", "admin_id",
+                "pinned_by", "created_by", "admin_id", "user_low", "user_high",
             }
             for schema in ("main", "messenger"):
                 cur = await db.execute(
@@ -872,9 +895,8 @@ async def get_code_handler(message: Message) -> None:
     if not owned:
         await message.answer(tr(lang, "need_number"))
         return
-    if len(owned) > 1:
-        rows = [[InlineKeyboardButton(text=number, callback_data=f"myacc:code:{number}")]
-                for number, _ in owned]
+    if len(owned) > 1 or owned[0][0] in SECRET_NUMBERS:
+        rows = account_number_rows(owned, "code", lang)
         await message.answer(tr(lang, "my_accounts"), reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
         return
     number = owned[0][0]
@@ -887,6 +909,14 @@ async def get_code_handler(message: Message) -> None:
     await message.answer(tr(lang, "code_ready", code=code, minutes=minutes))
 
 
+def account_number_rows(owned: list[tuple[str, int]], action: str, lang: str, *, secret: bool = False):
+    rows = [[InlineKeyboardButton(text=number, callback_data=f"myacc:{action}:{number}")]
+            for number, _ in owned if (number in SECRET_NUMBERS) == secret]
+    if not secret and any(number in SECRET_NUMBERS for number, _ in owned):
+        rows.append([InlineKeyboardButton(text="Секрет" if lang == "ru" else "Secret", callback_data=f"myacc:secret:{action}")])
+    return rows
+
+
 async def send_my_accounts(message: Message, telegram_id: int, lang: str) -> None:
     owned = await store.owned_numbers(telegram_id)
     if not owned:
@@ -897,8 +927,7 @@ async def send_my_accounts(message: Message, telegram_id: int, lang: str) -> Non
             ]),
         )
         return
-    keyboard = [[InlineKeyboardButton(text=number, callback_data=f"myacc:open:{number}")]
-                for number, _ in owned]
+    keyboard = account_number_rows(owned, "open", lang)
     keyboard.append([InlineKeyboardButton(text=tr(lang, "account_back"), callback_data="nav:menu")])
     await message.answer(tr(lang, "my_accounts"), reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard))
 
@@ -953,6 +982,16 @@ async def my_accounts_callback(callback: CallbackQuery) -> None:
         await send_my_accounts(callback.message, user_id, lang)
         return
     owned = await store.owned_numbers(user_id)
+    if action == "secret" and number in ("open", "code"):
+        rows = account_number_rows(owned, number, lang, secret=True)
+        if not rows:
+            await safe_callback_answer(callback, tr(lang, "account_not_found"), True)
+            return
+        rows.append([InlineKeyboardButton(text=tr(lang, "account_back"), callback_data="myacc:list")])
+        await safe_callback_answer(callback)
+        await callback.message.answer("Секрет" if lang == "ru" else "Secret",
+                                      reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+        return
     if not number or not any(item[0] == number for item in owned):
         await safe_callback_answer(callback, tr(lang, "account_not_found"), True)
         return
@@ -1112,6 +1151,8 @@ async def init_admin_storage() -> None:
             admin_id INTEGER,
             created_at INTEGER NOT NULL
         );
+        CREATE INDEX IF NOT EXISTS idx_economy_transactions_rating
+            ON economy_transactions(telegram_id,asset) WHERE admin_id IS NULL;
         CREATE TABLE IF NOT EXISTS gift_transactions (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             event_type TEXT NOT NULL,
@@ -1585,7 +1626,8 @@ async def admin_account_card(telegram_id: int) -> tuple[str, InlineKeyboardMarku
     ban_label = "Разблокировать" if row["is_banned"] else "Заблокировать"
     return body, admin_keyboard([
         [("➕ Начислить Stars", f"wgadm:credit:stars:{telegram_id}"), ("➕ Начислить Gram", f"wgadm:credit:grams:{telegram_id}")],
-        [("🎁 Выдать подарок", f"wgadm:grant:{telegram_id}"), ("📦 Подарки аккаунта", f"wgadm:usergifts:{telegram_id}")],
+        [("🎁 Выдать подарок", f"wgadm:grant:{telegram_id}"), ("💎 Выдать NFT-подарок", f"wgadm:nftgrant:{telegram_id}")],
+        [("📦 Подарки аккаунта", f"wgadm:usergifts:{telegram_id}")],
         [("↔️ Передать подарок", f"wgadm:transfer:{telegram_id}")],
         [(ban_label, f"wgadm:ban:{telegram_id}")],
         [("⬅️ В меню", "wgadm:home")],
@@ -1593,6 +1635,7 @@ async def admin_account_card(telegram_id: int) -> tuple[str, InlineKeyboardMarku
 
 GRANT_PAGE_SIZE = 10
 GRANT_MAX_QUANTITY = 100
+NFT_GRANT_MAX_QUANTITY = 150
 
 
 async def admin_grant_catalog() -> list[dict[str, Any]]:
@@ -1627,9 +1670,81 @@ def admin_grant_page(state: dict[str, Any], page: int) -> tuple[str, InlineKeybo
     return text, admin_keyboard(keyboard)
 
 
+NFT_SLOTS = ('model', 'backdrop', 'pattern')
+NFT_LABELS = {'model': 'Модель', 'backdrop': 'Фон', 'pattern': 'Узор (эмодзи)'}
+
+
+async def admin_nft_options(db, gift):
+    gift_id = str(gift['id'])
+    _, pool = gift_upgrades.pool_for_gift(gift_id)
+    metadata = await _telegram_gift_metadata(db, gift_id)
+    if not _gift_supports_upgrade(gift_id, metadata):
+        return {}
+    live = await _gift_attribute_rows(db, gift_id)
+    options = {}
+    for slot in NFT_SLOTS:
+        colored = slot == 'backdrop'
+        rows = gift_upgrades._live_rows(live, slot)
+        entries = (pool or {}).get(slot + 's', [])
+        weights = gift_upgrades._slot_weights(entries, colored=colored)
+        by_name = {}
+        for entry, weight in zip(entries, weights):
+            trait = gift_upgrades._backdrop_traits(entry) if colored else gift_upgrades._model_traits(entry)
+            trait['permille'] = gift_upgrades._effective_permille(weight, weights)
+            by_name[_normalise_attribute_name(trait['name'])] = trait
+        live_weights = gift_upgrades._live_weights(rows)
+        for row, weight in zip(rows, live_weights):
+            trait = gift_upgrades._live_traits(row, slot, len(rows))
+            key = _normalise_attribute_name(trait['name'])
+            if len(rows) > 1:
+                trait['permille'] = gift_upgrades._effective_permille(weight, live_weights)
+            elif key in by_name:
+                trait['permille'] = by_name[key]['permille']
+            by_name[key] = trait
+        options[slot] = list(by_name.values())
+    return options
+
+
+def admin_nft_page(state, page=0):
+    stage = state['stage']
+    options = state['gifts'] if stage == 'gift' else state['options'][stage] if stage in NFT_SLOTS else []
+    last = max(0, (len(options) - 1) // GRANT_PAGE_SIZE)
+    page = max(0, min(page, last))
+    key = f"wgadm:nft:{state['token']}:{stage}:"
+    rows = []
+    if stage == 'confirm':
+        text = f"Выдать NFT-подарок WaysGram «{state['gift']['name']}» аккаунту {state['user_id']}?"
+    else:
+        text = f"Выберите: {NFT_LABELS.get(stage, 'подарок')} · {page + 1}/{last + 1}"
+    selected = state.get('selected', {})
+    for slot in NFT_SLOTS:
+        if slot in selected:
+            trait = selected[slot]
+            text += f"\n{NFT_LABELS[slot]}: {trait['name']} · {trait['permille'] / 10:g}%"
+    if 'backdrop' in selected and 'pattern' in selected:
+        chance = selected['backdrop']['permille'] * selected['pattern']['permille'] / 10000
+        text += f"\nФон + узор при независимом выпадении: ≈ {chance:g}%"
+    if stage == 'confirm':
+        text += f"\n\nВведите количество от 1 до {NFT_GRANT_MAX_QUANTITY}. Ввод числа подтверждает выдачу."
+    else:
+        for index in range(page * GRANT_PAGE_SIZE, min(len(options), (page + 1) * GRANT_PAGE_SIZE)):
+            entry = options[index]
+            title = entry['name'][:44] + (f" · {entry['permille'] / 10:g}%" if stage != 'gift' else '')
+            rows.append([(title, key + f's{index}')])
+        nav = []
+        if page: nav.append(('⬅️', key + f'p{page - 1}'))
+        if page < last: nav.append(('➡️', key + f'p{page + 1}'))
+        if nav: rows.append(nav)
+    if stage != 'gift': rows.append([('↩️ Начать выбор заново', f"wgadm:nftgrant:{state['user_id']}")])
+    rows.append([('⬅️ К аккаунту', f"wgadm:user:{state['user_id']}")])
+    return text, admin_keyboard(rows)
+
+
 async def admin_grant_gifts(actor_id: int, payload: dict[str, Any], quantity: int) -> None:
     """Mint gifts into the selected WaysGram inventory in one audited transaction."""
-    if isinstance(quantity, bool) or not isinstance(quantity, int) or not 1 <= quantity <= GRANT_MAX_QUANTITY:
+    selected = payload.get("selected")
+    limit = NFT_GRANT_MAX_QUANTITY if selected is not None else GRANT_MAX_QUANTITY
+    if isinstance(quantity, bool) or not isinstance(quantity, int) or not 1 <= quantity <= limit:
         raise ValueError("Некорректное количество подарков.")
     from_id, user_id, gift = SYSTEM_ACCOUNT_ID, int(payload["user_id"]), payload["gift"]
     now = int(time.time())
@@ -1662,6 +1777,19 @@ async def admin_grant_gifts(actor_id: int, payload: dict[str, Any], quantity: in
             name = str(row["name"])
         else:
             raise ValueError("Подарок не найден. Начните выдачу заново.")
+        attributes = {}
+        gift_key = None
+        if selected is not None:
+            if source != "telegram" or set(selected) != set(NFT_SLOTS):
+                raise ValueError("Некорректный выбор NFT-подарка.")
+            options = await admin_nft_options(db, gift)
+            if any(selected[slot] not in options.get(slot, []) for slot in NFT_SLOTS):
+                raise ValueError("Атрибуты обновились. Выберите NFT-подарок заново.")
+            gift_key, _ = gift_upgrades.pool_for_gift(gift_id)
+            attributes = {"upgrade_level": 1, "upgrade_source": "admin_grant", "last_upgraded_at": now,
+                          "collectible_traits": {"version": gift_upgrades.TRAITS_VERSION, "rolled_at": now,
+                              "roll_source": "admin_grant", "strict_artwork": True, **selected,
+                              "rarity": gift_upgrades._rarest(t["rarity"] for t in selected.values())}}
         snapshot = json.dumps(metadata, ensure_ascii=False, separators=(",", ":"))
         for _ in range(quantity):
             serial = "WG-" + secrets.token_hex(6).upper()
@@ -1670,14 +1798,18 @@ async def admin_grant_gifts(actor_id: int, payload: dict[str, Any], quantity: in
                  owner_telegram_id,acquired_at,purchase_asset,purchase_price)
                 VALUES(?,?,?,?,?,?,?,?,'stars',0)""",
                 (serial, legacy_id, gift_id if source == "telegram" else "", name, emoji, snapshot, user_id, now))
+            if attributes:
+                await db.execute("UPDATE user_gifts SET upgrade_level=1,attributes_json=? WHERE serial_number=?",
+                                 (json.dumps(attributes, ensure_ascii=False), serial))
+                await _assign_unique_number(db, serial, gift_key or gift_id, now)
             await db.execute("""INSERT INTO gift_transactions
                 (event_type,serial_number,gift_name,from_telegram_id,to_telegram_id,created_at)
                 VALUES('admin_grant',?,?,?,?,?)""", (serial, name, from_id, user_id, now))
         await db.execute("""INSERT INTO admin_logs(admin_id,action,target,details,created_at)
-            VALUES(?,?,?,?,?)""", (actor_id, "gift_grant", str(user_id),
-            f"source={source}; gift_id={gift_id}; name={name}; quantity={quantity}; store_stock=unchanged", now))
+            VALUES(?,?,?,?,?)""", (actor_id, "nft_gift_grant" if attributes else "gift_grant", str(user_id),
+            f"source={source}; gift_id={gift_id}; name={name}; quantity={quantity}; store_stock=unchanged; traits={json.dumps(selected, ensure_ascii=False)}", now))
         cur = await db.execute("INSERT INTO messages(sender_telegram_id,recipient_telegram_id,body,created_at) VALUES(?,?,?,?)",
-            (from_id, user_id, f"Вам выдан подарок WaysGram: {name} × {quantity}. Найти его можно в подарках профиля.", now))
+            (from_id, user_id, f"Вам выдан {'NFT-подарок' if attributes else 'подарок'} WaysGram: {name} × {quantity}. Найти его можно в подарках профиля.", now))
         await db.execute("""INSERT INTO message_events(scope,chat_id,user_a,user_b,message_id,kind,actor_id,created_at)
             VALUES('dm',0,?,?,?,'new_message',?,?)""",
             (min(from_id, user_id), max(from_id, user_id), int(cur.lastrowid), from_id, now))
@@ -1933,14 +2065,16 @@ USERNAME_RE = re.compile(r"[a-z][a-z0-9_]{1,31}")
 
 
 def normalize_admin_number(value: str) -> str | None:
-    """Normalize an international E.164 number; retain legacy US input shortcuts."""
+    """Normalize a WaysGram number, retaining legacy US input shortcuts."""
     raw = value.strip()
     if not re.fullmatch(r"[+0-9().\s-]+", raw):
         return None
     digits = re.sub(r"\D", "", raw)
     if raw.startswith("+"):
         normalized = "+" + digits
-        return normalized if PHONE_RE.fullmatch(normalized) else None
+        return normalized if is_virtual_number(normalized) else None
+    if "+" + digits in SECRET_NUMBERS:
+        return "+" + digits
     if len(digits) == 10:
         return "+1" + digits
     if len(digits) == 11 and digits.startswith("1"):
@@ -2146,6 +2280,8 @@ async def set_telegram_gift_values(gift_id: str, price: int | None = None, suppl
 
 async def admin_create_account(number: str, stars: int, grams: int, *, actor_id: int | None = None) -> int:
     """An account that no Telegram user owns. Login codes for its number are delivered to the administrator."""
+    if not is_virtual_number(number):
+        raise ValueError("Invalid WaysGram number")
     actor_id = ADMIN_ID if actor_id is None else actor_id
     now = int(time.time())
     async with aiosqlite.connect(DATABASE_PATH) as db:
@@ -2162,10 +2298,12 @@ async def admin_create_account(number: str, stars: int, grams: int, *, actor_id:
             "INSERT INTO users(telegram_id,chat_id,language,verified,created_at) VALUES(?,?,?,?,?)",
             (account_id, actor_id, "ru", 1, now),
         )
-        await db.execute(
+        inserted_number = await db.execute(
             "INSERT INTO numbers(telegram_id,owner_telegram_id,number,provider_ref,created_at) VALUES(?,?,?,?,?)",
             (account_id, actor_id, number, "admin", now),
         )
+        if inserted_number.rowcount != 1:
+            raise aiosqlite.IntegrityError("Virtual number is retired")
         await db.execute(
             """INSERT INTO accounts(telegram_id,virtual_number,username,display_name,stars,grams,created_at,updated_at)
                VALUES(?,?,?,?,?,?,?,?)""",
@@ -2254,7 +2392,13 @@ async def admin_callback(callback: CallbackQuery) -> None:
     # Navigating away from the quantity prompt cancels it, including via older menus.
     if ADMIN_INPUT.get(actor_id, (None,))[0] in {"db_gift_count", "db_gift_fallback_price"}:
         ADMIN_INPUT.pop(actor_id, None)
-    if ADMIN_INPUT.get(actor_id, (None,))[0] in {"grant_select", "grant_count"} and action not in {"gpage", "gsel"}:
+    active_grant = ADMIN_INPUT.get(actor_id, (None, None))
+    if active_grant[0] in {"grant_select", "grant_count"} and action not in {"gpage", "gsel"}:
+        # A stale attribute button must not cancel the NFT quantity prompt.
+        if not (action == "nft" and active_grant[0] == "grant_count" and active_grant[1].get("selected") is not None):
+            ADMIN_INPUT.pop(actor_id, None)
+
+    if ADMIN_INPUT.get(actor_id, (None,))[0] == "nft_grant" and action != "nft":
         ADMIN_INPUT.pop(actor_id, None)
 
     if action in {"addadmin", "addadminconfirm", "admins", "adminremoveask", "adminremove", "admincancel"}:
@@ -2618,9 +2762,20 @@ async def admin_callback(callback: CallbackQuery) -> None:
                 cur = await db.execute("SELECT id FROM channels WHERE owner_telegram_id=?", (account_id,))
                 channel_ids = [int(row[0]) for row in await cur.fetchall()]
                 for channel_id in channel_ids:
+                    await db.execute("DELETE FROM channel_giveaway_entries WHERE giveaway_id IN (SELECT id FROM channel_giveaways WHERE channel_id=?)", (channel_id,))
+                    await db.execute("DELETE FROM channel_giveaways WHERE channel_id=?", (channel_id,))
+                    await db.execute("DELETE FROM channel_post_views WHERE channel_id=?", (channel_id,))
+                    await db.execute("DELETE FROM channel_member_departures WHERE channel_id=?", (channel_id,))
                     await db.execute("DELETE FROM channel_messages WHERE channel_id=?", (channel_id,))
                     await db.execute("DELETE FROM channel_admins WHERE channel_id=?", (channel_id,))
                     await db.execute("DELETE FROM channel_members WHERE channel_id=?", (channel_id,))
+                    await db.execute("DELETE FROM channel_subscription_offers WHERE channel_id=?", (channel_id,))
+                    await db.execute("DELETE FROM channel_subscriptions WHERE channel_id=?", (channel_id,))
+                    await db.execute("DELETE FROM channel_discussion_groups WHERE channel_id=?", (channel_id,))
+                    await db.execute("DELETE FROM channel_post_comments WHERE channel_id=?", (channel_id,))
+                    await db.execute("DELETE FROM channel_inbox_settings WHERE channel_id=?", (channel_id,))
+                    await db.execute("DELETE FROM channel_inbox_messages WHERE channel_id=?", (channel_id,))
+                    await db.execute("DELETE FROM community_boosts WHERE scope='channel' AND chat_id=?", (channel_id,))
                     await db.execute("DELETE FROM message_reactions WHERE scope='channel' AND chat_id=?", (channel_id,))
                     await db.execute("DELETE FROM pinned_messages WHERE scope='channel' AND chat_id=?", (channel_id,))
                     await db.execute("DELETE FROM cloud_drafts WHERE scope='channel' AND peer_id=?", (channel_id,))
@@ -2953,6 +3108,8 @@ async def admin_callback(callback: CallbackQuery) -> None:
                 return
             await db.execute("DELETE FROM group_messages WHERE group_id=?", (group_id,))
             await db.execute("DELETE FROM group_members WHERE group_id=?", (group_id,))
+            await db.execute("DELETE FROM group_topic_followers WHERE group_id=?", (group_id,))
+            await db.execute("DELETE FROM group_stories WHERE channel_id=?", (group_id,))
             await db.execute("DELETE FROM chat_groups WHERE id=?", (group_id,))
             await db.execute(
                 "INSERT INTO admin_logs(admin_id,action,target,details,created_at) VALUES(?,?,?,?,?)",
@@ -3187,6 +3344,10 @@ async def admin_callback(callback: CallbackQuery) -> None:
                 await db.rollback()
                 await callback.message.answer("Канал уже удалён или не найден.")
                 return
+            await db.execute("DELETE FROM channel_giveaway_entries WHERE giveaway_id IN (SELECT id FROM channel_giveaways WHERE channel_id=?)", (channel_id,))
+            await db.execute("DELETE FROM channel_giveaways WHERE channel_id=?", (channel_id,))
+            await db.execute("DELETE FROM channel_post_views WHERE channel_id=?", (channel_id,))
+            await db.execute("DELETE FROM channel_member_departures WHERE channel_id=?", (channel_id,))
             await db.execute("DELETE FROM channel_messages WHERE channel_id=?", (channel_id,))
             await db.execute("DELETE FROM channel_admins WHERE channel_id=?", (channel_id,))
             await db.execute("DELETE FROM channels WHERE id=?", (channel_id,))
@@ -3262,6 +3423,62 @@ async def admin_callback(callback: CallbackQuery) -> None:
         user_id = int(parts[2])
         ADMIN_INPUT[actor_id] = ("transfer_serial", user_id)
         await callback.message.answer(f"Введите серийный номер подарка, который сейчас принадлежит аккаунту {user_id}.")
+    elif action == "nftgrant" and len(parts) == 3 and parts[2].isascii() and parts[2].isdigit():
+        user_id = int(parts[2])
+        if not await admin_account_card(user_id):
+            await callback.message.answer("Аккаунт не найден.")
+            return
+        catalog = await admin_grant_catalog()
+        async with aiosqlite.connect(DATABASE_PATH) as db:
+            cur = await db.execute("SELECT DISTINCT gift_id FROM telegram_mtproto_gift_attributes WHERE is_available=1")
+            known = {str(row[0]) for row in await cur.fetchall()}
+        gifts = [gift for gift in catalog if gift['source'] == 'telegram'
+                 and (gift['id'] in known or gift_upgrades.pool_for_gift(gift['id'])[1])]
+        if not gifts:
+            await callback.message.answer("Нет коллекций с загруженными атрибутами.")
+            return
+        state = {"user_id": user_id, "gifts": gifts, "stage": "gift", "selected": {},
+                 "token": secrets.token_hex(6), "expires": time.time() + 900}
+        ADMIN_INPUT[actor_id] = ("nft_grant", state)
+        text, keyboard = admin_nft_page(state)
+        await callback.message.answer(text, reply_markup=keyboard)
+    elif action == "nft" and len(parts) == 5:
+        current = ADMIN_INPUT.get(actor_id)
+        if (not current or current[0] != "nft_grant" or current[1]["token"] != parts[2]
+                or current[1]["stage"] != parts[3] or time.time() > current[1]["expires"]):
+            await callback.message.answer("Выбор устарел. Откройте выдачу NFT-подарка заново.")
+            return
+        state, stage, choice = current[1], parts[3], parts[4]
+        if not re.fullmatch(r'[ps][0-9]{1,6}', choice):
+            return
+        index = int(choice[1:])
+        if choice.startswith('p'):
+            text, keyboard = admin_nft_page(state, index)
+        elif stage == 'gift':
+            if index >= len(state['gifts']):
+                return
+            gift = state['gifts'][index]
+            async with aiosqlite.connect(DATABASE_PATH) as db:
+                db.row_factory = aiosqlite.Row
+                options = await admin_nft_options(db, gift)
+            if ADMIN_INPUT.get(actor_id) is not current or state['stage'] != stage:
+                return
+            if not all(options.get(slot) for slot in NFT_SLOTS):
+                await callback.message.answer("У коллекции нет полного набора доступных атрибутов. Выберите другой подарок.")
+                return
+            state.update(gift=gift, options=options, stage=NFT_SLOTS[0])
+            text, keyboard = admin_nft_page(state)
+        else:
+            options = state['options'][stage]
+            if index >= len(options):
+                return
+            state['selected'][stage] = options[index]
+            next_slot = NFT_SLOTS.index(stage) + 1
+            state['stage'] = NFT_SLOTS[next_slot] if next_slot < len(NFT_SLOTS) else 'confirm'
+            if state['stage'] == 'confirm':
+                ADMIN_INPUT[actor_id] = ('grant_count', state)
+            text, keyboard = admin_nft_page(state)
+        await callback.message.answer(text, reply_markup=keyboard)
     elif action == "grant" and len(parts) == 3 and parts[2].isdigit():
         user_id = int(parts[2])
         if not await admin_account_card(user_id):
@@ -3482,8 +3699,10 @@ async def admin_text_input(message: Message) -> None:
             ADMIN_INPUT.pop(actor_id, None)
             await message.answer("Время выбора истекло. Откройте выдачу подарков заново.")
             return
-        if not re.fullmatch(r"[0-9]{1,3}", value) or not 1 <= int(value) <= GRANT_MAX_QUANTITY:
-            await message.answer(f"Введите целое число от 1 до {GRANT_MAX_QUANTITY} или нажмите «Отмена».")
+        is_nft = payload.get("selected") is not None
+        limit = NFT_GRANT_MAX_QUANTITY if is_nft else GRANT_MAX_QUANTITY
+        if not re.fullmatch(r"[0-9]{1,3}", value) or not 1 <= int(value) <= limit:
+            await message.answer(f"Введите целое число от 1 до {limit} или вернитесь к аккаунту.")
             return
         # Only one message can consume this prompt, even when updates arrive concurrently.
         if ADMIN_INPUT.get(actor_id) is not state:
@@ -3498,7 +3717,8 @@ async def admin_text_input(message: Message) -> None:
             log.exception("Admin gift grant failed")
             await message.answer("Не удалось выдать подарки. Откройте выдачу заново и повторите.")
             return
-        await message.answer(f"Выдано подарков: {value} · {payload['gift']['name']}. Они добавлены в профиль аккаунта; остатки магазина не изменены.")
+        gift_type = "NFT-подарков" if is_nft else "подарков"
+        await message.answer(f"Выдано {gift_type}: {value} · {payload['gift']['name']}. Они добавлены в профиль аккаунта; остатки магазина не изменены.")
         card = await admin_account_card(int(payload["user_id"]))
         if card:
             await message.answer(card[0], reply_markup=card[1])
@@ -3607,7 +3827,7 @@ async def admin_text_input(message: Message) -> None:
     elif kind == "newacct_number":
         number = normalize_admin_number(value)
         if not number:
-            await message.answer("Введите номер в международном формате: +код страны и 7–14 остальных цифр. Можно использовать пробелы, скобки и дефисы.")
+            await message.answer("Введите номер в международном формате: +код страны и 7–14 остальных цифр. Или выберите секретный номер: +111, +999, +0, +333, +666.")
             return
         async with aiosqlite.connect(DATABASE_PATH) as db:
             cur = await db.execute("SELECT 1 FROM numbers WHERE number=?", (number,))
@@ -3860,15 +4080,15 @@ async def admin_text_input(message: Message) -> None:
             reply_markup=admin_keyboard([[("Открыть каталог", "wgadm:gifts")]]))
 
 class NumberResolveRequest(BaseModel):
-    number: str = Field(min_length=9, max_length=16, pattern=r"^\+[1-9]\d{7,14}$")
+    number: str = Field(min_length=2, max_length=16)
 
 
 class AuthCodeRequest(BaseModel):
-    number: str = Field(min_length=9, max_length=16, pattern=r"^\+[1-9]\d{7,14}$")
+    number: str = Field(min_length=2, max_length=16)
 
 
 class CodeVerifyRequest(BaseModel):
-    number: str = Field(min_length=9, max_length=16, pattern=r"^\+[1-9]\d{7,14}$")
+    number: str = Field(min_length=2, max_length=16)
     code: str = Field(pattern=r"^\d{6}$")
 
 
@@ -4056,8 +4276,8 @@ async def resolve_number(
     x_internal_token: str | None = Header(default=None),
 ) -> dict[str, Any]:
     verify_internal_token(x_internal_token)
-    if not PHONE_RE.fullmatch(payload.number):
-        raise HTTPException(status_code=422, detail="Invalid international E.164 number format")
+    if not is_virtual_number(payload.number):
+        raise HTTPException(status_code=422, detail="Invalid WaysGram number format")
     owner = await store.resolve_number(payload.number)
     if not owner:
         raise HTTPException(status_code=404, detail="Number is not assigned")
@@ -4074,7 +4294,7 @@ async def request_auth_code(
     x_internal_token: str | None = Header(default=None),
 ) -> dict[str, str]:
     verify_internal_token(x_internal_token)
-    if not PHONE_RE.fullmatch(payload.number):
+    if not is_virtual_number(payload.number):
         raise HTTPException(status_code=422, detail="Invalid internal number format")
     owner = await store.resolve_number(payload.number)
     if not owner:
@@ -4106,7 +4326,7 @@ async def verify_auth_code(
     x_internal_token: str | None = Header(default=None),
 ) -> dict[str, bool]:
     verify_internal_token(x_internal_token)
-    if not PHONE_RE.fullmatch(payload.number):
+    if not is_virtual_number(payload.number):
         raise HTTPException(status_code=422, detail="Invalid internal number format")
     owner = await store.resolve_number(payload.number)
     if not owner or not owner.get("verified") or await account_is_banned(int(owner["telegram_id"])):
