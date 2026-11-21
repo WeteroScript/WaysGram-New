@@ -74,6 +74,15 @@ class NativeMessagingSourceChecks(unittest.TestCase):
         self.assertIn('put("stars", amount), token, 15000, key', payment)
         self.assertIn('data.optLong("total_stars"), data.optLong("my_stars")', payment)
 
+    def test_channel_analytics_is_owner_only_and_reads_real_revenue(self):
+        editor = self.source('ui/ChatEditActivity.java')
+        helper = self.source('ui/WaysGramPaidReactions.java')
+        gate = editor.split('&& ChatObject.isChannelAndNotMegaGroup(currentChat)) {\n                TextCell paidReactionsCell', 1)
+        self.assertTrue(gate[0].endswith('if (org.telegram.tgnet.WaysGramTransport.ENABLED && currentChat.creator\n                    '))
+        self.assertIn('WaysGramPaidReactions.showAnalytics', gate[1])
+        self.assertIn('int[] days = {7, 30, 90}', helper)
+        self.assertIn('data.optLong("paid_reaction_stars")', helper)
+
     def test_secret_numbers_are_grouped_and_valid_at_login(self):
         login = self.source('ui/LoginActivity.java')
         picker = self.source('ui/CountrySelectActivity.java')

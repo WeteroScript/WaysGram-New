@@ -1729,6 +1729,14 @@ def test_channel_paid_reactions_are_opt_in_atomic_and_idempotent(env):
             assert (await client.post(url, headers={**reader, 'Idempotency-Key': 'paid-reaction-0002'}, json={'stars': 16})).status_code == 409
             assert (await client.get(url, headers=owner)).json() == {'total_stars': 5, 'my_stars': 0}
             assert (await client.get(url, headers=reader)).json() == {'total_stars': 5, 'my_stars': 5}
+            assert (await client.get(base + '/analytics', headers=reader)).status_code == 404
+            assert (await client.get(base + '/analytics?days=999', headers=owner)).status_code == 422
+            analytics = (await client.get(base + '/analytics?days=7', headers=owner)).json()
+            assert (analytics['days'], analytics['published_posts_remaining']) == (7, 1)
+            assert (analytics['paid_reaction_purchases'], analytics['paid_reaction_stars']) == (1, 5)
+            assert (await client.delete(url.removesuffix('/paid-reactions'), headers=owner)).status_code == 200
+            analytics = (await client.get(base + '/analytics?days=7', headers=owner)).json()
+            assert (analytics['published_posts_remaining'], analytics['paid_reaction_stars']) == (0, 5)
         async with aiosqlite.connect(path) as db:
             cur = await db.execute("SELECT telegram_id,amount FROM economy_transactions WHERE reason LIKE 'channel_paid_reaction:%' ORDER BY telegram_id")
             assert await cur.fetchall() == [(101, 5), (102, -5)]

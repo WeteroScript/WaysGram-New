@@ -9176,6 +9176,33 @@ def build_messenger_router(
         channel["labels"] = await entity_labels("channel", channel_id)
         return channel
 
+    @router.get("/api/channels/{channel_id}/analytics")
+    async def get_channel_analytics(channel_id: int, days: Literal["7", "30", "90"] = "30",
+                                    authorization: str | None = Header(default=None)):
+        uid = int((await current_user(authorization))["telegram_id"])
+        now = int(time.time())
+        since = now - int(days) * 86400
+        async with aiosqlite.connect(db_path()) as db:
+            # A single read snapshot keeps membership, content and receipts consistent.
+            await db.execute("BEGIN")
+            cur = await db.execute("SELECT owner_telegram_id FROM channels WHERE id=?", (channel_id,))
+            owner = await cur.fetchone()
+            if owner is None or owner[0] != uid:
+                raise HTTPException(404, "CHANNEL_NOT_FOUND")
+            cur = await db.execute("SELECT COUNT(*), COUNT(CASE WHEN joined_at>=? THEN 1 END) FROM channel_members WHERE channel_id=?", (since, channel_id))
+            members, recent_members = await cur.fetchone()
+            cur = await db.execute("""SELECT COUNT(*) FROM channel_messages m WHERE channel_id=? AND created_at>=?
+                AND (media_album_id IS NULL OR media_album_index=0)""", (channel_id, since))
+            posts = (await cur.fetchone())[0]
+            # Read settled credits from the ledger so deleting a post does not erase revenue.
+            cur = await db.execute("""SELECT COUNT(*), COALESCE(SUM(amount),0)
+                FROM economy_transactions WHERE telegram_id=? AND asset='stars' AND admin_id IS NULL
+                AND amount>0 AND created_at>=? AND reason GLOB ?""", (uid, since, f"channel_paid_reaction:{channel_id}:*"))
+            purchases, stars = await cur.fetchone()
+        return {"days": int(days), "since": since, "as_of": now, "members": members,
+                "current_members_joined": recent_members, "published_posts_remaining": posts,
+                "paid_reaction_purchases": purchases, "paid_reaction_stars": stars}
+
     @router.put("/api/channels/{channel_id}/paid-reactions")
     async def set_channel_paid_reactions(channel_id: int, payload: dict[str, Any],
                                          authorization: str | None = Header(default=None)):
