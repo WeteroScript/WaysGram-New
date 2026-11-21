@@ -23,6 +23,18 @@ class NativeMessagingSourceChecks(unittest.TestCase):
     def source(self, path):
         return self.archive.read(BASE + path).decode('utf-8')
 
+    def test_chat_settings_refresh_enter_and_guard_bluetooth(self):
+        settings = self.source('ui/ThemeActivity.java')
+        composer = self.source('ui/Components/ChatActivityEnterView.java')
+        self.assertIn('editor.putBoolean("send_by_enter", !send)', settings)
+        self.assertIn('public void onResume() {\n        sendByEnter = MessagesController.getGlobalMainSettings().getBoolean("send_by_enter", false);', composer)
+        self.assertIn('chatActivityEnterView.onResume()', self.source('ui/ChatActivity.java'))
+        bluetooth = settings.split('Utilities.Callback<Boolean> selectBluetooth = granted -> {', 1)[1].split('Dialog dialog', 1)[0]
+        self.assertLess(bluetooth.index('if (!granted) return;'), bluetooth.index('SharedConfig.recordViaSco = true;'))
+        self.assertIn('Build.VERSION.SDK_INT >= Build.VERSION_CODES.S', bluetooth)
+        self.assertIn('Manifest.permission.BLUETOOTH_CONNECT, selectBluetooth', bluetooth)
+        self.assertIn('selectBluetooth.run(true)', bluetooth)
+
     def test_single_emoji_uses_bundled_vector_animation(self):
         import gzip
         import json
