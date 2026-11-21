@@ -244,6 +244,17 @@ class AndroidGiftSourceChecks(unittest.TestCase):
         controller = self.source("messenger/waysgram/WaysGramProfileGiftsController.java")
         self.assertIn('!isCollectible && !isListed && !isAuctioned && optBooleanLike(item, "can_upgrade")', controller)
 
+    def test_waysgram_wear_changes_native_profile_status_via_internal_api(self):
+        sheet = self.source("ui/Stars/StarGiftSheet.java")
+        self.assertIn('"/api/me/gifts/" + serial + "/wear"', sheet)
+        self.assertIn('TL_updateUserEmojiStatus', sheet)
+        self.assertIn('R.string.Gift2ActionWearOff', sheet)
+        mapper = self.source("tgnet/WaysGramMapper.java")
+        self.assertIn('user.emoji_status = wornGiftStatus(json.optJSONObject("worn_gift"))', mapper)
+        profile = self.source("ui/ProfileActivity.java")
+        self.assertIn('isWaysGramWornGift(status)', profile)
+        self.assertIn('R.drawable.filled_crown_on', profile)
+
     def test_waysgram_collectible_pin_uses_internal_profile_route(self):
         sheet = self.source("ui/Stars/StarGiftSheet.java")
         self.assertIn('this::toggleWaysGramPin', sheet)

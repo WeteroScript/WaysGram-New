@@ -2607,6 +2607,41 @@ def test_sent_gift_enqueues_one_durable_push_with_idempotency(env, monkeypatch) 
     run(scenario())
 
 
+def test_worn_gift_is_public_exclusive_and_clears_on_transfer(env) -> None:
+    path, app = env
+    with db_split.sqlite_connect(path) as db:
+        db.executemany(
+            "INSERT INTO user_gifts(serial_number,gift_name,owner_telegram_id,acquired_at,upgrade_level) VALUES(?,?,?,1,?)",
+            [(f"WG-{i:012X}", f"Gift {i}", uid, level) for i, uid, level in (
+                (1, 101, 1), (2, 101, 1), (3, 101, 0), (4, 102, 1),
+            )],
+        )
+        db.commit()
+
+    async def scenario() -> None:
+        async with await client_for(app) as client:
+            async def wear(i, value=True, uid=101):
+                return await client.put(f"/api/me/gifts/WG-{i:012X}/wear", headers=headers(uid), json={"worn": value})
+
+            assert (await wear(3)).status_code == 409
+            assert (await wear(1, uid=102)).status_code == 404
+            assert (await wear(1, value="true")).status_code == 400
+            assert (await wear(1)).json()["worn_gift"]["title"] == "Gift 1"
+            assert (await wear(2)).json()["worn_gift"]["title"] == "Gift 2"
+            assert (await wear(1, False)).json()["worn_gift"]["title"] == "Gift 2"
+            assert (await client.get("/api/users/101", headers=headers(102))).json()["worn_gift"]["title"] == "Gift 2"
+            assert (await wear(2, False)).json()["worn_gift"] is None
+            assert (await wear(2)).status_code == 200
+            assert (await wear(4, uid=102)).status_code == 200
+            with db_split.sqlite_connect(path) as db:
+                db.execute("UPDATE user_gifts SET owner_telegram_id=102 WHERE serial_number='WG-000000000002'")
+                db.commit()
+            assert (await client.get("/api/me", headers=headers(101))).json()["worn_gift"] is None
+            assert (await client.get("/api/me", headers=headers(102))).json()["worn_gift"]["title"] == "Gift 4"
+
+    run(scenario())
+
+
 def test_profile_pins_require_owned_collectibles_and_survive_paging(env) -> None:
     path, app = env
     with db_split.sqlite_connect(path) as db:

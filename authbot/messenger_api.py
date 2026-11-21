@@ -1458,6 +1458,7 @@ async def init_messenger_storage(database_path: Path) -> None:
             ("purchase_price", "INTEGER NOT NULL DEFAULT 0"),
             ("profile_order", "INTEGER"),
             ("profile_pinned", "INTEGER NOT NULL DEFAULT 0"),
+            ("profile_worn", "INTEGER NOT NULL DEFAULT 0"),
         ):
             if column not in user_gift_columns:
                 await db.execute(
@@ -1516,6 +1517,12 @@ async def init_messenger_storage(database_path: Path) -> None:
             AFTER UPDATE OF owner_telegram_id ON user_gifts
             WHEN OLD.owner_telegram_id != NEW.owner_telegram_id
             BEGIN UPDATE user_gifts SET profile_pinned=0 WHERE id=NEW.id; END""")
+        await db.execute(f"""CREATE INDEX IF NOT EXISTS {db_split.SCHEMA}.user_gifts_worn_lookup
+            ON user_gifts(owner_telegram_id) WHERE profile_worn=1""")
+        await db.execute(f"""CREATE TRIGGER IF NOT EXISTS {db_split.SCHEMA}.clear_worn_gift_on_transfer
+            AFTER UPDATE OF owner_telegram_id ON user_gifts
+            WHEN OLD.owner_telegram_id != NEW.owner_telegram_id AND OLD.profile_worn=1
+            BEGIN UPDATE user_gifts SET profile_worn=0 WHERE id=NEW.id; END""")
         # Gifts bought before the price was stored take it from their saved receipt, so the
         # refund can be calculated for them as well.
         cur = await db.execute(
@@ -4490,6 +4497,51 @@ def build_messenger_router(
                     await db.commit()
         return {"status": "logged_out"}
 
+    async def worn_gift_status(db: Any, uid: int) -> dict[str, Any] | None:
+        cur = await db.execute(
+            "SELECT id,serial_number,telegram_gift_id,gift_name,attributes_json FROM user_gifts WHERE owner_telegram_id=? AND profile_worn=1",
+            (uid,),
+        )
+        row = await cur.fetchone()
+        if row is None:
+            return None
+        try:
+            traits = gift_upgrades.traits_of(json.loads(row[4] or "{}")) or {}
+        except (TypeError, ValueError):
+            traits = {}
+        return {"id": row[0], "serial_number": row[1], "telegram_gift_id": row[2], "title": row[3], "traits": traits}
+
+    @router.put("/api/me/gifts/{serial_number}/wear")
+    async def set_gift_profile_wear(
+        serial_number: str, payload: dict[str, Any], authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        uid = int((await current_user(authorization))["telegram_id"])
+        serial = serial_number.strip().upper()
+        worn = payload.get("worn")
+        if not GIFT_SERIAL_RE.fullmatch(serial) or type(worn) is not bool:
+            raise HTTPException(status_code=400, detail="Некорректные параметры статуса")
+        async with aiosqlite.connect(db_path()) as db:
+            await db.execute("BEGIN IMMEDIATE")
+            cur = await db.execute(
+                "SELECT id,upgrade_level,attributes_json FROM user_gifts WHERE serial_number=? AND owner_telegram_id=?",
+                (serial, uid),
+            )
+            gift = await cur.fetchone()
+            if gift is None:
+                raise HTTPException(status_code=404, detail="Подарок не найден")
+            if worn:
+                try:
+                    attrs = json.loads(gift[2] or "{}")
+                except (TypeError, ValueError):
+                    attrs = {}
+                if not (int(gift[1] or 0) > 0 or _has_collectible_traits(attrs)):
+                    raise HTTPException(status_code=409, detail="Носить можно только коллекционный подарок")
+                await db.execute("UPDATE user_gifts SET profile_worn=0 WHERE owner_telegram_id=? AND profile_worn=1", (uid,))
+            await db.execute("UPDATE user_gifts SET profile_worn=? WHERE id=?", (int(worn), gift[0]))
+            status = await worn_gift_status(db, uid)
+            await db.commit()
+        return {"worn_gift": status}
+
     @router.get("/api/me")
     async def get_me(authorization: str | None = Header(default=None)) -> dict[str, Any]:
         user = await current_user(authorization)
@@ -4504,6 +4556,8 @@ def build_messenger_router(
             number = str(number_row[0] or "").strip() if number_row else ""
             if re.fullmatch(r"\+[1-9]\d{7,14}", number):
                 result["phone"] = number
+        async with aiosqlite.connect(db_path()) as db:
+            result["worn_gift"] = await worn_gift_status(db, int(user["telegram_id"]))
         result["is_admin"] = is_admin_user(user)
         result["labels"] = await entity_labels("account", int(user["telegram_id"]))
         return result
@@ -4625,7 +4679,7 @@ def build_messenger_router(
             total = int((await cur.fetchone())[0] or 0)
             query = """SELECT id,serial_number,gift_id,telegram_gift_id,gift_name,gift_emoji,
                           telegram_gift_metadata_json,acquired_at,upgrade_level,attributes_json,
-                          purchase_asset,purchase_price,profile_pinned,
+                          purchase_asset,purchase_price,profile_pinned,profile_worn,
                           EXISTS(SELECT 1 FROM gift_market_listings l
                                  WHERE l.serial_number=user_gifts.serial_number
                                    AND l.status='active') AS is_listed,
@@ -5244,7 +5298,9 @@ def build_messenger_router(
                 (user_id, viewer_id),
             )
             common_contacts = [dict(item) for item in await cur.fetchall()]
+            status = await worn_gift_status(db, user_id)
         profile = dict(row)
+        profile["worn_gift"] = status
         profile["labels"] = await entity_labels("account", user_id)
         for contact in common_contacts:
             contact["labels"] = await entity_labels("account", int(contact["id"]))
