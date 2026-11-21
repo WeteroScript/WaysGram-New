@@ -4722,6 +4722,55 @@ def build_messenger_router(
         row = await cur.fetchone()
         return tuple(row) if row else None
 
+    @router.post("/api/me/rotate-number")
+    async def rotate_virtual_number(payload: dict[str, Any], authorization: str | None = Header(default=None)):
+        uid = int((await current_user(authorization))["telegram_id"])
+        code = payload.get("code")
+        if not isinstance(code, str) or not re.fullmatch(r"[0-9]{6}", code):
+            raise HTTPException(400, "ROTATION_CODE_INVALID")
+        async with aiosqlite.connect(db_path()) as db:
+            cur = await db.execute("""SELECT n.number FROM numbers n JOIN users u ON u.telegram_id=n.telegram_id
+                WHERE n.telegram_id=? AND n.owner_telegram_id=n.telegram_id AND n.provider_ref='internal' AND u.verified=1""", (uid,))
+            row = await cur.fetchone()
+            password = await cloud_password_row(db, uid)
+        if row is None:
+            raise HTTPException(403, "NUMBER_ROTATION_UNAVAILABLE")
+        old = row[0]
+        if not await auth_store.verify_code(old, code):
+            raise HTTPException(401, "ROTATION_CODE_INVALID")
+        current_password = payload.get("password")
+        if password and (not valid_cloud_password(current_password) or not hmac.compare_digest(
+                await cloud_verifier(current_password, password[0]), password[1])):
+            raise HTTPException(403, "CLOUD_PASSWORD_INCORRECT")
+        async with aiosqlite.connect(db_path()) as db:
+            db.row_factory = aiosqlite.Row
+            await db.execute("BEGIN IMMEDIATE")
+            now = int(time.time())
+            await require_login_number(db, uid, old)
+            cur = await db.execute("SELECT 1 FROM api_sessions WHERE token_hash=? AND telegram_id=? AND expires_at>?",
+                                   (_token_hash(authorization[7:].strip()), uid, now))
+            if not await cur.fetchone():
+                raise HTTPException(401, "AUTH_SESSION_INVALID")
+            if await cloud_password_row(db, uid) != password:
+                raise HTTPException(409, "CLOUD_PASSWORD_CHANGED")
+            await db.execute("INSERT INTO retired_virtual_numbers VALUES(?)", (old,))
+            for _ in range(100):
+                number = "+1" + f"{secrets.randbelow(10_000_000_000):010d}"
+                cur = await db.execute("""UPDATE OR IGNORE numbers SET number=?
+                    WHERE telegram_id=? AND number=? AND owner_telegram_id=telegram_id AND provider_ref='internal'
+                    AND NOT EXISTS(SELECT 1 FROM accounts WHERE virtual_number=?)""", (number, uid, old, number))
+                if cur.rowcount == 1:
+                    break
+            else:
+                raise HTTPException(409, "NUMBER_ROTATION_UNAVAILABLE")
+            await db.execute("DELETE FROM auth_codes WHERE number=?", (old,))
+            await db.execute("DELETE FROM api_password_challenges WHERE telegram_id=?", (uid,))
+            await db.execute("UPDATE accounts SET virtual_number=?,updated_at=? WHERE telegram_id=?", (number, now, uid))
+            cur = await db.execute("SELECT * FROM accounts WHERE telegram_id=?", (uid,))
+            account = await cur.fetchone()
+            await db.commit()
+        return {"user": _public_account(account, include_phone=True)}
+
     @router.get("/api/me/cloud-password")
     async def cloud_password_state(authorization: str | None = Header(default=None)):
         uid = int((await current_user(authorization))["telegram_id"])

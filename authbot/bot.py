@@ -245,6 +245,15 @@ class Store:
                     created_at INTEGER NOT NULL,
                     last_code_requested_at INTEGER NOT NULL DEFAULT 0
                 );
+                CREATE TABLE IF NOT EXISTS retired_virtual_numbers (
+                    number TEXT PRIMARY KEY
+                );
+                CREATE TRIGGER IF NOT EXISTS prevent_retired_number_insert BEFORE INSERT ON numbers
+                WHEN EXISTS(SELECT 1 FROM retired_virtual_numbers WHERE number=NEW.number)
+                BEGIN SELECT RAISE(IGNORE); END;
+                CREATE TRIGGER IF NOT EXISTS prevent_retired_number_update BEFORE UPDATE OF number ON numbers
+                WHEN EXISTS(SELECT 1 FROM retired_virtual_numbers WHERE number=NEW.number)
+                BEGIN SELECT RAISE(IGNORE); END;
                 CREATE TABLE IF NOT EXISTS auth_codes (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     number TEXT NOT NULL,
@@ -2257,10 +2266,12 @@ async def admin_create_account(number: str, stars: int, grams: int, *, actor_id:
             "INSERT INTO users(telegram_id,chat_id,language,verified,created_at) VALUES(?,?,?,?,?)",
             (account_id, actor_id, "ru", 1, now),
         )
-        await db.execute(
+        inserted_number = await db.execute(
             "INSERT INTO numbers(telegram_id,owner_telegram_id,number,provider_ref,created_at) VALUES(?,?,?,?,?)",
             (account_id, actor_id, number, "admin", now),
         )
+        if inserted_number.rowcount != 1:
+            raise aiosqlite.IntegrityError("Virtual number is retired")
         await db.execute(
             """INSERT INTO accounts(telegram_id,virtual_number,username,display_name,stars,grams,created_at,updated_at)
                VALUES(?,?,?,?,?,?,?,?)""",

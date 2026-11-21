@@ -9285,3 +9285,40 @@ def test_cloud_password_requires_otp_and_single_use_login_challenge(api_env):
             assert (await client.put(settings, headers=auth, json={'new_password': None, 'code': '444444', 'current_password': password})).json() == {'enabled': False}
 
     run(scenario())
+
+
+def test_rotate_virtual_number_keeps_account_and_retires_old_login(api_env):
+    path, store, _, app = api_env
+    old = add_account(api_env, 81001, 'alpha')
+
+    async def scenario():
+        async with await client_for(app) as client:
+            async def code_for(number, code):
+                with db_split.sqlite_connect(path) as db:
+                    db.execute('UPDATE numbers SET last_code_requested_at=0 WHERE number=?', (number,))
+                    db.commit()
+                assert await store.save_code(number, code, 300)
+
+            await code_for(old, '111111')
+            verify = '/api/auth/verify-code'
+            session = (await client.post(verify, json={'phone': old, 'code': '111111'})).json()
+            auth = {'Authorization': 'Bearer ' + session['token']}
+            route = '/api/me/rotate-number'
+            assert (await client.post(route, headers=auth, json={'code': '111111'})).status_code == 401
+            await code_for(old, '222222')
+            rotated = await client.post(route, headers=auth, json={'code': '222222'})
+            assert rotated.status_code == 200
+            user = rotated.json()['user']
+            assert user['id'] == 81001 and user['username'] == 'alpha'
+            new = user['phone']
+            assert new != old
+            assert (await client.get('/api/me', headers=auth)).json()['phone'] == new
+            assert not await store.resolve_number(old)
+            assert (await client.post(verify, json={'phone': old, 'code': '222222'})).status_code == 401
+            await code_for(new, '333333')
+            assert (await client.post(verify, json={'phone': new, 'code': '333333'})).json()['user']['id'] == 81001
+            with db_split.sqlite_connect(path) as db:
+                assert db.execute('SELECT 1 FROM retired_virtual_numbers WHERE number=?', (old,)).fetchone()
+                assert db.execute('UPDATE numbers SET number=? WHERE number=?', (old, new)).rowcount == 0
+
+    run(scenario())
