@@ -85,6 +85,15 @@ class NativeMessagingSourceChecks(unittest.TestCase):
         self.assertIn('if (offer.optBoolean("unlocked"))', payment)
         self.assertIn('viewer.openPhoto', payment)
 
+    def test_channel_view_requests_feed_reach(self):
+        transport = self.source('tgnet/WaysGramTransport.java')
+        chats = self.source('tgnet/WaysGramChats.java')
+        analytics = self.source('ui/WaysGramPaidReactions.java')
+        self.assertIn('TL_messages_getMessagesViews', transport)
+        self.assertIn('/post-views', transport)
+        self.assertIn('TLObject.FLAG_9 | TLObject.FLAG_10 | TLObject.FLAG_14', chats)
+        self.assertIn('data.optLong("reached_accounts")', analytics)
+
     def test_paid_direct_text_confirms_exact_fee_and_preserves_retry(self):
         transport = self.source('tgnet/WaysGramTransport.java')
         privacy = self.source('ui/PrivacySettingsActivity.java')

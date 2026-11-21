@@ -67,6 +67,7 @@ MESSENGER_TABLES = frozenset(
         "channel_subscriptions",
         "channel_subscription_purchases",
         "channel_messages",
+        "channel_post_views",
         "chat_groups",
         "group_members",
         "group_messages",

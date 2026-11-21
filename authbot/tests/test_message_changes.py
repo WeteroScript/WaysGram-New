@@ -2175,3 +2175,29 @@ def test_community_boost_has_one_slot_and_optional_slow_mode_exception(env):
             assert (await client.get(channel_boost, headers=owner)).json()['boosts'] == 0
 
     run(scenario())
+
+
+def test_channel_post_views_deduplicate_and_respect_channel_access(env):
+    _, app = env
+
+    async def scenario():
+        async with await client_for(app) as client:
+            owner, reader = headers(101), headers(102)
+            channel = await client.post('/api/channels', headers=owner, json={'title': 'Reach', 'is_public': False})
+            base = f"/api/channels/{channel.json()['id']}"
+            first, second = [(await client.post(base + '/messages', headers=owner, json={'body': body})).json()['id']
+                             for body in ('First', 'Second')]
+            url = base + '/post-views'
+            viewed = {'ids': [first, second, first, 99999], 'increment': True}
+            assert (await client.post(url, headers=reader, json=viewed)).status_code == 404
+            assert (await client.post(base + '/members', headers=owner, json={'user_ids': [102]})).status_code == 201
+            assert (await client.post(url, headers=owner, json=viewed)).json()['views'] == [0, 0, 0, 0]
+            assert (await client.post(url, headers=reader, json={'ids': [first]})).json()['views'] == [0]
+            for _ in range(2):
+                assert (await client.post(url, headers=reader, json=viewed)).json()['views'] == [1, 1, 1, 0]
+            stats = (await client.get(base + '/analytics', headers=owner)).json()
+            assert (stats['unique_post_views'], stats['reached_accounts']) == (2, 1)
+            assert (await client.delete(base + f'/messages/{first}', headers=owner)).status_code == 200
+            assert (await client.post(url, headers=reader, json=viewed)).json()['views'] == [0, 1, 0, 0]
+
+    run(scenario())

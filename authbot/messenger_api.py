@@ -1072,6 +1072,14 @@ async def init_messenger_storage(database_path: Path) -> None:
                 ON channel_messages(channel_id, id DESC);
             CREATE INDEX IF NOT EXISTS idx_api_channel_author_time
                 ON channel_messages(author_telegram_id, created_at);
+            CREATE TABLE IF NOT EXISTS channel_post_views (
+                channel_id INTEGER NOT NULL,
+                message_id INTEGER NOT NULL,
+                viewer_id INTEGER NOT NULL,
+                last_seen_at INTEGER NOT NULL,
+                PRIMARY KEY(channel_id,message_id,viewer_id)
+            );
+            CREATE INDEX IF NOT EXISTS channel_post_views_reach ON channel_post_views(channel_id,last_seen_at,viewer_id);
             CREATE TABLE IF NOT EXISTS channel_paid_media (
                 channel_id INTEGER NOT NULL,
                 message_id INTEGER PRIMARY KEY,
@@ -9697,6 +9705,33 @@ def build_messenger_router(
             await db.commit()
         return {"channel_id": channel, "price_stars": price, "period_days": 30, "purchased_until": until}
 
+    @router.post("/api/channels/{channel_id}/post-views")
+    async def channel_post_views(channel_id: int, payload: dict[str, Any], authorization: str | None = Header(default=None)):
+        uid = int((await current_user(authorization))["telegram_id"])
+        ids, increment = payload.get("ids"), payload.get("increment", False)
+        if (not isinstance(ids, list) or not 1 <= len(ids) <= 100 or type(increment) is not bool
+                or any(type(mid) is not int or not 0 < mid < 2**63 for mid in ids)):
+            raise HTTPException(400, "INVALID_CHANNEL_VIEW_REQUEST")
+        async with aiosqlite.connect(db_path()) as db:
+            await db.execute("BEGIN IMMEDIATE" if increment else "BEGIN")
+            cur = await db.execute("SELECT c.owner_telegram_id FROM channels c WHERE c.id=? AND " + STORY_CHANNEL_ACCESS,
+                                   (channel_id, uid, uid, uid, uid))
+            owner = await cur.fetchone()
+            if owner is None:
+                raise HTTPException(404, "CHANNEL_NOT_FOUND")
+            marks = ",".join("?" for _ in ids)
+            if increment and owner[0] != uid:
+                now = int(time.time())
+                await db.execute(f"""INSERT INTO channel_post_views(channel_id,message_id,viewer_id,last_seen_at)
+                    SELECT channel_id,id,?,? FROM channel_messages WHERE channel_id=? AND id IN ({marks})
+                    ON CONFLICT(channel_id,message_id,viewer_id) DO UPDATE SET last_seen_at=excluded.last_seen_at
+                    WHERE excluded.last_seen_at > channel_post_views.last_seen_at + 60""", (uid, now, channel_id, *ids))
+            cur = await db.execute(f"""SELECT message_id,COUNT(*) FROM channel_post_views
+                WHERE channel_id=? AND message_id IN ({marks}) GROUP BY message_id""", (channel_id, *ids))
+            counts = dict(await cur.fetchall())
+            await db.commit()
+        return {"views": [counts.get(mid, 0) for mid in ids]}
+
     @router.get("/api/channels/{channel_id}/analytics")
     async def get_channel_analytics(channel_id: int, days: Literal["7", "30", "90"] = "30",
                                     authorization: str | None = Header(default=None)):
@@ -9715,6 +9750,9 @@ def build_messenger_router(
             cur = await db.execute("""SELECT COUNT(*) FROM channel_messages m WHERE channel_id=? AND created_at>=?
                 AND (media_album_id IS NULL OR media_album_index=0)""", (channel_id, since))
             posts = (await cur.fetchone())[0]
+            cur = await db.execute("""SELECT COUNT(*),COUNT(DISTINCT viewer_id) FROM channel_post_views
+                WHERE channel_id=? AND last_seen_at>=?""", (channel_id, since))
+            post_views, reached_accounts = await cur.fetchone()
             # Count only settled credits, including those for posts that have since been deleted.
             patterns = (f"channel_paid_reaction:{channel_id}:*", f"channel_paid_media:{channel_id}:*",
                         f"channel_subscription:{channel_id}", f"channel_inbox:{channel_id}:*")
@@ -9729,6 +9767,7 @@ def build_messenger_router(
             purchases, reaction_stars, media_stars, subscription_stars, inbox_stars = await cur.fetchone()
         return {"days": int(days), "since": since, "as_of": now, "members": members,
                 "current_members_joined": recent_members, "published_posts_remaining": posts,
+                "unique_post_views": post_views, "reached_accounts": reached_accounts,
                 "paid_reaction_purchases": purchases, "paid_reaction_stars": reaction_stars,
                 "paid_media_stars": media_stars, "subscription_stars": subscription_stars, "inbox_stars": inbox_stars,
                 "total_revenue_stars": reaction_stars + media_stars + subscription_stars + inbox_stars}
@@ -10919,6 +10958,7 @@ def build_messenger_router(
                 await db.rollback()
                 raise HTTPException(status_code=404, detail="Канал не найден или вы не являетесь владельцем")
             await db.execute("DELETE FROM channel_stories WHERE channel_id=?", (channel_id,))
+            await db.execute("DELETE FROM channel_post_views WHERE channel_id=?", (channel_id,))
             await db.execute("DELETE FROM channel_messages WHERE channel_id=?", (channel_id,))
             await db.execute("DELETE FROM channel_admins WHERE channel_id=?", (channel_id,))
             await db.execute("DELETE FROM channel_join_requests WHERE channel_id=?", (channel_id,))
@@ -14561,6 +14601,7 @@ def build_messenger_router(
             if await cur.fetchone() is None:
                 await db.rollback()
                 raise HTTPException(status_code=404, detail="Сообщение не найдено")
+            await db.execute("DELETE FROM channel_post_views WHERE channel_id=? AND message_id=?", (channel_id, message_id))
             await db.execute("DELETE FROM channel_messages WHERE id=?", (message_id,))
             await record_event(db, "channel", message_id, "delete", uid, chat_id=channel_id)
             await db.commit()
