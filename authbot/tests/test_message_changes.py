@@ -1679,3 +1679,25 @@ def test_group_create_returns_group_with_initial_members_and_privacy_skips(env):
             assert (await client.post('/api/groups', headers=headers(101), json={'title': 'Invalid', 'member_ids': [True]})).status_code == 400
 
     run(scenario())
+
+
+def test_live_dm_event_wakes_waiting_recipient_and_exact_fetch_includes_peer(env):
+    _, app = env
+
+    async def scenario():
+        async with await client_for(app) as client:
+            recipient = headers(102)
+            cursor = (await client.get('/api/events', headers=recipient)).json()['latest_id']
+            pending = asyncio.create_task(client.get(f'/api/events?after_id={cursor}&wait_seconds=5', headers=recipient))
+            await asyncio.sleep(.06)
+            assert not pending.done()
+            sent = await client.post('/api/messages', headers=headers(101), json={'recipient_id': 102, 'body': 'Live DM'})
+            assert sent.status_code == 201
+            response = await asyncio.wait_for(pending, timeout=1.0)
+            event = next(e for e in response.json()['events'] if e['kind'] == 'new_message')
+            assert event['scope'] == 'dm' and event['message_id'] == sent.json()['id']
+            exact = (await client.get(f"/api/messages?with=101&message_ids={event['message_id']}&include_peer=true", headers=recipient)).json()
+            assert exact['peer']['id'] == 101
+            assert [message['body'] for message in exact['messages']] == ['Live DM']
+
+    run(scenario())

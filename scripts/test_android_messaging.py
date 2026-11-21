@@ -49,6 +49,14 @@ class NativeMessagingSourceChecks(unittest.TestCase):
         self.assertIn('getUserConfig().saveConfig(true)', intro)
         self.assertIn('NotificationCenter.mainUserInfoChanged', intro)
 
+    def test_live_direct_events_deliver_without_waiting_for_history_sweep(self):
+        poller = self.source('tgnet/WaysGramPoller.java')
+        section = poller.split('private static void pollEvents(', 1)[1].split('private static void handleEvent', 1)[0]
+        regular = section.split('long cursor =', 1)[1]
+        self.assertLess(regular.index('deliverDirectEvent('), regular.index('if (sweep) refreshMessages('))
+        self.assertIn('"&message_ids=" + id + "&include_peer=true"', poller)
+        self.assertIn('if (!firstDelivery(account, peer, id)) return;', poller)
+
     def test_waysgram_chat_refresh_does_not_request_telegram_boosts(self):
         chat = self.source('ui/ChatActivity.java')
         edit = self.source('ui/ChatEditActivity.java')

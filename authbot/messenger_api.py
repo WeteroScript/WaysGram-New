@@ -10215,6 +10215,7 @@ def build_messenger_router(
         before_id: int = Query(default=0, ge=0),
         wait_seconds: int = Query(default=0, ge=0, le=20),
         message_ids: str | None = Query(default=None),
+        include_peer: bool = Query(default=False),
         authorization: str | None = Header(default=None),
     ) -> dict[str, Any]:
         user = await current_user(authorization)
@@ -10375,7 +10376,16 @@ def build_messenger_router(
                 (uid, peer, peer, uid),
             )
             my_read_id, peer_read_id = await cur.fetchone()
+            peer_profile = None
+            if include_peer:
+                db.row_factory = aiosqlite.Row
+                cur = await db.execute("""SELECT telegram_id AS id,username,display_name,avatar_media_id
+                    FROM accounts WHERE telegram_id=? AND is_banned=0""", (peer,))
+                row = await cur.fetchone()
+                if row:
+                    peer_profile = (await avatar_visible_rows(db, [row], uid))[0]
         return {
+            **({"peer": peer_profile} if include_peer else {}),
             "my_read_id": int(my_read_id),
             "peer_read_id": int(peer_read_id),
             "messages": items,
@@ -10820,6 +10830,8 @@ def build_messenger_router(
                     body, {"scope": "dm", "chat_id": str(uid), "message_id": str(message_id), "silent": "1" if silent else "0"}, now,
                 )
             await db.commit()
+        for waiter in dm_event_waiters.get(recipient_id, ()):
+            waiter.set()
         if queued_push:
             push_wakeup.set()
         return result
@@ -14407,6 +14419,9 @@ def build_messenger_router(
         return {"typing_users": rows, "server_time": now, "has_more": has_more,
                 "next_cursor": {"scope": last["scope"], "peer_id": last["peer_id"], "user_id": last["id"]} if last else None}
 
+    # Only active long-polls are retained. Timeout polling covers other workers and event producers.
+    dm_event_waiters: dict[int, set[asyncio.Event]] = {}
+
     @router.get("/api/events")
     async def message_changes(
         after_id: int | None = Query(default=None, ge=0),
@@ -14419,39 +14434,54 @@ def build_messenger_router(
         deadline = time.monotonic() + (wait_seconds if after_id is not None else 0)
         rows: list[dict[str, Any]] = []
         latest = 0
-        while True:
-            async with aiosqlite.connect(db_path()) as db:
-                db.row_factory = aiosqlite.Row
-                cur = await db.execute("SELECT COALESCE(MAX(id),0) FROM message_events")
-                latest = int((await cur.fetchone())[0])
-                if after_id is None:
-                    return {"events": [], "latest_id": latest}
-                cur = await db.execute(
-                    """SELECT id,scope,chat_id,user_a,user_b,message_id,kind,actor_id,created_at
-                       FROM message_events
-                       WHERE id>? AND id<=? AND (scope='scheduled' AND actor_id=? OR scope<>'scheduled' AND (
-                           (kind IN ('delete_for_me','clear_for_me','pin_local','unpin_local') AND actor_id=?)
-                           OR kind IN ('delete_for_all_sync','reaction','pin','unpin')
-                           OR (kind NOT IN ('delete_for_me','clear_for_me','pin_local','unpin_local','delete_for_all_sync','reaction','pin','unpin') AND actor_id<>?)
-                       ) AND (
-                           (scope='dm' AND (user_a=? OR user_b=?))
-                           OR (scope='group' AND chat_id IN (SELECT group_id FROM group_members WHERE telegram_id=?))
-                           OR (scope='channel' AND chat_id IN (
-                               SELECT ch.id FROM channels ch
-                               WHERE NOT EXISTS(SELECT 1 FROM channel_bans cb WHERE cb.channel_id=ch.id AND cb.telegram_id=? AND (cb.until_date=0 OR cb.until_date>CAST(strftime('%s','now') AS INTEGER)))
-                                 AND (ch.is_public=1 OR ch.owner_telegram_id=?
-                                  OR EXISTS(SELECT 1 FROM channel_admins ca
-                                            WHERE ca.channel_id=ch.id AND ca.telegram_id=?)
-                                  OR EXISTS(SELECT 1 FROM channel_members cm
-                                            WHERE cm.channel_id=ch.id AND cm.telegram_id=?)
-                           )))))
-                       ORDER BY id ASC LIMIT 200""",
-                    (after_id, latest, uid, uid, uid, uid, uid, uid, uid, uid, uid, uid),
-                )
-                rows = [dict(row) for row in await cur.fetchall()]
-            if rows or time.monotonic() >= deadline:
-                break
-            await asyncio.sleep(min(0.5, max(0.05, deadline - time.monotonic())))
+        waiter = asyncio.Event() if wait_seconds and after_id is not None else None
+        if waiter is not None:
+            dm_event_waiters.setdefault(uid, set()).add(waiter)
+        try:
+            while True:
+                if waiter is not None:
+                    waiter.clear()
+                async with aiosqlite.connect(db_path()) as db:
+                    db.row_factory = aiosqlite.Row
+                    cur = await db.execute("SELECT COALESCE(MAX(id),0) FROM message_events")
+                    latest = int((await cur.fetchone())[0])
+                    if after_id is None:
+                        return {"events": [], "latest_id": latest}
+                    cur = await db.execute(
+                        """SELECT id,scope,chat_id,user_a,user_b,message_id,kind,actor_id,created_at
+                           FROM message_events
+                           WHERE id>? AND id<=? AND (scope='scheduled' AND actor_id=? OR scope<>'scheduled' AND (
+                               (kind IN ('delete_for_me','clear_for_me','pin_local','unpin_local') AND actor_id=?)
+                               OR kind IN ('delete_for_all_sync','reaction','pin','unpin')
+                               OR (kind NOT IN ('delete_for_me','clear_for_me','pin_local','unpin_local','delete_for_all_sync','reaction','pin','unpin') AND actor_id<>?)
+                           ) AND (
+                               (scope='dm' AND (user_a=? OR user_b=?))
+                               OR (scope='group' AND chat_id IN (SELECT group_id FROM group_members WHERE telegram_id=?))
+                               OR (scope='channel' AND chat_id IN (
+                                   SELECT ch.id FROM channels ch
+                                   WHERE NOT EXISTS(SELECT 1 FROM channel_bans cb WHERE cb.channel_id=ch.id AND cb.telegram_id=? AND (cb.until_date=0 OR cb.until_date>CAST(strftime('%s','now') AS INTEGER)))
+                                     AND (ch.is_public=1 OR ch.owner_telegram_id=?
+                                      OR EXISTS(SELECT 1 FROM channel_admins ca
+                                                WHERE ca.channel_id=ch.id AND ca.telegram_id=?)
+                                      OR EXISTS(SELECT 1 FROM channel_members cm
+                                                WHERE cm.channel_id=ch.id AND cm.telegram_id=?)
+                               )))))
+                           ORDER BY id ASC LIMIT 200""",
+                        (after_id, latest, uid, uid, uid, uid, uid, uid, uid, uid, uid, uid),
+                    )
+                    rows = [dict(row) for row in await cur.fetchall()]
+                if rows or time.monotonic() >= deadline:
+                    break
+                try:
+                    await asyncio.wait_for(waiter.wait(), timeout=min(0.5, max(0, deadline - time.monotonic())))
+                except TimeoutError:
+                    pass
+        finally:
+            if waiter is not None:
+                waiters = dm_event_waiters[uid]
+                waiters.discard(waiter)
+                if not waiters:
+                    del dm_event_waiters[uid]
         cursor = rows[-1]["id"] if len(rows) >= 200 else max(after_id, latest)
         return {"events": rows, "latest_id": cursor}
 
