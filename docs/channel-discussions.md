@@ -1,0 +1,7 @@
+# Linked channel discussions (server API)
+
+The channel owner can link a group they also own via `PUT /api/channels/{id}/discussion-group` with `{"group_id":5}`. A group can only be linked to one channel. `{"group_id":null}` unlinks it, and authenticated `GET` on that endpoint returns the current group to the owner.
+
+Authenticated `GET /api/channels/{id}/messages/{post_id}/comments` returns text comments in chronological order within a page (`limit`, `before_id`, `next_before_id`). `POST` to that path takes `{"body":"…"}` and supports `Idempotency-Key`. Both operations require access to the original channel post and membership in the currently linked group. Sending uses the group's ordinary message pipeline, including moderation, slow mode, and posting restrictions. The comment is a real message in that group; editing or deleting the group message is reflected in the thread.
+
+This first version does not mirror the original post into the group, automatically join readers to the group, or handle nested replies or attachments through the comments endpoint. The owner should link a group intended for that audience: its members can see comments in group history even if they cannot open the channel post. Unlinking does not delete existing messages in the group. Android integration is pending.

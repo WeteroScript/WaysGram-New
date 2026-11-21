@@ -1005,6 +1005,18 @@ async def init_messenger_storage(database_path: Path) -> None:
             );
             CREATE INDEX IF NOT EXISTS idx_channel_members_user
                 ON channel_members(telegram_id,channel_id);
+            CREATE TABLE IF NOT EXISTS channel_discussion_groups (
+                channel_id INTEGER PRIMARY KEY,
+                group_id INTEGER NOT NULL UNIQUE
+            );
+            CREATE TABLE IF NOT EXISTS channel_post_comments (
+                group_message_id INTEGER PRIMARY KEY,
+                group_id INTEGER NOT NULL,
+                channel_id INTEGER NOT NULL,
+                post_id INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_channel_post_comments_thread
+                ON channel_post_comments(channel_id,post_id,group_id,group_message_id);
             CREATE TABLE IF NOT EXISTS channel_subscription_offers (
                 channel_id INTEGER PRIMARY KEY,
                 token TEXT NOT NULL UNIQUE,
@@ -9238,6 +9250,41 @@ def build_messenger_router(
         channel["labels"] = await entity_labels("channel", channel_id)
         return channel
 
+    @router.get("/api/channels/{channel_id}/discussion-group")
+    @router.put("/api/channels/{channel_id}/discussion-group")
+    async def manage_channel_discussion_group(channel_id: int, request: Request, payload: dict[str, Any] | None = None,
+                                               authorization: str | None = Header(default=None)):
+        uid = int((await current_user(authorization))["telegram_id"])
+        write = request.method == "PUT"
+        async with aiosqlite.connect(db_path()) as db:
+            await db.execute("BEGIN IMMEDIATE" if write else "BEGIN")
+            cur = await db.execute("SELECT 1 FROM channels WHERE id=? AND owner_telegram_id=?", (channel_id, uid))
+            if not await cur.fetchone():
+                raise HTTPException(404, "CHANNEL_NOT_FOUND")
+            if write:
+                if payload is None or "group_id" not in payload:
+                    raise HTTPException(400, "DISCUSSION_GROUP_REQUIRED")
+                group_id = payload["group_id"]
+                if group_id is None:
+                    await db.execute("DELETE FROM channel_discussion_groups WHERE channel_id=?", (channel_id,))
+                else:
+                    if type(group_id) is not int or group_id <= 0:
+                        raise HTTPException(400, "INVALID_DISCUSSION_GROUP")
+                    cur = await db.execute("SELECT 1 FROM chat_groups WHERE id=? AND owner_telegram_id=?", (group_id, uid))
+                    if not await cur.fetchone():
+                        raise HTTPException(403, "DISCUSSION_GROUP_OWNER_REQUIRED")
+                    cur = await db.execute("SELECT 1 FROM channel_discussion_groups WHERE group_id=? AND channel_id<>?", (group_id, channel_id))
+                    if await cur.fetchone():
+                        raise HTTPException(409, "DISCUSSION_GROUP_ALREADY_LINKED")
+                    await db.execute("""INSERT INTO channel_discussion_groups(channel_id,group_id) VALUES(?,?)
+                        ON CONFLICT(channel_id) DO UPDATE SET group_id=excluded.group_id""", (channel_id, group_id))
+                await db.commit()
+                return {"group_id": group_id}
+            cur = await db.execute("""SELECT g.id,g.title FROM channel_discussion_groups d JOIN chat_groups g ON g.id=d.group_id
+                                       WHERE d.channel_id=?""", (channel_id,))
+            group = await cur.fetchone()
+        return {"group_id": group[0], "title": group[1]} if group else {"group_id": None}
+
     @router.get("/api/channels/{channel_id}/subscription-offer")
     async def get_channel_subscription_offer(channel_id: int, authorization: str | None = Header(default=None)):
         uid = int((await current_user(authorization))["telegram_id"])
@@ -10555,6 +10602,8 @@ def build_messenger_router(
             await db.execute("DELETE FROM channel_members WHERE channel_id=?", (channel_id,))
             await db.execute("DELETE FROM channel_subscription_offers WHERE channel_id=?", (channel_id,))
             await db.execute("DELETE FROM channel_subscriptions WHERE channel_id=?", (channel_id,))
+            await db.execute("DELETE FROM channel_discussion_groups WHERE channel_id=?", (channel_id,))
+            await db.execute("DELETE FROM channel_post_comments WHERE channel_id=?", (channel_id,))
             await db.execute(
                 "DELETE FROM channels WHERE id=? AND owner_telegram_id=?",
                 (channel_id, int(user["telegram_id"])),
@@ -14105,6 +14154,7 @@ def build_messenger_router(
             if int(row[0]) != uid and not group_has_right(member, 16):
                 await db.rollback()
                 raise HTTPException(status_code=403, detail="Удалять чужие сообщения могут только администраторы")
+            await db.execute("DELETE FROM channel_post_comments WHERE group_message_id=? AND group_id=?", (message_id, group_id))
             await db.execute("DELETE FROM group_messages WHERE id=?", (message_id,))
             await record_event(db, "group", message_id, "delete", uid, chat_id=group_id)
             await db.commit()
@@ -15143,6 +15193,8 @@ def build_messenger_router(
                 await db.execute(f"DELETE FROM {table} WHERE scope='group' AND peer_id=?", (group_id,))
             for table in ("group_join_requests", "group_invites", "group_mutes", "group_members", "group_messages"):
                 await db.execute(f"DELETE FROM {table} WHERE group_id=?", (group_id,))
+            await db.execute("DELETE FROM channel_discussion_groups WHERE group_id=?", (group_id,))
+            await db.execute("DELETE FROM channel_post_comments WHERE group_id=?", (group_id,))
             await db.execute("DELETE FROM chat_groups WHERE id=?", (group_id,))
             await db.commit()
         return {"deleted": True}
@@ -15901,6 +15953,48 @@ def build_messenger_router(
         await attach_my_reactions(items, "group", group_id, int(user["telegram_id"]))
         return {"query": term, "messages": items, "count": len(items), "has_more": len(items) == 100}
 
+    async def channel_discussion_access(db: Any, channel_id: int, post_id: int, uid: int) -> int:
+        cur = await db.execute("""SELECT d.group_id FROM channel_discussion_groups d
+              JOIN channels c ON c.id=d.channel_id JOIN channel_messages m ON m.channel_id=c.id
+              WHERE c.id=? AND m.id=? AND """ + STORY_CHANNEL_ACCESS,
+              (channel_id, post_id, uid, uid, uid, uid))
+        row = await cur.fetchone()
+        if row is None:
+            raise HTTPException(404, "DISCUSSION_NOT_AVAILABLE")
+        group = int(row[0])
+        await require_group_member(db, group, uid)
+        return group
+
+    @router.get("/api/channels/{channel_id}/messages/{post_id}/comments")
+    async def list_channel_post_comments(channel_id: int, post_id: int,
+                                         before_id: int = Query(default=0, ge=0), limit: int = Query(default=40, ge=1, le=100),
+                                         authorization: str | None = Header(default=None)):
+        uid = int((await current_user(authorization))["telegram_id"])
+        async with aiosqlite.connect(db_path()) as db:
+            await db.execute("BEGIN")
+            group = await channel_discussion_access(db, channel_id, post_id, uid)
+            cur = await db.execute("""SELECT m.id,m.sender_telegram_id AS sender_id,m.body,m.created_at,m.edited_at,
+                                             a.display_name AS sender_name
+                FROM channel_post_comments p JOIN group_messages m ON m.id=p.group_message_id AND m.group_id=p.group_id
+                LEFT JOIN accounts a ON a.telegram_id=m.sender_telegram_id
+                WHERE p.channel_id=? AND p.post_id=? AND p.group_id=? AND (?=0 OR p.group_message_id<?)
+                ORDER BY p.group_message_id DESC LIMIT ?""", (channel_id, post_id, group, before_id, before_id, limit + 1))
+            rows = await cur.fetchall()
+        return {"group_id": group, "comments": [dict(row) for row in reversed(rows[:limit])],
+                "next_before_id": rows[limit - 1]["id"] if len(rows) > limit else 0}
+
+    @router.post("/api/channels/{channel_id}/messages/{post_id}/comments", status_code=201)
+    async def send_channel_post_comment(channel_id: int, post_id: int, payload: dict[str, Any],
+                                        authorization: str | None = Header(default=None),
+                                        idempotency_key: str | None = Header(default=None, alias="Idempotency-Key")):
+        uid = int((await current_user(authorization))["telegram_id"])
+        body = payload.get("body")
+        if not isinstance(body, str) or not body.strip():
+            raise HTTPException(400, "COMMENT_TEXT_REQUIRED")
+        async with aiosqlite.connect(db_path()) as db:
+            group = await channel_discussion_access(db, channel_id, post_id, uid)
+        return await store_group_message(group, {"body": body}, authorization, idempotency_key, (channel_id, post_id))
+
     @router.post("/api/groups/{group_id}/messages/quote/v1", status_code=201)
     @router.post("/api/groups/{group_id}/messages", status_code=201)
     async def send_group_message(
@@ -15909,6 +16003,10 @@ def build_messenger_router(
         authorization: str | None = Header(default=None),
         idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
     ) -> dict[str, Any]:
+        return await store_group_message(group_id, payload, authorization, idempotency_key)
+
+    async def store_group_message(group_id: int, payload: dict[str, Any], authorization: str | None,
+                                  idempotency_key: str | None, discussion: tuple[int, int] | None = None):
         user = await current_user(authorization)
         uid = int(user["telegram_id"])
         silent = payload.get("silent", False)
@@ -15940,9 +16038,13 @@ def build_messenger_router(
             entities = []
         now = int(time.time())
         scope = f"/api/groups/{group_id}/messages"
-        descriptor = idempotency_descriptor(scope, payload, idempotency_key)
+        if discussion:
+            scope = f"/api/channels/{discussion[0]}/messages/{discussion[1]}/comments"
+        descriptor = idempotency_descriptor(scope, {**payload, "discussion_group_id": group_id} if discussion else payload, idempotency_key)
         async with aiosqlite.connect(db_path()) as db:
             await db.execute("BEGIN IMMEDIATE")
+            if discussion and await channel_discussion_access(db, *discussion, uid) != group_id:
+                raise HTTPException(409, "DISCUSSION_GROUP_CHANGED")
             membership = await require_group_member(db, group_id, uid)
             await require_group_can_send(db, group_id, uid, media_id)
             previous = await idempotency_lookup(db, uid, scope, descriptor, now)
@@ -15997,6 +16099,8 @@ def build_messenger_router(
                 (group_id, uid, body, media_id, reply_to_id, now),
             )
             message_id = int(cur.lastrowid)
+            if discussion:
+                await db.execute("INSERT INTO channel_post_comments VALUES(?,?,?,?)", (message_id, group_id, *discussion))
             if quote is not None:
                 await db.execute("UPDATE group_messages SET quote_json=? WHERE id=?",
                                  (json.dumps(quote, ensure_ascii=True, separators=(",", ":")), message_id))

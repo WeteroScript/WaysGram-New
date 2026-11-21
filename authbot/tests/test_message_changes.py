@@ -1914,3 +1914,43 @@ def test_paid_channel_subscription_expires_without_converting_to_free_membership
             assert await cur.fetchall() == [(101, 12, 2), (102, -12, 2)]
 
     run(scenario())
+
+
+def test_channel_discussion_comments_use_group_permissions_and_moderation(env):
+    _, app = env
+
+    async def scenario():
+        async with await client_for(app) as client:
+            owner, member, outsider = headers(101), headers(102), headers(ADMIN)
+            channel = await client.post('/api/channels', headers=owner, json={'title': 'Discuss news', 'is_public': False})
+            cid = channel.json()['id']
+            base = f'/api/channels/{cid}'
+            post = await client.post(base + '/messages', headers=owner, json={'body': 'News'})
+            url = base + f"/messages/{post.json()['id']}/comments"
+            group = await client.post('/api/groups', headers=owner, json={'title': 'News discussion', 'member_ids': [102]})
+            gid = group.json()['id']
+            group_api = f'/api/groups/{gid}'
+            link = base + '/discussion-group'
+            assert (await client.get(url, headers=owner)).status_code == 404
+            assert (await client.put(link, headers=member, json={'group_id': gid})).status_code == 404
+            assert (await client.put(link, headers=owner, json={'group_id': gid})).json() == {'group_id': gid}
+            assert (await client.get(link, headers=owner)).json()['title'] == 'News discussion'
+            assert (await client.get(url, headers=member)).status_code == 404  # group membership alone does not grant post access
+            assert (await client.post(base + '/members', headers=owner, json={'user_ids': [102, ADMIN]})).status_code == 201
+            assert (await client.get(url, headers=outsider)).status_code == 403  # channel membership alone is not enough
+            key = {**member, 'Idempotency-Key': 'channel-comment-0001'}
+            first = await client.post(url, headers=key, json={'body': 'Comment'})
+            assert first.status_code == 201
+            again = await client.post(url, headers=key, json={'body': 'Comment'})
+            assert again.json()['id'] == first.json()['id']
+            comments = (await client.get(url, headers=owner)).json()['comments']
+            assert [row['body'] for row in comments] == ['Comment']
+            assert [row['id'] for row in (await client.get(group_api + '/messages', headers=owner)).json()['messages']] == [first.json()['id']]
+            assert (await client.put(group_api + '/send-permissions', headers=owner, json={'default_send_restrictions': 1})).status_code == 200
+            assert (await client.post(url, headers=member, json={'body': 'Blocked'})).status_code == 403
+            assert (await client.delete(group_api + f"/messages/{first.json()['id']}", headers=owner)).status_code == 200
+            assert (await client.get(url, headers=owner)).json()['comments'] == []
+            assert (await client.put(link, headers=owner, json={'group_id': None})).status_code == 200
+            assert (await client.get(url, headers=owner)).status_code == 404
+
+    run(scenario())
