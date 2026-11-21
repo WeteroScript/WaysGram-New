@@ -1604,6 +1604,9 @@ async def init_messenger_storage(database_path: Path) -> None:
                 f"ALTER TABLE {db_split.SCHEMA}.group_invites "
                 "ADD COLUMN require_approval INTEGER NOT NULL DEFAULT 0 CHECK(require_approval IN (0,1))"
             )
+        for column in ("share_token", "label"):
+            if column not in group_invite_columns:
+                await db.execute(f"ALTER TABLE {db_split.SCHEMA}.group_invites ADD COLUMN {column} TEXT")
         cur = await db.execute(f"PRAGMA {db_split.SCHEMA}.table_info(channels)")
         channel_columns = {str(row[1]) for row in await cur.fetchall()}
         if "is_public" not in channel_columns:
@@ -13382,6 +13385,70 @@ def build_messenger_router(
             await db.commit()
         return {"group_id": group_id, "slow_mode_seconds": seconds}
 
+    @router.get("/api/groups/{group_id}/invites")
+    async def list_group_invites(group_id: int, request: Request, admin_id: int | None = None,
+                                 revoked: bool = False, after: str | None = None, limit: int = 50,
+                                 authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        uid = int((await current_user(authorization))["telegram_id"])
+        admin_id = uid if admin_id is None else admin_id
+        async with aiosqlite.connect(db_path()) as db:
+            db.row_factory = aiosqlite.Row
+            member = await require_group_member(db, group_id, uid)
+            if member["role"] not in ("owner", "admin") or (admin_id != uid and member["role"] != "owner"):
+                raise HTTPException(403, "Нет доступа к списку приглашений")
+            where = "group_id=? AND created_by=? AND share_token IS NOT NULL AND (revoked_at IS NOT NULL)=?"
+            args = (group_id, admin_id, int(revoked))
+            cur = await db.execute(f"SELECT COUNT(*) FROM group_invites WHERE {where}", args)
+            count = (await cur.fetchone())[0]
+            if after:
+                where += " AND (created_at,token_hash)<(SELECT created_at,token_hash FROM group_invites WHERE group_id=? AND share_token=?)"
+                args += (group_id, after)
+            cur = await db.execute(f"""SELECT share_token,created_by,created_at,expires_at,max_uses,uses,require_approval,revoked_at,label
+                FROM group_invites WHERE {where} ORDER BY created_at DESC,token_hash DESC LIMIT ?""",
+                args + (max(1, min(100, limit)),))
+            rows = await cur.fetchall()
+        base = _external_api_base_url(request) + "/api/groups/invites/"
+        invites = []
+        for row in rows:
+            item = dict(row)
+            item["invite_link"] = base + item.pop("share_token")
+            invites.append(item)
+        return {"count": count, "invites": invites}
+
+    @router.patch("/api/groups/{group_id}/invites/{invite_token}")
+    async def edit_group_invite(group_id: int, invite_token: str, payload: dict[str, Any],
+                                authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        uid = int((await current_user(authorization))["telegram_id"])
+        if not re.fullmatch(r"[A-Za-z0-9_-]{20,128}", invite_token):
+            raise HTTPException(404, "Приглашение не найдено")
+        if not payload or not payload.keys() <= {"expires_at", "max_uses", "require_approval", "label"}:
+            raise HTTPException(400, "Недопустимые параметры приглашения")
+        now = int(time.time())
+        checks = {
+            "expires_at": lambda v: v is None or (type(v) is int and now < v <= now + 365 * 86400),
+            "max_uses": lambda v: v is None or (type(v) is int and 1 <= v <= 10000),
+            "require_approval": lambda v: type(v) is bool,
+            "label": lambda v: isinstance(v, str) and len(v) <= 128,
+        }
+        if any(not checks[k](v) for k, v in payload.items()):
+            raise HTTPException(400, "Недопустимые параметры приглашения")
+        async with aiosqlite.connect(db_path()) as db:
+            db.row_factory = aiosqlite.Row
+            await db.execute("BEGIN IMMEDIATE")
+            member = await require_group_member(db, group_id, uid)
+            if member["role"] not in ("owner", "admin"):
+                raise HTTPException(403, "Нет права редактировать приглашение")
+            assignments = ",".join(f"{k}=?" for k in payload)
+            cur = await db.execute(f"""UPDATE group_invites SET {assignments}
+                WHERE group_id=? AND token_hash=? AND revoked_at IS NULL AND (created_by=? OR ?)
+                RETURNING created_by,created_at,expires_at,max_uses,uses,require_approval,label""",
+                (*payload.values(), group_id, hashlib.sha256(invite_token.encode()).hexdigest(), uid, member["role"] == "owner"))
+            row = await cur.fetchone()
+            if row is None:
+                raise HTTPException(404, "Активное приглашение не найдено")
+            await db.commit()
+        return dict(row)
+
     @router.post("/api/groups/{group_id}/invites", status_code=201)
     async def create_group_invite(
         group_id: int,
@@ -13411,6 +13478,9 @@ def build_messenger_router(
             if raw_max_uses < 1 or raw_max_uses > 10000:
                 raise HTTPException(status_code=400, detail="Лимит вступлений должен быть от 1 до 10000")
             max_uses = raw_max_uses
+        label = payload.get("label", "")
+        if not isinstance(label, str) or len(label) > 128:
+            raise HTTPException(400, "Слишком длинное название ссылки")
         now = int(time.time())
         expires_at = now + expires_seconds if expires_seconds is not None else None
         token = secrets.token_urlsafe(32)
@@ -13423,9 +13493,9 @@ def build_messenger_router(
                 raise HTTPException(status_code=403, detail="Создавать приглашения могут только администраторы группы")
             await db.execute(
                 """INSERT INTO group_invites
-                   (token_hash,group_id,created_by,created_at,expires_at,max_uses,uses,require_approval,revoked_at)
-                   VALUES(?,?,?,?,?,?,0,?,NULL)""",
-                (token_hash, group_id, uid, now, expires_at, max_uses, int(require_approval)),
+                   (token_hash,group_id,created_by,created_at,expires_at,max_uses,uses,require_approval,revoked_at,share_token,label)
+                   VALUES(?,?,?,?,?,?,0,?,NULL,?,?)""",
+                (token_hash, group_id, uid, now, expires_at, max_uses, int(require_approval), token, label),
             )
             cur = await db.execute("SELECT title FROM chat_groups WHERE id=?", (group_id,))
             group = await cur.fetchone()
@@ -13437,6 +13507,7 @@ def build_messenger_router(
             "expires_at": expires_at,
             "max_uses": max_uses,
             "uses": 0,
+            "label": label,
             "require_approval": require_approval,
         }
 

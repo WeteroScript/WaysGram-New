@@ -874,3 +874,39 @@ def test_private_channel_invite_rotation_preserves_membership(env):
             assert (await client.post('/api/channels/join', headers=guest, json={'invite_link': new})).status_code == 200
 
     run(scenario())
+
+
+def test_group_invite_list_edit_and_revoke(env):
+    _, app = env
+
+    async def scenario():
+        async with await client_for(app) as client:
+            owner, member = headers(101), headers(102)
+            created = await client.post('/api/groups', headers=owner, json={'title': 'Invite management'})
+            assert created.status_code == 201, created.text
+            group = f"/api/groups/{created.json()['id']}"
+            assert (await client.post(group + '/members', headers=owner, json={'telegram_id': 102})).status_code == 201
+            path = group + '/invites'
+            first = (await client.post(path, headers=owner, json={'label': 'First'})).json()
+            second = (await client.post(path, headers=owner, json={'label': 'Second'})).json()
+            assert (await client.get(path, headers=member)).status_code == 403
+            page = (await client.get(path, headers=owner, params={'limit': 1})).json()
+            assert page['count'] == 2 and len(page['invites']) == 1
+            token = page['invites'][0]['invite_link'].rsplit('/', 1)[-1]
+            next_page = (await client.get(path, headers=owner, params={'after': token})).json()
+            assert {x['label'] for x in page['invites'] + next_page['invites']} == {'First', 'Second'}
+            item = path + '/' + first['invite_link'].rsplit('/', 1)[-1]
+            assert (await client.patch(item, headers=member, json={'label': 'No'})).status_code == 403
+            edited = await client.patch(item, headers=owner, json={'label': 'Updated', 'max_uses': 5, 'expires_at': None, 'require_approval': True})
+            assert edited.status_code == 200, edited.text
+            assert edited.json()['label'] == 'Updated'
+            preview = (await client.get(first['invite_link'])).json()
+            assert preview['max_uses'] == 5 and preview['expires_at'] is None and preview['require_approval'] is True
+            assert (await client.delete(item, headers=owner)).status_code == 200
+            assert (await client.patch(item, headers=owner, json={'label': 'No'})).status_code == 404
+            active = (await client.get(path, headers=owner)).json()['invites']
+            assert [x['invite_link'] for x in active] == [second['invite_link']]
+            revoked = (await client.get(path, headers=owner, params={'revoked': 'true'})).json()['invites']
+            assert [x['label'] for x in revoked] == ['Updated']
+
+    run(scenario())
