@@ -3016,3 +3016,22 @@ def test_new_rolls_never_infer_artwork_from_an_unrelated_row() -> None:
     messenger_api._enrich_traits_documents(traits, {"models": [["Actual", 10], ["Other", 20]]}, rows)
     assert "document_id" not in traits["model"]
     assert traits["pattern"]["document_id"] == 3
+
+
+def test_inventory_uses_live_waysgram_shop_stock(env):
+    path, app = env
+    with db_split.sqlite_connect(path) as db:
+        db.execute("""INSERT INTO user_gifts(serial_number,telegram_gift_id,gift_name,owner_telegram_id,acquired_at,upgrade_level)
+                      VALUES('WG-000000000001','stock-test','Gift',101,1,1)""")
+        db.execute("INSERT INTO telegram_gift_prices(gift_id,price_stars,supply,sold) VALUES('stock-test',25,2000,123)")
+        db.commit()
+
+    async def scenario():
+        async with await client_for(app) as client:
+            for url, viewer in [('/api/me/gifts', 101), ('/api/users/101/gifts', 102)]:
+                response = await client.get(url, headers=headers(viewer))
+                assert response.status_code == 200, response.text
+                gift = response.json()['gifts'][0]
+                assert (gift['shop_remaining'], gift['shop_supply']) == (1877, 2000)
+
+    run(scenario())

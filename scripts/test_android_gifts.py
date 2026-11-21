@@ -108,7 +108,7 @@ class AndroidGiftSourceChecks(unittest.TestCase):
         self.assertIn('final TL_stars.StarGift gift = getGift()', sheet[serial_start:serial_start + 450])
         self.assertIn('if (isWaysGramGift() || userStarGiftRepolling', sheet)
         self.assertIn('walletTransaction == null && !isWaysGramGift()', sheet)
-        self.assertIn('if (messageObject != null && !isWaysGramGift() && showQuantity)', sheet)
+        self.assertIn('else if (messageObject != null && showQuantity)', sheet)
         self.assertIn('if (!isWaysGramGift() && attr.rarity instanceof', sheet)
         self.assertIn('if (permille < 0) return ""', sheet)
         profile = self.source("messenger/waysgram/WaysGramProfileGiftsController.java")

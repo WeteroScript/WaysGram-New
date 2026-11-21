@@ -4751,6 +4751,8 @@ def build_messenger_router(
             query = """SELECT id,serial_number,gift_id,telegram_gift_id,gift_name,gift_emoji,
                           telegram_gift_metadata_json,acquired_at,upgrade_level,attributes_json,
                           purchase_asset,purchase_price,profile_pinned,profile_worn,
+                          (SELECT p.supply FROM telegram_gift_prices p WHERE p.gift_id=user_gifts.telegram_gift_id) AS shop_supply,
+                          (SELECT MAX(0, p.supply-p.sold) FROM telegram_gift_prices p WHERE p.gift_id=user_gifts.telegram_gift_id) AS shop_remaining,
                           EXISTS(SELECT 1 FROM gift_market_listings l
                                  WHERE l.serial_number=user_gifts.serial_number
                                    AND l.status='active') AS is_listed,
