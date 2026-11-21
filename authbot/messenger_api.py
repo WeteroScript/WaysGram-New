@@ -1322,6 +1322,11 @@ async def init_messenger_storage(database_path: Path) -> None:
             CREATE TABLE IF NOT EXISTS profile_birthdays (
                 telegram_id INTEGER PRIMARY KEY, day INTEGER NOT NULL, month INTEGER NOT NULL, year INTEGER
             );
+            CREATE TABLE IF NOT EXISTS dm_message_fees (
+                telegram_id INTEGER PRIMARY KEY,
+                stars INTEGER NOT NULL CHECK(stars BETWEEN 1 AND 10000),
+                exempt_users TEXT NOT NULL DEFAULT '[]'
+            );
             CREATE TABLE IF NOT EXISTS account_profile_privacy (
                 telegram_id INTEGER NOT NULL, setting TEXT NOT NULL, rules TEXT NOT NULL,
                 PRIMARY KEY (telegram_id, setting)
@@ -6417,6 +6422,7 @@ def build_messenger_router(
                     raise HTTPException(status_code=404, detail="Получатель не найден")
                 owner = int(recipient)
                 await require_gift_delivery_allowed(db, uid, owner)
+                await require_free_dm(db, uid, owner)
                 await require_gift_type(db, owner)
             cur = await db.execute(
                 "UPDATE accounts SET stars=stars-?,updated_at=? WHERE telegram_id=? AND stars>=?",
@@ -10566,6 +10572,73 @@ def build_messenger_router(
             await db.commit()
         return {"ok": True}
 
+    async def dm_message_fee(db: Any, sender: int, recipient: int) -> int:
+        if sender == recipient:
+            return 0
+        cur = await db.execute("SELECT stars,exempt_users FROM dm_message_fees WHERE telegram_id=?", (recipient,))
+        settings = await cur.fetchone()
+        if not settings or sender in json.loads(settings[1]):
+            return 0
+        cur = await db.execute("""SELECT 1 FROM contacts WHERE owner_telegram_id=? AND contact_telegram_id=?
+            UNION ALL SELECT 1 FROM messages WHERE sender_telegram_id=? AND recipient_telegram_id=? LIMIT 1""",
+            (recipient, sender, recipient, sender))
+        return 0 if await cur.fetchone() else int(settings[0])
+
+    @router.get("/api/me/message-fee")
+    async def get_message_fee(authorization: str | None = Header(default=None)):
+        uid = int((await current_user(authorization))["telegram_id"])
+        async with aiosqlite.connect(db_path()) as db:
+            cur = await db.execute("SELECT stars,exempt_users FROM dm_message_fees WHERE telegram_id=?", (uid,))
+            row = await cur.fetchone()
+        return {"stars": int(row[0]), "exempt_users": json.loads(row[1])} if row else {"stars": 0, "exempt_users": []}
+
+    @router.put("/api/me/message-fee")
+    async def set_message_fee(payload: dict[str, Any], authorization: str | None = Header(default=None)):
+        uid = int((await current_user(authorization))["telegram_id"])
+        stars, exempt = payload.get("stars"), payload.get("exempt_users", [])
+        if (type(stars) is not int or not 0 <= stars <= 10000 or not isinstance(exempt, list)
+                or len(exempt) > 200 or any(type(x) is not int or not 0 < x < 2**63 for x in exempt)):
+            raise HTTPException(400, "MESSAGE_FEE_INVALID")
+        exempt = sorted(set(exempt)) if stars else []
+        async with aiosqlite.connect(db_path()) as db:
+            if stars:
+                await db.execute("""INSERT INTO dm_message_fees VALUES(?,?,?) ON CONFLICT(telegram_id)
+                    DO UPDATE SET stars=excluded.stars,exempt_users=excluded.exempt_users""", (uid, stars, json.dumps(exempt)))
+            else:
+                await db.execute("DELETE FROM dm_message_fees WHERE telegram_id=?", (uid,))
+            await db.commit()
+        return {"stars": stars, "exempt_users": exempt}
+
+    @router.get("/api/chats/{peer_id}/message-fee")
+    async def quote_message_fee(peer_id: int, authorization: str | None = Header(default=None)):
+        uid = int((await current_user(authorization))["telegram_id"])
+        if not 0 < peer_id < 2**63:
+            raise HTTPException(400, "PEER_ID_INVALID")
+        async with aiosqlite.connect(db_path()) as db:
+            cur = await db.execute("""SELECT 1 FROM accounts WHERE telegram_id=? AND is_banned=0
+                AND NOT EXISTS (SELECT 1 FROM blocked_users WHERE (owner_telegram_id=? AND blocked_telegram_id=?)
+                OR (owner_telegram_id=? AND blocked_telegram_id=?))""", (peer_id, uid, peer_id, peer_id, uid))
+            if not await cur.fetchone():
+                raise HTTPException(404, "PEER_NOT_FOUND")
+            return {"stars": await dm_message_fee(db, uid, peer_id)}
+
+    async def require_free_dm(db: Any, sender: int, recipient: int) -> None:
+        stars = await dm_message_fee(db, sender, recipient)
+        if stars:
+            raise HTTPException(402, {"code": "MESSAGE_FEE_UNSUPPORTED_FOR_SEND_TYPE", "stars": stars})
+
+    async def charge_dm_fee(db: Any, sender: int, recipient: int, stars: int, message_id: int, now: int) -> None:
+        for uid, amount in ((sender, -stars), (recipient, stars)):
+            cur = await db.execute("UPDATE accounts SET stars=stars+? WHERE telegram_id=? AND stars+? BETWEEN 0 AND 9223372036854775807 RETURNING stars",
+                                   (amount, uid, amount))
+            row = await cur.fetchone()
+            await cur.close()
+            if row is None:
+                raise HTTPException(409, "MESSAGE_FEE_INSUFFICIENT_STARS")
+            await db.execute("""INSERT INTO economy_transactions
+                (telegram_id,asset,amount,balance_after,reason,admin_id,created_at) VALUES(?,'stars',?,?,?,NULL,?)""",
+                (uid, amount, row[0], f"message_fee:{message_id}", now))
+
     @router.post("/api/messages/quote/v1", status_code=201)
     @router.post("/api/messages", status_code=201)
     async def send_message(
@@ -10661,6 +10734,13 @@ def build_messenger_router(
             if int((await cur.fetchone())[0]) >= DM_MESSAGES_PER_MINUTE:
                 await db.rollback()
                 raise HTTPException(status_code=429, detail="Превышен лимит отправки сообщений")
+            fee = await dm_message_fee(db, uid, recipient_id)
+            if fee:
+                allowed = payload.get("approved_fee_stars")
+                if type(allowed) is not int or allowed != fee:
+                    raise HTTPException(402, {"code": "MESSAGE_FEE_REQUIRED", "stars": fee})
+                if descriptor is None:
+                    raise HTTPException(400, "MESSAGE_FEE_IDEMPOTENCY_REQUIRED")
             cur = await db.execute(
                 """INSERT INTO messages
                    (sender_telegram_id,recipient_telegram_id,body,media_id,reply_to_id,created_at)
@@ -10668,6 +10748,8 @@ def build_messenger_router(
                 (uid, recipient_id, body, media_id, reply_to_id, now),
             )
             message_id = int(cur.lastrowid)
+            if fee:
+                await charge_dm_fee(db, uid, recipient_id, fee, message_id, now)
             if quote is not None:
                 await db.execute("UPDATE messages SET quote_json=? WHERE id=?",
                                  (json.dumps(quote, ensure_ascii=True, separators=(",", ":")), message_id))
@@ -11079,6 +11161,7 @@ def build_messenger_router(
 
             for index, (media_id, media_fields) in enumerate(checked_media):
                 item_body = captions[index]
+                await require_free_dm(db, uid, recipient_id)
                 cur = await db.execute(
                     """INSERT INTO messages
                        (sender_telegram_id,recipient_telegram_id,body,media_id,reply_to_id,
@@ -11536,6 +11619,7 @@ def build_messenger_router(
                         raise HTTPException(status_code=409, detail="Отправленное сообщение больше недоступно")
                     result = dict(message)
                 else:
+                    await require_free_dm(db, uid, peer)
                     cur = await db.execute("""INSERT INTO messages(sender_telegram_id,recipient_telegram_id,body,created_at,silent,entities_json)
                         VALUES(?,?,?,?,?,?)""", (uid, peer, row["body"], now, row["silent"], row["entities_json"]))
                     message_id = int(cur.lastrowid)
@@ -11717,6 +11801,7 @@ def build_messenger_router(
                 await db.rollback()
                 raise HTTPException(status_code=409, detail="Владение подарком уже изменилось")
             await apply_gift_autosave(db, serial, recipient_id, uid)
+            await require_free_dm(db, uid, recipient_id)
             cur = await db.execute(
                 """INSERT INTO messages
                    (sender_telegram_id,recipient_telegram_id,body,created_at)
@@ -11985,6 +12070,7 @@ def build_messenger_router(
                 body = "" if drop_captions and media_id else str(item["body"] or "")
                 album_id, album_index, album_count = album_for.get(index, (None, 0, 0))
                 if target_scope == "dm":
+                    await require_free_dm(db, uid, target_peer)
                     cur = await db.execute("""INSERT INTO messages(sender_telegram_id,recipient_telegram_id,body,media_id,
                         media_album_id,media_album_index,media_album_count,created_at) VALUES(?,?,?,?,?,?,?,?)""",
                         (uid, target_peer, body, media_id, album_id, album_index, album_count, now))
@@ -12160,6 +12246,7 @@ def build_messenger_router(
                 if source["forwarded_from_message_id"] is not None
                 else int(source["id"])
             )
+            await require_free_dm(db, uid, recipient_id)
             cur = await db.execute(
                 """INSERT INTO messages
                    (sender_telegram_id,recipient_telegram_id,body,media_id,reply_to_id,created_at,
@@ -12331,6 +12418,8 @@ def build_messenger_router(
                 )
                 if not failure and int((await cur.fetchone())[0]) >= DM_MESSAGES_PER_MINUTE:
                     continue
+                if not failure and await dm_message_fee(db, sender_id, recipient_id):
+                    failure = "Для сообщения требуется подтверждение оплаты Stars"
                 if failure:
                     await db.execute(
                         "UPDATE scheduled_messages SET status='failed',error=? WHERE id=? AND status='pending'",
@@ -12435,6 +12524,8 @@ def build_messenger_router(
                     )
                     if await cur.fetchone():
                         failure = "Пользователь находится в чёрном списке"
+                if not failure and await dm_message_fee(db, sender_id, recipient_id):
+                    failure = "Для сообщения требуется подтверждение оплаты Stars"
                 if failure:
                     await db.execute(
                         "UPDATE online_scheduled_messages SET status='failed',error=? WHERE id=? AND status='pending'",

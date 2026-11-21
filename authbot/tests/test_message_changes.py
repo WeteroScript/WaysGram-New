@@ -1618,3 +1618,44 @@ def test_call_privacy_preferences_are_independent_and_account_scoped(env):
             assert (await client.get(calls)).status_code == 401
 
     run(scenario())
+
+
+def test_paid_dm_requires_current_quote_and_charges_once(env):
+    import db_split
+    path, app = env
+
+    async def scenario():
+        async with await client_for(app) as client:
+            owner, sender = headers(102), headers(101)
+            route = '/api/me/message-fee'
+            assert (await client.get(route, headers=owner)).json()['stars'] == 0
+            assert (await client.put(route, headers=owner, json={'stars': 3})).status_code == 200
+            quote = '/api/chats/102/message-fee'
+            assert (await client.get(quote, headers=sender)).json() == {'stars': 3}
+            body = {'recipient_id': 102, 'body': 'paid hello'}
+            denied = await client.post('/api/messages', headers=sender, json=body)
+            assert denied.status_code == 402 and denied.json()['detail']['stars'] == 3
+            assert (await client.post('/api/messages', headers=sender, json={**body, 'approved_fee_stars': 2})).status_code == 402
+            body['approved_fee_stars'] = 3
+            assert (await client.post('/api/messages', headers=sender, json=body)).status_code == 400
+            with db_split.sqlite_connect(path) as db:
+                initial = dict(db.execute('SELECT telegram_id,stars FROM accounts WHERE telegram_id IN (101,102)'))
+            keyed = {**sender, 'Idempotency-Key': 'message-fee-test-0001'}
+            sent = await client.post('/api/messages', headers=keyed, json=body)
+            assert sent.status_code == 201
+            replay = await client.post('/api/messages', headers=keyed, json=body)
+            assert replay.json()['id'] == sent.json()['id']
+            with db_split.sqlite_connect(path) as db:
+                balances = dict(db.execute('SELECT telegram_id,stars FROM accounts WHERE telegram_id IN (101,102)'))
+                assert balances == {101: initial[101] - 3, 102: initial[102] + 3}
+                assert db.execute('SELECT COUNT(*) FROM economy_transactions WHERE reason=?', (f"message_fee:{sent.json()['id']}",)).fetchone()[0] == 2
+                db.execute('UPDATE accounts SET stars=0 WHERE telegram_id=101')
+                db.commit()
+            poor = await client.post('/api/messages', headers={**sender, 'Idempotency-Key': 'message-fee-test-0002'}, json={**body, 'body': 'unfunded'})
+            assert poor.status_code == 409
+            listed = (await client.get('/api/messages?with=102', headers=sender)).json()['messages']
+            assert all(item['body'] != 'unfunded' for item in listed)
+            assert (await client.put(route, headers=owner, json={'stars': 3, 'exempt_users': [101]})).status_code == 200
+            assert (await client.get(quote, headers=sender)).json() == {'stars': 0}
+
+    run(scenario())
