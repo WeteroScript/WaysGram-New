@@ -1843,6 +1843,11 @@ async def init_messenger_storage(database_path: Path) -> None:
             await db.execute("ALTER TABLE main.channel_inbox_messages ADD COLUMN proposal_state TEXT")
         if "published_post_id" not in inbox_columns:
             await db.execute("ALTER TABLE main.channel_inbox_messages ADD COLUMN published_post_id INTEGER")
+        if "sponsor_stars" not in inbox_columns:
+            await db.execute("ALTER TABLE main.channel_inbox_messages ADD COLUMN sponsor_stars INTEGER NOT NULL DEFAULT 0")
+        cur = await db.execute(f"PRAGMA {db_split.SCHEMA}.table_info(channel_messages)")
+        if "sponsored" not in {row[1] for row in await cur.fetchall()}:
+            await db.execute(f"ALTER TABLE {db_split.SCHEMA}.channel_messages ADD COLUMN sponsored INTEGER NOT NULL DEFAULT 0")
         if "scheduled_at" not in inbox_columns:
             await db.execute("ALTER TABLE main.channel_inbox_messages ADD COLUMN scheduled_at INTEGER")
         if "scheduled_by" not in inbox_columns:
@@ -9634,6 +9639,13 @@ def build_messenger_router(
         uid = int((await current_user(authorization))["telegram_id"])
         return await channel_inbox_thread(channel_id, uid, uid, False, request.method == "POST", payload, key, before_id, limit)
 
+    @router.post("/api/channels/{channel_id}/inbox/me/sponsored-offers")
+    async def create_sponsored_offer(channel_id: int, payload: dict[str, Any],
+                                     authorization: str | None = Header(default=None),
+                                     key: str | None = Header(default=None, alias="Idempotency-Key")):
+        uid = int((await current_user(authorization))["telegram_id"])
+        return await channel_inbox_thread(channel_id, uid, uid, False, True, payload, key, 0, 40, sponsored=True)
+
     @router.get("/api/channels/{channel_id}/inbox/threads/{reader_id}")
     @router.post("/api/channels/{channel_id}/inbox/threads/{reader_id}")
     async def channel_inbox_owner_thread(channel_id: int, reader_id: int, request: Request, payload: dict[str, Any] | None = None,
@@ -9646,7 +9658,7 @@ def build_messenger_router(
         return await channel_inbox_thread(channel_id, reader_id, uid, True, request.method == "POST", payload, key, before_id, limit)
 
     async def channel_inbox_thread(channel_id: int, reader: int, uid: int, as_owner: bool, write: bool,
-                                   payload: dict[str, Any] | None, key: str | None, before_id: int, limit: int):
+                                   payload: dict[str, Any] | None, key: str | None, before_id: int, limit: int, sponsored: bool = False):
         direction = "reply" if as_owner else "incoming"
         async with aiosqlite.connect(db_path()) as db:
             await db.execute("BEGIN IMMEDIATE" if write else "BEGIN")
@@ -9662,7 +9674,7 @@ def build_messenger_router(
             if channel is None:
                 raise HTTPException(404, "CHANNEL_NOT_FOUND")
             owner, enabled, fee = channel
-            columns = "id,direction,body,fee_stars,created_at,proposal_state,published_post_id,scheduled_at,reward_stars"
+            columns = "id,direction,body,fee_stars,created_at,proposal_state,published_post_id,scheduled_at,reward_stars,sponsor_stars"
             if as_owner:
                 cur = await db.execute("SELECT 1 FROM channel_inbox_messages WHERE channel_id=? AND reader_id=? AND direction='incoming' LIMIT 1", (channel_id, reader))
                 if not await cur.fetchone():
@@ -9673,7 +9685,7 @@ def build_messenger_router(
                 rows = await cur.fetchall()
                 return {"messages": [dict(row) for row in reversed(rows[:limit])],
                         "next_before_id": rows[limit - 1]["id"] if len(rows) > limit else 0,
-                        "can_send": as_owner or (bool(enabled) and reader != owner), "fee_stars": 0 if as_owner else fee}
+                        "can_send": as_owner or (bool(enabled) and reader != owner), "fee_stars": 0 if as_owner else fee, "sponsored_offers_supported": True}
             body = (payload or {}).get("body")
             approved = (payload or {}).get("approved_fee_stars", 0)
             proposal = (payload or {}).get("propose_post", False)
@@ -9682,10 +9694,13 @@ def build_messenger_router(
             if not isinstance(body, str) or type(approved) is not int or not key or not re.fullmatch(r"[A-Za-z0-9_-]{16,128}", key):
                 raise HTTPException(400, "INVALID_CHANNEL_INBOX_MESSAGE")
             body = _message_body(body)
+            sponsor = (payload or {}).get("sponsor_stars", 0)
+            if type(sponsor) is not int or not 0 <= sponsor <= 10000 or bool(sponsor) != sponsored or (sponsor and (not proposal or as_owner or len(body) > 3950)):
+                raise HTTPException(400, "INVALID_SPONSORED_OFFER")
             cur = await db.execute(f"SELECT {columns} FROM channel_inbox_messages WHERE channel_id=? AND reader_id=? AND direction=? AND operation_key=?", (channel_id, reader, direction, key))
             prior = await cur.fetchone()
             if prior is not None:
-                if (prior["body"], prior["fee_stars"], prior["proposal_state"] is not None) != (body, approved, proposal):
+                if (prior["body"], prior["fee_stars"], prior["proposal_state"] is not None, prior["sponsor_stars"]) != (body, approved, proposal, sponsor):
                     raise HTTPException(409, "IDEMPOTENCY_KEY_CONFLICT")
                 return dict(prior)
             if as_owner:
@@ -9694,14 +9709,18 @@ def build_messenger_router(
                 raise HTTPException(403, "CHANNEL_INBOX_DISABLED")
             if approved != fee:
                 raise HTTPException(402, {"code": "CHANNEL_INBOX_FEE_REQUIRED", "stars": fee})
+            if sponsor:
+                cur = await db.execute("SELECT stars FROM accounts WHERE telegram_id=?", (reader,))
+                if (await cur.fetchone())[0] < fee + sponsor:
+                    raise HTTPException(409, "SPONSORED_OFFER_INSUFFICIENT_STARS")
             now = int(time.time())
             field, target = ("channel_id", channel_id) if as_owner else ("reader_id", reader)
             cur = await db.execute(f"SELECT COUNT(*) FROM channel_inbox_messages WHERE {field}=? AND direction=? AND created_at>?", (target, direction, now - 60))
             if (await cur.fetchone())[0] >= 20:
                 raise HTTPException(429, "CHANNEL_INBOX_RATE_LIMIT")
             proposal_state = "pending" if proposal else None
-            cur = await db.execute("INSERT INTO channel_inbox_messages(channel_id,reader_id,direction,body,fee_stars,created_at,operation_key,proposal_state) VALUES(?,?,?,?,?,?,?,?)",
-                                   (channel_id, reader, direction, body, fee, now, key, proposal_state))
+            cur = await db.execute("INSERT INTO channel_inbox_messages(channel_id,reader_id,direction,body,fee_stars,created_at,operation_key,proposal_state,sponsor_stars) VALUES(?,?,?,?,?,?,?,?,?)",
+                                   (channel_id, reader, direction, body, fee, now, key, proposal_state, sponsor))
             message_id = int(cur.lastrowid)
             if fee:
                 for account, amount in ((reader, -fee), (owner, fee)):
@@ -9716,27 +9735,28 @@ def build_messenger_router(
                         (account, amount, balance[0], f"channel_inbox:{channel_id}:{message_id}", now))
             await db.commit()
         return {"id": message_id, "direction": direction, "body": body, "fee_stars": fee, "created_at": now,
-                "proposal_state": proposal_state, "published_post_id": None, "scheduled_at": None, "reward_stars": 0}
+                "proposal_state": proposal_state, "published_post_id": None, "scheduled_at": None, "reward_stars": 0, "sponsor_stars": sponsor}
 
     async def publish_inbox_proposal(db: Any, channel_id: int, owner: int, proposal_id: int,
-                                     reader: int, body: str, reward: int, now: int) -> int:
+                                     reader: int, body: str, reward: int, now: int, sponsor: int = 0) -> int:
         cur = await db.execute("SELECT COUNT(*) FROM channel_messages WHERE author_telegram_id=? AND created_at>?", (owner, now - 60))
         if (await cur.fetchone())[0] >= CHANNEL_POSTS_PER_MINUTE:
             raise HTTPException(429, "CHANNEL_POST_RATE_LIMIT")
-        cur = await db.execute("INSERT INTO channel_messages(channel_id,author_telegram_id,body,created_at) VALUES(?,?,?,?)",
-                               (channel_id, owner, body, now))
+        cur = await db.execute("INSERT INTO channel_messages(channel_id,author_telegram_id,body,created_at,sponsored) VALUES(?,?,?,?,?)",
+                               (channel_id, owner, ("Реклама / Sponsored\n\n" + body) if sponsor else body, now, int(bool(sponsor))))
         post_id = int(cur.lastrowid)
-        if reward:
-            for account, amount in ((owner, -reward), (reader, reward)):
+        if reward or sponsor:
+            payer, recipient, price, reason = (reader, owner, sponsor, "channel_sponsored_post") if sponsor else (owner, reader, reward, "channel_proposal_reward")
+            for account, amount in ((payer, -price), (recipient, price)):
                 cur = await db.execute("""UPDATE accounts SET stars=stars+? WHERE telegram_id=? AND is_banned=0
                     AND stars+? BETWEEN 0 AND 9223372036854775807 RETURNING stars""", (amount, account, amount))
                 balance = await cur.fetchone()
                 await cur.close()
                 if balance is None:
-                    raise HTTPException(409, "POST_PROPOSAL_REWARD_FAILED")
+                    raise HTTPException(409, "SPONSORED_OFFER_INSUFFICIENT_STARS" if sponsor else "POST_PROPOSAL_REWARD_FAILED")
                 await db.execute("""INSERT INTO economy_transactions
                     (telegram_id,asset,amount,balance_after,reason,admin_id,created_at) VALUES(?,'stars',?,?,?,NULL,?)""",
-                    (account, amount, balance[0], f"channel_proposal_reward:{channel_id}:{proposal_id}", now))
+                    (account, amount, balance[0], f"{reason}:{channel_id}:{proposal_id}", now))
         await db.execute("UPDATE channel_inbox_messages SET proposal_state='published',published_post_id=?,reward_stars=?,scheduled_at=NULL,scheduled_by=NULL WHERE id=?",
                          (post_id, reward, proposal_id))
         await record_event(db, "channel", post_id, "new_message", owner, chat_id=channel_id)
@@ -9744,11 +9764,14 @@ def build_messenger_router(
 
     @router.post("/api/channels/{channel_id}/inbox/proposals/{proposal_id}/{action}")
     async def resolve_channel_post_proposal(channel_id: int, proposal_id: int,
-                                            action: Literal["publish", "decline", "withdraw", "schedule"],
+                                            action: Literal["publish", "publish-sponsored", "decline", "withdraw", "schedule"],
                                             payload: dict[str, Any] | None = None,
                                             authorization: str | None = Header(default=None)):
         user = await current_user(authorization)
         uid = int(user["telegram_id"])
+        sponsored_action = action == "publish-sponsored"
+        if sponsored_action:
+            action = "publish"
         target = {"publish": "published", "decline": "declined", "withdraw": "withdrawn", "schedule": "scheduled"}[action]
         now = int(time.time())
         payload = payload or {}
@@ -9761,13 +9784,15 @@ def build_messenger_router(
             await db.execute("BEGIN IMMEDIATE")
             if action != "withdraw":
                 await require_channel_inbox_owner(db, channel_id, uid)
-            cur = await db.execute("""SELECT m.body,m.proposal_state,m.published_post_id,m.reader_id,m.scheduled_at,m.reward_stars FROM channel_inbox_messages m
+            cur = await db.execute("""SELECT m.body,m.proposal_state,m.published_post_id,m.reader_id,m.scheduled_at,m.reward_stars,m.sponsor_stars,m.created_at FROM channel_inbox_messages m
                 JOIN channels c ON c.id=m.channel_id WHERE m.id=? AND m.channel_id=? AND m.proposal_state IS NOT NULL
                 AND (?=0 OR m.reader_id=?)""", (proposal_id, channel_id, int(action == "withdraw"), uid))
             proposal = await cur.fetchone()
             if proposal is None:
                 raise HTTPException(404, "POST_PROPOSAL_NOT_FOUND")
-            body, state, post_id, reader, old_schedule, old_reward = proposal
+            body, state, post_id, reader, old_schedule, old_reward, sponsor, offered_at = proposal
+            if action == "publish" and sponsored_action != bool(sponsor):
+                raise HTTPException(400, "SPONSORED_OFFER_CONFIRMATION_REQUIRED")
             if state == target and (action != "schedule" or (scheduled_at, reward) == (old_schedule, old_reward)):
                 return {"id": proposal_id, "proposal_state": state, "published_post_id": post_id,
                         "scheduled_at": old_schedule, "reward_stars": old_reward}
@@ -9777,8 +9802,18 @@ def build_messenger_router(
                 raise HTTPException(400, "INVALID_POST_PROPOSAL_REWARD")
             if action == "schedule" and (type(scheduled_at) is not int or not now + 10 <= scheduled_at <= now + 30 * 86400):
                 raise HTTPException(400, "INVALID_POST_PROPOSAL_SCHEDULE")
+            if sponsor:
+                if action == "schedule" or reward:
+                    raise HTTPException(400, "SPONSORED_OFFER_IMMEDIATE_ONLY")
+                if action == "publish":
+                    if offered_at < now - 7 * 86400:
+                        raise HTTPException(409, "SPONSORED_OFFER_EXPIRED")
+                    approved = payload.get("approved_sponsor_stars")
+                    if type(approved) is not int or approved != sponsor or reader == uid:
+                        raise HTTPException(400, "SPONSORED_OFFER_CONFIRMATION_REQUIRED")
+                    await require_channel_not_banned(db, channel_id, reader)
             if action == "publish":
-                post_id = await publish_inbox_proposal(db, channel_id, uid, proposal_id, reader, body, reward, now)
+                post_id = await publish_inbox_proposal(db, channel_id, uid, proposal_id, reader, body, reward, now, sponsor)
                 cur = await db.execute("SELECT telegram_id FROM active_channel_members WHERE channel_id=? AND telegram_id<>?", (channel_id, uid))
                 recipients = [int(row[0]) for row in await cur.fetchall()]
             else:
@@ -9787,7 +9822,7 @@ def build_messenger_router(
             await db.commit()
         if recipients:
             await deliver_push_notifications(recipients, str(user.get("display_name") or user.get("username") or "Новая публикация"),
-                                             body, {"scope": "channel", "chat_id": str(channel_id), "message_id": str(post_id), "silent": "0"})
+                                             ("Реклама / Sponsored: " + body) if sponsor else body, {"scope": "channel", "chat_id": str(channel_id), "message_id": str(post_id), "silent": "0"})
         return {"id": proposal_id, "proposal_state": target, "published_post_id": post_id,
                 "scheduled_at": scheduled_at, "reward_stars": reward}
 
@@ -10005,23 +10040,25 @@ def build_messenger_router(
             voluntary_leaves, moderated_removals = await cur.fetchone()
             # Count only settled credits, including those for posts that have since been deleted.
             patterns = (f"channel_paid_reaction:{channel_id}:*", f"channel_paid_media:{channel_id}:*",
-                        f"channel_subscription:{channel_id}", f"channel_inbox:{channel_id}:*")
+                        f"channel_subscription:{channel_id}", f"channel_inbox:{channel_id}:*", f"channel_sponsored_post:{channel_id}:*")
             cur = await db.execute("""SELECT
                     COUNT(CASE WHEN reason GLOB ? THEN 1 END),
                     COALESCE(SUM(CASE WHEN reason GLOB ? THEN amount ELSE 0 END),0),
                     COALESCE(SUM(CASE WHEN reason GLOB ? THEN amount ELSE 0 END),0),
                     COALESCE(SUM(CASE WHEN reason=? THEN amount ELSE 0 END),0),
+                    COALESCE(SUM(CASE WHEN reason GLOB ? THEN amount ELSE 0 END),0),
                     COALESCE(SUM(CASE WHEN reason GLOB ? THEN amount ELSE 0 END),0)
                 FROM economy_transactions WHERE telegram_id=? AND asset='stars' AND admin_id IS NULL
                 AND amount>0 AND created_at BETWEEN ? AND ?""", (patterns[0], *patterns, uid, since, now))
-            purchases, reaction_stars, media_stars, subscription_stars, inbox_stars = await cur.fetchone()
+            purchases, reaction_stars, media_stars, subscription_stars, inbox_stars, sponsorship_stars = await cur.fetchone()
         return {"days": int(days), "since": since, "as_of": now, "members": members,
                 "current_members_joined": recent_members, "published_posts_remaining": posts,
                 "unique_post_views": post_views, "reached_accounts": reached_accounts,
                 "voluntary_leaves": voluntary_leaves, "moderated_removals": moderated_removals,
                 "paid_reaction_purchases": purchases, "paid_reaction_stars": reaction_stars,
                 "paid_media_stars": media_stars, "subscription_stars": subscription_stars, "inbox_stars": inbox_stars,
-                "total_revenue_stars": reaction_stars + media_stars + subscription_stars + inbox_stars}
+                "sponsorship_stars": sponsorship_stars,
+                "total_revenue_stars": reaction_stars + media_stars + subscription_stars + inbox_stars + sponsorship_stars}
 
     @router.put("/api/channels/{channel_id}/messages/{message_id}/paid-media")
     async def attach_channel_paid_media(channel_id: int, message_id: int, payload: dict[str, Any],
@@ -10033,7 +10070,7 @@ def build_messenger_router(
         async with aiosqlite.connect(db_path()) as db:
             await db.execute("BEGIN IMMEDIATE")
             cur = await db.execute("""SELECT 1 FROM channel_messages m JOIN channels c ON c.id=m.channel_id
-                WHERE m.id=? AND c.id=? AND c.owner_telegram_id=? AND m.media_id IS NULL""", (message_id, channel_id, uid))
+                WHERE m.id=? AND c.id=? AND c.owner_telegram_id=? AND m.media_id IS NULL AND m.sponsored=0""", (message_id, channel_id, uid))
             if not await cur.fetchone():
                 raise HTTPException(404, "CHANNEL_POST_NOT_FOUND")
             media = await require_owned_media(db, payload.get("media_id"), uid)
@@ -14883,12 +14920,14 @@ def build_messenger_router(
             if not await channel_has_right(db, channel_id, uid, 2):
                 raise HTTPException(status_code=403, detail="Менять публикации может только владелец или администратор")
             cur = await db.execute(
-                "SELECT media_id FROM channel_messages WHERE id=? AND channel_id=?", (message_id, channel_id)
+                "SELECT media_id,sponsored FROM channel_messages WHERE id=? AND channel_id=?", (message_id, channel_id)
             )
             row = await cur.fetchone()
             if row is None:
                 await db.rollback()
                 raise HTTPException(status_code=404, detail="Сообщение не найдено")
+            if row[1]:
+                raise HTTPException(409, "SPONSORED_POST_IMMUTABLE")
             if not body and not row[0]:
                 raise HTTPException(status_code=400, detail="Текст сообщения не может быть пустым")
             if "entities" not in payload:
@@ -16922,6 +16961,16 @@ def build_messenger_router(
         authorization: str | None = Header(default=None),
         idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
     ) -> dict[str, Any]:
+        if "send_as_id" in payload:
+            raise HTTPException(400, "USE_GROUP_IDENTITY_ENDPOINT")
+        return await store_group_message(group_id, payload, authorization, idempotency_key)
+
+    @router.post("/api/groups/{group_id}/identity-messages", status_code=201)
+    async def send_group_identity_message(group_id: int, payload: dict[str, Any],
+                                          authorization: str | None = Header(default=None),
+                                          idempotency_key: str | None = Header(default=None, alias="Idempotency-Key")):
+        if "send_as_id" not in payload:
+            raise HTTPException(400, "INVALID_GROUP_SEND_IDENTITY")
         return await store_group_message(group_id, payload, authorization, idempotency_key)
 
     async def store_group_message(group_id: int, payload: dict[str, Any], authorization: str | None,

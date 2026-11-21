@@ -2440,10 +2440,12 @@ def test_group_alternate_identities_hide_actor_and_enforce_ownership(env):
             gid = group.json()['id']
             root = f'/api/groups/{gid}'
             messages = root + '/messages'
+            identities = root + '/identity-messages'
             admin_setting = root + '/admins/102/anonymous'
             masked = {'body': 'Masked author', 'send_as_id': 0}
+            assert (await client.post(messages, headers=owner, json=masked)).status_code == 400
             assert (await client.post(root + '/admins', headers=owner, json={'telegram_id': 102})).status_code == 201
-            assert (await client.post(messages, headers=admin, json=masked)).status_code == 403
+            assert (await client.post(identities, headers=admin, json=masked)).status_code == 403
             assert (await client.put(admin_setting, headers=admin, json={'enabled': True})).status_code == 403
             assert (await client.put(admin_setting, headers=owner, json={'enabled': True})).status_code == 200
             assert (await client.get(root + '/send-identities', headers=admin)).json()['anonymous_allowed'] is True
@@ -2451,7 +2453,7 @@ def test_group_alternate_identities_hide_actor_and_enforce_ownership(env):
             cursor = (await client.get('/api/events', headers=owner)).json()['latest_id']
             key = {**admin, 'Idempotency-Key': 'anonymous-group-0001'}
             for _ in range(2):
-                sent = await client.post(messages, headers=key, json=masked)
+                sent = await client.post(identities, headers=key, json=masked)
                 assert sent.status_code == 201 and sent.json()['sender_id'] == 0 and sent.json()['is_mine'] is True
             mid = sent.json()['id']
             item = (await client.get(messages, headers=owner)).json()['messages'][0]
@@ -2468,10 +2470,57 @@ def test_group_alternate_identities_hide_actor_and_enforce_ownership(env):
             ch = await client.post('/api/channels', headers=admin, json={'title': 'Public author', 'username': 'public_author', 'is_public': True})
             cid = ch.json()['id']
             via_channel = {'body': 'Public identity', 'send_as_id': cid}
-            assert (await client.post(messages, headers=owner, json=via_channel)).status_code == 403
-            assert (await client.post(messages, headers=admin, json=via_channel)).json()['identity_title'] == 'Public author'
+            assert (await client.post(identities, headers=owner, json=via_channel)).status_code == 403
+            assert (await client.post(identities, headers=admin, json=via_channel)).json()['identity_title'] == 'Public author'
             assert (await client.delete(root + '/admins/102', headers=owner)).status_code == 200
             assert (await client.post(root + '/admins', headers=owner, json={'telegram_id': 102})).status_code == 201
-            assert (await client.post(messages, headers=admin, json=masked)).status_code == 403
+            assert (await client.post(identities, headers=admin, json=masked)).status_code == 403
+
+    run(scenario())
+
+
+def test_sponsored_placement_requires_consent_and_settles_real_stars_once(env):
+    import aiosqlite
+
+    path, app = env
+
+    async def scenario():
+        async with aiosqlite.connect(path) as db:
+            await db.execute('UPDATE accounts SET stars=20 WHERE telegram_id=102')
+            await db.commit()
+        async with await client_for(app) as client:
+            owner, sponsor = headers(101), headers(102)
+            channel = await client.post('/api/channels', headers=owner, json={'title': 'Ads', 'username': 'paid_placement', 'is_public': True})
+            root = f"/api/channels/{channel.json()['id']}"
+            inbox = root + '/inbox'
+            assert (await client.put(inbox + '/settings', headers=owner, json={'enabled': True, 'fee_stars': 0})).status_code == 200
+            key = {**sponsor, 'Idempotency-Key': 'sponsored-placement-01'}
+            body = {'body': 'Placement text', 'propose_post': True, 'sponsor_stars': 7}
+            offered = await client.post(inbox + '/me/sponsored-offers', headers=key, json=body)
+            assert offered.status_code == 200 and offered.json()['sponsor_stars'] == 7
+            assert (await client.post(inbox + '/me/sponsored-offers', headers=key, json={**body, 'sponsor_stars': 8})).status_code == 409
+            assert (await client.get(root + '/analytics', headers=owner)).json()['sponsorship_stars'] == 0
+            publish = f"{inbox}/proposals/{offered.json()['id']}/publish-sponsored"
+            assert (await client.post(publish, headers=owner)).status_code == 400
+            assert (await client.post(publish, headers=owner, json={'approved_sponsor_stars': 6})).status_code == 400
+            assert (await client.post(publish, headers=sponsor, json={'approved_sponsor_stars': 7})).status_code == 404
+            results = await asyncio.gather(*(client.post(publish, headers=owner, json={'approved_sponsor_stars': 7}) for _ in range(2)))
+            assert results[0].status_code == results[1].status_code == 200 and results[0].json() == results[1].json()
+            pid = results[0].json()['published_post_id']
+            posts = (await client.get(root + '/messages', headers=sponsor)).json()['messages']
+            assert [(p['id'], p['body']) for p in posts] == [(pid, 'Реклама / Sponsored\n\nPlacement text')]
+            assert (await client.patch(root + f'/messages/{pid}', headers=owner, json={'body': 'Remove label'})).status_code == 409
+            stats = (await client.get(root + '/analytics', headers=owner)).json()
+            assert stats['sponsorship_stars'] == stats['total_revenue_stars'] == 7
+            async with aiosqlite.connect(path) as db:
+                cur = await db.execute("SELECT telegram_id,amount FROM economy_transactions WHERE reason LIKE 'channel_sponsored_post:%' ORDER BY telegram_id")
+                assert await cur.fetchall() == [(101, 7), (102, -7)]
+            another = await client.post(inbox + '/me/sponsored-offers', headers={**sponsor, 'Idempotency-Key': 'sponsored-placement-02'}, json=body)
+            async with aiosqlite.connect(path) as db:
+                await db.execute('UPDATE accounts SET stars=0 WHERE telegram_id=102')
+                await db.commit()
+            failed = await client.post(f"{inbox}/proposals/{another.json()['id']}/publish-sponsored", headers=owner, json={'approved_sponsor_stars': 7})
+            assert failed.status_code == 409
+            assert len((await client.get(root + '/messages', headers=sponsor)).json()['messages']) == 1
 
     run(scenario())

@@ -4,4 +4,4 @@
 
 The server retains the real actor internally to enforce edits, deletions and limits. For non-personal sends, public history, search, reply metadata and the new/edit/delete events never include that actor's account ID. The author only receives an `is_mine` flag. Forwarding these messages is disabled. This does not hide admin membership or make the ownership of a public channel private.
 
-`GET /api/groups/{id}/send-identities` lists available identities. `PUT /api/groups/{id}/admins/{user}/anonymous` with `{"enabled":true}` grants the right. `POST /api/groups/{id}/messages` takes `send_as_id: 0` for the group or a positive public channel ID. This version covers text in the main group, not attachments, forum topics, channel comments or scheduled sends.
+`GET /api/groups/{id}/send-identities` lists available identities. `PUT /api/groups/{id}/admins/{user}/anonymous` with `{"enabled":true}` grants the right. `POST /api/groups/{id}/identity-messages` takes `send_as_id: 0` for the group or a positive public channel ID. This version covers text in the main group, not attachments, forum topics, channel comments or scheduled sends.

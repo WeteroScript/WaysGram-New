@@ -15,3 +15,11 @@ Readers can choose **Propose a post** under **Actions** in their channel thread.
 `POST /api/channels/{id}/inbox/proposals/{proposal_id}/{action}` accepts `publish`, `schedule` or `decline` from the owner, or `withdraw` from the author. `schedule` takes `scheduled_at` as Unix seconds, from 10 seconds to 30 days ahead. A scheduled proposal can be rescheduled, declined, withdrawn or published immediately before the worker claims it. Concurrent resolutions cannot publish twice.
 
 `publish` and `schedule` can include `reward_stars` (0–10,000). This is a payment from the owner to the proposal author, separate from the inbox fee. The server commits the post, both ledger entries and the final state in one transaction. Funds are not reserved: insufficient funds prevent publication, and a failed scheduled attempt is shown as failed and can be reviewed again. Counteroffers are not supported.
+
+## Direct sponsored placements
+
+In **Message channel → Actions → Offer sponsored post**, an advertiser offers a fixed payment of 1–10,000 internal Stars for an exact text placement. This uses `POST /api/channels/{id}/inbox/me/sponsored-offers` with the usual `Idempotency-Key`, `body`, `propose_post: true`, the approved inbox fee and `sponsor_stars`. The inbox fee (if any) is charged on submission; the placement price is not reserved or charged until publication. The advertiser can withdraw an unpublished offer.
+
+The owner can decline or accept within seven days. Acceptance uses `publish-sponsored` with `approved_sponsor_stars` equal to the offered amount. It creates an immutable post labeled **Реклама / Sponsored** and transfers the exact placement price from the advertiser to the owner in a single transaction. If the transfer fails, nothing is published. The owner can remove a published post; removal does not refund the placement. Sponsored offers cannot be scheduled or combined with an author reward.
+
+Owner analytics separately report settled `sponsorship_stars` and include them in total Stars revenue. This is direct channel sponsorship funded by WaysGram accounts, not a programmatic ad network, impressions-based payments, or a cash-payout system.
