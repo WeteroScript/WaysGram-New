@@ -254,9 +254,9 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -uo pipefail
-          file=/tmp/javac.log
+          file=/tmp/build.log
           if [ ! -s "$file" ]; then
-            file=/tmp/build.log
+            file=/tmp/javac.log
           fi
           {
             echo "### Ошибки сборки: run ${{ github.run_number }}, commit ${GITHUB_SHA:0:7}"
@@ -272,7 +272,11 @@ jobs:
           } > /tmp/report.md
           # Branch builds may not have a PR; surface diagnostics on the check itself.
           if [ -s "$file" ]; then
-            grep -E '^(e: |.*\.java:[0-9]+: error:|Execution failed for task)' "$file" | head -25 | while IFS= read -r line; do
+            {
+              grep -E '^(e: |.*\.java:[0-9]+: error:)' "$file" | head -20
+              awk '/^\* What went wrong:/{report=1; next} /^\* (Try|Exception is):/{report=0} report && NF' "$file" | head -20
+              grep -m 6 '^Caused by:' "$file"
+            } | while IFS= read -r line; do
               printf '::error::%s\n' "${line//%/%25}"
             done
           fi
