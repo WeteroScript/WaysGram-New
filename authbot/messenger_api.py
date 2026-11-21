@@ -14811,6 +14811,29 @@ def build_messenger_router(
             result["members"].append(item)
         return result
 
+    @router.get("/api/groups/{group_id}/analytics")
+    async def get_group_analytics(group_id: int, days: Literal["7", "30", "90"] = "30",
+                                  authorization: str | None = Header(default=None)):
+        uid = int((await current_user(authorization))["telegram_id"])
+        now = int(time.time())
+        since = now - int(days) * 86400
+        async with aiosqlite.connect(db_path()) as db:
+            await db.execute("BEGIN")
+            membership = await require_group_member(db, group_id, uid)
+            if membership["role"] not in ("owner", "admin"):
+                raise HTTPException(403, "GROUP_ANALYTICS_ADMIN_REQUIRED")
+            cur = await db.execute("SELECT COUNT(*), COUNT(CASE WHEN joined_at>=? THEN 1 END) FROM group_members WHERE group_id=?",
+                                   (since, group_id))
+            members, recent_members = await cur.fetchone()
+            cur = await db.execute("""SELECT COUNT(CASE WHEN media_album_id IS NULL OR media_album_index=0 THEN 1 END),
+                                              COUNT(DISTINCT sender_telegram_id)
+                                       FROM group_messages WHERE group_id=? AND created_at>=? AND created_at<=?""",
+                                   (group_id, since, now))
+            messages, authors = await cur.fetchone()
+        return {"days": int(days), "since": since, "as_of": now, "members": members,
+                "current_members_joined": recent_members, "messages_remaining": messages,
+                "unique_authors": authors}
+
     @router.put("/api/groups/{group_id}")
     async def update_group(group_id: int, payload: dict[str, Any],
                            authorization: str | None = Header(default=None)) -> dict[str, Any]:

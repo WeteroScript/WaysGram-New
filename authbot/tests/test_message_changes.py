@@ -1773,3 +1773,34 @@ def test_group_hidden_roster_preserves_counts_and_admin_access(env):
             assert await roster(member) == everyone
 
     run(scenario())
+
+
+def test_group_analytics_excludes_old_and_deleted_messages_and_requires_admin(env):
+    import aiosqlite
+    import time
+
+    path, app = env
+
+    async def scenario():
+        async with await client_for(app) as client:
+            owner, member, outsider = headers(101), headers(102), headers(ADMIN)
+            created = await client.post('/api/groups', headers=owner, json={'title': 'Analytics group', 'member_ids': [102]})
+            base = f"/api/groups/{created.json()['id']}"
+            old = await client.post(base + '/messages', headers=owner, json={'body': 'Old'})
+            current = await client.post(base + '/messages', headers=member, json={'body': 'Current'})
+            assert old.status_code == current.status_code == 201
+            async with aiosqlite.connect(path) as db:
+                await db.execute('UPDATE group_messages SET created_at=? WHERE id=?', (int(time.time()) - 10 * 86400, old.json()['id']))
+                await db.commit()
+            url = base + '/analytics?days=7'
+            assert (await client.get(url, headers=member)).status_code == 403
+            assert (await client.get(url, headers=outsider)).status_code == 403
+            stats = (await client.get(url, headers=owner)).json()
+            assert (stats['members'], stats['messages_remaining'], stats['unique_authors']) == (2, 1, 1)
+            assert (await client.get(base + '/analytics?days=30', headers=owner)).json()['unique_authors'] == 2
+            assert (await client.post(base + '/admins', headers=owner, json={'telegram_id': 102})).status_code in (200, 201)
+            assert (await client.get(url, headers=member)).status_code == 200
+            assert (await client.delete(base + f"/messages/{current.json()['id']}", headers=member)).status_code == 200
+            assert (await client.get(url, headers=owner)).json()['messages_remaining'] == 0
+
+    run(scenario())

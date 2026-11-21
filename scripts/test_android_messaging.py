@@ -83,6 +83,13 @@ class NativeMessagingSourceChecks(unittest.TestCase):
         self.assertIn('int[] days = {7, 30, 90}', helper)
         self.assertIn('data.optLong("paid_reaction_stars")', helper)
 
+    def test_group_analytics_uses_group_endpoint_and_activity_metrics(self):
+        editor = self.source('ui/ChatEditActivity.java')
+        helper = self.source('ui/WaysGramPaidReactions.java')
+        self.assertIn('WaysGramPaidReactions.showGroupAnalytics', editor)
+        self.assertIn('"/api/groups/" + group, true', helper)
+        self.assertIn('data.optLong("messages_remaining"), data.optLong("unique_authors")', helper)
+
     def test_group_roster_visibility_uses_server_setting(self):
         editor = self.source('ui/ChatEditActivity.java')
         self.assertIn('currentChat.creator && !ChatObject.isChannel(currentChat)', editor)
