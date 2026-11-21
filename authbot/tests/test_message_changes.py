@@ -1310,3 +1310,25 @@ def test_avatar_privacy_hides_profile_search_and_direct_download(env):
             assert (await client.get(media_path, headers=viewer)).status_code == 200
 
     run(scenario())
+
+
+def test_group_permanent_invite_is_reused_until_rotated(env):
+    _, app = env
+
+    async def scenario():
+        async with await client_for(app) as client:
+            owner, outsider = headers(101), headers(102)
+            group = await client.post('/api/groups', headers=owner, json={'title': 'Permanent link'})
+            path = f"/api/groups/{group.json()['id']}/permanent-invite"
+            assert (await client.post(path, headers=outsider)).status_code in (403, 404)
+            first = await client.post(path, headers=owner)
+            assert first.status_code == 200, first.text
+            invite = first.json()['invite_link']
+            assert (await client.post(path, headers=owner)).json()['invite_link'] == invite
+            assert (await client.get(invite)).status_code == 200
+            second = await client.post(path + '?rotate=true', headers=owner)
+            assert second.status_code == 200 and second.json()['invite_link'] != invite
+            assert (await client.get(invite)).status_code in (404, 410)
+            assert (await client.get(second.json()['invite_link'])).status_code == 200
+
+    run(scenario())

@@ -1641,6 +1641,8 @@ async def init_messenger_storage(database_path: Path) -> None:
                 f"ALTER TABLE {db_split.SCHEMA}.group_invites "
                 "ADD COLUMN require_approval INTEGER NOT NULL DEFAULT 0 CHECK(require_approval IN (0,1))"
             )
+        if "is_permanent" not in group_invite_columns:
+            await db.execute(f"ALTER TABLE {db_split.SCHEMA}.group_invites ADD COLUMN is_permanent INTEGER NOT NULL DEFAULT 0")
         for column in ("share_token", "label"):
             if column not in group_invite_columns:
                 await db.execute(f"ALTER TABLE {db_split.SCHEMA}.group_invites ADD COLUMN {column} TEXT")
@@ -13941,6 +13943,32 @@ def build_messenger_router(
             await db.commit()
         return {"group_id": group_id, "slow_mode_seconds": seconds}
 
+    @router.post("/api/groups/{group_id}/permanent-invite")
+    async def ensure_group_permanent_invite(group_id: int, request: Request, rotate: bool = False,
+                                            authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        uid = int((await current_user(authorization))["telegram_id"])
+        async with aiosqlite.connect(db_path()) as db:
+            await db.execute("BEGIN IMMEDIATE")
+            member = await require_group_member(db, group_id, uid)
+            if not group_has_right(member, 2):
+                raise HTTPException(403, "Нет права создавать приглашения")
+            cur = await db.execute("""SELECT share_token,created_at FROM group_invites
+                WHERE group_id=? AND created_by=? AND is_permanent=1 AND revoked_at IS NULL""", (group_id, uid))
+            row = await cur.fetchone()
+            if row and not rotate:
+                token, created_at = row
+            else:
+                created_at = int(time.time())
+                if row:
+                    await db.execute("""UPDATE group_invites SET revoked_at=?
+                        WHERE group_id=? AND created_by=? AND is_permanent=1 AND revoked_at IS NULL""", (created_at, group_id, uid))
+                token = secrets.token_urlsafe(32)
+                await db.execute("""INSERT INTO group_invites
+                    (token_hash,group_id,created_by,created_at,share_token,is_permanent)
+                    VALUES(?,?,?,?,?,1)""", (hashlib.sha256(token.encode()).hexdigest(), group_id, uid, created_at, token))
+            await db.commit()
+        return {"invite_link": _external_api_base_url(request) + f"/api/groups/invites/{token}", "created_at": created_at}
+
     @router.get("/api/groups/{group_id}/invites")
     async def list_group_invites(group_id: int, request: Request, admin_id: int | None = None,
                                  revoked: bool = False, after: str | None = None, limit: int = 50,
@@ -13953,6 +13981,8 @@ def build_messenger_router(
             if not group_has_right(member, 2) or (admin_id != uid and member["role"] != "owner"):
                 raise HTTPException(403, "Нет доступа к списку приглашений")
             where = "group_id=? AND created_by=? AND share_token IS NOT NULL AND (revoked_at IS NOT NULL)=?"
+            if not revoked:
+                where += " AND is_permanent=0"
             args = (group_id, admin_id, int(revoked))
             cur = await db.execute(f"SELECT COUNT(*) FROM group_invites WHERE {where}", args)
             count = (await cur.fetchone())[0]
@@ -13999,7 +14029,7 @@ def build_messenger_router(
                 raise HTTPException(403, "Нет права редактировать приглашение")
             assignments = ",".join(f"{k}=?" for k in payload)
             cur = await db.execute(f"""UPDATE group_invites SET {assignments}
-                WHERE group_id=? AND token_hash=? AND revoked_at IS NULL AND (created_by=? OR ?)
+                WHERE group_id=? AND token_hash=? AND revoked_at IS NULL AND is_permanent=0 AND (created_by=? OR ?)
                 RETURNING created_by,created_at,expires_at,max_uses,uses,require_approval,label""",
                 (*payload.values(), group_id, hashlib.sha256(invite_token.encode()).hexdigest(), uid, member["role"] == "owner"))
             row = await cur.fetchone()
