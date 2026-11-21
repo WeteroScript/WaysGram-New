@@ -2314,3 +2314,43 @@ def test_channel_giveaway_eligible_members_only_settles_once(env):
                 assert await cur.fetchall() == [(101, -7), (102, 7)]
 
     run(scenario())
+
+
+def test_topic_attachment_and_pin_are_scoped_and_permission_checked(env):
+    import sqlite3
+    import uuid
+
+    storage, app = env
+    media = uuid.uuid4().hex
+    files = storage.parent / 'waysgram_media'
+    files.mkdir(exist_ok=True)
+    (files / media).write_bytes(b'photo')
+    with sqlite3.connect(storage.with_name('waysgram_messenger.sqlite3')) as db:
+        db.execute("""INSERT INTO media_assets(id,owner_telegram_id,storage_name,mime_type,size_bytes,created_at)
+                       VALUES(?,101,?,'image/png',5,1)""", (media, media))
+
+    async def scenario():
+        async with await client_for(app) as client:
+            owner, member, outsider = headers(101), headers(102), headers(ADMIN)
+            group = await client.post('/api/groups', headers=owner, json={'title': 'Media topics', 'member_ids': [102]})
+            group_url = f"/api/groups/{group.json()['id']}"
+            topics = group_url + '/topics'
+            one, two = [(await client.post(topics, headers=owner, json={'title': name})).json()['id'] for name in ('One', 'Two')]
+            first, second = f'{topics}/{one}', f'{topics}/{two}'
+            assert (await client.post(first + '/messages', headers=member, json={'media_id': media})).status_code in (403, 404)
+            msg = await client.post(first + '/messages', headers=owner, json={'media_id': media})
+            assert msg.status_code == 201
+            mid = msg.json()['id']
+            assert (await client.put(first + '/pin', headers=member, json={'message_id': mid})).status_code == 403
+            assert (await client.put(second + '/pin', headers=owner, json={'message_id': mid})).status_code == 404
+            assert (await client.put(first + '/pin', headers=owner, json={'message_id': mid})).status_code == 200
+            history = (await client.get(first + '/messages', headers=member)).json()
+            assert history['topic']['pin'] == {'id': mid, 'body': 'Изображение', 'has_media': True}
+            assert history['messages'][0]['media_type'] == 'image/png'
+            url = f'/api/media/{media}'
+            assert (await client.get(url, headers=member)).content == b'photo'
+            assert (await client.get(url, headers=outsider)).status_code == 404
+            assert (await client.delete(first, headers=owner)).status_code == 200
+            assert (await client.get(url, headers=member)).status_code == 404
+
+    run(scenario())

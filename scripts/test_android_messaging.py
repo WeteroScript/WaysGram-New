@@ -130,6 +130,10 @@ class NativeMessagingSourceChecks(unittest.TestCase):
         self.assertIn('data.optBoolean("can_manage")', topics)
         self.assertIn('new JSONObject().put("closed", !closed)', topics)
         self.assertIn('path + "/messages?limit=25&before_id="', topics)
+        self.assertIn('PICK_WAYSGRAM_TOPIC_MEDIA', self.source('ui/ChatActivity.java'))
+        self.assertIn('new JSONObject().put("media_id", media)', topics)
+        self.assertIn('new JSONObject().put("message_id", message)', topics)
+        self.assertIn('dialog.setMessage(history(data))', topics)
 
     def test_channel_inbox_uses_distinct_owner_and_reader_flows_and_confirms_fee(self):
         chat = self.source('ui/ChatActivity.java')
