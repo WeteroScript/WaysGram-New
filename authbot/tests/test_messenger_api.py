@@ -9306,7 +9306,9 @@ def test_rotate_virtual_number_keeps_account_and_retires_old_login(api_env):
             route = '/api/me/rotate-number'
             assert (await client.post(route, headers=auth, json={'code': '111111'})).status_code == 401
             await code_for(old, '222222')
-            rotated = await client.post(route, headers=auth, json={'code': '222222'})
+            assert (await client.get(route, headers=auth)).json() == {'phone': old, 'password_required': False}
+            assert (await client.post(route, headers=auth, json={'phone': '+12000000000', 'code': '222222'})).status_code == 409
+            rotated = await client.post(route, headers=auth, json={'phone': old, 'code': '222222'})
             assert rotated.status_code == 200
             user = rotated.json()['user']
             assert user['id'] == 81001 and user['username'] == 'alpha'

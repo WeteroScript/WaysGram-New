@@ -23,6 +23,16 @@ class NativeMessagingSourceChecks(unittest.TestCase):
     def source(self, path):
         return self.archive.read(BASE + path).decode('utf-8')
 
+    def test_change_number_uses_authenticated_waysgram_rotation(self):
+        intro = self.source('ui/ActionIntroActivity.java')
+        self.assertIn('ROTATE_NUMBER_PATH = "/api/me/rotate-number"', intro)
+        self.assertIn('WaysGramApi.request("GET", ROTATE_NUMBER_PATH, null, token', intro)
+        self.assertIn('WaysGramApi.request("POST", ROTATE_NUMBER_PATH, body, token', intro)
+        self.assertIn('result.optBoolean("password_required")', intro)
+        self.assertIn('new JSONObject().put("phone", phone).put("code", code)', intro)
+        self.assertIn('getUserConfig().saveConfig(true)', intro)
+        self.assertIn('NotificationCenter.mainUserInfoChanged', intro)
+
     def test_cloud_password_uses_waysgram_challenge_and_authenticated_settings(self):
         transport = self.source('tgnet/WaysGramTransport.java')
         login = self.source('ui/LoginActivity.java')

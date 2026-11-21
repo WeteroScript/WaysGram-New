@@ -4722,6 +4722,21 @@ def build_messenger_router(
         row = await cur.fetchone()
         return tuple(row) if row else None
 
+    async def rotation_number(db: Any, uid: int) -> str | None:
+        cur = await db.execute("""SELECT n.number FROM numbers n JOIN users u ON u.telegram_id=n.telegram_id
+            WHERE n.telegram_id=? AND n.owner_telegram_id=n.telegram_id AND n.provider_ref='internal' AND u.verified=1""", (uid,))
+        row = await cur.fetchone()
+        return str(row[0]) if row else None
+
+    @router.get("/api/me/rotate-number")
+    async def virtual_number_rotation_state(authorization: str | None = Header(default=None)):
+        uid = int((await current_user(authorization))["telegram_id"])
+        async with aiosqlite.connect(db_path()) as db:
+            phone = await rotation_number(db, uid)
+            if phone is None:
+                raise HTTPException(403, "NUMBER_ROTATION_UNAVAILABLE")
+            return {"phone": phone, "password_required": await cloud_password_row(db, uid) is not None}
+
     @router.post("/api/me/rotate-number")
     async def rotate_virtual_number(payload: dict[str, Any], authorization: str | None = Header(default=None)):
         uid = int((await current_user(authorization))["telegram_id"])
@@ -4729,13 +4744,12 @@ def build_messenger_router(
         if not isinstance(code, str) or not re.fullmatch(r"[0-9]{6}", code):
             raise HTTPException(400, "ROTATION_CODE_INVALID")
         async with aiosqlite.connect(db_path()) as db:
-            cur = await db.execute("""SELECT n.number FROM numbers n JOIN users u ON u.telegram_id=n.telegram_id
-                WHERE n.telegram_id=? AND n.owner_telegram_id=n.telegram_id AND n.provider_ref='internal' AND u.verified=1""", (uid,))
-            row = await cur.fetchone()
+            old = await rotation_number(db, uid)
             password = await cloud_password_row(db, uid)
-        if row is None:
+        if old is None:
             raise HTTPException(403, "NUMBER_ROTATION_UNAVAILABLE")
-        old = row[0]
+        if "phone" in payload and payload["phone"] != old:
+            raise HTTPException(409, "NUMBER_ROTATION_CHANGED")
         if not await auth_store.verify_code(old, code):
             raise HTTPException(401, "ROTATION_CODE_INVALID")
         current_password = payload.get("password")
