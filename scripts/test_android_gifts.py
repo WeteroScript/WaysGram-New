@@ -262,6 +262,18 @@ class AndroidGiftSourceChecks(unittest.TestCase):
         controller = self.source("messenger/waysgram/WaysGramProfileGiftsController.java")
         self.assertIn('savedGift.pinned_to_top = isCollectible && optBooleanLike(item, "profile_pinned")', controller)
 
+    def test_waysgram_pins_render_on_native_profile_cover_before_opening_gifts(self):
+        profile = self.source("ui/ProfileActivity.java")
+        media = self.source("ui/Components/SharedMediaLayout.java")
+        controller = self.source("messenger/waysgram/WaysGramProfileGiftsController.java")
+        cover = self.source("ui/Stars/ProfileGiftsView.java")
+        self.assertIn("sharedMediaLayout.loadWaysGramProfileCover()", profile)
+        self.assertIn("ensureWaysGramGifts();\n        waysGramGiftsController.refresh();", media)
+        self.assertIn("cover.setWaysGramGifts(nativeGifts)", controller)
+        self.assertIn("gift.pinned_to_top && !gift.unsaved", cover)
+        self.assertIn("maxCount = waysGram ? 6", cover)
+        self.assertIn("giftIds.add(((TLRPC.TL_emojiStatusCollectible) emojiStatus).collectible_id)", cover)
+
     def test_gift_batch_only_selects_eligible_regular_gifts_and_uses_internal_api(self):
         page = self.source("ui/Gifts/ProfileGiftsContainer.java")
         for fragment in ("GiftBatchMode.UPGRADE", "GiftBatchMode.SELL", "gift.gift instanceof TL_stars.TL_starGift",

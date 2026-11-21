@@ -4991,8 +4991,8 @@ def build_messenger_router(
                 raise HTTPException(status_code=409, detail="Можно закрепить только коллекционный подарок")
             if pinned and not gift[3]:
                 cur = await db.execute("SELECT COUNT(*) FROM user_gifts WHERE owner_telegram_id=? AND profile_pinned=1", (uid,))
-                if int((await cur.fetchone())[0]) >= 3:
-                    raise HTTPException(status_code=409, detail="Можно закрепить до трёх подарков. Сначала открепите один из них.")
+                if int((await cur.fetchone())[0]) >= 6:
+                    raise HTTPException(status_code=409, detail="Можно закрепить до шести подарков. Сначала открепите один из них.")
             await db.execute("UPDATE user_gifts SET profile_pinned=? WHERE id=?", (int(pinned), gift[0]))
             await db.commit()
         return {"serial_number": serial, "pinned": pinned}

@@ -2647,7 +2647,7 @@ def test_profile_pins_require_owned_collectibles_and_survive_paging(env) -> None
     with db_split.sqlite_connect(path) as db:
         db.executemany(
             "INSERT INTO user_gifts(serial_number,gift_name,owner_telegram_id,acquired_at,upgrade_level) VALUES(?,?,101,1,?)",
-            [(f"WG-{i:012X}", "Gift", int(i != 5)) for i in range(1, 6)],
+            [(f"WG-{i:012X}", "Gift", int(i != 8)) for i in range(1, 9)],
         )
         db.commit()
 
@@ -2657,18 +2657,18 @@ def test_profile_pins_require_owned_collectibles_and_survive_paging(env) -> None
                 return await client.put(f"/api/me/gifts/WG-{i:012X}/pin", headers=headers(uid), json={"pinned": value})
 
             assert (await pin(1, uid=102)).status_code == 404
-            assert (await pin(5)).status_code == 409
-            for i in (1, 2, 3, 3):
+            assert (await pin(8)).status_code == 409
+            for i in (1, 2, 3, 4, 5, 6, 6):
                 assert (await pin(i)).status_code == 200
-            assert (await pin(4)).status_code == 409
-            public = await client.get("/api/users/101/gifts?limit=3", headers=headers(102))
+            assert (await pin(7)).status_code == 409
+            public = await client.get("/api/users/101/gifts?limit=6", headers=headers(102))
             rows = public.json()["gifts"]
             assert all(gift["profile_pinned"] for gift in rows)
-            assert {gift["serial_number"] for gift in rows} == {f"WG-{i:012X}" for i in (1, 2, 3)}
+            assert {gift["serial_number"] for gift in rows} == {f"WG-{i:012X}" for i in range(1, 7)}
             assert (await pin(1, False)).status_code == 200
-            assert (await pin(4)).status_code == 200
+            assert (await pin(7)).status_code == 200
             with db_split.sqlite_connect(path) as db:
-                db.execute("UPDATE user_gifts SET owner_telegram_id=102 WHERE serial_number='WG-000000000004'")
+                db.execute("UPDATE user_gifts SET owner_telegram_id=102 WHERE serial_number='WG-000000000007'")
                 db.commit()
             recipient = await client.get("/api/me/gifts", headers=headers(102))
             assert recipient.json()["gifts"][0]["profile_pinned"] == 0
