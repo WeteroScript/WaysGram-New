@@ -49,6 +49,9 @@ class NativeMessagingSourceChecks(unittest.TestCase):
         self.assertIn("rights.manage_call ? 32 : 0", controller)
         self.assertIn("Настраивать медленный режим", ui)
         self.assertIn("showWaysGramMuteDuration(userId, rights)", self.source("ui/ProfileActivity.java"))
+        profile = self.source("ui/ProfileActivity.java")
+        self.assertIn("int[] bits = {1, 2, 4, 8, 16, 32}", profile)
+        self.assertIn("otherItem.addSubItem(WAYSGRAM_SLOW_MODE", profile)
 
     def test_empty_chat_dialogs_do_not_shift_peer_messages(self):
         chats = self.source('tgnet/WaysGramChats.java')
