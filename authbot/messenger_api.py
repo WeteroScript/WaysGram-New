@@ -1825,9 +1825,15 @@ async def init_messenger_storage(database_path: Path) -> None:
         cur = await db.execute(f"PRAGMA {db_split.SCHEMA}.table_info(chat_groups)")
         chat_group_columns = {str(row[1]) for row in await cur.fetchall()}
         cur = await db.execute(f"PRAGMA {db_split.SCHEMA}.table_info(group_messages)")
-        if "topic_id" not in {row[1] for row in await cur.fetchall()}:
+        group_message_columns = {row[1] for row in await cur.fetchall()}
+        if "send_as_id" not in group_message_columns:
+            await db.execute(f"ALTER TABLE {db_split.SCHEMA}.group_messages ADD COLUMN send_as_id INTEGER")
+        if "topic_id" not in group_message_columns:
             await db.execute(f"ALTER TABLE {db_split.SCHEMA}.group_messages ADD COLUMN topic_id INTEGER")
         await db.execute(f"CREATE INDEX IF NOT EXISTS {db_split.SCHEMA}.idx_group_topic_messages ON group_messages(group_id,topic_id,id DESC)")
+        cur = await db.execute(f"PRAGMA {db_split.SCHEMA}.table_info(group_members)")
+        if "anonymous_allowed" not in {row[1] for row in await cur.fetchall()}:
+            await db.execute(f"ALTER TABLE {db_split.SCHEMA}.group_members ADD COLUMN anonymous_allowed INTEGER NOT NULL DEFAULT 0")
         cur = await db.execute("PRAGMA main.table_info(group_topics)")
         if "pinned_message_id" not in {row[1] for row in await cur.fetchall()}:
             await db.execute("ALTER TABLE main.group_topics ADD COLUMN pinned_message_id INTEGER")
@@ -4798,7 +4804,7 @@ def build_messenger_router(
     ) -> dict[str, Any]:
         db.row_factory = aiosqlite.Row
         cur = await db.execute(
-            """SELECT gm.role,gm.admin_rights,g.title,g.username,g.owner_telegram_id
+            """SELECT gm.role,gm.admin_rights,gm.anonymous_allowed,g.title,g.username,g.owner_telegram_id
                FROM group_members gm JOIN chat_groups g ON g.id=gm.group_id
                WHERE gm.group_id=? AND gm.telegram_id=?""",
             (group_id, telegram_id),
@@ -13102,7 +13108,7 @@ def build_messenger_router(
                         (SELECT 1 FROM message_hidden_for h WHERE h.message_id=m.id AND h.telegram_id=?)""",
                         (mid, uid, source_peer, source_peer, uid, uid))
                 elif source_scope == "group":
-                    cur = await db.execute("SELECT *,sender_telegram_id AS author_id FROM group_messages WHERE id=? AND group_id=? AND topic_id IS NULL", (mid, source_peer))
+                    cur = await db.execute("SELECT *,sender_telegram_id AS author_id FROM group_messages WHERE id=? AND group_id=? AND topic_id IS NULL AND send_as_id IS NULL", (mid, source_peer))
                 else:
                     cur = await db.execute("SELECT *,author_telegram_id AS author_id FROM channel_messages WHERE id=? AND channel_id=?", (mid, source_peer))
                 row = await cur.fetchone()
@@ -14166,7 +14172,7 @@ def build_messenger_router(
                 params = (uid, uid, peer_id, peer_id, uid, uid)
             elif scope == "group":
                 base = """SELECT p.message_id,p.pinned_by,p.created_at AS pinned_at,
-                              m.body,m.created_at,m.sender_telegram_id AS sender_id
+                              m.body,m.created_at,CASE WHEN m.send_as_id IS NULL THEN m.sender_telegram_id ELSE 0 END AS sender_id,m.send_as_id
                        FROM pinned_messages p JOIN group_messages m ON m.id=p.message_id
                        WHERE p.scope='group' AND p.chat_id=? AND m.group_id=p.chat_id"""
                 params = (peer_id,)
@@ -14793,7 +14799,7 @@ def build_messenger_router(
             await db.execute("BEGIN IMMEDIATE")
             await require_group_member(db, group_id, uid)
             cur = await db.execute(
-                "SELECT sender_telegram_id,media_id FROM group_messages WHERE id=? AND group_id=?", (message_id, group_id)
+                "SELECT sender_telegram_id,media_id,send_as_id FROM group_messages WHERE id=? AND group_id=?", (message_id, group_id)
             )
             row = await cur.fetchone()
             if row is None:
@@ -14813,7 +14819,7 @@ def build_messenger_router(
                 if (await cur.fetchone())[0]:
                     raise HTTPException(status_code=400, detail="Форматирование вложений пока не поддерживается")
             await db.execute("UPDATE group_messages SET body=?,edited_at=?,entities_json=? WHERE id=?", (body, now, _message_entities_json(entities), message_id))
-            await record_event(db, "group", message_id, "edit", uid, chat_id=group_id)
+            await record_event(db, "group", message_id, "edit", uid if row[2] is None else 0, chat_id=group_id)
             await db.commit()
         result = {"id": message_id, "body": body, "edited_at": now}
         if entities:
@@ -14832,7 +14838,7 @@ def build_messenger_router(
             await db.execute("BEGIN IMMEDIATE")
             member = await require_group_member(db, group_id, uid)
             cur = await db.execute(
-                "SELECT sender_telegram_id FROM group_messages WHERE id=? AND group_id=?", (message_id, group_id)
+                "SELECT sender_telegram_id,send_as_id FROM group_messages WHERE id=? AND group_id=?", (message_id, group_id)
             )
             row = await cur.fetchone()
             if row is None:
@@ -14843,7 +14849,7 @@ def build_messenger_router(
                 raise HTTPException(status_code=403, detail="Удалять чужие сообщения могут только администраторы")
             await db.execute("DELETE FROM channel_post_comments WHERE group_message_id=? AND group_id=?", (message_id, group_id))
             await db.execute("DELETE FROM group_messages WHERE id=?", (message_id,))
-            await record_event(db, "group", message_id, "delete", uid, chat_id=group_id)
+            await record_event(db, "group", message_id, "delete", uid if row[1] is None else 0, chat_id=group_id)
             await db.commit()
         return {"id": message_id, "status": "deleted"}
 
@@ -15798,6 +15804,54 @@ def build_messenger_router(
         return {"id": row[0], "title": row[1], "closed": bool(row[2]), "created_at": row[3],
                 "pin": {"id": row[4], "body": row[5], "has_media": row[6] is not None} if row[4] is not None else None}
 
+    @router.get("/api/groups/{group_id}/send-identities")
+    async def group_send_identities(group_id: int, authorization: str | None = Header(default=None)):
+        uid = int((await current_user(authorization))["telegram_id"])
+        async with aiosqlite.connect(db_path()) as db:
+            await db.execute("BEGIN")
+            member = await require_group_member(db, group_id, uid)
+            cur = await db.execute("""SELECT id,title FROM channels c WHERE c.owner_telegram_id=? AND c.is_public=1
+                AND NOT EXISTS(SELECT 1 FROM channel_bans b WHERE b.channel_id=c.id AND b.telegram_id=?
+                    AND (b.until_date=0 OR b.until_date>?)) ORDER BY id DESC LIMIT 100""", (uid, uid, int(time.time())))
+            channels = [dict(row) for row in await cur.fetchall()]
+            admins = []
+            if member["role"] == "owner":
+                cur = await db.execute("""SELECT a.telegram_id,a.display_name,a.username,m.anonymous_allowed FROM group_members m
+                    JOIN accounts a ON a.telegram_id=m.telegram_id WHERE m.group_id=? AND m.role='admin' ORDER BY a.telegram_id""", (group_id,))
+                admins = [{**dict(row), "anonymous_allowed": bool(row["anonymous_allowed"])} for row in await cur.fetchall()]
+        return {"anonymous_allowed": member["role"] == "owner" or (member["role"] == "admin" and bool(member["anonymous_allowed"])),
+                "can_manage": member["role"] == "owner", "title": member["title"], "channels": channels, "admins": admins}
+
+    @router.put("/api/groups/{group_id}/admins/{target_id}/anonymous")
+    async def set_group_admin_anonymity(group_id: int, target_id: int, payload: dict[str, Any], authorization: str | None = Header(default=None)):
+        uid = int((await current_user(authorization))["telegram_id"])
+        enabled = payload.get("enabled")
+        if type(enabled) is not bool:
+            raise HTTPException(400, "INVALID_ANONYMOUS_SETTING")
+        async with aiosqlite.connect(db_path()) as db:
+            await db.execute("BEGIN IMMEDIATE")
+            if (await require_group_member(db, group_id, uid))["role"] != "owner":
+                raise HTTPException(403, "CHAT_OWNER_REQUIRED")
+            cur = await db.execute("UPDATE group_members SET anonymous_allowed=? WHERE group_id=? AND telegram_id=? AND role='admin'",
+                                   (int(enabled), group_id, target_id))
+            if not cur.rowcount:
+                raise HTTPException(404, "CHAT_ADMIN_REQUIRED")
+            await db.commit()
+        return {"enabled": enabled}
+
+    def group_identity_rows(rows: Any, viewer: int) -> list[dict[str, Any]]:
+        items = []
+        for row in rows:
+            item = dict(row)
+            actor = item.pop("_actor_id")
+            if item["send_as_id"] is not None:
+                item["is_mine"] = actor == viewer
+            else:
+                item.pop("send_as_id")
+                item.pop("identity_title")
+            items.append(item)
+        return items
+
     @router.get("/api/groups/{group_id}/topics")
     @router.post("/api/groups/{group_id}/topics")
     async def group_topics(group_id: int, request: Request, payload: dict[str, Any] | None = None,
@@ -16684,7 +16738,7 @@ def build_messenger_router(
             if owner["role"] != "owner":
                 raise HTTPException(status_code=403, detail="Изменять права может только владелец")
             cur = await db.execute(
-                "UPDATE group_members SET role='member' WHERE group_id=? AND telegram_id=? AND role='admin'",
+                "UPDATE group_members SET role='member',anonymous_allowed=0 WHERE group_id=? AND telegram_id=? AND role='admin'",
                 (group_id, telegram_id),
             )
             await db.commit()
@@ -16717,9 +16771,13 @@ def build_messenger_router(
                 db.row_factory = aiosqlite.Row
                 if after_id:
                     cur = await db.execute(
-                        """SELECT id,group_id,sender_telegram_id AS sender_id,body,entities_json,group_messages.silent AS silent,group_messages.quote_json AS quote_json,media_id,media_album_id,media_album_index,media_album_count,edited_at,reply_to_id,created_at,
+                        """SELECT id,group_id,CASE WHEN send_as_id IS NULL THEN sender_telegram_id ELSE 0 END AS sender_id,
+                                  sender_telegram_id AS _actor_id,send_as_id,
+                                  CASE WHEN send_as_id=0 THEN (SELECT title FROM chat_groups WHERE id=group_messages.group_id)
+                                       WHEN send_as_id>0 THEN COALESCE((SELECT title FROM channels WHERE id=send_as_id AND is_public=1),'Канал') END AS identity_title,
+                                  body,entities_json,group_messages.silent AS silent,group_messages.quote_json AS quote_json,media_id,media_album_id,media_album_index,media_album_count,edited_at,reply_to_id,created_at,
                                   (SELECT body FROM group_messages AS replied WHERE replied.id=group_messages.reply_to_id) AS reply_to_body,
-                                  (SELECT sender_telegram_id FROM group_messages AS replied WHERE replied.id=group_messages.reply_to_id) AS reply_to_sender_id,
+                                  (SELECT CASE WHEN replied.send_as_id IS NULL THEN replied.sender_telegram_id ELSE 0 END FROM group_messages AS replied WHERE replied.id=group_messages.reply_to_id) AS reply_to_sender_id,
                                   (SELECT group_concat(reaction || ':' || reaction_count, ',')
                                      FROM (SELECT reaction,COUNT(*) AS reaction_count FROM message_reactions
                                            WHERE scope='group' AND chat_id=group_messages.group_id
@@ -16735,9 +16793,13 @@ def build_messenger_router(
                     id_filter = "" if selected_ids is None else " AND id IN (" + ",".join("?" for _ in selected_ids) + ")"
                     selected_limit = limit if selected_ids is None else len(selected_ids)
                     cur = await db.execute(
-                        """SELECT id,group_id,sender_telegram_id AS sender_id,body,entities_json,group_messages.silent AS silent,group_messages.quote_json AS quote_json,media_id,media_album_id,media_album_index,media_album_count,edited_at,reply_to_id,created_at,
+                        """SELECT id,group_id,CASE WHEN send_as_id IS NULL THEN sender_telegram_id ELSE 0 END AS sender_id,
+                                  sender_telegram_id AS _actor_id,send_as_id,
+                                  CASE WHEN send_as_id=0 THEN (SELECT title FROM chat_groups WHERE id=group_messages.group_id)
+                                       WHEN send_as_id>0 THEN COALESCE((SELECT title FROM channels WHERE id=send_as_id AND is_public=1),'Канал') END AS identity_title,
+                                  body,entities_json,group_messages.silent AS silent,group_messages.quote_json AS quote_json,media_id,media_album_id,media_album_index,media_album_count,edited_at,reply_to_id,created_at,
                                   (SELECT body FROM group_messages AS replied WHERE replied.id=group_messages.reply_to_id) AS reply_to_body,
-                                  (SELECT sender_telegram_id FROM group_messages AS replied WHERE replied.id=group_messages.reply_to_id) AS reply_to_sender_id,
+                                  (SELECT CASE WHEN replied.send_as_id IS NULL THEN replied.sender_telegram_id ELSE 0 END FROM group_messages AS replied WHERE replied.id=group_messages.reply_to_id) AS reply_to_sender_id,
                                   (SELECT group_concat(reaction || ':' || reaction_count, ',')
                                      FROM (SELECT reaction,COUNT(*) AS reaction_count FROM message_reactions
                                            WHERE scope='group' AND chat_id=group_messages.group_id
@@ -16753,7 +16815,7 @@ def build_messenger_router(
             if rows or time.monotonic() >= deadline:
                 break
             await asyncio.sleep(min(1.0, max(0.05, deadline - time.monotonic())))
-        items = [dict(row) for row in rows]
+        items = group_identity_rows(rows, uid)
         if not after_id:
             items.reverse()
         await attach_my_reactions(items, "group", group_id, uid)
@@ -16773,9 +16835,13 @@ def build_messenger_router(
             await require_group_member(db, group_id, int(user["telegram_id"]))
             db.row_factory = aiosqlite.Row
             cur = await db.execute(
-                """SELECT id,group_id,sender_telegram_id AS sender_id,body,entities_json,group_messages.silent AS silent,group_messages.quote_json AS quote_json,media_id,media_album_id,media_album_index,media_album_count,edited_at,reply_to_id,created_at,
+                """SELECT id,group_id,CASE WHEN send_as_id IS NULL THEN sender_telegram_id ELSE 0 END AS sender_id,
+                                  sender_telegram_id AS _actor_id,send_as_id,
+                                  CASE WHEN send_as_id=0 THEN (SELECT title FROM chat_groups WHERE id=group_messages.group_id)
+                                       WHEN send_as_id>0 THEN COALESCE((SELECT title FROM channels WHERE id=send_as_id AND is_public=1),'Канал') END AS identity_title,
+                                  body,entities_json,group_messages.silent AS silent,group_messages.quote_json AS quote_json,media_id,media_album_id,media_album_index,media_album_count,edited_at,reply_to_id,created_at,
                           (SELECT body FROM group_messages AS replied WHERE replied.id=group_messages.reply_to_id) AS reply_to_body,
-                                  (SELECT sender_telegram_id FROM group_messages AS replied WHERE replied.id=group_messages.reply_to_id) AS reply_to_sender_id,
+                                  (SELECT CASE WHEN replied.send_as_id IS NULL THEN replied.sender_telegram_id ELSE 0 END FROM group_messages AS replied WHERE replied.id=group_messages.reply_to_id) AS reply_to_sender_id,
                                   (SELECT group_concat(reaction || ':' || reaction_count, ',')
                                      FROM (SELECT reaction,COUNT(*) AS reaction_count FROM message_reactions
                                            WHERE scope='group' AND chat_id=group_messages.group_id
@@ -16790,7 +16856,7 @@ def build_messenger_router(
                 (group_id, f"%{term}%"),
             )
             rows = await cur.fetchall()
-        items = [dict(row) for row in rows]
+        items = group_identity_rows(rows, int(user["telegram_id"]))
         items.reverse()
         await attach_my_reactions(items, "group", group_id, int(user["telegram_id"]))
         return {"query": term, "messages": items, "count": len(items), "has_more": len(items) == 100}
@@ -16889,6 +16955,10 @@ def build_messenger_router(
         else:
             body = _message_body(body_value) if body_value.strip() or not media_id else ""
             entities = []
+        identity = payload.get("send_as_id")
+        if "send_as_id" in payload and (type(identity) is not int or not 0 <= identity < 2**63
+                or discussion is not None or topic_id is not None or media_id or card or contact_payload or location_payload):
+            raise HTTPException(400, "INVALID_GROUP_SEND_IDENTITY")
         now = int(time.time())
         scope = f"/api/groups/{group_id}/messages"
         if discussion:
@@ -16907,6 +16977,18 @@ def build_messenger_router(
                 await db.rollback()
                 return previous
             await require_group_anti_spam(db, group_id, uid, membership, now, body=body if not media_id else "")
+            identity_title = None
+            if identity == 0:
+                if membership["role"] != "owner" and not (membership["role"] == "admin" and membership["anonymous_allowed"]):
+                    raise HTTPException(403, "GROUP_IDENTITY_FORBIDDEN")
+                identity_title = membership["title"]
+            elif identity is not None:
+                cur = await db.execute("SELECT title FROM channels WHERE id=? AND owner_telegram_id=? AND is_public=1", (identity, uid))
+                channel = await cur.fetchone()
+                if channel is None:
+                    raise HTTPException(403, "GROUP_IDENTITY_FORBIDDEN")
+                await require_channel_not_banned(db, identity, uid)
+                identity_title = channel[0]
             if topic_id is not None and (await get_group_topic_row(db, group_id, topic_id))["closed"]:
                 raise HTTPException(403, "GROUP_TOPIC_CLOSED")
             cur = await db.execute(
@@ -16959,9 +17041,9 @@ def build_messenger_router(
                 raise HTTPException(status_code=429, detail="Превышен лимит отправки сообщений")
             cur = await db.execute(
                 """INSERT INTO group_messages
-                   (group_id,sender_telegram_id,body,media_id,reply_to_id,created_at,topic_id)
-                   VALUES(?,?,?,?,?,?,?)""",
-                (group_id, uid, body, media_id, reply_to_id, now, topic_id),
+                   (group_id,sender_telegram_id,body,media_id,reply_to_id,created_at,topic_id,send_as_id)
+                   VALUES(?,?,?,?,?,?,?,?)""",
+                (group_id, uid, body, media_id, reply_to_id, now, topic_id, identity),
             )
             message_id = int(cur.lastrowid)
             if discussion:
@@ -16992,12 +17074,14 @@ def build_messenger_router(
                 await db.execute("INSERT INTO message_cards(scope,message_id,data_json) VALUES(?,?,?)",
                                  ("group", message_id, json.dumps(card, ensure_ascii=True)))
             if topic_id is None:
-                await record_event(db, "group", message_id, "new_message", uid, chat_id=group_id)
+                await record_event(db, "group", message_id, "new_message", uid if identity is None else 0, chat_id=group_id)
             result = {
-                "id": message_id, "group_id": group_id, "sender_id": uid,
+                "id": message_id, "group_id": group_id, "sender_id": uid if identity is None else 0,
                 "body": body, "media_id": media_id, "reply_to_id": reply_to_id,
                 **media_fields, "created_at": now,
             }
+            if identity is not None:
+                result.update(send_as_id=identity, identity_title=identity_title, is_mine=True)
             if location_payload:
                 result["location"] = location_payload
             if contact_payload:
@@ -17031,7 +17115,7 @@ def build_messenger_router(
             group_recipients = [int(row[0]) for row in await cur.fetchall()]
         await deliver_push_notifications(
             group_recipients,
-            str(user.get("display_name") or user.get("username") or "Новое сообщение"),
+            identity_title or str(user.get("display_name") or user.get("username") or "Новое сообщение"),
             body,
             {"scope": "group", "chat_id": str(group_id), "message_id": str(message_id), "silent": "1" if silent else "0"},
         )

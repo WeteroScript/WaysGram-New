@@ -85,6 +85,17 @@ class NativeMessagingSourceChecks(unittest.TestCase):
         self.assertIn('if (offer.optBoolean("unlocked"))', payment)
         self.assertIn('viewer.openPhoto', payment)
 
+    def test_group_identity_maps_group_and_channel_peers_without_personal_sender(self):
+        chat = self.source('ui/ChatActivity.java')
+        helper = self.source('ui/WaysGramGroupIdentity.java')
+        mapper = self.source('tgnet/WaysGramChats.java')
+        self.assertIn('WaysGramGroupIdentity.open(this, currentAccount, currentChat.id)', chat)
+        self.assertIn('put("send_as_id", identity)', helper)
+        self.assertIn('send(chat, account, group, token, identity, body, key)', helper)
+        self.assertIn('message.from_id = peer;', mapper)
+        self.assertIn('from.channel_id = channelTg(identity)', mapper)
+        self.assertIn('message.noforwards = identity >= 0', mapper)
+
     def test_group_stories_use_membership_scoped_routes_and_permission_controls(self):
         chat = self.source('ui/ChatActivity.java')
         stories = self.source('ui/WaysGramGroupStories.java')
@@ -532,7 +543,7 @@ class NativeMessagingSourceChecks(unittest.TestCase):
                        '"/messages?message_ids="', '"&message_ids="',
                        'java.util.HashSet<Integer> requested', 'batch.put(id, row)',
                        'if (row == null) throw new WaysGramApi.ApiException(409, "PINS_CHANGED_RETRY")',
-                       'WaysGramChats.groupMessage(row, t.id, selfId)',
+                       'WaysGramChats.groupMessage(row, t.id, selfId, account)',
                        'WaysGramChats.channelMessage(row, WaysGramChats.channelTg(t.id), selfId)',
                        'WaysGramMapper.toMessage(row, selfId, account)',
                        'WaysGramMedia.attach(account, message, row)',

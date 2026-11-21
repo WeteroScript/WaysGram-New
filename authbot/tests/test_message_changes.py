@@ -2428,3 +2428,50 @@ def test_group_story_membership_publish_and_pin_permissions(env):
             assert (await client.post(stories, headers=member, json={**body, 'random_id': 213})).status_code == 403
 
     run(scenario())
+
+
+def test_group_alternate_identities_hide_actor_and_enforce_ownership(env):
+    _, app = env
+
+    async def scenario():
+        async with await client_for(app) as client:
+            owner, admin = headers(101), headers(102)
+            group = await client.post('/api/groups', headers=owner, json={'title': 'Identity group', 'member_ids': [102]})
+            gid = group.json()['id']
+            root = f'/api/groups/{gid}'
+            messages = root + '/messages'
+            admin_setting = root + '/admins/102/anonymous'
+            masked = {'body': 'Masked author', 'send_as_id': 0}
+            assert (await client.post(root + '/admins', headers=owner, json={'telegram_id': 102})).status_code == 201
+            assert (await client.post(messages, headers=admin, json=masked)).status_code == 403
+            assert (await client.put(admin_setting, headers=admin, json={'enabled': True})).status_code == 403
+            assert (await client.put(admin_setting, headers=owner, json={'enabled': True})).status_code == 200
+            assert (await client.get(root + '/send-identities', headers=admin)).json()['anonymous_allowed'] is True
+            assert (await client.get(root + '/send-identities', headers=owner)).json()['admins'][0]['anonymous_allowed'] is True
+            cursor = (await client.get('/api/events', headers=owner)).json()['latest_id']
+            key = {**admin, 'Idempotency-Key': 'anonymous-group-0001'}
+            for _ in range(2):
+                sent = await client.post(messages, headers=key, json=masked)
+                assert sent.status_code == 201 and sent.json()['sender_id'] == 0 and sent.json()['is_mine'] is True
+            mid = sent.json()['id']
+            item = (await client.get(messages, headers=owner)).json()['messages'][0]
+            assert item['send_as_id'] == 0 and item['sender_id'] == 0 and item['is_mine'] is False and '_actor_id' not in item
+            assert (await client.get(messages + '/search?q=Masked', headers=owner)).json()['messages'][0] == item
+            assert (await client.post(messages, headers=owner, json={'body': 'Reply', 'reply_to_id': mid})).status_code == 201
+            assert (await client.get(messages, headers=owner)).json()['messages'][1]['reply_to_sender_id'] == 0
+            assert (await client.post('/api/forward', headers=owner, json={'source_scope': 'group', 'source_peer_id': gid,
+                'target_scope': 'dm', 'target_peer_id': 101, 'message_ids': [mid]})).status_code == 404
+            assert (await client.patch(messages + f'/{mid}', headers=admin, json={'body': 'Changed'})).status_code == 200
+            assert (await client.delete(messages + f'/{mid}', headers=admin)).status_code == 200
+            events = (await client.get(f'/api/events?after_id={cursor}', headers=owner)).json()['events']
+            assert [(e['kind'], e['actor_id']) for e in events if e['message_id'] == mid] == [('new_message', 0), ('edit', 0), ('delete', 0)]
+            ch = await client.post('/api/channels', headers=admin, json={'title': 'Public author', 'username': 'public_author', 'is_public': True})
+            cid = ch.json()['id']
+            via_channel = {'body': 'Public identity', 'send_as_id': cid}
+            assert (await client.post(messages, headers=owner, json=via_channel)).status_code == 403
+            assert (await client.post(messages, headers=admin, json=via_channel)).json()['identity_title'] == 'Public author'
+            assert (await client.delete(root + '/admins/102', headers=owner)).status_code == 200
+            assert (await client.post(root + '/admins', headers=owner, json={'telegram_id': 102})).status_code == 201
+            assert (await client.post(messages, headers=admin, json=masked)).status_code == 403
+
+    run(scenario())
