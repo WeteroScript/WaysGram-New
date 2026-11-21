@@ -1614,6 +1614,9 @@ async def init_messenger_storage(database_path: Path) -> None:
         cur = await db.execute("PRAGMA main.table_info(channel_bans)")
         if "until_date" not in {str(row[1]) for row in await cur.fetchall()}:
             await db.execute("ALTER TABLE main.channel_bans ADD COLUMN until_date INTEGER NOT NULL DEFAULT 0")
+        cur = await db.execute(f"PRAGMA {db_split.SCHEMA}.table_info(channel_admins)")
+        if "rights" not in {str(row[1]) for row in await cur.fetchall()}:
+            await db.execute(f"ALTER TABLE {db_split.SCHEMA}.channel_admins ADD COLUMN rights INTEGER NOT NULL DEFAULT 15")
         cur = await db.execute(f"PRAGMA {db_split.SCHEMA}.table_info(channels)")
         channel_columns = {str(row[1]) for row in await cur.fetchall()}
         if "is_public" not in channel_columns:
@@ -3558,6 +3561,7 @@ def build_messenger_router(
                     (peer_id, before_id, before_id, limit),
                 )
             else:
+                await require_channel_not_banned(db, peer_id, uid)
                 cur = await db.execute(
                     """SELECT ch.is_public,ch.owner_telegram_id,
                               EXISTS(SELECT 1 FROM channel_admins ca
@@ -3658,6 +3662,7 @@ def build_messenger_router(
                 where = "m.group_id=?"
                 params = (peer_id,)
             else:
+                await require_channel_not_banned(db, peer_id, uid)
                 cur = await db.execute(
                     """SELECT c.is_public,c.owner_telegram_id,
                          EXISTS(SELECT 1 FROM channel_admins a WHERE a.channel_id=c.id AND a.telegram_id=?),
@@ -4356,6 +4361,13 @@ def build_messenger_router(
         await channel_row(channel_id)
         if not await can_view_channel(channel_id, telegram_id):
             raise HTTPException(status_code=403, detail="Это приватный канал. Нужна ссылка-приглашение.")
+
+    # Wire bitmask shared with WaysGramChats: post, edit, delete, pin, invite, ban.
+    async def channel_has_right(db: Any, channel_id: int, uid: int, bit: int) -> bool:
+        cur = await db.execute("""SELECT 1 FROM channels c WHERE c.id=? AND (c.owner_telegram_id=? OR EXISTS(
+            SELECT 1 FROM channel_admins a WHERE a.channel_id=c.id AND a.telegram_id=? AND (a.rights & ?) != 0))""",
+            (channel_id, uid, uid, bit))
+        return await cur.fetchone() is not None
 
     async def can_manage_channel(channel_id: int, telegram_id: int) -> bool:
         async with aiosqlite.connect(db_path()) as db:
@@ -8111,6 +8123,7 @@ def build_messenger_router(
                           ch.title,ch.owner_telegram_id,ch.is_public,
                           owner.username AS owner_username,
                           EXISTS(SELECT 1 FROM channel_admins ca WHERE ca.channel_id=ch.id AND ca.telegram_id=?) AS is_admin,
+                          COALESCE((SELECT ca.rights FROM channel_admins ca WHERE ca.channel_id=ch.id AND ca.telegram_id=?),0) AS admin_rights,
                           EXISTS(SELECT 1 FROM channel_members cm WHERE cm.channel_id=ch.id AND cm.telegram_id=?) AS is_member,
                           COALESCE((SELECT rm.last_read_id FROM read_markers rm
                                     WHERE rm.telegram_id=? AND rm.scope='channel' AND rm.peer_id=ch.id),0) AS last_read_id,
@@ -8128,7 +8141,7 @@ def build_messenger_router(
                       OR EXISTS(SELECT 1 FROM channel_members cm
                                 WHERE cm.channel_id=ch.id AND cm.telegram_id=?)
                     ) ORDER BY ch.id DESC""",
-                (uid, uid, uid, uid, uid, uid, uid, uid, uid),
+                (uid, uid, uid, uid, uid, uid, uid, uid, uid, uid),
             )
             rows = await cur.fetchall()
         channels = []
@@ -8284,6 +8297,10 @@ def build_messenger_router(
         await require_channel_access(channel_id, int(user["telegram_id"]))
         channel = await channel_row(channel_id)
         channel["is_admin"] = await can_manage_channel(channel_id, int(user["telegram_id"]))
+        async with aiosqlite.connect(db_path()) as db:
+            cur = await db.execute("SELECT rights FROM channel_admins WHERE channel_id=? AND telegram_id=?", (channel_id, int(user["telegram_id"])))
+            rights = await cur.fetchone()
+            channel["admin_rights"] = rights[0] if rights else 0
         channel["labels"] = await entity_labels("channel", channel_id)
         return channel
 
@@ -8378,10 +8395,8 @@ def build_messenger_router(
         targets = list(dict.fromkeys(targets))
         async with aiosqlite.connect(db_path()) as db:
             await db.execute("BEGIN IMMEDIATE")
-            cur = await db.execute("SELECT owner_telegram_id FROM channels WHERE id=?", (channel_id,))
-            row = await cur.fetchone()
-            if row is None or row[0] != uid:
-                raise HTTPException(403, "Приглашать участников может только владелец канала")
+            if not await channel_has_right(db, channel_id, uid, 16):
+                raise HTTPException(403, "Нет права приглашать участников канала")
             for target in targets:
                 await require_channel_not_banned(db, channel_id, target)
                 cur = await db.execute("""SELECT 1 FROM accounts WHERE telegram_id=? AND is_banned=0
@@ -8418,7 +8433,7 @@ def build_messenger_router(
             args = (channel_id, q, q, q, admins)
             cur = await db.execute("SELECT COUNT(*) " + base, args)
             count = (await cur.fetchone())[0]
-            cur = await db.execute(f"""SELECT m.telegram_id,m.{date} AS date,{until_date} AS until_date,a.username,a.display_name,a.avatar_media_id,
+            cur = await db.execute(f"""SELECT m.telegram_id,m.{date} AS date,{until_date} AS until_date,a.username,a.display_name,a.avatar_media_id,COALESCE(ca.rights,0) AS admin_rights,
                 CASE WHEN c.owner_telegram_id=m.telegram_id THEN 'owner' WHEN ca.telegram_id IS NOT NULL THEN 'admin' ELSE 'member' END AS role
                 {base} ORDER BY m.{date} DESC,m.telegram_id LIMIT ? OFFSET ?""",
                 args + (max(1, min(200, limit)), max(0, offset)))
@@ -8442,8 +8457,12 @@ def build_messenger_router(
             channel = await cur.fetchone()
             if channel is None:
                 raise HTTPException(404, "Канал не найден")
-            if channel[0] != uid or target_id == uid:
-                raise HTTPException(403, "Блокировать участников может только владелец канала")
+            if target_id in (uid, channel[0]) or not await channel_has_right(db, channel_id, uid, 32):
+                raise HTTPException(403, "Нет права блокировать этого участника")
+            if uid != channel[0]:
+                cur = await db.execute("SELECT 1 FROM channel_admins WHERE channel_id=? AND telegram_id=?", (channel_id, target_id))
+                if await cur.fetchone():
+                    raise HTTPException(403, "Администратор не может блокировать другого администратора")
             if banned:
                 cur = await db.execute("SELECT 1 FROM accounts WHERE telegram_id=?", (target_id,))
                 if not await cur.fetchone():
@@ -8840,7 +8859,7 @@ def build_messenger_router(
             # and contact snapshot; demotion cannot race this write or replay.
             cur = await db.execute("""SELECT 1 FROM channels c WHERE c.id=? AND
                 (c.owner_telegram_id=? OR EXISTS(SELECT 1 FROM channel_admins a
-                WHERE a.channel_id=c.id AND a.telegram_id=?))""", (channel_id, uid, uid))
+                WHERE a.channel_id=c.id AND a.telegram_id=? AND (a.rights & 1) != 0))""", (channel_id, uid, uid))
             if await cur.fetchone() is None:
                 raise HTTPException(status_code=403, detail="Публиковать в канале может только владелец или администратор")
             previous = await idempotency_lookup(db, uid, scope, descriptor, now)
@@ -8975,7 +8994,7 @@ def build_messenger_router(
             cur = await db.execute(
                 """SELECT 1 FROM channels c WHERE c.id=? AND
                    (c.owner_telegram_id=? OR EXISTS(
-                       SELECT 1 FROM channel_admins a WHERE a.channel_id=c.id AND a.telegram_id=?))""",
+                       SELECT 1 FROM channel_admins a WHERE a.channel_id=c.id AND a.telegram_id=? AND (a.rights & 1) != 0))""",
                 (channel_id, uid, uid),
             )
             if await cur.fetchone() is None:
@@ -9110,6 +9129,11 @@ def build_messenger_router(
             target_id = 0
         if target_id <= 0:
             raise HTTPException(status_code=400, detail="Некорректный Telegram ID")
+        rights = payload.get("rights", 15)
+        if type(rights) is not int or not 1 <= rights <= 63:
+            raise HTTPException(400, "Некорректные права администратора")
+        if target_id == uid:
+            raise HTTPException(409, "Нельзя изменить права владельца")
         async with aiosqlite.connect(db_path()) as db:
             await db.execute("BEGIN IMMEDIATE")
             await require_channel_not_banned(db, channel_id, target_id)
@@ -9118,8 +9142,9 @@ def build_messenger_router(
                 raise HTTPException(status_code=404, detail="Пользователь не найден")
             joined_at = int(time.time())
             await db.execute(
-                "INSERT OR IGNORE INTO channel_admins(channel_id,telegram_id,created_at) VALUES(?,?,?)",
-                (channel_id, target_id, joined_at),
+                """INSERT INTO channel_admins(channel_id,telegram_id,created_at,rights) VALUES(?,?,?,?)
+                   ON CONFLICT(channel_id,telegram_id) DO UPDATE SET rights=excluded.rights""",
+                (channel_id, target_id, joined_at, rights),
             )
             await db.execute(
                 "INSERT OR IGNORE INTO channel_members(channel_id,telegram_id,joined_at) VALUES(?,?,?)",
@@ -10813,7 +10838,7 @@ def build_messenger_router(
                 elif target_scope == "channel":
                     cur = await db.execute("""SELECT 1 FROM channels c WHERE c.id=? AND
                         (c.owner_telegram_id=? OR EXISTS(SELECT 1 FROM channel_admins a
-                        WHERE a.channel_id=c.id AND a.telegram_id=?))""", (target_peer, uid, uid))
+                        WHERE a.channel_id=c.id AND a.telegram_id=? AND (a.rights & 1) != 0))""", (target_peer, uid, uid))
                     if await cur.fetchone() is None:
                         raise HTTPException(status_code=403, detail="Публиковать может только администратор канала")
                 else:
@@ -10876,7 +10901,7 @@ def build_messenger_router(
             else:
                 cur = await db.execute("""SELECT 1 FROM channels c WHERE c.id=? AND
                     (c.owner_telegram_id=? OR EXISTS(SELECT 1 FROM channel_admins a
-                     WHERE a.channel_id=c.id AND a.telegram_id=?))""", (target_peer, uid, uid))
+                     WHERE a.channel_id=c.id AND a.telegram_id=? AND (a.rights & 1) != 0))""", (target_peer, uid, uid))
                 if await cur.fetchone() is None:
                     raise HTTPException(status_code=403, detail="Публиковать может только администратор канала")
                 table, sender_col, limit = "channel_messages", "author_telegram_id", CHANNEL_POSTS_PER_MINUTE
@@ -11698,7 +11723,7 @@ def build_messenger_router(
                 cur = await db.execute(
                     """SELECT ch.owner_telegram_id,
                               EXISTS(SELECT 1 FROM channel_admins ca
-                                     WHERE ca.channel_id=ch.id AND ca.telegram_id=?) AS is_admin
+                                     WHERE ca.channel_id=ch.id AND ca.telegram_id=? AND (rights & 8) != 0) AS is_admin
                        FROM channels ch WHERE ch.id=?""",
                     (user_id, chat_id),
                 )
@@ -11953,7 +11978,7 @@ def build_messenger_router(
             else:
                 cur = await db.execute(
                     """SELECT owner_telegram_id,EXISTS(SELECT 1 FROM channel_admins a
-                           WHERE a.channel_id=channels.id AND a.telegram_id=?) AS is_admin
+                           WHERE a.channel_id=channels.id AND a.telegram_id=? AND (rights & 8) != 0) AS is_admin
                        FROM channels WHERE id=?""", (uid, peer_id))
                 channel = await cur.fetchone()
                 if channel is None:
@@ -12227,7 +12252,7 @@ def build_messenger_router(
                 table = "channel_messages"
                 cur = await db.execute("""SELECT 1 FROM channels c WHERE c.id=? AND
                     (c.owner_telegram_id=? OR EXISTS(SELECT 1 FROM channel_admins a
-                    WHERE a.channel_id=c.id AND a.telegram_id=?))""", (chat_id, uid, uid))
+                    WHERE a.channel_id=c.id AND a.telegram_id=? AND (a.rights & 2) != 0))""", (chat_id, uid, uid))
                 if await cur.fetchone() is None:
                     raise HTTPException(status_code=403, detail="Менять публикации может только владелец или администратор")
                 cur = await db.execute(
@@ -12553,12 +12578,12 @@ def build_messenger_router(
     ) -> dict[str, Any]:
         user = await current_user(authorization)
         uid = int(user["telegram_id"])
-        if not await can_manage_channel(channel_id, uid):
-            raise HTTPException(status_code=403, detail="Менять публикации может только владелец или администратор")
         body, entities = edited_content(payload)
         now = int(time.time())
         async with aiosqlite.connect(db_path()) as db:
             await db.execute("BEGIN IMMEDIATE")
+            if not await channel_has_right(db, channel_id, uid, 2):
+                raise HTTPException(status_code=403, detail="Менять публикации может только владелец или администратор")
             cur = await db.execute(
                 "SELECT media_id FROM channel_messages WHERE id=? AND channel_id=?", (message_id, channel_id)
             )
@@ -12592,10 +12617,10 @@ def build_messenger_router(
     ) -> dict[str, Any]:
         user = await current_user(authorization)
         uid = int(user["telegram_id"])
-        if not await can_manage_channel(channel_id, uid):
-            raise HTTPException(status_code=403, detail="Удалять публикации может только владелец или администратор")
         async with aiosqlite.connect(db_path()) as db:
             await db.execute("BEGIN IMMEDIATE")
+            if not await channel_has_right(db, channel_id, uid, 4):
+                raise HTTPException(status_code=403, detail="Удалять публикации может только владелец или администратор")
             cur = await db.execute(
                 "SELECT 1 FROM channel_messages WHERE id=? AND channel_id=?", (message_id, channel_id)
             )
@@ -12631,6 +12656,7 @@ def build_messenger_router(
             if scope == "group":
                 await require_group_member(db, int(peer_id), uid)
             elif scope == "channel":
+                await require_channel_not_banned(db, int(peer_id), uid)
                 cur = await db.execute(
                     """SELECT ch.is_public,ch.owner_telegram_id,
                               EXISTS(SELECT 1 FROM channel_admins ca

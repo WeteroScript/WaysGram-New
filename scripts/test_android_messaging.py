@@ -101,7 +101,7 @@ class NativeMessagingSourceChecks(unittest.TestCase):
         self.assertIn('loadPinnedMessages(dialog_id, 0, 0)', chat)
         self.assertIn('full.can_pin_message = !WaysGramBotFather.is(userId)', profile)
         self.assertIn('chat.admin_rights.pin_messages = true', chats)
-        self.assertIn('channel.admin_rights.pin_messages = true', chats)
+        self.assertIn('rights.pin_messages = (mask & 8) != 0', chats)
 
     def test_pin_refresh_retry_and_pinned_screen_reconcile(self):
         media = self.source('messenger/MediaDataController.java')

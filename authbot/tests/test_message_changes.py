@@ -999,3 +999,42 @@ def test_temporary_channel_ban_expires_without_restoring_subscription(env):
             assert (await client.put(channel + '/membership', headers=member, json={'joined': True})).status_code == 200
 
     run(scenario())
+
+
+def test_channel_admin_rights_are_independent(env):
+    _, app = env
+
+    async def scenario():
+        async with await client_for(app) as client:
+            owner, admin, member = headers(101), headers(102), headers(ADMIN)
+            created = await client.post('/api/channels', headers=owner, json={'title': 'Permissions', 'username': 'permissions'})
+            assert created.status_code == 201, created.text
+            path = f"/api/channels/{created.json()['id']}"
+
+            async def grant(mask):
+                response = await client.post(path + '/admins', headers=owner, json={'telegram_id': 102, 'rights': mask})
+                assert response.status_code == 201, response.text
+
+            await grant(1)
+            post = await client.post(path + '/messages', headers=admin, json={'body': 'Post only'})
+            assert post.status_code == 201, post.text
+            message = path + f"/messages/{post.json()['id']}"
+            assert (await client.patch(message, headers=admin, json={'body': 'Denied'})).status_code == 403
+            assert (await client.delete(message, headers=admin)).status_code == 403
+            assert (await client.post(path + '/members', headers=admin, json={'user_ids': [ADMIN]})).status_code == 403
+            assert (await client.put(path + f'/members/{ADMIN}/ban', headers=admin, json={'banned': True})).status_code == 403
+
+            await grant(2 | 16)
+            assert (await client.get(path, headers=admin)).json()['admin_rights'] == 18
+            assert (await client.post(path + '/messages', headers=admin, json={'body': 'Denied'})).status_code == 403
+            assert (await client.patch(message, headers=admin, json={'body': 'Allowed'})).status_code == 200
+            assert (await client.post(path + '/members', headers=admin, json={'user_ids': [ADMIN]})).status_code == 201
+            assert (await client.get(path, headers=member)).status_code == 200
+            assert (await client.post(path + '/admins', headers=admin, json={'telegram_id': ADMIN, 'rights': 63})).status_code == 403
+
+            await grant(4 | 32)
+            assert (await client.delete(message, headers=admin)).status_code == 200
+            assert (await client.put(path + '/members/101/ban', headers=admin, json={'banned': True})).status_code == 403
+            assert (await client.put(path + f'/members/{ADMIN}/ban', headers=admin, json={'banned': True})).status_code == 200
+
+    run(scenario())
