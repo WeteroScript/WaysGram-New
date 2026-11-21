@@ -5773,6 +5773,11 @@ def build_messenger_router(
             await db.commit()
         return {"status": "unblocked", "user_id": user_id}
 
+    async def dm_auto_delete_seconds(db: Any, uid: int, peer_id: int) -> int:
+        cur = await db.execute("SELECT seconds FROM dm_auto_delete WHERE user_low=? AND user_high=?", sorted((uid, peer_id)))
+        row = await cur.fetchone()
+        return int(row[0]) if row else 0
+
     @router.get("/api/users/{user_id}")
     async def get_user_profile(
         user_id: int,
@@ -5816,7 +5821,7 @@ def build_messenger_router(
                 (user_id, viewer_id),
             )
             common_contacts = await avatar_visible_rows(db, await cur.fetchall(), viewer_id)
-            visible = {}
+            visible = {"dm_auto_delete_seconds": await dm_auto_delete_seconds(db, viewer_id, user_id)}
             if await privacy_allows(db, user_id, viewer_id, "birthday"):
                 visible["birthday"] = await profile_birthday(db, user_id)
             if await privacy_allows(db, user_id, viewer_id, "phone"):
@@ -11950,9 +11955,7 @@ def build_messenger_router(
         if not 0 < peer_id < 2**63 or peer_id == uid:
             raise HTTPException(400, "PEER_ID_INVALID")
         async with aiosqlite.connect(db_path()) as db:
-            cur = await db.execute("SELECT seconds FROM dm_auto_delete WHERE user_low=? AND user_high=?", sorted((uid, peer_id)))
-            row = await cur.fetchone()
-        return {"seconds": row[0] if row else 0}
+            return {"seconds": await dm_auto_delete_seconds(db, uid, peer_id)}
 
     @router.put("/api/chats/{peer_id}/auto-delete")
     async def set_dm_auto_delete(peer_id: int, payload: dict[str, Any], authorization: str | None = Header(default=None)):

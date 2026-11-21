@@ -23,6 +23,17 @@ class NativeMessagingSourceChecks(unittest.TestCase):
     def source(self, path):
         return self.archive.read(BASE + path).decode('utf-8')
 
+    def test_private_auto_delete_uses_server_and_applies_after_success(self):
+        transport = self.source('tgnet/WaysGramTransport.java')
+        profile = self.source('tgnet/WaysGramProfile.java')
+        controller = self.source('messenger/MessagesController.java')
+        self.assertIn('WaysGramApi.put(account, "/api/chats/" + ttl.peer.user_id + "/auto-delete", body)', transport)
+        self.assertIn('full.ttl_period = json.optInt("dm_auto_delete_seconds")', profile)
+        handler = controller.split('public void setDialogHistoryTTL(long did, int ttl, Runnable onApplied)', 1)[1].split('private void applyDialogHistoryTTL', 1)[0]
+        self.assertLess(handler.index('if (error != null || response == null)'), handler.index('applyDialogHistoryTTL(did, ttl)'))
+        self.assertIn('setDialogHistoryTTL(dialog_id, time, () -> {', self.source('ui/ChatActivity.java'))
+        self.assertIn('setDialogHistoryTTL(did, time, () -> {', self.source('ui/ProfileActivity.java'))
+
     def test_chat_settings_refresh_enter_and_guard_bluetooth(self):
         settings = self.source('ui/ThemeActivity.java')
         composer = self.source('ui/Components/ChatActivityEnterView.java')

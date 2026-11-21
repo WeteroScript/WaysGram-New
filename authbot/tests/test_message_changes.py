@@ -1526,6 +1526,8 @@ def test_dm_auto_delete_applies_to_new_messages_and_syncs_both_participants(env)
             assert (await client.put(route, headers=headers(101), json={'seconds': True})).status_code == 400
             assert (await client.put(route, headers=headers(101), json={'seconds': 86400})).status_code == 200
             assert (await client.get('/api/chats/101/auto-delete', headers=headers(102))).json() == {'seconds': 86400}
+            assert (await client.get('/api/users/101', headers=headers(102))).json()['dm_auto_delete_seconds'] == 86400
+            assert (await client.get('/api/users/101', headers=headers(ADMIN))).json()['dm_auto_delete_seconds'] == 0
             due = await send(102, 101, 'expires')
             assert (await client.put(route, headers=headers(101), json={'seconds': 0})).status_code == 200
             new = await send(101, 102, 'not expiring')
