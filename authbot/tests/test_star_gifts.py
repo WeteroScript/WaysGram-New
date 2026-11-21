@@ -3035,3 +3035,26 @@ def test_inventory_uses_live_waysgram_shop_stock(env):
                 assert (gift['shop_remaining'], gift['shop_supply']) == (1877, 2000)
 
     run(scenario())
+
+
+def test_gift_autosave_keeps_hidden_gifts_in_owner_inventory(env):
+    _, app = env
+
+    async def scenario():
+        await bot_module.set_telegram_gift_values('g1', price=1, supply=2)
+        async with await client_for(app) as client:
+            sender, owner = headers(101), headers(102)
+            assert (await client.put('/api/me/privacy/gift-autosave', headers=owner, json={'mode': 'nobody'})).status_code == 200
+            bought = await client.post('/api/telegram/gifts/g1/purchase', headers=sender, json={})
+            assert bought.status_code == 201 or bought.status_code == 200
+            serial = bought.json()['gift']['serial_number']
+            sent = await client.post('/api/messages/gift', headers=sender, json={'recipient_id': 102, 'serial_number': serial})
+            assert sent.status_code == 201
+            assert (await client.get('/api/users/102/gifts', headers=sender)).json()['total'] == 0
+            assert (await client.get('/api/me/gifts', headers=owner)).json()['gifts'][0]['profile_hidden'] == 1
+            endpoint = f'/api/me/gifts/{serial}/visibility'
+            assert (await client.put(endpoint, headers=sender, json={'visible': True})).status_code == 404
+            assert (await client.put(endpoint, headers=owner, json={'visible': True})).status_code == 200
+            assert (await client.get('/api/users/102/gifts', headers=sender)).json()['total'] == 1
+
+    run(scenario())

@@ -1519,6 +1519,7 @@ async def init_messenger_storage(database_path: Path) -> None:
             ("profile_order", "INTEGER"),
             ("profile_pinned", "INTEGER NOT NULL DEFAULT 0"),
             ("profile_worn", "INTEGER NOT NULL DEFAULT 0"),
+            ("profile_hidden", "INTEGER NOT NULL DEFAULT 0"),
         ):
             if column not in user_gift_columns:
                 await db.execute(
@@ -1577,6 +1578,10 @@ async def init_messenger_storage(database_path: Path) -> None:
             AFTER UPDATE OF owner_telegram_id ON user_gifts
             WHEN OLD.owner_telegram_id != NEW.owner_telegram_id
             BEGIN UPDATE user_gifts SET profile_pinned=0 WHERE id=NEW.id; END""")
+        await db.execute(f"""CREATE TRIGGER IF NOT EXISTS {db_split.SCHEMA}.reset_gift_profile_visibility
+            AFTER UPDATE OF owner_telegram_id ON user_gifts
+            WHEN OLD.owner_telegram_id != NEW.owner_telegram_id
+            BEGIN UPDATE user_gifts SET profile_hidden=0 WHERE id=NEW.id; END""")
         await db.execute(f"""CREATE INDEX IF NOT EXISTS {db_split.SCHEMA}.user_gifts_worn_lookup
             ON user_gifts(owner_telegram_id) WHERE profile_worn=1""")
         await db.execute(f"""CREATE TRIGGER IF NOT EXISTS {db_split.SCHEMA}.clear_worn_gift_on_transfer
@@ -4823,7 +4828,7 @@ def build_messenger_router(
         else:
             cur = await db.execute("SELECT rules FROM account_profile_privacy WHERE telegram_id=? AND setting=?", (uid, setting))
         row = await cur.fetchone()
-        return json.loads(row[0]) if row else {"mode": {"invites": "everyone", "find-by-phone": "contacts", "avatar": "everyone", "bio": "everyone", "music": "everyone", "voice": "everyone", "forwards": "everyone"}.get(setting, "nobody"), "allow": [], "deny": []}
+        return json.loads(row[0]) if row else {"mode": {"invites": "everyone", "find-by-phone": "contacts", "avatar": "everyone", "bio": "everyone", "music": "everyone", "voice": "everyone", "forwards": "everyone", "gift-autosave": "everyone"}.get(setting, "nobody"), "allow": [], "deny": []}
 
     async def privacy_allows(db: Any, owner: int, viewer: int, setting: str) -> bool:
         if owner == viewer:
@@ -4868,7 +4873,7 @@ def build_messenger_router(
     @router.get("/api/me/privacy/{setting}")
     async def get_privacy(setting: str, authorization: str | None = Header(default=None)):
         uid = int((await current_user(authorization))["telegram_id"])
-        if setting not in ("invites", "phone", "last-seen", "find-by-phone", "avatar", "bio", "birthday", "music", "voice", "forwards"):
+        if setting not in ("invites", "phone", "last-seen", "find-by-phone", "avatar", "bio", "birthday", "music", "voice", "forwards", "gift-autosave"):
             raise HTTPException(404, "PRIVACY_KEY_INVALID")
         async with aiosqlite.connect(db_path()) as db:
             return await privacy_rules(db, uid, setting)
@@ -4876,7 +4881,7 @@ def build_messenger_router(
     @router.put("/api/me/privacy/{setting}")
     async def set_privacy(setting: str, payload: dict[str, Any], authorization: str | None = Header(default=None)):
         uid = int((await current_user(authorization))["telegram_id"])
-        if setting not in ("invites", "phone", "last-seen", "find-by-phone", "avatar", "bio", "birthday", "music", "voice", "forwards"):
+        if setting not in ("invites", "phone", "last-seen", "find-by-phone", "avatar", "bio", "birthday", "music", "voice", "forwards", "gift-autosave"):
             raise HTTPException(404, "PRIVACY_KEY_INVALID")
         mode = payload.get("mode")
         if mode not in ("everyone", "contacts", "nobody"):
@@ -5060,14 +5065,15 @@ def build_messenger_router(
         """The same paginated inventory for the owner and for a profile visitor."""
         async with aiosqlite.connect(db_path()) as db:
             db.row_factory = aiosqlite.Row
+            visible = " AND profile_hidden=0" if public else ""
             cur = await db.execute(
-                "SELECT COUNT(*) FROM user_gifts WHERE owner_telegram_id=?",
+                "SELECT COUNT(*) FROM user_gifts WHERE owner_telegram_id=?" + visible,
                 (owner_id,),
             )
             total = int((await cur.fetchone())[0] or 0)
-            query = """SELECT id,serial_number,gift_id,telegram_gift_id,gift_name,gift_emoji,
+            query = f"""SELECT id,serial_number,gift_id,telegram_gift_id,gift_name,gift_emoji,
                           telegram_gift_metadata_json,acquired_at,upgrade_level,attributes_json,
-                          purchase_asset,purchase_price,profile_pinned,profile_worn,
+                          purchase_asset,purchase_price,profile_pinned,profile_worn,profile_hidden,
                           (SELECT p.supply FROM telegram_gift_prices p WHERE p.gift_id=user_gifts.telegram_gift_id) AS shop_supply,
                           (SELECT MAX(0, p.supply-p.sold) FROM telegram_gift_prices p WHERE p.gift_id=user_gifts.telegram_gift_id) AS shop_remaining,
                           EXISTS(SELECT 1 FROM gift_market_listings l
@@ -5089,7 +5095,7 @@ def build_messenger_router(
                                  WHERE r.gift_id=user_gifts.telegram_gift_id) AS auction_eligible,
                           (SELECT n.unique_num FROM gift_unique_numbers n
                             WHERE n.serial_number=user_gifts.serial_number) AS unique_num
-                   FROM user_gifts WHERE owner_telegram_id=?
+                   FROM user_gifts WHERE owner_telegram_id=?{visible}
                    ORDER BY profile_pinned DESC, profile_order IS NOT NULL, profile_order ASC, id DESC"""
             query_params: tuple[Any, ...] = (owner_id,)
             if limit is not None:
@@ -5328,9 +5334,30 @@ def build_messenger_router(
                 cur = await db.execute("SELECT COUNT(*) FROM user_gifts WHERE owner_telegram_id=? AND profile_pinned=1", (uid,))
                 if int((await cur.fetchone())[0]) >= 6:
                     raise HTTPException(status_code=409, detail="Можно закрепить до шести подарков. Сначала открепите один из них.")
-            await db.execute("UPDATE user_gifts SET profile_pinned=? WHERE id=?", (int(pinned), gift[0]))
+            await db.execute("UPDATE user_gifts SET profile_pinned=?,profile_hidden=CASE WHEN ? THEN 0 ELSE profile_hidden END WHERE id=?", (int(pinned), pinned, gift[0]))
             await db.commit()
         return {"serial_number": serial, "pinned": pinned}
+
+    @router.put("/api/me/gifts/{serial_number}/visibility")
+    async def set_gift_visibility(serial_number: str, payload: dict[str, Any], authorization: str | None = Header(default=None)):
+        uid = int((await current_user(authorization))["telegram_id"])
+        visible = payload.get("visible")
+        if type(visible) is not bool:
+            raise HTTPException(400, "GIFT_VISIBILITY_INVALID")
+        async with aiosqlite.connect(db_path()) as db:
+            await db.execute("BEGIN IMMEDIATE")
+            cur = await db.execute("""UPDATE user_gifts SET profile_hidden=?,
+                profile_pinned=CASE WHEN ? THEN profile_pinned ELSE 0 END
+                WHERE serial_number=? AND owner_telegram_id=?""", (not visible, visible, serial_number.upper(), uid))
+            if cur.rowcount != 1:
+                raise HTTPException(404, "GIFT_NOT_FOUND")
+            await db.commit()
+        return {"visible": visible}
+
+    async def apply_gift_autosave(db: Any, serial: str, owner: int, sender: int) -> None:
+        visible = await privacy_allows(db, owner, sender, "gift-autosave")
+        await db.execute("UPDATE user_gifts SET profile_hidden=? WHERE serial_number=? AND owner_telegram_id=?",
+                         (not visible, serial, owner))
 
     @router.put("/api/me/gifts/order")
     async def reorder_my_gifts(request: Request, authorization: str | None = Header(default=None)) -> dict[str, Any]:
@@ -6071,6 +6098,7 @@ def build_messenger_router(
                    VALUES(?,NULL,?,?,?,?,?,?,'stars',?)""",
                 (serial, gift_id, title, gift_emoji, gift_metadata_json, owner, now, price),
             )
+            await apply_gift_autosave(db, serial, owner, uid)
             balance = int(account["stars"]) - price
             await db.execute(
                 """INSERT INTO economy_transactions(telegram_id,asset,amount,balance_after,reason,admin_id,created_at)
@@ -7219,6 +7247,7 @@ def build_messenger_router(
             if cur.rowcount != 1:
                 await db.rollback()
                 raise HTTPException(status_code=409, detail="Владение подарком уже изменилось")
+            await apply_gift_autosave(db, serial, target_id, uid)
             await db.execute(
                 """INSERT INTO gift_transactions
                    (event_type,serial_number,gift_name,from_telegram_id,to_telegram_id,created_at)
@@ -11351,6 +11380,7 @@ def build_messenger_router(
             if cur.rowcount != 1:
                 await db.rollback()
                 raise HTTPException(status_code=409, detail="Владение подарком уже изменилось")
+            await apply_gift_autosave(db, serial, recipient_id, uid)
             cur = await db.execute(
                 """INSERT INTO messages
                    (sender_telegram_id,recipient_telegram_id,body,created_at)
