@@ -13923,6 +13923,38 @@ def build_messenger_router(
                 "created_at": invite[1], "expires_at": invite[2], "max_uses": invite[3],
                 "uses": invite[4], "require_approval": bool(invite[5])}
 
+    @router.delete("/api/groups/{group_id}/revoked-invites")
+    async def delete_revoked_group_invites(group_id: int, admin_id: int | None = None,
+                                           invite_token: str | None = None,
+                                           authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        uid = int((await current_user(authorization))["telegram_id"])
+        if invite_token is not None and not re.fullmatch(r"[A-Za-z0-9_-]{20,128}", invite_token):
+            raise HTTPException(404, "Приглашение не найдено")
+        async with aiosqlite.connect(db_path()) as db:
+            await db.execute("BEGIN IMMEDIATE")
+            member = await require_group_member(db, group_id, uid)
+            owner = member["role"] == "owner"
+            if not owner and (member["role"] != "admin" or admin_id not in (None, uid)):
+                raise HTTPException(403, "Нет права удалять приглашения")
+            where = "group_id=? AND revoked_at IS NOT NULL"
+            args = [group_id]
+            if invite_token is not None:
+                where += " AND token_hash=?"
+                args.append(hashlib.sha256(invite_token.encode()).hexdigest())
+                if not owner:
+                    where += " AND created_by=?"
+                    args.append(uid)
+            else:
+                where += " AND created_by=?"
+                args.append(uid if admin_id is None else admin_id)
+            await db.execute(f"""DELETE FROM group_join_requests WHERE group_id=? AND status='pending'
+                AND invite_token_hash IN (SELECT token_hash FROM group_invites WHERE {where})""", (group_id, *args))
+            cur = await db.execute(f"DELETE FROM group_invites WHERE {where}", args)
+            if invite_token is not None and cur.rowcount == 0:
+                raise HTTPException(404, "Отозванное приглашение не найдено")
+            await db.commit()
+        return {"deleted": cur.rowcount}
+
     @router.post("/api/groups/{group_id}/members", status_code=201)
     async def add_group_member(
         group_id: int,

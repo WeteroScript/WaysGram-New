@@ -908,6 +908,15 @@ def test_group_invite_list_edit_and_revoke(env):
             assert [x['invite_link'] for x in active] == [second['invite_link']]
             revoked = (await client.get(path, headers=owner, params={'revoked': 'true'})).json()['invites']
             assert [x['label'] for x in revoked] == ['Updated']
+            cleanup = group + '/revoked-invites'
+            active_token = second['invite_link'].rsplit('/', 1)[-1]
+            revoked_token = first['invite_link'].rsplit('/', 1)[-1]
+            assert (await client.delete(cleanup, headers=member)).status_code == 403
+            assert (await client.delete(cleanup, headers=owner, params={'invite_token': active_token})).status_code == 404
+            assert (await client.delete(cleanup, headers=owner, params={'invite_token': revoked_token})).json()['deleted'] == 1
+            assert (await client.delete(item.replace(revoked_token, active_token), headers=owner)).status_code == 200
+            assert (await client.delete(cleanup, headers=owner, params={'admin_id': 101})).json()['deleted'] == 1
+            assert (await client.get(path, headers=owner, params={'revoked': 'true'})).json()['count'] == 0
 
     run(scenario())
 
