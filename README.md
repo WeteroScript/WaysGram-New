@@ -16,7 +16,14 @@
 - `.github/workflows/build-apk.yml`: восстановление проекта, наложение WaysGram-кода и сборка APK.
 - `.github/workflows/authbot.yml`: тесты AuthBot и проверка загрузки кода бота.
 
+- `android-source/`: распакованный (только для чтения) миррор Android-исходников из частей архива —
+  чтобы искать и читать код без распаковки. Пересобирается `scripts/extract_android_source.py`,
+  см. [`docs/android-source-mirror.md`](docs/android-source-mirror.md).
+
 Подробности — [`docs/authbot-hosting.md`](docs/authbot-hosting.md).
+
+Карта интерфейса каналов и групп (экраны, обработчики нажатий, сетевые запросы и отличия нашей копии) —
+[`docs/channel-group-ui-map.md`](docs/channel-group-ui-map.md).
 
 Исходный Gradle-проект не хранится распакованными файлами в корне Git. **Части архива — единственный источник правды:** WaysGram-код лежит прямо внутри `WaysGram-Android.zip.part1…part5`, поэтому правки вносятся в архив (распаковать → поправить → склеить части), а не наложением патчей поверх при сборке. Workflow только восстанавливает архив и запускает Gradle.
 
