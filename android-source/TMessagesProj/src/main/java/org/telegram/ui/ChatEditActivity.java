@@ -913,14 +913,14 @@ public class ChatEditActivity extends BaseFragment implements ImageUpdater.Image
             if (org.telegram.tgnet.WaysGramTransport.ENABLED && !ChatObject.isChannel(currentChat)
                     && (currentChat.creator || currentChat.admin_rights != null && currentChat.admin_rights.change_info)) {
                 TextCell permissionsCell = new TextCell(context);
-                permissionsCell.setTextAndIcon(getString(R.string.WaysGramGroupSendPermissions), R.drawable.msg_stats, true);
+                permissionsCell.setTextAndIcon(getString(R.string.WaysGramGroupSendPermissions), R.drawable.msg_permissions, true);
                 permissionsCell.setBackground(Theme.getSelectorDrawable(true));
                 waysGramCells.add(permissionsCell);
                 permissionsCell.setOnClickListener(v -> WaysGramPaidReactions.showGroupSendPermissions(this, currentAccount, chatId));
             }
             if (org.telegram.tgnet.WaysGramTransport.ENABLED && currentChat.creator && !ChatObject.isChannel(currentChat)) {
                 TextCell hiddenMembersCell = new TextCell(context);
-                hiddenMembersCell.setTextAndIcon(getString(R.string.WaysGramGroupMemberList), R.drawable.msg_stats, true);
+                hiddenMembersCell.setTextAndIcon(getString(R.string.WaysGramGroupMemberList), R.drawable.msg_members_list2, true);
                 hiddenMembersCell.setBackground(Theme.getSelectorDrawable(true));
                 waysGramCells.add(hiddenMembersCell);
                 hiddenMembersCell.setOnClickListener(v -> groupRosterVisibility(null));
@@ -966,7 +966,7 @@ public class ChatEditActivity extends BaseFragment implements ImageUpdater.Image
             if (org.telegram.tgnet.WaysGramTransport.ENABLED && currentChat.creator
                     && ChatObject.isChannelAndNotMegaGroup(currentChat)) {
                 TextCell paidReactionsCell = new TextCell(context);
-                paidReactionsCell.setTextAndIcon(getString(R.string.WaysGramPaidReactions), R.drawable.msg_stats, true);
+                paidReactionsCell.setTextAndIcon(getString(R.string.WaysGramPaidReactions), R.drawable.msg_reactions, true);
                 paidReactionsCell.setBackground(Theme.getSelectorDrawable(true));
                 waysGramCells.add(paidReactionsCell);
                 paidReactionsCell.setOnClickListener(v -> WaysGramPaidReactions.showSetting(this, currentAccount, chatId));
@@ -986,7 +986,7 @@ public class ChatEditActivity extends BaseFragment implements ImageUpdater.Image
 
             if (org.telegram.tgnet.WaysGramTransport.ENABLED && currentChat.creator && ChatObject.isChannelAndNotMegaGroup(currentChat)) {
                 TextCell discussionCell = new TextCell(context);
-                discussionCell.setTextAndIcon(getString(R.string.WaysGramDiscussionGroup), R.drawable.msg_link2, true);
+                discussionCell.setTextAndIcon(getString(R.string.WaysGramDiscussionGroup), R.drawable.msg_discussion, true);
                 discussionCell.setBackground(Theme.getSelectorDrawable(true));
                 waysGramCells.add(discussionCell);
                 discussionCell.setOnClickListener(v -> WaysGramDiscussions.settings(this, currentAccount, chatId));
@@ -1386,11 +1386,6 @@ public class ChatEditActivity extends BaseFragment implements ImageUpdater.Image
                 });
             }
 
-            // WaysGram-only rows follow the stock rows, so the Telegram settings keep their order.
-            for (int a = 0; a < waysGramCells.size(); a++) {
-                typeEditContainer.addView(waysGramCells.get(a), LayoutHelper.createLinear(LayoutHelper.MATCH_PARENT, LayoutHelper.WRAP_CONTENT));
-            }
-
             infoContainer.addView(reactionsCell, LayoutHelper.createLinear(LayoutHelper.MATCH_PARENT, LayoutHelper.WRAP_CONTENT));
             if (welcomeMessagesCell != null) {
                 infoContainer.addView(welcomeMessagesCell, LayoutHelper.createLinear(LayoutHelper.MATCH_PARENT, LayoutHelper.WRAP_CONTENT));
@@ -1475,6 +1470,14 @@ public class ChatEditActivity extends BaseFragment implements ImageUpdater.Image
             changeBotSettingsCell.setTextAndIcon(getString(R.string.BotChangeSettings), R.drawable.msg_bot, true);
             infoContainer.addView(changeBotSettingsCell, LayoutHelper.createLinear(LayoutHelper.MATCH_PARENT, LayoutHelper.WRAP_CONTENT));
             changeBotSettingsCell.setOnClickListener(v -> Browser.openUrl(v.getContext(), "https://t.me/BotFather?start=" + getActiveUsername(currentUser)));
+        }
+
+        if (!waysGramCells.isEmpty()) {
+            // WaysGram-only rows are appended after every stock row, so the Telegram settings keep their own order.
+            for (int a = 0; a < waysGramCells.size(); a++) {
+                infoContainer.addView(waysGramCells.get(a), LayoutHelper.createLinear(LayoutHelper.MATCH_PARENT, LayoutHelper.WRAP_CONTENT));
+            }
+            waysGramCells.get(waysGramCells.size() - 1).setNeedDivider(false);
         }
 
         if (currentChat != null) {

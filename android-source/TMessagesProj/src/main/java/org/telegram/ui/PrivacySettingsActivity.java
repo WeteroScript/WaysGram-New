@@ -445,11 +445,7 @@ public class PrivacySettingsActivity extends BaseFragment implements Notificatio
             } else if (position == voicesRow) {
                 presentFragment(new PrivacyControlActivity(ContactsController.PRIVACY_RULES_TYPE_VOICE_MESSAGES));
             } else if (position == noncontactsRow) {
-                if (WaysGramTransport.ENABLED) {
-                    WaysGramPaidDm.settings(this, currentAccount);
-                } else {
-                    presentFragment(new PrivacyControlActivity(ContactsController.PRIVACY_RULES_TYPE_MESSAGES));
-                }
+                presentFragment(new PrivacyControlActivity(ContactsController.PRIVACY_RULES_TYPE_MESSAGES));
             } else if (position == emailLoginRow) {
                 if (currentPassword == null || currentPassword.login_email_pattern == null) {
                     return;
@@ -1338,10 +1334,21 @@ public class PrivacySettingsActivity extends BaseFragment implements Notificatio
         return "unknown";
     }
 
+    private void loadWaysGramFee() {
+        WaysGramPaidDm.loadFee(currentAccount, (stars, users) -> {
+            if (listAdapter != null) {
+                listAdapter.notifyDataSetChanged();
+            }
+        });
+    }
+
     @Override
     public void onResume() {
         super.onResume();
-        if (WaysGramTransport.ENABLED) loadWaysGramInactivity(false);
+        if (WaysGramTransport.ENABLED) {
+            loadWaysGramInactivity(false);
+            loadWaysGramFee();
+        }
         if (listAdapter != null) {
             listAdapter.notifyDataSetChanged();
         }
@@ -1520,7 +1527,8 @@ public class PrivacySettingsActivity extends BaseFragment implements Notificatio
                         imageView.setColorFilter(new PorterDuffColorFilter(Theme.getColor(Theme.key_windowBackgroundWhiteGrayIcon), PorterDuff.Mode.MULTIPLY));
                     } else if (position == noncontactsRow) {
                         if (WaysGramTransport.ENABLED) {
-                            textCell.setTextAndValue(getString(R.string.PrivacyMessages), getString(R.string.WaysGramPaidDmTitle), musicRow != -1);
+                            final boolean paid = WaysGramPaidDm.hasCachedFee(currentAccount) && WaysGramPaidDm.cachedFeeStars(currentAccount) > 0;
+                            textCell.setTextAndValue(getString(R.string.PrivacyMessages), getString(paid ? R.string.WaysGramPaidDmTitle : R.string.P2PEverybody), musicRow != -1);
                         } else {
                             value = getString(feeValue ? R.string.ContactsAndFee : noncontactsValue ? R.string.ContactsAndPremium : R.string.P2PEverybody);
 
