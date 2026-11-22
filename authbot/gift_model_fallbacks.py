@@ -11,16 +11,21 @@ from pathlib import Path
 from typing import Any
 
 HEART_LOCKET_ID = "5868455043362980631"
-_ROOT = Path(__file__).with_name("assets") / "gift_models" / HEART_LOCKET_ID
+
+#: Telegram id of Plush Pepe; the pinned pack adds the WaysGram-exclusive upgraded model.
+PLUSH_PEPE_ID = "5936013938331222567"
+
+_ROOT = Path(__file__).with_name("assets") / "gift_models"
 
 
-@lru_cache(maxsize=1)
-def _models() -> tuple[dict[str, dict[str, Any]], dict[int, dict[str, Any]], dict[int, dict[str, Any]]]:
+@lru_cache(maxsize=16)
+def _models(gift_id: str = HEART_LOCKET_ID) -> tuple[dict[str, dict[str, Any]], dict[int, dict[str, Any]], dict[int, dict[str, Any]]]:
+    root = _ROOT / gift_id
     try:
-        manifest = json.loads((_ROOT / "manifest.json").read_text(encoding="utf-8"))
+        manifest = json.loads((root / "manifest.json").read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return {}, {}, {}
-    if manifest.get("gift_id") != HEART_LOCKET_ID or not isinstance(manifest.get("models"), list):
+    if manifest.get("gift_id") != gift_id or not isinstance(manifest.get("models"), list):
         return {}, {}, {}
     names, synthetic, telegram = {}, {}, {}
     for row in manifest["models"]:
@@ -33,7 +38,7 @@ def _models() -> tuple[dict[str, dict[str, Any]], dict[int, dict[str, Any]], dic
             continue
         if not name or not filename.endswith(".tgs") or Path(filename).name != filename or doc_id >= 0:
             continue
-        path = _ROOT / filename
+        path = root / filename
         if not path.is_file():
             continue
         entry = {"name": name, "document_id": doc_id, "path": path}
@@ -45,15 +50,32 @@ def _models() -> tuple[dict[str, dict[str, Any]], dict[int, dict[str, Any]], dic
 
 
 def model_for_name(gift_id: str, name: Any) -> dict[str, Any] | None:
-    if gift_id != HEART_LOCKET_ID or not isinstance(name, str):
+    """Pinned artwork of one model name inside a gift's local pack (any gift with a pack)."""
+    if not isinstance(name, str):
         return None
-    return _models()[0].get(name.strip().casefold())
+    key = str(gift_id or "").strip()
+    if not key:
+        return None
+    return _models(key)[0].get(name.strip().casefold())
 
 
 def model_for_document(gift_id: str, document_id: int, *, synthetic: bool) -> dict[str, Any] | None:
-    if gift_id != HEART_LOCKET_ID:
+    key = str(gift_id or "").strip()
+    if not key:
         return None
-    return _models()[1 if synthetic else 2].get(document_id)
+    return _models(key)[1 if synthetic else 2].get(document_id)
+
+
+def names(gift_id: str) -> list[str]:
+    """Model names available offline for a gift (empty when no pack is bundled)."""
+    key = str(gift_id or "").strip()
+    if not key:
+        return []
+    _, synthetic, telegram = _models(key)
+    seen: dict[str, None] = {}
+    for entry in list(synthetic.values()) + list(telegram.values()):
+        seen.setdefault(str(entry["name"]), None)
+    return list(seen)
 
 
 # Both independently published catalogs identify Shield of Sun with the same

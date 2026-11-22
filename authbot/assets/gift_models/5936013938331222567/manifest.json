@@ -1,0 +1,14 @@
+{
+  "gift_id": "5936013938331222567",
+  "source": "WaysGram original artwork (WaysGram Pepe)",
+  "commit": "",
+  "models": [
+    {
+      "name": "WaysGram",
+      "file": "waysgram.tgs",
+      "document_id": -5936013938331222567,
+      "sha256": "da201bba27ae55cfd4271e7948983c65c173066f4ea1660007f644d37bf10a19",
+      "bytes": 39649
+    }
+  ]
+}

@@ -1701,8 +1701,21 @@ async def admin_nft_options(db, gift):
             elif key in by_name:
                 trait['permille'] = by_name[key]['permille']
             by_name[key] = trait
+        if slot == 'model':
+            # WaysGram-exclusive models are not in Telegram's pool; the admin can still
+            # pick one to mint a gift with exactly that artwork.
+            for entry in gift_upgrades.special_models(gift_id):
+                trait = gift_upgrades.special_model_trait(entry)
+                by_name[_normalise_attribute_name(trait['name'])] = trait
         options[slot] = list(by_name.values())
     return options
+
+
+def _trait_chance(trait: dict[str, Any]) -> str:
+    """Human chance of an attribute: exact percent when known, otherwise permille."""
+    if trait.get('chance_percent'):
+        return f"{trait['chance_percent']:g}%"
+    return f"{trait['permille'] / 10:g}%"
 
 
 def admin_nft_page(state, page=0):
@@ -1720,7 +1733,7 @@ def admin_nft_page(state, page=0):
     for slot in NFT_SLOTS:
         if slot in selected:
             trait = selected[slot]
-            text += f"\n{NFT_LABELS[slot]}: {trait['name']} · {trait['permille'] / 10:g}%"
+            text += f"\n{NFT_LABELS[slot]}: {trait['name']} · {_trait_chance(trait)}"
     if 'backdrop' in selected and 'pattern' in selected:
         chance = selected['backdrop']['permille'] * selected['pattern']['permille'] / 10000
         text += f"\nФон + узор при независимом выпадении: ≈ {chance:g}%"
@@ -1729,7 +1742,7 @@ def admin_nft_page(state, page=0):
     else:
         for index in range(page * GRANT_PAGE_SIZE, min(len(options), (page + 1) * GRANT_PAGE_SIZE)):
             entry = options[index]
-            title = entry['name'][:44] + (f" · {entry['permille'] / 10:g}%" if stage != 'gift' else '')
+            title = entry['name'][:44] + (f" · {_trait_chance(entry)}" if stage != 'gift' else '')
             rows.append([(title, key + f's{index}')])
         nav = []
         if page: nav.append(('⬅️', key + f'p{page - 1}'))

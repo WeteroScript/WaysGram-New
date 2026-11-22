@@ -2620,7 +2620,8 @@ public class ChatActionCell extends BaseCell implements DownloadController.FileD
                 final TLRPC.TL_messageActionSetChatTheme action = (TLRPC.TL_messageActionSetChatTheme) messageObject.messageOwner.action;
                 final TLRPC.TL_chatThemeUniqueGift chatThemeUniqueGift = (TLRPC.TL_chatThemeUniqueGift) action.theme;
                 final TL_stars.StarGift gift = chatThemeUniqueGift.gift;
-                final String giftTitle = gift.title + " #" + LocaleController.formatNumber(gift.num, ',');
+                final String giftTitle = org.telegram.ui.Stars.WaysGramGiftNumber.titled(gift,
+                        gift.title + " #" + LocaleController.formatNumber(gift.num, ','));
 
                 final long fromDialogId = messageObject.getFromChatId();
                 final boolean isUserSelf = UserConfig.getInstance(currentAccount).getClientUserId() == fromDialogId;

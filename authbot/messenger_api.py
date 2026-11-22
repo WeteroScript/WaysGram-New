@@ -2191,7 +2191,9 @@ async def init_messenger_storage(database_path: Path) -> None:
             traits = gift_upgrades.traits_of(attributes)
             if not traits:
                 _, pool = _collectible_trait_pool(gift_key_hint, title_hint)
-                attributes["collectible_traits"] = gift_upgrades.roll_traits(pool, now)
+                attributes["collectible_traits"] = gift_upgrades.roll_traits(
+                    pool, now, gift_id=gift_key_hint,
+                )
                 await db.execute(
                     "UPDATE user_gifts SET attributes_json=? WHERE id=?",
                     (json.dumps(attributes, ensure_ascii=False, separators=(",", ":")),
@@ -8720,7 +8722,7 @@ def build_messenger_router(
             result = {"serial_number": serial, "telegram_gift_id": gift_id,
                       "price_stars": UPGRADE_PRICE_STARS,
                       "candidates": gift_upgrades.reveal_pool(
-                          pool, {}, _reveal_pool_documents(pool, rows))}
+                          pool, {}, _reveal_pool_documents(pool, rows), gift_id=gift_id)}
         if gift_id:
             schedule_attribute_sync(gift_id)
         return result
@@ -8876,6 +8878,7 @@ def build_messenger_router(
                 now,
                 previous_traits if gift_upgrades.is_current_traits(previous_traits) else None,
                 live=attribute_rows or None,
+                gift_id=str(gift["telegram_gift_id"] or ""),
             )
             traits = gift_upgrades.traits_of(attributes) or {}
             # New rolls never guess artwork by an unrelated row's chance or position.
@@ -8966,6 +8969,7 @@ def build_messenger_router(
                     reveal_base,
                     traits,
                     _reveal_pool_documents(reveal_base, attribute_documents),
+                    gift_id=str(gift["telegram_gift_id"] or ""),
                 ),
             }
             await idempotency_store(db, uid, scope, descriptor, result, now)

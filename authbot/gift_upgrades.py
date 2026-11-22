@@ -22,6 +22,23 @@ from typing import Any, Iterable
 
 TRAITS_VERSION = 3
 
+#: WaysGram-exclusive upgraded models, rolled *instead of* the regular pool draw.
+#: ``one_in`` is an exact independent draw (1 / one_in), so the published chance is precise
+#: and does not shift the odds of Telegram's own models. ``document_id`` is the synthetic
+#: negative id of artwork bundled in :mod:`gift_model_fallbacks`.
+SPECIAL_MODELS: dict[str, list[dict[str, Any]]] = {
+    # Plush Pepe: the improved animated WaysGram model drops in 1 of 2000 upgrades (0.05 %).
+    "5936013938331222567": [
+        {
+            "name": "WaysGram",
+            "one_in": 2000,
+            "chance_percent": 0.05,
+            "rarity": "legendary",
+            "document_id": -5936013938331222567,
+        }
+    ],
+}
+
 #: Every published chance is expressed in permille and a slot adds up to 1000.
 PERMILLE_TOTAL = 1000
 
@@ -77,6 +94,34 @@ def _load() -> tuple[dict[str, Any], dict[str, str]]:
             if title and title not in _by_title:
                 _by_title[title] = key
     return _pools, _by_title or {}
+
+
+def special_models(gift_id: Any) -> list[dict[str, Any]]:
+    """WaysGram-exclusive models of a gift, empty for every ordinary Telegram gift."""
+    key = str(gift_id or "").strip()
+    return SPECIAL_MODELS.get(key, [])
+
+
+def special_model_trait(entry: dict[str, Any]) -> dict[str, Any]:
+    """Trait dict of an exclusive model, in the same shape as a rolled pool model."""
+    return {
+        "name": str(entry.get("name") or ""),
+        # Permille cannot express 0.05 %, so the exact chance travels separately.
+        "permille": 0,
+        "rarity": str(entry.get("rarity") or "legendary"),
+        "document_id": int(entry.get("document_id") or 0),
+        "special": True,
+        "chance_percent": float(entry.get("chance_percent") or 0.0),
+    }
+
+
+def roll_special_model(gift_id: Any) -> dict[str, Any] | None:
+    """Draws one of the exclusive models of a gift; ``None`` when nothing dropped."""
+    for entry in special_models(gift_id):
+        one_in = int(entry.get("one_in") or 0)
+        if one_in > 0 and secrets.randbelow(one_in) == 0:
+            return special_model_trait(entry)
+    return None
 
 
 def pool_for_gift(gift_id: Any, title: Any = None) -> tuple[str | None, dict[str, Any] | None]:
@@ -266,6 +311,7 @@ def roll_traits(
         now: int,
         previous: dict[str, Any] | None = None,
         live: dict[str, list[dict[str, Any]]] | None = None,
+        gift_id: Any = "",
 ) -> dict[str, Any]:
     """Rolls one trait set using available weighted chances.
 
@@ -300,19 +346,23 @@ def roll_traits(
         result["permille"] = _effective_permille(weights[entries.index(selected)], weights)
         return result
 
-    model = live_hits["model"] or pool_slot(models)
+    special = roll_special_model(gift_id)
+    model = special or live_hits["model"] or pool_slot(models)
     pattern = live_hits["pattern"] or pool_slot(patterns)
     backdrop = live_hits["backdrop"] or pool_slot(backdrops, colored=True)
     used = sum(1 for hit in live_hits.values() if hit is not None)
-    return {
+    result = {
         "version": TRAITS_VERSION,
         "rolled_at": int(now),
-        "roll_source": "telegram" if used == 3 else ("mixed" if used else "pool"),
+        "roll_source": "waysgram" if special else ("telegram" if used == 3 else ("mixed" if used else "pool")),
         "model": model,
         "pattern": pattern,
         "backdrop": backdrop,
         "rarity": _rarest((model["rarity"], pattern["rarity"], backdrop["rarity"])),
     }
+    if special:
+        result["special_model"] = True
+    return result
 
 
 def pool_from_rows(live: Any) -> dict[str, Any]:
@@ -391,6 +441,7 @@ def reveal_pool(
         pool: dict[str, Any] | None,
         traits: dict[str, Any],
         documents: dict[str, dict[int, int]] | None = None,
+        gift_id: Any = "",
 ) -> dict[str, Any]:
     """Candidate attributes the client scrolls through before it lands on the result."""
     source = pool or FALLBACK_POOL
@@ -403,6 +454,11 @@ def reveal_pool(
     mapping = documents or {}
     models = _with_documents(models or FALLBACK_POOL["models"], mapping.get("model"))
     patterns = _with_documents(patterns or FALLBACK_POOL["patterns"], mapping.get("pattern"))
+    # Exclusive WaysGram models never appear in Telegram's catalogue rows, so they are
+    # appended to the reel with the synthetic document id that plays their animation.
+    for entry in special_models(gift_id):
+        trait = special_model_trait(entry)
+        models.append([trait["name"], 0, trait["rarity"], int(trait["document_id"])])
     return {
         "models": _reel(models, model_name),
         "patterns": _reel(patterns, pattern_name),

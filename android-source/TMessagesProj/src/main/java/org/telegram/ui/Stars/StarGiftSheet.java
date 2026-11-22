@@ -2074,6 +2074,11 @@ public class StarGiftSheet extends BottomSheetWithRecyclerListView implements No
 
         private final GiftSheet.Ribbon ribbon;
         private final LinkSpanDrawable.LinksTextView[] titleView = new LinkSpanDrawable.LinksTextView[5];
+
+        /** Заголовок карточки: нужен, чтобы анимировать номер модели WaysGram. */
+        public View getTitleView() {
+            return titleView[0];
+        }
         private final LinkSpanDrawable.LinksTextView releasedView;
         private final TextView collectionReleasedView;
         private int collectionReleasedViewColor;
@@ -4555,7 +4560,9 @@ public class StarGiftSheet extends BottomSheetWithRecyclerListView implements No
         final long owner_id = DialogObject.getPeerDialogId(gift.owner_id);
         final long host_id = DialogObject.getPeerDialogId(gift.host_id);
 
-        title = gift.num > 0 ? gift.title + " #" + LocaleController.formatNumber(gift.num, ',') : gift.title;
+        final boolean waysGramNumber = WaysGramGiftNumber.isWaysGramModel(gift);
+        title = waysGramNumber ? gift.title + " " + WaysGramGiftNumber.LABEL
+                : (gift.num > 0 ? gift.title + " #" + LocaleController.formatNumber(gift.num, ',') : gift.title);
 
         if (!rolling && roller != null && roller.isRolling() && roller.rollingGift != null && roller.rollingGift.id != gift.id) {
             roller.detach();
@@ -4590,7 +4597,11 @@ public class StarGiftSheet extends BottomSheetWithRecyclerListView implements No
 
         final SpannableStringBuilder title = new SpannableStringBuilder();
         title.append(gift.title);
-        if (gift.num > 0) {
+        if (waysGramNumber) {
+            // Модель WaysGram: вместо настоящего номера — «#???» с переливом.
+            WaysGramGiftNumber.appendTo(title);
+            WaysGramGiftNumber.bindShimmer(topView.getTitleView());
+        } else if (gift.num > 0) {
             title.append(" ");
             int fromIndex = title.length();
             title.append("#" + LocaleController.formatNumber(gift.num, ','));
@@ -5324,7 +5335,8 @@ public class StarGiftSheet extends BottomSheetWithRecyclerListView implements No
         final TL_stars.StarGift gift = getGift();
         if (gift instanceof TL_stars.TL_starGiftUnique) {
             final TL_stars.TL_starGiftUnique uniqueGift = (TL_stars.TL_starGiftUnique) gift;
-            return uniqueGift.title + " #" + LocaleController.formatNumber(uniqueGift.num, ',');
+            return WaysGramGiftNumber.titled(uniqueGift,
+                    uniqueGift.title + " #" + LocaleController.formatNumber(uniqueGift.num, ','));
         }
         return "";
     }
@@ -5332,7 +5344,8 @@ public class StarGiftSheet extends BottomSheetWithRecyclerListView implements No
     public static String getGiftName(TL_stars.StarGift gift) {
         if (gift instanceof TL_stars.TL_starGiftUnique) {
             final TL_stars.TL_starGiftUnique uniqueGift = (TL_stars.TL_starGiftUnique) gift;
-            return uniqueGift.title + " #" + LocaleController.formatNumber(uniqueGift.num, ',');
+            return WaysGramGiftNumber.titled(uniqueGift,
+                    uniqueGift.title + " #" + LocaleController.formatNumber(uniqueGift.num, ','));
         } else if (gift instanceof TL_stars.TL_starGift) {
             if (!TextUtils.isEmpty(gift.title)) {
                 return gift.title;
