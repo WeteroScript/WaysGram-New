@@ -135,13 +135,43 @@ Telegram-клиент уже умеет все эти экраны; менять
 
 ## Что осталось за рамками паритета
 
-* У групп нет форума-топиков, передача владения (`channels.editCreator`), `getSendAs` и
-  геолокация — отвечают пустым успехом или заглушкой.
+* У групп нет форума-топиков, передачи владения (`channels.editCreator`), `getSendAs` и
+  геолокации. Важно: `channels.toggleForum` и `channels.editCreator` **не заглушены** — их нет в
+  `WaysGramTransport.handle()`, поэтому экран «Форум» и «Передать канал» показывают
+  «Это действие пока не поддерживается WaysGram». Остальные из этого абзаца закрыты пустым успехом.
 * `channels.toggleAntiSpam` для групп включает серверный антиспам (`send-permissions`), но без
   обучаемых порогов — это простой фильтр.
 * Цвет профиля группы пока не хранится: `channels.updateColor` для группы вернёт ошибку канала.
 * Форум-топики, спонсорские отчёты, геолокация канала, переводчик (`toggleAutotranslation`) —
   отвечают пустым успехом или заглушкой, отдельной функциональности не несут.
+
+## Всплывашки «не поддерживается» в каналах (проверено по коду клиента)
+
+Таблица выше описывает пункты задания. Кроме них официальный клиент в канальных экранах
+отправляет ещё ряд TL-методов, которых в диспетчере нет — каждый даёт bulletin
+`WaysGramUnsupportedOperation` («Это действие пока не поддерживается WaysGram»).
+Проверено поиском по `tgnet/WaysGram*.java`: метода нет ни в `instanceof`, ни в заглушках.
+
+| TL-метод | Откуда вызывается |
+| --- | --- |
+| `messages.getPollVotes`, `messages.readPollVotes`, `messages.getUnreadPollVotes` | результаты опроса, «непрочитанные голоса» |
+| `messages.getUnreadReactions`, `messages.readReactions` | раздел «Реакции» в профиле канала (дёргает `MessagesController` при открытии) |
+| `messages.translateText` | «Перевести» публикацию (`TranslateAlert2/3`, `TranslateController`) |
+| `messages.report` | «Пожаловаться» (`ReportBottomSheet`) |
+| `messages.editChatParticipantRank` | «Должность» администратора (`ChatRightsEditActivity`) |
+| `channels.editCreator` | «Передать канал» (`ChatRightsEditActivity`, `SelectChatUserSheet`) |
+| `channels.toggleForum` | тумблер «Форум» (`MessagesController`) |
+| `channels.reorderProfileTabs`, `account.reorderProfileTabs` | перестановка вкладок профиля (`SharedMediaLayout`) |
+| `help.getCountriesList` | выбор страны (`LoginActivity`, бусты) |
+| `messages.getBotCallbackAnswer` | кнопки-боты под постами |
+| `messages.getInlineBotResults`, `messages.searchGlobal`, `messages.searchStickers` | поиск и инлайн-боты из канала |
+| `messages.acceptUrlAuth`, `messages.requestUrlAuth`, `messages.checkUrlAuthMatchCode` | ссылки с авторизацией |
+| `messages.sendBotRequestedPeer`, `messages.reportReadMetrics` | мелкие вызовы из `ChatActivity*` |
+| `messages.deleteParticipantReaction(s)`, `messages.addPollAnswer`, `messages.deletePollAnswer` | реакции/опросы участников |
+
+Тихого фолбэка нет: `BulletinFactory.errorDescription()` показывает строку для любого
+`METHOD_NOT_SUPPORTED:`. Чтобы убрать всплывашки, нужны либо серверные обработчики,
+либо явные заглушки в диспетчере.
 
 ## Следующие заходы (если понадобятся)
 
