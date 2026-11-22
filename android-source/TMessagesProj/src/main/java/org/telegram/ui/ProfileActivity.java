@@ -2811,7 +2811,16 @@ public class ProfileActivity extends BaseFragment implements NotificationCenter.
                     openAddMember();
                 } else if (id == statistics) {
                     TLRPC.Chat chat = getMessagesController().getChat(chatId);
-                    presentFragment(StatisticActivity.create(chat, false));
+                    if (org.telegram.tgnet.WaysGramTransport.ENABLED && chat != null) {
+                        // WaysGram: серверная статистика канала/группы, вход как в Telegram — из «⋮» карточки.
+                        if (chat.megagroup || !ChatObject.isChannel(chat)) {
+                            WaysGramPaidReactions.showGroupAnalytics(this, currentAccount, chat.id);
+                        } else {
+                            WaysGramPaidReactions.showAnalytics(this, currentAccount, chat.id);
+                        }
+                    } else {
+                        presentFragment(StatisticActivity.create(chat, false));
+                    }
                 } else if (id == view_discussion) {
                     openDiscussion();
                 } else if (id == gift_premium) {
@@ -12476,7 +12485,9 @@ public class ProfileActivity extends BaseFragment implements NotificationCenter.
                             streamAction = true;
                         }
                     }
-                    if ((chatInfo.can_view_stats || chatInfo.can_view_revenue || chatInfo.can_view_stars_revenue || getMessagesController().getStoriesController().canPostStories(getDialogId())) && topicId == 0) {
+                    boolean waysGramStatistics = org.telegram.tgnet.WaysGramTransport.ENABLED
+                            && (chat.creator || ChatObject.hasAdminRights(chat));
+                    if ((chatInfo.can_view_stats || chatInfo.can_view_revenue || chatInfo.can_view_stars_revenue || getMessagesController().getStoriesController().canPostStories(getDialogId()) || waysGramStatistics) && topicId == 0) {
                         otherItem.addSubItem(statistics, R.drawable.msg_stats, LocaleController.getString(R.string.Statistics));
                     }
                     ChatObject.Call call = getMessagesController().getGroupCall(chatId, false);

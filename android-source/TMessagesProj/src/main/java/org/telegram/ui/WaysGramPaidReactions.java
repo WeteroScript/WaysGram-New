@@ -567,6 +567,63 @@ final class WaysGramPaidReactions {
         return new AlertDialog.Builder(fragment.getParentActivity()).setTitle(LocaleController.getString(title));
     }
 
+    public interface PaidReactionsState {
+        void onLoaded(boolean enabled);
+    }
+
+    /** Текущее состояние «Платные реакции» канала — для штатного тумблера в экране реакций. */
+    public static void loadChannelPaidReactions(int account, long channel, PaidReactionsState callback) {
+        final String token = WaysGramApi.getToken(account);
+        if (TextUtils.isEmpty(token)) return;
+        final String base = "/api/channels/" + org.telegram.tgnet.WaysGramChats.channelServer(channel);
+        WaysGramApi.NETWORK.execute(() -> {
+            final boolean enabled;
+            try {
+                enabled = WaysGramApi.request("GET", base, null, token, 10000).optBoolean("paid_reactions_enabled");
+            } catch (Exception e) {
+                org.telegram.messenger.FileLog.e(e);
+                return;
+            }
+            AndroidUtilities.runOnUIThread(() -> {
+                try {
+                    callback.onLoaded(enabled);
+                } catch (Exception e) {
+                    org.telegram.messenger.FileLog.e(e);
+                }
+            });
+        });
+    }
+
+    /** Сохранение тумблера «Платные реакции» из штатного экрана реакций. */
+    public static void saveChannelPaidReactions(int account, long channel, boolean enabled, Runnable success, Runnable failure) {
+        final String token = WaysGramApi.getToken(account);
+        if (TextUtils.isEmpty(token)) {
+            if (failure != null) failure.run();
+            return;
+        }
+        final String base = "/api/channels/" + org.telegram.tgnet.WaysGramChats.channelServer(channel);
+        WaysGramApi.NETWORK.execute(() -> {
+            boolean ok;
+            try {
+                WaysGramApi.request("PUT", base + "/paid-reactions", new JSONObject().put("enabled", enabled), token, 10000);
+                ok = true;
+            } catch (Exception e) {
+                org.telegram.messenger.FileLog.e(e);
+                ok = false;
+            }
+            final boolean saved = ok;
+            AndroidUtilities.runOnUIThread(() -> {
+                Runnable action = saved ? success : failure;
+                if (action == null) return;
+                try {
+                    action.run();
+                } catch (Exception e) {
+                    org.telegram.messenger.FileLog.e(e);
+                }
+            });
+        });
+    }
+
     static void showSetting(BaseFragment fragment, int account, long channel) {
         String token = WaysGramApi.getToken(account);
         String base = "/api/channels/" + org.telegram.tgnet.WaysGramChats.channelServer(channel);

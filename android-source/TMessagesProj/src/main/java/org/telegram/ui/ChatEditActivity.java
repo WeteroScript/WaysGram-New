@@ -903,14 +903,6 @@ public class ChatEditActivity extends BaseFragment implements ImageUpdater.Image
         ArrayList<TextCell> waysGramCells = new ArrayList<>();
         if (currentChat != null) {
             if (org.telegram.tgnet.WaysGramTransport.ENABLED && !ChatObject.isChannel(currentChat)
-                    && (currentChat.creator || currentChat.admin_rights != null)) {
-                TextCell groupAnalyticsCell = new TextCell(context);
-                groupAnalyticsCell.setTextAndIcon(getString(R.string.WaysGramGroupAnalytics), R.drawable.msg_stats, true);
-                groupAnalyticsCell.setBackground(Theme.getSelectorDrawable(true));
-                waysGramCells.add(groupAnalyticsCell);
-                groupAnalyticsCell.setOnClickListener(v -> WaysGramPaidReactions.showGroupAnalytics(this, currentAccount, chatId));
-            }
-            if (org.telegram.tgnet.WaysGramTransport.ENABLED && !ChatObject.isChannel(currentChat)
                     && (currentChat.creator || currentChat.admin_rights != null && currentChat.admin_rights.change_info)) {
                 TextCell permissionsCell = new TextCell(context);
                 permissionsCell.setTextAndIcon(getString(R.string.WaysGramGroupSendPermissions), R.drawable.msg_permissions, true);
@@ -965,16 +957,6 @@ public class ChatEditActivity extends BaseFragment implements ImageUpdater.Image
 
             if (org.telegram.tgnet.WaysGramTransport.ENABLED && currentChat.creator
                     && ChatObject.isChannelAndNotMegaGroup(currentChat)) {
-                TextCell paidReactionsCell = new TextCell(context);
-                paidReactionsCell.setTextAndIcon(getString(R.string.WaysGramPaidReactions), R.drawable.msg_reactions, true);
-                paidReactionsCell.setBackground(Theme.getSelectorDrawable(true));
-                waysGramCells.add(paidReactionsCell);
-                paidReactionsCell.setOnClickListener(v -> WaysGramPaidReactions.showSetting(this, currentAccount, chatId));
-                TextCell channelAnalyticsCell = new TextCell(context);
-                channelAnalyticsCell.setTextAndIcon(getString(R.string.WaysGramChannelAnalytics), R.drawable.msg_stats, true);
-                channelAnalyticsCell.setBackground(Theme.getSelectorDrawable(true));
-                waysGramCells.add(channelAnalyticsCell);
-                channelAnalyticsCell.setOnClickListener(v -> WaysGramPaidReactions.showAnalytics(this, currentAccount, chatId));
                 if (!ChatObject.isPublic(currentChat)) {
                     TextCell subscriptionCell = new TextCell(context);
                     subscriptionCell.setTextAndIcon(getString(R.string.WaysGramSubscription), R.drawable.msg_link2, true);

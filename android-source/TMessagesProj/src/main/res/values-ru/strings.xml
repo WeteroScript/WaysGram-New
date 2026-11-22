@@ -294,6 +294,7 @@
     <string name="WaysGramSecretNumbers">Секрет</string>
     <string name="WaysGramMessagePrivacyPending">Пока недоступно</string>
     <string name="WaysGramMessagePrivacyUnavailable">Настройки доступа и платы за входящие сообщения пока не поддерживаются WaysGram. Stars за сообщения не списываются.</string>
+    <string name="WaysGramUnsupportedOperation">Это действие пока не поддерживается WaysGram.</string>
     <string name="WaysGramUnsupportedOperationWithMethod">Это действие пока не поддерживается WaysGram (%1$s).</string>
     <string name="WaysGramPaidReactions">Платные реакции</string>
     <string name="WaysGramPaidOn">Платные реакции включены.</string>

@@ -111,27 +111,46 @@ public class WaysGramCustomizationActivity extends BaseFragment {
         accentColor = backdropAlpha == 0 ? 0 : layerAccent(layers[0]);
     }
 
-    /** Средний цвет подложки, подтянутый по насыщенности: акцент для кнопок. */
+    /**
+     * Доминирующий насыщенный цвет подложки: акцент для кнопок и ссылок.
+     * Если на картинке нет выраженного цвета (серый/тёмный снимок), акцент не задаётся —
+     * иначе из средней яркости получался случайный оттенок (например зелёный).
+     */
     private static int layerAccent(Bitmap bitmap) {
         if (bitmap == null || bitmap.getWidth() < 2 || bitmap.getHeight() < 2) return 0;
-        int stepX = Math.max(1, bitmap.getWidth() / 16), stepY = Math.max(1, bitmap.getHeight() / 8);
-        long red = 0, green = 0, blue = 0;
-        int count = 0;
+        int stepX = Math.max(1, bitmap.getWidth() / 24), stepY = Math.max(1, bitmap.getHeight() / 24);
+        final float[] hsv = new float[3];
+        final double[] weights = new double[12], reds = new double[12], greens = new double[12], blues = new double[12];
+        double total = 0, bestWeight = 0;
+        float maxSaturation = 0;
         for (int y = stepY / 2; y < bitmap.getHeight(); y += stepY) {
             for (int x = stepX / 2; x < bitmap.getWidth(); x += stepX) {
                 int pixel = bitmap.getPixel(x, y);
                 if (Color.alpha(pixel) < 32) continue;
-                red += Color.red(pixel);
-                green += Color.green(pixel);
-                blue += Color.blue(pixel);
-                count++;
+                Color.colorToHSV(pixel, hsv);
+                if (hsv[2] < .12f) continue;
+                maxSaturation = Math.max(maxSaturation, hsv[1]);
+                if (hsv[1] < .25f) continue;
+                int sector = Math.min(11, (int) (hsv[0] / 30f));
+                double weight = hsv[1] * hsv[1] * (.35f + hsv[2]);
+                weights[sector] += weight;
+                reds[sector] += Color.red(pixel) * weight;
+                greens[sector] += Color.green(pixel) * weight;
+                blues[sector] += Color.blue(pixel) * weight;
+                total += weight;
             }
         }
-        if (count == 0) return 0;
-        float[] hsv = new float[3];
-        Color.colorToHSV(Color.rgb((int) (red / count), (int) (green / count), (int) (blue / count)), hsv);
-        hsv[1] = Math.max(hsv[1], .55f);
-        hsv[2] = Math.max(.45f, Math.min(.62f, hsv[2]));
+        int best = -1;
+        for (int i = 0; i < weights.length; i++) {
+            if (weights[i] > bestWeight) {
+                bestWeight = weights[i];
+                best = i;
+            }
+        }
+        if (best < 0 || total <= 0 || maxSaturation < .4f || bestWeight / total < .3) return 0;
+        int pixel = Color.rgb((int) (reds[best] / bestWeight), (int) (greens[best] / bestWeight), (int) (blues[best] / bestWeight));
+        Color.colorToHSV(pixel, hsv);
+        hsv[2] = Math.max(.5f, Math.min(.68f, hsv[2]));
         return Color.HSVToColor(hsv);
     }
 
@@ -141,11 +160,12 @@ public class WaysGramCustomizationActivity extends BaseFragment {
      */
     public static int windowColor(int key, int color) {
         final int accent = accentColor;
+        // key_featuredStickers_addButton намеренно не подменяем: это кнопки покупок
+        // и подтверждений («Buy More Stars», «OK», «Add a post») — они остаются синими Telegram.
         if (accent != 0 && (key == Theme.key_windowBackgroundWhiteBlueButton
                 || key == Theme.key_windowBackgroundWhiteBlueIcon
                 || key == Theme.key_windowBackgroundWhiteBlueText
                 || key == Theme.key_windowBackgroundWhiteBlueText2
-                || key == Theme.key_featuredStickers_addButton
                 || key == Theme.key_chat_messagePanelSend)) {
             return accent;
         }

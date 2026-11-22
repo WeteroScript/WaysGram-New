@@ -90,8 +90,7 @@ public final class BulletinFactory {
 
     private static String errorDescription(String code) {
         if (org.telegram.tgnet.WaysGramTransport.ENABLED && code != null && code.startsWith("METHOD_NOT_SUPPORTED:")) {
-            String method = code.substring("METHOD_NOT_SUPPORTED:".length());
-            return LocaleController.formatString(R.string.WaysGramUnsupportedOperationWithMethod, method);
+            return LocaleController.getString(R.string.WaysGramUnsupportedOperation);
         }
         return LocaleController.formatString(R.string.UnknownErrorCode, code);
     }

@@ -649,6 +649,15 @@ public class WaysGramChats {
             }
         }
         full.participants_count = channel.optInt("member_count");
+        boolean channelOwner = channel.optLong("owner_telegram_id") == selfId;
+        int adminsCount = Math.max(0, channel.optInt("admin_count", 0));
+        if (channelOwner) {
+            adminsCount = Math.max(1, adminsCount + 1);
+        }
+        if (adminsCount > 0) {
+            full.admins_count = adminsCount;
+            full.flags |= TLObject.FLAG_1;
+        }
         full.notify_settings = new TLRPC.TL_peerNotifySettings();
         if (channel.optInt("is_public", 1) == 0 && channel.optLong("owner_telegram_id") == selfId) {
             try {

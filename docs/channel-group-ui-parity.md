@@ -101,3 +101,34 @@ git status --short   # только три .java и пять частей арх
 
 Дополнительно: все три файла разобраны парсером Java (`javalang`) — синтаксис корректен и до, и
 после правок; Gradle/javac не запускались, поэтому полноценная компиляция ещё предстоит в CI.
+
+## Платные реакции и статистика — только в стоковых местах
+
+Telegram не держит эти переключатели в «Изменить»:
+
+| Что | Где в Telegram | Где теперь в WaysGram |
+| --- | --- | --- |
+| Платные реакции канала | «Изменить» → «Реакции» → тумблер `ChannelEnablePaidReactions` | тот же экран `ChatCustomReactionsEditActivity`; тумблер рисуется, когда бэкенд не отдаёт `paid_media_allowed`, состояние читается/пишется через `/api/channels/{id}` и `PUT …/paid-reactions` |
+| Статистика канала | карточка канала → «⋮» → «Statistics» | тот же пункт `statistics` в `ProfileActivity`; открывает серверную аналитику WaysGram (7/30/90 дней) |
+| Статистика группы | карточка группы → «⋮» → «Statistics» | там же, `WaysGramPaidReactions.showGroupAnalytics` |
+
+Строки WaysGram «Платные реакции», «Аналитика канала» и «Аналитика группы» из `ChatEditActivity`
+удалены — дублирующих входов больше нет.
+
+Проверка:
+
+```bash
+grep -n "paidReactionsCell\|channelAnalyticsCell\|groupAnalyticsCell" \
+    android-source/TMessagesProj/src/main/java/org/telegram/ui/ChatEditActivity.java   # пусто
+grep -n "ChannelEnablePaidReactions" \
+    android-source/TMessagesProj/src/main/java/org/telegram/ui/Components/Reactions/ChatCustomReactionsEditActivity.java
+grep -n "waysGramStatistics" android-source/TMessagesProj/src/main/java/org/telegram/ui/ProfileActivity.java
+```
+
+## Акцент кастомизации
+
+`WaysGramCustomizationActivity.layerAccent` больше не «вытягивает» насыщенность из серого снимка:
+акцент берётся только если на подложке есть доминирующий насыщенный оттенок (доля ≥ 30% среди
+насыщенных пикселей, максимальная насыщенность ≥ 0.4). Иначе акцент не задаётся и кнопки остаются
+штатного синего цвета. `key_featuredStickers_addButton` («Buy More Stars», «OK», «Add a post»)
+намеренно исключён из подмены — акцент применяется к ссылкам, иконкам и кнопке отправки.
