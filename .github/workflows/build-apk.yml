@@ -271,14 +271,21 @@ jobs:
             echo '```'
           } > /tmp/report.md
           # Branch builds may not have a PR; surface diagnostics on the check itself.
+          # Annotations are the only channel that works when the log artifact cannot be
+          # downloaded, so every interesting line (and, as a last resort, the log tail)
+          # must reach them.
           if [ -s "$file" ]; then
             {
-              grep -E '^(e: |.*\.java:[0-9]+: error:)' "$file" | head -20
-              awk '/^\* What went wrong:/{report=1; next} /^\* (Try|Exception is):/{report=0} report && NF' "$file" | head -20
-              grep -m 6 '^Caused by:' "$file"
+              grep -E '(^e: |error:|Error:|FAILED|What went wrong|Caused by|OutOfMemory|Could not (resolve|create|find)|Unresolved)' "$file" | head -25 || true
+              if ! grep -qE '(^e: |error:|Error:|FAILED|What went wrong|Caused by)' "$file"; then
+                echo '--- tail of the build log ---'
+                tail -n 25 "$file" || true
+              fi
             } | while IFS= read -r line; do
               printf '::error::%s\n' "${line//%/%25}"
             done
+          else
+            printf '::error::build log is empty: %s\n' "$file"
           fi
           number="$(gh pr list --head "${GITHUB_REF_NAME}" --json number --jq '.[0].number' 2>/dev/null || true)"
           if [ -n "${number:-}" ] && [ "$number" != "null" ]; then
