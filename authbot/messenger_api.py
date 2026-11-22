@@ -1931,6 +1931,10 @@ async def init_messenger_storage(database_path: Path) -> None:
             await db.execute(f"ALTER TABLE {db_split.SCHEMA}.chat_groups ADD COLUMN default_send_restrictions INTEGER NOT NULL DEFAULT 0")
         if "members_hidden" not in chat_group_columns:
             await db.execute(f"ALTER TABLE {db_split.SCHEMA}.chat_groups ADD COLUMN members_hidden INTEGER NOT NULL DEFAULT 0")
+        if "pre_history_hidden" not in chat_group_columns:
+            await db.execute(f"ALTER TABLE {db_split.SCHEMA}.chat_groups ADD COLUMN pre_history_hidden INTEGER NOT NULL DEFAULT 0")
+        if "join_request" not in chat_group_columns:
+            await db.execute(f"ALTER TABLE {db_split.SCHEMA}.chat_groups ADD COLUMN join_request INTEGER NOT NULL DEFAULT 0")
         if "slow_mode_seconds" not in chat_group_columns:
             await db.execute(
                 f"ALTER TABLE {db_split.SCHEMA}.chat_groups "
@@ -4934,6 +4938,43 @@ def build_messenger_router(
         matches = sum(" ".join(unicodedata.normalize("NFKC", row[0]).casefold().split()) == normalized for row in await cur.fetchall())
         if matches >= 2:
             raise HTTPException(429, "GROUP_ANTI_SPAM_REPEAT", headers={"Retry-After": "60"})
+
+    async def seed_group_history_marker(db: Any, group_id: int, telegram_id: int,
+                                        now: int | None = None) -> None:
+        """Hidden pre-history: a new member starts reading from the moment of joining."""
+        cur = await db.execute("SELECT pre_history_hidden FROM chat_groups WHERE id=?", (group_id,))
+        row = await cur.fetchone()
+        if row is None or not int(row[0]):
+            return
+        cur = await db.execute("SELECT COALESCE(MAX(id),0) FROM group_messages WHERE group_id=?", (group_id,))
+        top = int((await cur.fetchone())[0])
+        if top <= 0:
+            return
+        await db.execute(
+            """INSERT INTO read_markers(telegram_id,scope,peer_id,last_read_id,updated_at) VALUES(?,?,?,?,?)
+               ON CONFLICT(telegram_id,scope,peer_id) DO UPDATE SET
+                 last_read_id=MAX(read_markers.last_read_id,excluded.last_read_id),
+                 updated_at=excluded.updated_at""",
+            (telegram_id, "group", group_id, top, int(now or time.time())),
+        )
+
+    async def group_history_floor(db: Any, group_id: int, uid: int) -> int:
+        """Messages sent before a plain member joined stay hidden while pre-history is disabled."""
+        cur = await db.execute("SELECT pre_history_hidden FROM chat_groups WHERE id=?", (group_id,))
+        row = await cur.fetchone()
+        if row is None or not int(row[0]):
+            return 0
+        cur = await db.execute("SELECT role FROM group_members WHERE group_id=? AND telegram_id=?", (group_id, uid))
+        member = await cur.fetchone()
+        if member is None or str(member[0]) != "member":
+            return 0
+        cur = await db.execute(
+            """SELECT COALESCE(MAX(m.id),0) FROM group_messages m JOIN group_members gm
+               ON gm.group_id=m.group_id AND gm.telegram_id=?
+               WHERE m.group_id=? AND m.created_at<gm.joined_at""",
+            (uid, group_id),
+        )
+        return int((await cur.fetchone())[0])
 
     async def require_group_member(
         db: Any, group_id: int, telegram_id: int
@@ -16299,6 +16340,7 @@ def build_messenger_router(
                 """SELECT g.id,g.username,g.title,g.description,g.owner_telegram_id,g.created_at,
                           g.avatar_media_id,g.no_forwards,
                           g.slow_mode_seconds,g.members_hidden,g.default_send_restrictions,g.anti_spam_enabled,
+                          g.pre_history_hidden,g.join_request,
                           (SELECT COUNT(*) FROM group_members m WHERE m.group_id=g.id) AS member_count
                    FROM chat_groups g WHERE g.id=?""",
                 (group_id,),
@@ -16328,6 +16370,8 @@ def build_messenger_router(
         result = dict(group)
         result["members_hidden"] = bool(result["members_hidden"])
         result["anti_spam_enabled"] = bool(result["anti_spam_enabled"])
+        result["pre_history_hidden"] = bool(result["pre_history_hidden"])
+        result["join_request"] = bool(result["join_request"])
         result["labels"] = await entity_labels("group", group_id)
         result["my_role"] = membership["role"]
         result["admin_rights"] = membership["admin_rights"] if membership["role"] in ("owner", "admin") else 0
@@ -16567,16 +16611,36 @@ def build_messenger_router(
             if not isinstance(value, str) or len(value.strip()) > limit or (key == "title" and not value.strip()):
                 raise HTTPException(400, "Некорректное название или описание группы")
             fields[key] = value.strip()
+        if "username" in payload:
+            username = str(payload["username"] or "").strip().lstrip("@").lower()
+            if username and not re.fullmatch(r"[a-z][a-z0-9_]{0,31}", username):
+                raise HTTPException(400, "Username группы: латиница, цифры и _, первый символ — буква")
+            fields["username"] = username
         if not fields:
             raise HTTPException(400, "Нет полей для изменения")
-        async with aiosqlite.connect(db_path()) as db:
-            await db.execute("BEGIN IMMEDIATE")
-            membership = await require_group_member(db, group_id, uid)
-            if not group_has_right(membership, 1):
-                raise HTTPException(403, "Изменять группу может только владелец или администратор")
-            for key, value in fields.items():
-                await db.execute(f"UPDATE chat_groups SET {key}=? WHERE id=?", (value, group_id))
-            await db.commit()
+        try:
+            async with aiosqlite.connect(db_path()) as db:
+                await db.execute("BEGIN IMMEDIATE")
+                membership = await require_group_member(db, group_id, uid)
+                if not group_has_right(membership, 1):
+                    raise HTTPException(403, "Изменять группу может только владелец или администратор")
+                if fields.get("username"):
+                    name = fields["username"]
+                    for table in ("chat_groups", "channels", "accounts"):
+                        column = "id" if table == "chat_groups" else ("id" if table == "channels" else "telegram_id")
+                        id_column = column
+                        cur = await db.execute(
+                            f"SELECT 1 FROM {table} WHERE username=? COLLATE NOCASE AND {id_column}<>?",
+                            (name, group_id if table == "chat_groups" else -1),
+                        )
+                        if await cur.fetchone() is not None:
+                            await db.rollback()
+                            raise HTTPException(409, "Username уже занят")
+                for key, value in fields.items():
+                    await db.execute(f"UPDATE chat_groups SET {key}=? WHERE id=?", (value, group_id))
+                await db.commit()
+        except aiosqlite.IntegrityError as exc:
+            raise HTTPException(409, "Username уже занят") from exc
         return {"id": group_id, **fields}
 
     @router.put("/api/groups/{group_id}/settings")
@@ -16597,6 +16661,14 @@ def build_messenger_router(
             if type(payload["members_hidden"]) is not bool:
                 raise HTTPException(400, "INVALID_MEMBER_VISIBILITY")
             fields["members_hidden"] = int(payload["members_hidden"])
+        if "pre_history_hidden" in payload:
+            if type(payload["pre_history_hidden"]) is not bool:
+                raise HTTPException(400, "INVALID_HISTORY_VISIBILITY")
+            fields["pre_history_hidden"] = int(payload["pre_history_hidden"])
+        if "join_request" in payload:
+            if type(payload["join_request"]) is not bool:
+                raise HTTPException(400, "INVALID_JOIN_REQUEST")
+            fields["join_request"] = int(payload["join_request"])
         if not fields:
             raise HTTPException(400, "Нет полей для изменения")
         async with aiosqlite.connect(db_path()) as db:
@@ -16609,7 +16681,7 @@ def build_messenger_router(
             await db.commit()
         result: dict[str, Any] = {"id": group_id}
         for key, value in fields.items():
-            result[key] = bool(value) if key in ("no_forwards", "members_hidden") else value
+            result[key] = bool(value) if key in ("no_forwards", "members_hidden", "pre_history_hidden", "join_request") else value
         return result
 
     @router.put("/api/groups/{group_id}/avatar")
@@ -16677,6 +16749,124 @@ def build_messenger_router(
                 raise HTTPException(404, "GROUP_NOT_FOUND")
             await db.commit()
         return {"members_hidden": hidden}
+
+    @router.post("/api/groups/{group_id}/join")
+    async def join_public_group(group_id: int, authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        """Public group join. A group with the approval flag turns the join into a request."""
+        user = await current_user(authorization)
+        uid = int(user["telegram_id"])
+        now = int(time.time())
+        async with aiosqlite.connect(db_path()) as db:
+            db.row_factory = aiosqlite.Row
+            await db.execute("BEGIN IMMEDIATE")
+            cur = await db.execute("SELECT username,join_request,owner_telegram_id FROM chat_groups WHERE id=?",
+                                   (group_id,))
+            group = await cur.fetchone()
+            if group is None or not str(group["username"] or "").strip():
+                await db.rollback()
+                raise HTTPException(404, "Группа не найдена")
+            cur = await db.execute("SELECT 1 FROM group_members WHERE group_id=? AND telegram_id=?", (group_id, uid))
+            if await cur.fetchone() is not None:
+                await db.commit()
+                return {"id": group_id, "joined": True, "join_requested": False}
+            cur = await db.execute("SELECT is_banned FROM accounts WHERE telegram_id=?", (uid,))
+            account = await cur.fetchone()
+            if account is None or int(account["is_banned"]):
+                await db.rollback()
+                raise HTTPException(403, "Аккаунт заблокирован")
+            if int(group["join_request"]):
+                cur = await db.execute(
+                    """SELECT token_hash FROM group_invites
+                       WHERE group_id=? AND revoked_at IS NULL AND require_approval=1 LIMIT 1""",
+                    (group_id,),
+                )
+                row = await cur.fetchone()
+                if row is None:
+                    token_hash = hashlib.sha256(secrets.token_urlsafe(24).encode()).hexdigest()
+                    await db.execute(
+                        """INSERT INTO group_invites(token_hash,group_id,created_by,created_at,require_approval)
+                           VALUES(?,?,?,?,1)""",
+                        (token_hash, group_id, int(group["owner_telegram_id"]), now),
+                    )
+                    invite_hash = token_hash
+                else:
+                    invite_hash = str(row["token_hash"])
+                await db.execute(
+                    """INSERT INTO group_join_requests
+                       (group_id,telegram_id,invite_token_hash,requested_at,status,reviewed_by,reviewed_at)
+                       VALUES(?,?,?,?,'pending',NULL,NULL)
+                       ON CONFLICT(group_id,telegram_id) DO UPDATE SET
+                         invite_token_hash=excluded.invite_token_hash,requested_at=excluded.requested_at,
+                         status='pending',reviewed_by=NULL,reviewed_at=NULL
+                       WHERE group_join_requests.status<>'pending'""",
+                    (group_id, uid, invite_hash, now),
+                )
+                await db.commit()
+                return {"id": group_id, "joined": False, "join_requested": True}
+            await db.execute(
+                "INSERT OR IGNORE INTO group_members(group_id,telegram_id,role,joined_at) VALUES(?,?,'member',?)",
+                (group_id, uid, now),
+            )
+            await seed_group_history_marker(db, group_id, uid, now)
+            await db.commit()
+        return {"id": group_id, "joined": True, "join_requested": False}
+
+    @router.delete("/api/groups/{group_id}/messages")
+    async def clear_group_messages(group_id: int, payload: dict[str, Any] | None = None,
+                                   authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        """Clears the group history; an optional id list deletes just those messages."""
+        user = await current_user(authorization)
+        uid = int(user["telegram_id"])
+        raw_ids = (payload or {}).get("ids")
+        if raw_ids is not None and (not isinstance(raw_ids, list)
+                                    or any(type(value) is not int or value <= 0 for value in raw_ids)):
+            raise HTTPException(400, "Некорректный список сообщений")
+        ids = [int(value) for value in raw_ids] if raw_ids else []
+        async with aiosqlite.connect(db_path()) as db:
+            await db.execute("BEGIN IMMEDIATE")
+            member = await require_group_member(db, group_id, uid)
+            if ids:
+                placeholders = ",".join("?" for _ in ids)
+                cur = await db.execute(
+                    f"""SELECT id,sender_telegram_id,send_as_id FROM group_messages
+                        WHERE group_id=? AND id IN ({placeholders})""",
+                    (group_id, *ids),
+                )
+                rows = await cur.fetchall()
+                owner = await group_has_right(member, 16)
+                for row in rows:
+                    message_id = int(row[0])
+                    author = row[2] if row[2] is not None else int(row[1])
+                    if not owner and int(author) != uid:
+                        raise HTTPException(403, "Удалять чужие сообщения может только администратор")
+                for message_id in ids:
+                    await db.execute("DELETE FROM group_messages WHERE group_id=? AND id=?", (group_id, message_id))
+                    await db.execute("DELETE FROM message_reactions WHERE scope='group' AND chat_id=? AND message_id=?",
+                                     (group_id, message_id))
+                await db.commit()
+                return {"deleted": len(ids)}
+            if not group_has_right(member, 16):
+                raise HTTPException(403, "Очистить историю может только администратор")
+            cur = await db.execute("DELETE FROM group_messages WHERE group_id=?", (group_id,))
+            await db.execute("DELETE FROM message_reactions WHERE scope='group' AND chat_id=?", (group_id,))
+            await db.commit()
+        return {"deleted": cur.rowcount}
+
+    @router.delete("/api/groups/{group_id}/members/{telegram_id}/messages")
+    async def clear_group_member_messages(group_id: int, telegram_id: int,
+                                          authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        user = await current_user(authorization)
+        uid = int(user["telegram_id"])
+        async with aiosqlite.connect(db_path()) as db:
+            await db.execute("BEGIN IMMEDIATE")
+            member = await require_group_member(db, group_id, uid)
+            if not group_has_right(member, 16):
+                await db.rollback()
+                raise HTTPException(403, "Удалять историю участника может только администратор")
+            cur = await db.execute("DELETE FROM group_messages WHERE group_id=? AND sender_telegram_id=?",
+                                   (group_id, telegram_id))
+            await db.commit()
+        return {"deleted": cur.rowcount}
 
     @router.delete("/api/groups/{group_id}")
     async def delete_group(group_id: int, authorization: str | None = Header(default=None)) -> dict[str, bool]:
@@ -17003,6 +17193,7 @@ def build_messenger_router(
                             "UPDATE group_invites SET uses=uses+1 WHERE token_hash=?",
                             (token_hash,),
                         )
+                        await seed_group_history_marker(db, group_id, uid, now)
             await db.commit()
         return {
             "joined": joined,
@@ -17104,6 +17295,7 @@ def build_messenger_router(
                     "UPDATE group_invites SET uses=uses+1 WHERE token_hash=?",
                     (invite_hash,),
                 )
+                await seed_group_history_marker(db, group_id, telegram_id, now)
             await db.execute(
                 """UPDATE group_join_requests SET status='approved',reviewed_by=?,reviewed_at=?
                    WHERE group_id=? AND telegram_id=? AND status='pending'""",
@@ -17245,6 +17437,8 @@ def build_messenger_router(
                    VALUES(?,?,'member',?)""",
                 (group_id, target_id, now),
             )
+            if cur.rowcount == 1:
+                await seed_group_history_marker(db, group_id, target_id, now)
             await db.commit()
         return {
             "group_id": group_id,
@@ -17383,6 +17577,7 @@ def build_messenger_router(
                 if selected_ids is not None:
                     await db.execute("BEGIN")
                 await require_group_member(db, group_id, uid)
+                history_floor = await group_history_floor(db, group_id, uid)
                 db.row_factory = aiosqlite.Row
                 if after_id:
                     cur = await db.execute(
@@ -17401,8 +17596,8 @@ def build_messenger_router(
                                   (SELECT original_name FROM media_assets WHERE id=group_messages.media_id) AS media_name,
                                   (SELECT media_kind FROM media_assets WHERE id=group_messages.media_id) AS media_kind,
                                   (SELECT media_metadata FROM media_assets WHERE id=group_messages.media_id) AS media_metadata
-                           FROM group_messages WHERE group_id=? AND topic_id IS NULL AND id>? ORDER BY id ASC LIMIT ?""",
-                        (group_id, after_id, limit),
+                           FROM group_messages WHERE group_id=? AND topic_id IS NULL AND id>? AND id>? ORDER BY id ASC LIMIT ?""",
+                        (group_id, after_id, history_floor, limit),
                     )
                 else:
                     id_filter = "" if selected_ids is None else " AND id IN (" + ",".join("?" for _ in selected_ids) + ")"
@@ -17423,8 +17618,8 @@ def build_messenger_router(
                                   (SELECT original_name FROM media_assets WHERE id=group_messages.media_id) AS media_name,
                                   (SELECT media_kind FROM media_assets WHERE id=group_messages.media_id) AS media_kind,
                                   (SELECT media_metadata FROM media_assets WHERE id=group_messages.media_id) AS media_metadata
-                           FROM group_messages WHERE group_id=? AND topic_id IS NULL AND (?=0 OR id<?)""" + id_filter + " ORDER BY id DESC LIMIT ?",
-                        (group_id, before_id, before_id) + tuple(selected_ids or ()) + (selected_limit,),
+                           FROM group_messages WHERE group_id=? AND topic_id IS NULL AND (?=0 OR id<?) AND id>?""" + id_filter + " ORDER BY id DESC LIMIT ?",
+                        (group_id, before_id, before_id, history_floor) + tuple(selected_ids or ()) + (selected_limit,),
                     )
                 rows = await cur.fetchall()
             if rows or time.monotonic() >= deadline:

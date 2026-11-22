@@ -110,11 +110,36 @@ Telegram-клиент уже умеет все эти экраны; менять
     плюс `channels.checkSearchPostsFlood` (поиск всегда бесплатный) и `channels.deleteHistory` /
     `channels.deleteParticipantHistory` (очистка истории канала и истории участника).
 
+13. Группы переведены в супергруппы. Сервер отдаёт группу как `TL_channel` с `megagroup=true`
+    (`WaysGramChats.toMegagroup`), id группы остаётся прежним и лежит ниже `CHANNEL_OFFSET`, поэтому
+    клиент сам отличает группу от канала (`WaysGramChats.isGroupChannel`). Все сообщения групп
+    (`messages.*` → `channels.*`) идут через `WaysGramMegagroups` и `channels.*`-методы:
+    `getFullChannel`, `getParticipants`, `getParticipant`, `editAdmin`, `editBanned`,
+    `inviteToChannel`, `joinChannel`, `leaveChannel`, `deleteChannel`, `editTitle`, `editPhoto`,
+    `readHistory`, `deleteMessages`, `deleteHistory`, `deleteParticipantHistory`, `getMessages`,
+    `checkUsername`/`updateUsername`/`toggleUsername`, `getAdminLog`, `exportMessageLink`.
+    Диалоги, история, отправка, черновики, закреп, реакции, «печатает», медиа, пересылка,
+    приглашения и события — на `TL_peerChannel`/`TL_inputPeerChannel`.
+14. Три «супергрупповых» пункта теперь штатные в UI: медленный режим
+    (`channels.toggleSlowMode` → `PUT /api/groups/{id}/settings`, лестница 0/5/10/15/30/60/120/300),
+    скрытие списка участников (`toggleParticipantsHidden` → `members_hidden` + `can_view_participants`
+    в полном инфо) и скрытие истории (`togglePreHistoryHidden` → `pre_history_hidden`: новому
+    участнику ставится метка чтения на момент входа, а `GET /api/groups/{id}/messages` не отдаёт
+    сообщения старше его вступления).
+15. Заявки на вступление: `channels.toggleJoinRequest` → `join_request`; публичное вступление
+    (`POST /api/groups/{id}/join`) при включённом флаге создаёт заявку вместо вступления.
+    Очистка истории: `DELETE /api/groups/{id}/messages` (все или список id) и
+    `DELETE /api/groups/{id}/members/{tg}/messages`.
+16. Username группы (публичная ссылка) — `PUT /api/groups/{id}` с проверкой занятости среди групп,
+    каналов и аккаунтов.
+
 ## Что осталось за рамками паритета
 
-* Группы в WaysGram — это базовые чаты (`TL_chat`), поэтому строки «медленный режим» и «скрытие
-  участников» Telegram показывает только для супергрупп: серверная часть для групп готова
-  (`PUT /api/groups/{id}/settings`), но UI этих переключателей у базовой группы не рисует.
+* У групп нет форума-топиков, передача владения (`channels.editCreator`), `getSendAs` и
+  геолокация — отвечают пустым успехом или заглушкой.
+* `channels.toggleAntiSpam` для групп включает серверный антиспам (`send-permissions`), но без
+  обучаемых порогов — это простой фильтр.
+* Цвет профиля группы пока не хранится: `channels.updateColor` для группы вернёт ошибку канала.
 * Форум-топики, спонсорские отчёты, геолокация канала, переводчик (`toggleAutotranslation`) —
   отвечают пустым успехом или заглушкой, отдельной функциональности не несут.
 
@@ -122,4 +147,6 @@ Telegram-клиент уже умеет все эти экраны; менять
 
 1. Форум-топики канала (`channels.toggleForum`) — сейчас заглушка, нужен серверный слой топиков.
 2. Отправка от имени канала в группах (`channels.getSendAs`, `sendAsPeers`).
-3. Геолокация канала (`channels.editLocation`) и передача владения (`channels.editCreator`).
+3. Геолокация канала (`channels.editLocation`), передача владения (`channels.editCreator`) и цвет
+   профиля группы (`channels.updateColor`).
+4. Проверка миграции на устройстве: ветка собрана без компилятора, нужен прогон сборки APK.

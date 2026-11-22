@@ -9527,8 +9527,20 @@ def test_channel_settings_cover_signatures_slowmode_and_join_flags(api_env) -> N
             group = await client.post("/api/groups", headers=owner, json={"title": "Settings group"})
             group_id = group.json()["id"]
             assert (await client.put(f"/api/groups/{group_id}/settings", headers=owner,
-                                     json={"no_forwards": True, "slow_mode_seconds": 30})).status_code == 200
-            assert (await client.get(f"/api/groups/{group_id}", headers=owner)).json()["no_forwards"] == 1
+                                     json={"no_forwards": True, "slow_mode_seconds": 30,
+                                           "pre_history_hidden": True, "join_request": True})).status_code == 200
+            group_row = (await client.get(f"/api/groups/{group_id}", headers=owner)).json()
+            assert group_row["no_forwards"] == 1
+            assert group_row["pre_history_hidden"] is True
+            assert group_row["join_request"] is True
+            # Публичная ссылка группы: username хранится в chat_groups и проверяется на занятость.
+            assert (await client.put(f"/api/groups/{group_id}", headers=owner,
+                                     json={"username": "settings_group_link"})).status_code == 200
+            assert (await client.get(f"/api/groups/{group_id}", headers=owner)).json()["username"] == "settings_group_link"
+            # Группа с включёнными заявками: публичное вступление создаёт заявку, а не участника.
+            request = await client.post(f"/api/groups/{group_id}/join", headers=member)
+            assert request.status_code == 200, request.text
+            assert request.json()["join_requested"] is True
 
     run(scenario())
 
