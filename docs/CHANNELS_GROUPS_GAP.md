@@ -67,7 +67,7 @@ Telegram-клиент уже умеет все эти экраны; менять
 | Участники и их данные | ✅ | ✅ `getFullChat`, `channels.getParticipants` (для супергрупп) |
 | Приглашение / вступление / выход | ✅ `…/members`, `…/invites`, `/api/groups/join` | ✅ `addChatUser`, `importChatInvite`, `deleteChatUser` |
 | Администраторы, их права | ✅ `…/admins` | ✅ `messages.editChatAdmin` |
-| Блокировка / разблокировка / ограничение | ✅ `…/members/{tg}/mute`, ban | ✅ `channels.editBanned`, `editBanned` |
+| Блокировка / разблокировка / ограничение | ✅ `…/members/{tg}/mute`, ban, `…/send-permissions` | ✅ `channels.editBanned`, `editBanned`, `messages.editChatDefaultBannedRights` |
 | Текст / медиа / альбомы | ✅ | ✅ `sendMessage`, `sendMedia`, `sendMultiMedia` |
 | Редактирование / удаление / пересылка | ✅ | ✅ |
 | История / закреп / откреп | ✅ | ✅ |
@@ -103,7 +103,10 @@ Telegram-клиент уже умеет все эти экраны; менять
 10. Журнал действий: `channels.getAdminLog` — таблица `channel_admin_log`, события о названии,
     описании, username, фото, входе/выходе, бане/разбане, назначении/снятии админов, slow mode,
     привязке обсуждений; читают только владелец и админы.
-11. Поиск по постам: `channels.searchPosts` — `GET /api/channels/posts/search` по публичным каналам,
+11. Ограничения прав в группах: `messages.editChatDefaultBannedRights` ↔ `PUT /api/groups/{id}/send-permissions`
+    (маска «что нельзя отправлять»: текст, фото, видео, голосовые, стикеры, файлы), текущая маска
+    отдаётся в `default_banned_rights` группы.
+12. Поиск по постам: `channels.searchPosts` — `GET /api/channels/posts/search` по публичным каналам,
     плюс `channels.checkSearchPostsFlood` (поиск всегда бесплатный) и `channels.deleteHistory` /
     `channels.deleteParticipantHistory` (очистка истории канала и истории участника).
 
