@@ -9018,7 +9018,7 @@ public class Theme {
                 } else if (key == key_chat_serviceBackgroundSelected) {
                     return serviceSelectedMessageColor;
                 }
-                return getDefaultColor(key);
+                return org.telegram.ui.WaysGramCustomizationActivity.windowColor(key, getDefaultColor(key));
             }
         }
         int index = currentColors.indexOfKey(key);
@@ -9040,14 +9040,14 @@ public class Theme {
             } else if (key == key_chat_serviceBackgroundSelected) {
                 return serviceSelectedMessageColor;
             }
-            return getDefaultColor(key);
+            return org.telegram.ui.WaysGramCustomizationActivity.windowColor(key, getDefaultColor(key));
         } else {
             color = currentColors.valueAt(index);
         }
         if (key_windowBackgroundWhite == key || key_windowBackgroundGray == key || key_actionBarDefault == key || key_actionBarDefaultArchived == key) {
             color |= 0xff000000;
         }
-        return color;
+        return org.telegram.ui.WaysGramCustomizationActivity.windowColor(key, color);
     }
 
     private static boolean isMyMessagesBubbles(int key) {

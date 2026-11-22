@@ -44867,8 +44867,9 @@ public class ChatActivity extends BaseFragment implements
             return;
         }
         if (contentView.getBackgroundImage() == null || AndroidUtilities.isTablet()) {
-            final Drawable drawable = Theme.getCachedWallpaper();
-            contentView.setBackgroundImage(drawable, Theme.isWallpaperMotion());
+            final Drawable custom = WaysGramCustomizationActivity.chatWallpaper(currentAccount);
+            final Drawable drawable = custom != null ? custom : Theme.getCachedWallpaper();
+            contentView.setBackgroundImage(drawable, custom == null && Theme.isWallpaperMotion());
         }
     }
 

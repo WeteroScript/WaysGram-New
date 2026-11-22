@@ -296,7 +296,10 @@ public class PagerSlidingTabStrip extends HorizontalScrollView {
                 rectPaint.setColor(indicatorColor);
                 AndroidUtilities.rectTmp.set(lineLeft - AndroidUtilities.dp(11), getPaddingTop(), lineRight  + AndroidUtilities.dp(11), height - getPaddingBottom());
                 AndroidUtilities.rectTmp.offset(getPaddingLeft(), 0);
-                canvas.drawRoundRect(AndroidUtilities.rectTmp, AndroidUtilities.rectTmp.height() / 2f, AndroidUtilities.rectTmp.height() / 2f, rectPaint);
+                if (!org.telegram.ui.WaysGramCustomizationActivity.drawIndicatorImage(canvas, AndroidUtilities.rectTmp,
+                        AndroidUtilities.rectTmp.height() / 2f, 1f)) {
+                    canvas.drawRoundRect(AndroidUtilities.rectTmp, AndroidUtilities.rectTmp.height() / 2f, AndroidUtilities.rectTmp.height() / 2f, rectPaint);
+                }
             }
         }
 

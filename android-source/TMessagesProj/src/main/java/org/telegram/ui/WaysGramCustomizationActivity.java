@@ -23,6 +23,10 @@ public class WaysGramCustomizationActivity extends BaseFragment {
     private static final Bitmap[] layers = new Bitmap[2];
     private static int renderedAccount = -1;
     private static String renderedKey;
+    /** 0 — кастомизация выключена; иначе альфа фонов окна (сквозь них виден фон). */
+    private static volatile int backdropAlpha;
+    /** Акцентный цвет, выведенный из картинки подложки: им красятся основные кнопки. */
+    private static volatile int accentColor;
     private static final java.util.WeakHashMap<View, Integer> navViews = new java.util.WeakHashMap<>();
     private static final Path clip = new Path();
 
@@ -95,13 +99,74 @@ public class WaysGramCustomizationActivity extends BaseFragment {
 
     public static void refreshLayers(int account) {
         SharedPreferences p = prefs(account);
-        String id = p.getBoolean("enabled", false) ? p.getString("active", "") : "";
+        boolean enabled = p.getBoolean("enabled", false);
+        String id = enabled ? p.getString("active", "") : "";
         String key = UserConfig.getInstance(account).getClientUserId() + ":" + id;
         if (renderedAccount == account && key.equals(renderedKey)) return;
         renderedAccount = account;
         renderedKey = key;
         JSONObject config = object(p.getString("config_" + id, ""));
         for (int i = 0; i < 2; i++) layers[i] = bitmap(config.optString("image" + i));
+        backdropAlpha = enabled && layers[0] != null ? 214 : 0;
+        accentColor = backdropAlpha == 0 ? 0 : layerAccent(layers[0]);
+    }
+
+    /** Средний цвет подложки, подтянутый по насыщенности: акцент для кнопок. */
+    private static int layerAccent(Bitmap bitmap) {
+        if (bitmap == null || bitmap.getWidth() < 2 || bitmap.getHeight() < 2) return 0;
+        int stepX = Math.max(1, bitmap.getWidth() / 16), stepY = Math.max(1, bitmap.getHeight() / 8);
+        long red = 0, green = 0, blue = 0;
+        int count = 0;
+        for (int y = stepY / 2; y < bitmap.getHeight(); y += stepY) {
+            for (int x = stepX / 2; x < bitmap.getWidth(); x += stepX) {
+                int pixel = bitmap.getPixel(x, y);
+                if (Color.alpha(pixel) < 32) continue;
+                red += Color.red(pixel);
+                green += Color.green(pixel);
+                blue += Color.blue(pixel);
+                count++;
+            }
+        }
+        if (count == 0) return 0;
+        float[] hsv = new float[3];
+        Color.colorToHSV(Color.rgb((int) (red / count), (int) (green / count), (int) (blue / count)), hsv);
+        hsv[1] = Math.max(hsv[1], .55f);
+        hsv[2] = Math.max(.45f, Math.min(.62f, hsv[2]));
+        return Color.HSVToColor(hsv);
+    }
+
+    /**
+     * Фон окна и основные кнопки под кастомизацию. Вызывается из Theme.getColor,
+     * поэтому обязано быть дешёвым и без обращений к prefs.
+     */
+    public static int windowColor(int key, int color) {
+        final int accent = accentColor;
+        if (accent != 0 && (key == Theme.key_windowBackgroundWhiteBlueButton
+                || key == Theme.key_windowBackgroundWhiteBlueIcon
+                || key == Theme.key_windowBackgroundWhiteBlueText
+                || key == Theme.key_windowBackgroundWhiteBlueText2
+                || key == Theme.key_featuredStickers_addButton
+                || key == Theme.key_chat_messagePanelSend)) {
+            return accent;
+        }
+        final int alpha = backdropAlpha;
+        if (alpha == 0) return color;
+        if (key == Theme.key_windowBackgroundWhite) return (color & 0x00ffffff) | (alpha << 24);
+        if (key == Theme.key_windowBackgroundGray) return (color & 0x00ffffff) | (Math.min(255, alpha - 14) << 24);
+        return color;
+    }
+
+    /** Картинка индикатора для любых вкладок; false — рисуйте штатный индикатор. */
+    public static boolean drawIndicatorImage(Canvas canvas, RectF box, float radius, float opacity) {
+        refreshLayers(UserConfig.selectedAccount);
+        return drawLayer(canvas, 1, box, radius, opacity);
+    }
+
+    /** Фон переписки: подложка кастомизации вместо обоев, если она включена. */
+    public static android.graphics.drawable.Drawable chatWallpaper(int account) {
+        SharedPreferences p = prefs(account);
+        if (!p.getBoolean("enabled", false) || p.getString("active", "").isEmpty()) return null;
+        return new ImageBackdropDrawable(account, 0x2b000000);
     }
 
     public static boolean drawIndicator(View tabLayout, Canvas canvas, RectF box, float radius, float opacity) {
@@ -122,6 +187,62 @@ public class WaysGramCustomizationActivity extends BaseFragment {
         canvas.drawBitmap(b, null, box, PAINT);
         canvas.restoreToCount(save);
         return true;
+    }
+
+    private static void cover(RectF dst, Rect bounds, Bitmap image) {
+        float scale = Math.max(bounds.width() / (float) image.getWidth(), bounds.height() / (float) image.getHeight());
+        float width = image.getWidth() * scale, height = image.getHeight() * scale;
+        float centerX = bounds.exactCenterX(), centerY = bounds.exactCenterY();
+        dst.set(centerX - width / 2f, centerY - height / 2f, centerX + width / 2f, centerY + height / 2f);
+    }
+
+    /** Подложка, растянутая по площади с сохранением пропорций, плюс затемнение под текст. */
+    public static class ImageBackdropDrawable extends android.graphics.drawable.Drawable {
+        private final int account, scrimColor;
+        private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.FILTER_BITMAP_FLAG);
+        private final Paint scrimPaint = new Paint();
+        private final RectF dst = new RectF();
+        private final Rect bounds = new Rect();
+
+        public ImageBackdropDrawable(int account, int scrimColor) {
+            this.account = account;
+            this.scrimColor = scrimColor;
+        }
+
+        @Override public void draw(Canvas canvas) {
+            refreshLayers(account);
+            Bitmap image = layers[0];
+            Rect area = getBounds();
+            if (image == null || area.isEmpty()) return;
+            cover(dst, area, image);
+            canvas.drawBitmap(image, null, dst, paint);
+            if (Color.alpha(scrimColor) != 0) {
+                scrimPaint.setColor(scrimColor);
+                canvas.drawRect(area, scrimPaint);
+            }
+        }
+
+        @Override public void setAlpha(int alpha) { paint.setAlpha(alpha); }
+        @Override public void setColorFilter(ColorFilter filter) { paint.setColorFilter(filter); }
+        @Override public int getOpacity() { return PixelFormat.TRANSLUCENT; }
+    }
+
+    /** Фон всего приложения: живёт под интерфейсом в LaunchActivity. */
+    public static class BackdropView extends View {
+        private final ImageBackdropDrawable drawable;
+        private final Rect area = new Rect();
+
+        public BackdropView(Context context, int account) {
+            super(context);
+            drawable = new ImageBackdropDrawable(account, 0x33000000);
+            navViews.put(this, account);
+        }
+
+        @Override protected void onDraw(Canvas canvas) {
+            area.set(0, 0, getWidth(), getHeight());
+            drawable.setBounds(area);
+            drawable.draw(canvas);
+        }
     }
 
     @Override public View createView(Context context) {
