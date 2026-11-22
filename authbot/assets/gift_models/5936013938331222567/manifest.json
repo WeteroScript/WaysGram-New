@@ -1,14 +1,15 @@
 {
   "gift_id": "5936013938331222567",
-  "source": "WaysGram original artwork; motion keyframes of the body layer are taken from the original Plush Pepe gift sticker (plush_pepe.tgs)",
+  "source": "WaysGram original artwork, encoded from the model's raster frames as WebM with alpha (the app's Lottie renderer draws vector frames only)",
   "commit": "",
   "models": [
     {
       "name": "WaysGram",
-      "file": "waysgram.tgs",
+      "file": "waysgram.webm",
       "document_id": -5936013938331222567,
-      "sha256": "3c6b713314503bc59a40651ab6fa3fa0dcced05e76aadd0320f32e3d83392823",
-      "bytes": 27682
+      "mime_type": "video/webm",
+      "sha256": "f36099b7bdf8704ab550a94343b4eace8b7b604195e2f5501438c8d40da521ba",
+      "bytes": 193921
     }
   ]
 }

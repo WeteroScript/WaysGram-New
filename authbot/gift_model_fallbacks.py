@@ -1,4 +1,12 @@
-"""Pinned, exact-name artwork fallback for old Heart Locket upgrades.
+"""Pinned, exact-name artwork fallback for WaysGram-exclusive models.
+
+Two packs are bundled with the backend:
+
+* Heart Locket — the official Telegram model set, kept as a last resort when a live
+  file reference expires;
+* Plush Pepe — the WaysGram-exclusive model, a WebM animation with an alpha channel.
+  The app ships the same file, so the model is visible offline; this copy answers the
+  ``attributes/{document_id}`` request when the client has not installed it yet.
 
 Synthetic negative document IDs are local to WaysGram; they are never persisted as
 Telegram IDs. Do not guess a model from its chance or position in a partial pool.
@@ -16,6 +24,10 @@ HEART_LOCKET_ID = "5868455043362980631"
 PLUSH_PEPE_ID = "5936013938331222567"
 
 _ROOT = Path(__file__).with_name("assets") / "gift_models"
+
+#: Artwork formats a pack may carry. Telegram stickers are vector TGS; the WaysGram
+#: model is WebM with alpha, because the app's Lottie renderer draws vector frames only.
+_SUFFIX_MIME = {".tgs": "application/x-tgsticker", ".webm": "video/webm"}
 
 
 @lru_cache(maxsize=16)
@@ -36,12 +48,13 @@ def _models(gift_id: str = HEART_LOCKET_ID) -> tuple[dict[str, dict[str, Any]], 
             doc_id, telegram_id = int(row.get("document_id") or 0), int(row.get("telegram_document_id") or 0)
         except (TypeError, ValueError):
             continue
-        if not name or not filename.endswith(".tgs") or Path(filename).name != filename or doc_id >= 0:
+        suffix = Path(filename).suffix.lower()
+        if not name or suffix not in _SUFFIX_MIME or Path(filename).name != filename or doc_id >= 0:
             continue
         path = root / filename
         if not path.is_file():
             continue
-        entry = {"name": name, "document_id": doc_id, "path": path}
+        entry = {"name": name, "document_id": doc_id, "path": path, "mime": _SUFFIX_MIME[suffix]}
         names[name.casefold()] = entry
         synthetic[doc_id] = entry
         if telegram_id > 0:

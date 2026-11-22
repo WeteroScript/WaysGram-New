@@ -7671,7 +7671,8 @@ def build_messenger_router(
         # Negative IDs are reserved for our pinned fallback assets, never sent to MTProto.
         local_model = gift_model_fallbacks.model_for_document(key, numeric_document, synthetic=True)
         if local_model:
-            return FileResponse(local_model["path"], media_type="application/x-tgsticker",
+            return FileResponse(local_model["path"],
+                                media_type=local_model.get("mime") or "application/x-tgsticker",
                                 headers={"Cache-Control": "private, max-age=604800"})
         provider = _gift_provider()
         error = None
@@ -7686,7 +7687,8 @@ def build_messenger_router(
         # model is still available offline if the live file reference has expired.
         local_model = gift_model_fallbacks.model_for_document(key, numeric_document, synthetic=False)
         if local_model:
-            return FileResponse(local_model["path"], media_type="application/x-tgsticker",
+            return FileResponse(local_model["path"],
+                                media_type=local_model.get("mime") or "application/x-tgsticker",
                                 headers={"Cache-Control": "private, max-age=604800"})
         if provider is None:
             raise HTTPException(status_code=503, detail="Каталог подарков Telegram недоступен")

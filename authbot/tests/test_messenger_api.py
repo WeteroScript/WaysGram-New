@@ -7027,6 +7027,34 @@ def test_heart_locket_model_fallback_respects_live_provider_and_fails_closed(api
     run(scenario())
 
 
+def test_plush_pepe_model_fallback_serves_webm_artwork(api_env):
+    """The WaysGram-exclusive model is WebM: the app's Lottie renderer ignores raster layers."""
+    import gift_model_fallbacks
+    path, store, bot, _ = api_env
+    add_account(api_env, 88422, 'pepe_model_reader')
+    add_session(path, 88422, 'pepe-model-reader-session')
+    model = gift_model_fallbacks.model_for_name(gift_model_fallbacks.PLUSH_PEPE_ID, 'WaysGram')
+    assert model is not None
+    assert model['mime'] == 'video/webm'
+    assert model['path'].read_bytes()[:4] == b'\x1aE\xdf\xa3'  # EBML/WebM signature
+
+    app = FastAPI()
+    app.include_router(build_messenger_router(path, store, lambda: bot, bot_module.account_is_banned, lambda: None))
+
+    async def scenario():
+        headers = {'Authorization': 'Bearer pepe-model-reader-session'}
+        base = f"/api/telegram/gifts/{gift_model_fallbacks.PLUSH_PEPE_ID}/attributes/"
+        async with await client_for(app) as client:
+            response = await client.get(base + str(model['document_id']), headers=headers)
+            assert response.status_code == 200
+            assert response.headers['content-type'].split(';')[0] == 'video/webm'
+            assert response.content == model['path'].read_bytes()
+            # Unknown synthetic IDs keep failing closed instead of guessing artwork.
+            unknown = await client.get(base + '-5936013938331229999', headers=headers)
+            assert unknown.status_code in (502, 503)
+    run(scenario())
+
+
 def test_group_channel_history_pages_and_authorization(api_env) -> None:
     path, _auth_store, _fake_bot, app = api_env
     for uid, name in ((88001, 'history_owner'), (88002, 'history_outsider')):
