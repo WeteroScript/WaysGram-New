@@ -1879,8 +1879,15 @@ async def init_messenger_storage(database_path: Path) -> None:
             await db.execute("ALTER TABLE main.channel_inbox_messages ADD COLUMN reward_stars INTEGER NOT NULL DEFAULT 0")
         await db.execute("CREATE INDEX IF NOT EXISTS main.idx_inbox_scheduled ON channel_inbox_messages(scheduled_at) WHERE proposal_state='scheduled'")
         cur = await db.execute("PRAGMA table_info(channels)")
-        if "paid_reactions_enabled" not in {row[1] for row in await cur.fetchall()}:
+        channel_columns = {row[1] for row in await cur.fetchall()}
+        if "paid_reactions_enabled" not in channel_columns:
             await db.execute("ALTER TABLE channels ADD COLUMN paid_reactions_enabled INTEGER NOT NULL DEFAULT 0")
+        if "reactions_enabled" not in channel_columns:
+            await db.execute("ALTER TABLE channels ADD COLUMN reactions_enabled INTEGER NOT NULL DEFAULT 1")
+        if "reactions_limit" not in channel_columns:
+            await db.execute("ALTER TABLE channels ADD COLUMN reactions_limit INTEGER NOT NULL DEFAULT 11")
+        if "available_reactions" not in channel_columns:
+            await db.execute("ALTER TABLE channels ADD COLUMN available_reactions TEXT NOT NULL DEFAULT '[]'")
         if "members_can_post_stories" not in chat_group_columns:
             await db.execute(f"ALTER TABLE {db_split.SCHEMA}.chat_groups ADD COLUMN members_can_post_stories INTEGER NOT NULL DEFAULT 0")
         if "boost_slow_mode_bypass" not in chat_group_columns:
@@ -9508,8 +9515,18 @@ def build_messenger_router(
                 pending = await cur.fetchall()
                 channel["requests_pending"] = pending[0][1] if pending else 0
                 channel["recent_requesters"] = [row[0] for row in pending]
-            cur = await db.execute("SELECT paid_reactions_enabled FROM channels WHERE id=?", (channel_id,))
-            channel["paid_reactions_enabled"] = bool((await cur.fetchone() or (0,))[0])
+            cur = await db.execute(
+                "SELECT paid_reactions_enabled,reactions_enabled,reactions_limit,available_reactions FROM channels WHERE id=?",
+                (channel_id,),
+            )
+            reactions_row = await cur.fetchone() or (0, 1, 11, "[]")
+            channel["paid_reactions_enabled"] = bool(reactions_row[0])
+            channel["reactions_enabled"] = bool(reactions_row[1])
+            channel["reactions_limit"] = int(reactions_row[2])
+            try:
+                channel["available_reactions"] = json.loads(reactions_row[3] or "[]")
+            except (TypeError, ValueError):
+                channel["available_reactions"] = []
         channel["labels"] = await entity_labels("channel", channel_id)
         return channel
 
@@ -10243,6 +10260,59 @@ def build_messenger_router(
                 raise HTTPException(404, "CHANNEL_NOT_FOUND")
             await db.commit()
         return {"enabled": enabled}
+
+    @router.put("/api/channels/{channel_id}/reactions-settings")
+    async def set_channel_reactions_settings(channel_id: int, payload: dict[str, Any],
+                                             authorization: str | None = Header(default=None)):
+        """Настройки реакций канала: включены ли, сколько и какие именно эмодзи."""
+        uid = int((await current_user(authorization))["telegram_id"])
+        if not await can_manage_channel(channel_id, uid):
+            raise HTTPException(403, "CHANNEL_FORBIDDEN")
+        fields: list[str] = []
+        values: list[Any] = []
+        if "enabled" in payload:
+            enabled = payload["enabled"]
+            if type(enabled) is not bool:
+                raise HTTPException(400, "INVALID_REACTIONS_SETTING")
+            fields.append("reactions_enabled=?")
+            values.append(int(enabled))
+        if "limit" in payload:
+            limit = payload["limit"]
+            if type(limit) is not int or not 1 <= limit <= 11:
+                raise HTTPException(400, "INVALID_REACTIONS_LIMIT")
+            fields.append("reactions_limit=?")
+            values.append(limit)
+        if "reactions" in payload:
+            reactions = payload["reactions"]
+            if (
+                not isinstance(reactions, list)
+                or len(reactions) > 100
+                or any(not isinstance(item, str) or not item.strip() or len(item) > 32 for item in reactions)
+            ):
+                raise HTTPException(400, "INVALID_REACTIONS")
+            fields.append("available_reactions=?")
+            values.append(json.dumps(list(dict.fromkeys(item.strip() for item in reactions)), ensure_ascii=False))
+        if not fields:
+            raise HTTPException(400, "INVALID_REACTIONS_SETTING")
+        values.append(channel_id)
+        async with aiosqlite.connect(db_path()) as db:
+            cur = await db.execute("UPDATE channels SET " + ",".join(fields) + " WHERE id=?", values)
+            if not cur.rowcount:
+                raise HTTPException(404, "CHANNEL_NOT_FOUND")
+            await db.commit()
+        async with aiosqlite.connect(db_path()) as db:
+            cur = await db.execute(
+                "SELECT reactions_enabled,reactions_limit,available_reactions FROM channels WHERE id=?",
+                (channel_id,),
+            )
+            row = await cur.fetchone()
+        if row is None:
+            raise HTTPException(404, "CHANNEL_NOT_FOUND")
+        try:
+            reactions = json.loads(row[2] or "[]")
+        except (TypeError, ValueError):
+            reactions = []
+        return {"enabled": bool(row[0]), "limit": int(row[1]), "reactions": reactions}
 
     @router.get("/api/channels/{channel_id}/messages/{message_id}/paid-reactions")
     async def get_channel_paid_reactions(channel_id: int, message_id: int, authorization: str | None = Header(default=None)):

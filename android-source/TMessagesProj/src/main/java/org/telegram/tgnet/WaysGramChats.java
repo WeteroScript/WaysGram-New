@@ -629,6 +629,49 @@ public class WaysGramChats {
         return result;
     }
 
+    /** setChatAvailableReactions: включение, лимит и список эмодзи для канала. */
+    public static TLRPC.TL_updates setAvailableReactions(int account, TLRPC.TL_messages_setChatAvailableReactions req, long selfId) throws WaysGramApi.ApiException {
+        if (!(req.peer instanceof TLRPC.TL_inputPeerChannel)) {
+            throw new WaysGramApi.ApiException(400, "METHOD_NOT_SUPPORTED");
+        }
+        long channelId = channelServer(((TLRPC.TL_inputPeerChannel) req.peer).channel_id);
+        JSONObject body = new JSONObject();
+        try {
+            if (req.available_reactions instanceof TLRPC.TL_chatReactionsNone) {
+                body.put("enabled", false);
+            } else {
+                body.put("enabled", true);
+                if (req.available_reactions instanceof TLRPC.TL_chatReactionsSome) {
+                    JSONArray reactions = new JSONArray();
+                    for (TLRPC.Reaction reaction : ((TLRPC.TL_chatReactionsSome) req.available_reactions).reactions) {
+                        if (reaction instanceof TLRPC.TL_reactionEmoji
+                                && !android.text.TextUtils.isEmpty(((TLRPC.TL_reactionEmoji) reaction).emoticon)) {
+                            reactions.put(((TLRPC.TL_reactionEmoji) reaction).emoticon);
+                        }
+                    }
+                    body.put("reactions", reactions);
+                } else {
+                    body.put("reactions", new JSONArray());
+                }
+            }
+            if (TLObject.hasFlag(req.flags, TLObject.FLAG_0)) {
+                body.put("limit", Math.max(1, Math.min(11, req.reactions_limit)));
+            }
+            if (TLObject.hasFlag(req.flags, TLObject.FLAG_1)) {
+                WaysGramApi.put(account, "/api/channels/" + channelId + "/paid-reactions",
+                        new JSONObject().put("enabled", req.paid_enabled));
+            }
+        } catch (org.json.JSONException e) {
+            throw new WaysGramApi.ApiException(400, "REACTIONS_INVALID");
+        }
+        WaysGramApi.put(account, "/api/channels/" + channelId + "/reactions-settings", body);
+        TLRPC.TL_updates updates = new TLRPC.TL_updates();
+        updates.date = (int) (System.currentTimeMillis() / 1000);
+        updates.chats.add(toChannel(WaysGramApi.get(account, "/api/channels/" + channelId), selfId,
+                joinedChannels(account).contains(channelId)));
+        return updates;
+    }
+
     public static TLRPC.TL_messages_chatFull fullChannel(int account, long channelId, long selfId) throws WaysGramApi.ApiException {
         JSONObject channel = WaysGramApi.get(account, "/api/channels/" + channelServer(channelId));
         TLRPC.TL_channelFull full = new TLRPC.TL_channelFull();
@@ -648,6 +691,26 @@ public class WaysGramChats {
                 org.telegram.messenger.FileLog.e(e);
             }
         }
+        JSONArray availableReactions = channel.optJSONArray("available_reactions");
+        boolean reactionsEnabled = channel.optBoolean("reactions_enabled", true);
+        if (availableReactions == null || availableReactions.length() == 0) {
+            full.available_reactions = reactionsEnabled ? new TLRPC.TL_chatReactionsAll() : new TLRPC.TL_chatReactionsNone();
+        } else {
+            TLRPC.TL_chatReactionsSome some = new TLRPC.TL_chatReactionsSome();
+            for (int i = 0; i < availableReactions.length(); i++) {
+                String emoji = availableReactions.optString(i, "").trim();
+                if (emoji.isEmpty()) continue;
+                TLRPC.TL_reactionEmoji reaction = new TLRPC.TL_reactionEmoji();
+                reaction.emoticon = emoji;
+                some.reactions.add(reaction);
+            }
+            full.available_reactions = some.reactions.isEmpty() ? new TLRPC.TL_chatReactionsAll() : some;
+        }
+        full.flags |= TLObject.FLAG_30;
+        full.reactions_limit = channel.optInt("reactions_limit", 11);
+        full.flags2 |= TLObject.FLAG_13;
+        full.paid_reactions_available = channel.optBoolean("paid_reactions_enabled");
+        if (full.paid_reactions_available) full.flags2 |= TLObject.FLAG_16;
         full.participants_count = channel.optInt("member_count");
         boolean channelOwner = channel.optLong("owner_telegram_id") == selfId;
         int adminsCount = Math.max(0, channel.optInt("admin_count", 0));

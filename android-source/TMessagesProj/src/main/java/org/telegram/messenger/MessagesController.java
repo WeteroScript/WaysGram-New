@@ -15215,6 +15215,16 @@ public class MessagesController extends BaseController implements NotificationCe
     }
 
     public void convertToMegaGroup(Context context, long chatId, BaseFragment fragment, MessagesStorage.LongCallback convertRunnable, Runnable errorRunnable) {
+        if (org.telegram.tgnet.WaysGramTransport.ENABLED) {
+            // WaysGram-группы изначально умеют всё, что даёт миграция в мегагруппу,
+            // поэтому конвертация не нужна: продолжаем с тем же чатом.
+            AndroidUtilities.runOnUIThread(() -> {
+                if (convertRunnable != null) {
+                    convertRunnable.run(chatId);
+                }
+            });
+            return;
+        }
         TLRPC.TL_messages_migrateChat req = new TLRPC.TL_messages_migrateChat();
         req.chat_id = chatId;
         AlertDialog progressDialog = context != null ? new AlertDialog(context, AlertDialog.ALERT_TYPE_SPINNER) : null;

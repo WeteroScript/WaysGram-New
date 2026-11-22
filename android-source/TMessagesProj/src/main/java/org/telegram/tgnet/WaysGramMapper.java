@@ -50,6 +50,22 @@ public class WaysGramMapper {
         return "";
     }
 
+    private static boolean looksLikePhone(String value) {
+        if (TextUtils.isEmpty(value)) {
+            return false;
+        }
+        int digits = 0;
+        for (int i = 0; i < value.length(); i++) {
+            char ch = value.charAt(i);
+            if (ch >= '0' && ch <= '9') {
+                digits++;
+            } else if (ch != '+' && ch != ' ' && ch != '(' && ch != ')' && ch != '-') {
+                return false;
+            }
+        }
+        return digits >= 5;
+    }
+
     public static TLRPC.TL_user toUser(JSONObject json) {
         TLRPC.TL_user user = new TLRPC.TL_user();
         if (json == null) {
@@ -61,6 +77,11 @@ public class WaysGramMapper {
 
         String display = json.optString("display_name", "").trim();
         String username = json.optString("username", "").trim();
+        // Служебные аккаунты создаются с именем-номером («+888 888 8888»): если у человека
+        // есть ник, показываем ник, а не телефон.
+        if (!username.isEmpty() && looksLikePhone(display)) {
+            display = username;
+        }
         if (display.isEmpty()) {
             display = !username.isEmpty() ? username : "User " + user.id;
         }

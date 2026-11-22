@@ -616,6 +616,8 @@ public class WaysGramTransport {
             return WaysGramChats.fullChat(account, ((TLRPC.TL_messages_getFullChat) request).chat_id, selfId);
         } else if (request instanceof TLRPC.TL_messages_createChat) {
             return WaysGramChats.createChat(account, (TLRPC.TL_messages_createChat) request, selfId);
+        } else if (request instanceof TLRPC.TL_messages_setChatAvailableReactions) {
+            return WaysGramChats.setAvailableReactions(account, (TLRPC.TL_messages_setChatAvailableReactions) request, selfId);
         } else if (request instanceof TLRPC.TL_messages_editChatTitle) {
             TLRPC.TL_messages_editChatTitle edit = (TLRPC.TL_messages_editChatTitle) request;
             return WaysGramChats.editGroup(account, edit.chat_id, "title", edit.title, selfId);

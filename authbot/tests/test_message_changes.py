@@ -2526,3 +2526,50 @@ def test_sponsored_placement_requires_consent_and_settles_real_stars_once(env):
             assert len((await client.get(root + '/messages', headers=sponsor)).json()['messages']) == 1
 
     run(scenario())
+
+
+def test_channel_reactions_settings_are_saved_and_returned(env) -> None:
+    """Экран «Реакции» канала: включение, лимит и свой список эмодзи."""
+    path, app = env
+
+    async def scenario() -> None:
+        async with await client_for(app) as client:
+            channel = (await client.post("/api/channels", headers=headers(101), json={"title": "Reacts", "username": "reacts_chan"})).json()
+            cid = channel["id"]
+
+            # По умолчанию реакции включены, лимит 11, список — все эмодзи.
+            current = (await client.get(f"/api/channels/{cid}", headers=headers(101))).json()
+            assert current["reactions_enabled"] is True
+            assert current["reactions_limit"] == 11
+            assert current["available_reactions"] == []
+
+            saved = await client.put(
+                f"/api/channels/{cid}/reactions-settings", headers=headers(101),
+                json={"enabled": True, "limit": 3, "reactions": ["👍", "🔥", "👍"]},
+            )
+            assert saved.status_code == 200
+            assert saved.json() == {"enabled": True, "limit": 3, "reactions": ["👍", "🔥"]}
+            refreshed = (await client.get(f"/api/channels/{cid}", headers=headers(101))).json()
+            assert refreshed["reactions_limit"] == 3
+            assert refreshed["available_reactions"] == ["👍", "🔥"]
+
+            # Выключить реакции можно отдельным запросом.
+            assert (await client.put(
+                f"/api/channels/{cid}/reactions-settings", headers=headers(101), json={"enabled": False}
+            )).json()["enabled"] is False
+
+            # Чужие и кривые значения не проходят.
+            assert (await client.put(
+                f"/api/channels/{cid}/reactions-settings", headers=headers(102), json={"enabled": True}
+            )).status_code == 403
+            assert (await client.put(
+                f"/api/channels/{cid}/reactions-settings", headers=headers(101), json={"limit": 12}
+            )).status_code == 400
+            assert (await client.put(
+                f"/api/channels/{cid}/reactions-settings", headers=headers(101), json={"reactions": ["👍", 5]}
+            )).status_code == 400
+            assert (await client.put(
+                f"/api/channels/{cid}/reactions-settings", headers=headers(101), json={}
+            )).status_code == 400
+
+    run(scenario())

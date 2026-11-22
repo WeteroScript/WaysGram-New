@@ -1305,7 +1305,10 @@ public class ChatEditActivity extends BaseFragment implements ImageUpdater.Image
                 }
             });
 
-            if (ChatObject.canUserDoAdminAction(currentChat, ChatObject.ACTION_MANAGE_WELCOME)) {
+            // WaysGram пока не поддерживает приветственные сообщения (ephemeral API),
+            // поэтому не показываем пункт, который ведёт в пустой экран.
+            if (!org.telegram.tgnet.WaysGramTransport.ENABLED
+                    && ChatObject.canUserDoAdminAction(currentChat, ChatObject.ACTION_MANAGE_WELCOME)) {
                 welcomeMessagesCell = new TextCell(context);
                 welcomeMessagesCell.setBackground(Theme.getSelectorDrawable(false));
                 welcomeMessagesCell.setOnClickListener(v -> {
