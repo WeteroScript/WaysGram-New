@@ -19,7 +19,7 @@ Telegram-клиент уже умеет все эти экраны; менять
 | Удаление канала | ✅ `DELETE /api/channels/{id}` | ✅ `channels.deleteChannel` |
 | Изменение названия | ✅ `PUT /api/channels/{id}` | ✅ `channels.editTitle` |
 | Изменение фотографии | ✅ `PUT/DELETE /api/channels/{id}/avatar`, `avatar_media_id` в выдаче | ✅ `channels.editPhoto` |
-| Изменение описания | ✅ `PUT /api/channels/{id}` | ❌ `messages.editChatAbout`/`channels.editAbout` не подключены |
+| Изменение описания | ✅ `PUT /api/channels/{id}` | ✅ `messages.editChatAbout` |
 | Установка username | ✅ `PUT /api/channels/{id}` | ✅ `channels.updateUsername` |
 | Проверка username | ✅ | ✅ `channels.checkUsername` |
 | Просмотр информации | ✅ `GET /api/channels/{id}` | ✅ `channels.getFullChannel` |
@@ -40,18 +40,18 @@ Telegram-клиент уже умеет все эти экраны; менять
 | Закрепление / открепление | ✅ | ✅ `messages.updatePinnedMessage`, `unpinAllMessages` |
 | История публикаций | ✅ `GET …/messages` | ✅ `messages.getHistory` |
 | Отметка прочитанным | ✅ `read_markers` | ✅ `channels.readHistory` |
-| Подписи авторов | 🟡 только `post`-флаг | ❌ `channels.toggleSignatures` |
-| Привязка группы обсуждений | ✅ `PUT …/discussion-group` | 🟡 своя строка в настройках, нативный `channels.setDiscussionGroup` — ❌ |
-| Список групп для обсуждения | ✅ `GET /api/groups` | ❌ `channels.getGroupsForDiscussion` |
+| Подписи авторов | ✅ `PUT …/settings` (`signatures_enabled`, `signatures_profiles`) | ✅ `channels.toggleSignatures` |
+| Привязка группы обсуждений | ✅ `PUT …/discussion-group` | ✅ `channels.setDiscussionGroup` (+ `linked_chat_id` в полном инфо) |
+| Список групп для обсуждения | ✅ `GET /api/groups` | ✅ `channels.getGroupsForDiscussion` |
 | Пригласительные ссылки (создать/изменить/удалить/список) | ✅ `…/invites…` | ✅ `messages.exportChatInvite`, `editExportedChatInvite`, `deleteExportedChatInvite`, `getExportedChatInvites` |
 | Заявки на вступление | ✅ `…/join-requests…` | ✅ `getChatInviteImporters`, `hideChatJoinRequest`; одобрение/отклонение — ✅ |
 | Посты по id (ответы, закреп, альбомы) | ✅ `?message_ids=` | ✅ **добавлено:** `channels.getMessages`, `channels.readMessageContents` |
-| Медленный режим канала | ❌ нет поля | ❌ `channels.toggleSlowMode` |
-| Скрытие участников / прежней истории | ❌ нет полей | ❌ `channels.toggleParticipantsHidden`, `togglePreHistoryHidden` |
-| Журнал действий | 🟡 `GET …/analytics` | ❌ `channels.getAdminLog` |
-| Поиск по постам | ✅ `GET …/messages/search` | ❌ `channels.searchPosts` (обычный `messages.search` работает) |
-| Заявки «на вход» (join to send) | ❌ | ❌ `channels.toggleJoinToSend`, `toggleJoinRequest` |
-| Цвет/эмодзи-статус канала | ❌ | ❌ `channels.updateColor`, `updateEmojiStatus` |
+| Медленный режим канала | ✅ `PUT …/settings` (`slow_mode_seconds`) | ✅ `channels.toggleSlowMode` |
+| Скрытие участников / прежней истории | ✅ `PUT …/settings` | ✅ `channels.toggleParticipantsHidden`, `togglePreHistoryHidden` |
+| Журнал действий | ✅ `GET …/admin-log` (title/about/username/photo, вход/выход, бан, админы, slow mode, обсуждения) | ✅ `channels.getAdminLog` |
+| Поиск по постам | ✅ `GET …/messages/search` + `GET /api/channels/posts/search` | ✅ `channels.searchPosts` |
+| Заявки «на вход» (join to send) | ✅ `PUT …/settings` | ✅ `channels.toggleJoinToSend`, `toggleJoinRequest` |
+| Цвет/эмодзи-статус канала | ✅ `PUT …/settings` (`color_id`, `background_emoji_id`, `profile_*`, `emoji_status_id`) | ✅ `channels.updateColor`, `updateEmojiStatus` |
 | Спонсорские отчёты | — | ✅ закрыто заглушкой (не показывают ошибку) |
 | Неактивные каналы | — | ✅ закрыто заглушкой (пустой список) |
 | Репорт спама | — | ✅ закрыто заглушкой (true) |
@@ -71,10 +71,10 @@ Telegram-клиент уже умеет все эти экраны; менять
 | Текст / медиа / альбомы | ✅ | ✅ `sendMessage`, `sendMedia`, `sendMultiMedia` |
 | Редактирование / удаление / пересылка | ✅ | ✅ |
 | История / закреп / откреп | ✅ | ✅ |
-| Медленный режим | ✅ `PUT …/slow-mode` | ❌ `channels.toggleSlowMode`, `messages.setChat…` |
+| Медленный режим | ✅ `PUT …/settings` (`slow_mode_seconds`) | 🟡 сервер готов, в UI базовой группы строки нет (Telegram показывает её только для супергрупп) |
 | Заявки на вступление + одобрение/отклонение | ✅ `…/join-requests…` | ✅ (invite importers), кнопки — ✅ |
-| Скрытие списка участников | ✅ `PUT …/member-visibility` | ❌ `channels.toggleParticipantsHidden` |
-| Скрытие прежней истории | ❌ нет поля | ❌ `channels.togglePreHistoryHidden` |
+| Скрытие списка участников | ✅ `PUT …/settings` (`members_hidden`) | 🟡 сервер готов, в UI базовой группы строки нет (Telegram показывает её только для супергрупп) |
+| Скрытие прежней истории | ✅ `PUT …/settings` (`no_forwards`, `members_hidden`, `slow_mode_seconds`) | 🟡 сервер готов, для базовой группы UI строки не имеет |
 | Пригласительные ссылки | ✅ `…/invites`, `…/permanent-invite` | ✅ |
 
 ## Что сделано в этом заходе
@@ -92,11 +92,31 @@ Telegram-клиент уже умеет все эти экраны; менять
    платных реакций на экране реакций канала удалены. Реакции теперь штатные (бесплатные,
    серверный роут `POST/PUT /api/channels/{id}/messages/{mid}/reactions*`), как в эталоне.
 
-## Следующие заходы (по одному пункту за раз)
+7. Флаги канала: `toggleSignatures`, `toggleSlowMode`, `toggleParticipantsHidden`,
+   `togglePreHistoryHidden`, `toggleJoinToSend`, `toggleJoinRequest`, `toggleAntiSpam`,
+   `toggleUsername`/`deactivateAllUsernames`, `messages.toggleNoForwards` — всё через
+   `PUT /api/channels/{id}/settings` (и `/api/groups/{id}/settings` для групп).
+8. Обсуждения: `channels.getGroupsForDiscussion` (группы, где я админ) + `channels.setDiscussionGroup`;
+   привязанная группа приходит в `linked_chat_id` полного инфо.
+9. Цвет и эмодзи-статус канала: `channels.updateColor` (цвет + эмодзи-фон, отдельно для профиля) и
+   `channels.updateEmojiStatus`.
+10. Журнал действий: `channels.getAdminLog` — таблица `channel_admin_log`, события о названии,
+    описании, username, фото, входе/выходе, бане/разбане, назначении/снятии админов, slow mode,
+    привязке обсуждений; читают только владелец и админы.
+11. Поиск по постам: `channels.searchPosts` — `GET /api/channels/posts/search` по публичным каналам,
+    плюс `channels.checkSearchPostsFlood` (поиск всегда бесплатный) и `channels.deleteHistory` /
+    `channels.deleteParticipantHistory` (очистка истории канала и истории участника).
 
-1. Флаги канала: `toggleSignatures`, `toggleSlowMode`, `toggleParticipantsHidden`,
-   `togglePreHistoryHidden` + поля в `PUT /api/channels/{id}`.
-2. Обсуждения: `channels.getGroupsForDiscussion`, `channels.setDiscussionGroup` нативно.
-3. `channels.getAdminLog`, `channels.searchPosts`, `channels.updateColor`, `updateEmojiStatus`.
-4. Заявки на вход: `toggleJoinToSend`, `toggleJoinRequest` + поля на сервере.
-5. `messages.toggleNoForwards`, `messages.setChatTheme` и прочие «мелочи» групп.
+## Что осталось за рамками паритета
+
+* Группы в WaysGram — это базовые чаты (`TL_chat`), поэтому строки «медленный режим» и «скрытие
+  участников» Telegram показывает только для супергрупп: серверная часть для групп готова
+  (`PUT /api/groups/{id}/settings`), но UI этих переключателей у базовой группы не рисует.
+* Форум-топики, спонсорские отчёты, геолокация канала, переводчик (`toggleAutotranslation`) —
+  отвечают пустым успехом или заглушкой, отдельной функциональности не несут.
+
+## Следующие заходы (если понадобятся)
+
+1. Форум-топики канала (`channels.toggleForum`) — сейчас заглушка, нужен серверный слой топиков.
+2. Отправка от имени канала в группах (`channels.getSendAs`, `sendAsPeers`).
+3. Геолокация канала (`channels.editLocation`) и передача владения (`channels.editCreator`).

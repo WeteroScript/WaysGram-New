@@ -1906,6 +1906,8 @@ async def init_messenger_storage(database_path: Path) -> None:
             await db.execute("ALTER TABLE channels ADD COLUMN profile_background_emoji_id INTEGER NOT NULL DEFAULT 0")
         if "emoji_status_id" not in channel_columns:
             await db.execute("ALTER TABLE channels ADD COLUMN emoji_status_id INTEGER NOT NULL DEFAULT 0")
+        if "antispam" not in channel_columns:
+            await db.execute("ALTER TABLE channels ADD COLUMN antispam INTEGER NOT NULL DEFAULT 0")
         await db.execute("""CREATE TABLE IF NOT EXISTS channel_admin_log (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             channel_id INTEGER NOT NULL,
@@ -4819,7 +4821,7 @@ def build_messenger_router(
                           ch.signatures_enabled,ch.signatures_profiles,ch.slow_mode_seconds,
                           ch.participants_hidden,ch.pre_history_hidden,ch.join_to_send,ch.join_request,
                           ch.no_forwards,ch.color_id,ch.background_emoji_id,
-                          ch.profile_color_id,ch.profile_background_emoji_id,ch.emoji_status_id,
+                          ch.profile_color_id,ch.profile_background_emoji_id,ch.emoji_status_id,ch.antispam,
                           (SELECT d.group_id FROM channel_discussion_groups d WHERE d.channel_id=ch.id) AS discussion_group_id,
                           (SELECT COUNT(*) FROM active_channel_members m WHERE m.channel_id=ch.id) AS member_count,
                           owner.username AS owner_username
@@ -10557,7 +10559,7 @@ def build_messenger_router(
         uid = int(user["telegram_id"])
         await channel_row(channel_id)
         fields: dict[str, int] = {}
-        for key in CHANNEL_BOOL_SETTINGS:
+        for key in CHANNEL_BOOL_SETTINGS + ("antispam",):
             if key in payload:
                 if type(payload[key]) is not bool:
                     raise HTTPException(400, "Некорректное значение настройки канала")
@@ -10603,6 +10605,9 @@ def build_messenger_router(
             if "slow_mode_seconds" in fields:
                 await log_channel_event(db, channel_id, uid, "toggle_slow_mode",
                                         {"value": fields["slow_mode_seconds"]})
+            if "antispam" in fields:
+                await log_channel_event(db, channel_id, uid, "toggle_antispam",
+                                        {"value": bool(fields["antispam"])})
             if "signatures_enabled" in fields:
                 await log_channel_event(db, channel_id, uid, "toggle_signatures",
                                         {"value": bool(fields["signatures_enabled"])})
@@ -10613,7 +10618,7 @@ def build_messenger_router(
             await db.commit()
         result: dict[str, Any] = {"id": channel_id}
         for key, value in fields.items():
-            result[key] = bool(value) if key in CHANNEL_BOOL_SETTINGS else value
+            result[key] = bool(value) if key in CHANNEL_BOOL_SETTINGS + ("antispam",) else value
         return result
 
     @router.get("/api/channels/{channel_id}/admin-log")
@@ -15430,6 +15435,52 @@ def build_messenger_router(
             await record_event(db, "channel", message_id, "delete", uid, chat_id=channel_id)
             await db.commit()
         return {"id": message_id, "status": "deleted"}
+
+    @router.delete("/api/channels/{channel_id}/messages")
+    async def clear_channel_messages(
+        channel_id: int,
+        for_everyone: bool = True,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        uid = int((await current_user(authorization))["telegram_id"])
+        async with aiosqlite.connect(db_path()) as db:
+            await db.execute("BEGIN IMMEDIATE")
+            if not await channel_has_right(db, channel_id, uid, 4):
+                raise HTTPException(403, "Удалять публикации может только владелец или администратор")
+            if for_everyone:
+                await db.execute("DELETE FROM channel_post_views WHERE channel_id=?", (channel_id,))
+                cur = await db.execute("DELETE FROM channel_messages WHERE channel_id=?", (channel_id,))
+            else:
+                cur = await db.execute(
+                    "DELETE FROM channel_messages WHERE channel_id=? AND author_telegram_id=?",
+                    (channel_id, uid),
+                )
+            deleted = int(cur.rowcount or 0)
+            await log_channel_event(db, channel_id, uid, "delete_history",
+                                    {"deleted": deleted, "for_everyone": for_everyone})
+            await db.commit()
+        return {"id": channel_id, "deleted": deleted}
+
+    @router.delete("/api/channels/{channel_id}/members/{target_id}/messages")
+    async def clear_channel_member_messages(
+        channel_id: int,
+        target_id: int,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        uid = int((await current_user(authorization))["telegram_id"])
+        async with aiosqlite.connect(db_path()) as db:
+            await db.execute("BEGIN IMMEDIATE")
+            if not await channel_has_right(db, channel_id, uid, 4):
+                raise HTTPException(403, "Удалять публикации может только владелец или администратор")
+            cur = await db.execute(
+                "DELETE FROM channel_messages WHERE channel_id=? AND author_telegram_id=?",
+                (channel_id, target_id),
+            )
+            deleted = int(cur.rowcount or 0)
+            await log_channel_event(db, channel_id, uid, "delete_all_messages",
+                                    {"telegram_id": target_id, "deleted": deleted})
+            await db.commit()
+        return {"channel_id": channel_id, "telegram_id": target_id, "deleted": deleted}
 
     @router.put("/api/read")
     async def mark_read(
