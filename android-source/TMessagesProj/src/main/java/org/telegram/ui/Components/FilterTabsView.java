@@ -1510,8 +1510,9 @@ public class FilterTabsView extends FrameLayout {
             selectorDrawable.setBounds((int) (indicatorX - dp(TAB_INTERNAL_PADDING) - add), y, (int) (indicatorX + indicatorWidth + dp(TAB_INTERNAL_PADDING) + add), y + dp(28));
             selectorDrawable.setAlpha(31);
             selectorDrawable.draw(canvas);
+            AndroidUtilities.rectTmp.set(selectorDrawable.getBounds());
             org.telegram.ui.WaysGramCustomizationActivity.drawIndicatorImage(canvas,
-                    AndroidUtilities.rectTmp.set(selectorDrawable.getBounds()), dp(14), listView.getAlpha());
+                    AndroidUtilities.rectTmp, dp(14), listView.getAlpha());
             canvas.restore();
         }
     }
