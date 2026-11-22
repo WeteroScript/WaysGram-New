@@ -901,6 +901,7 @@ public class ChatEditActivity extends BaseFragment implements ImageUpdater.Image
         linearLayout1.addView(typeEditContainer, LayoutHelper.createLinear(LayoutHelper.MATCH_PARENT, LayoutHelper.WRAP_CONTENT));
 
         ArrayList<TextCell> waysGramCells = new ArrayList<>();
+        ArrayList<TextCell> waysGramChannelCells = new ArrayList<>();
         if (currentChat != null) {
             if (org.telegram.tgnet.WaysGramTransport.ENABLED && !ChatObject.isChannel(currentChat)
                     && (currentChat.creator || currentChat.admin_rights != null && currentChat.admin_rights.change_info)) {
@@ -961,7 +962,7 @@ public class ChatEditActivity extends BaseFragment implements ImageUpdater.Image
                     TextCell subscriptionCell = new TextCell(context);
                     subscriptionCell.setTextAndIcon(getString(R.string.WaysGramSubscription), R.drawable.msg_link2, true);
                     subscriptionCell.setBackground(Theme.getSelectorDrawable(true));
-                    waysGramCells.add(subscriptionCell);
+                    waysGramChannelCells.add(subscriptionCell);
                     subscriptionCell.setOnClickListener(v -> WaysGramPaidReactions.showSubscriptionSettings(this, currentAccount, chatId));
                 }
             }
@@ -970,12 +971,12 @@ public class ChatEditActivity extends BaseFragment implements ImageUpdater.Image
                 TextCell discussionCell = new TextCell(context);
                 discussionCell.setTextAndIcon(getString(R.string.WaysGramDiscussionGroup), R.drawable.msg_discussion, true);
                 discussionCell.setBackground(Theme.getSelectorDrawable(true));
-                waysGramCells.add(discussionCell);
+                waysGramChannelCells.add(discussionCell);
                 discussionCell.setOnClickListener(v -> WaysGramDiscussions.settings(this, currentAccount, chatId));
                 TextCell inboxCell = new TextCell(context);
                 inboxCell.setTextAndIcon(getString(R.string.WaysGramInboxSettings), R.drawable.msg_markunread, true);
                 inboxCell.setBackground(Theme.getSelectorDrawable(true));
-                waysGramCells.add(inboxCell);
+                waysGramChannelCells.add(inboxCell);
                 inboxCell.setOnClickListener(v -> WaysGramChannelInbox.settings(this, currentAccount, chatId));
             }
 
@@ -1389,6 +1390,9 @@ public class ChatEditActivity extends BaseFragment implements ImageUpdater.Image
                 infoContainer.addView(inviteLinksCell, LayoutHelper.createLinear(LayoutHelper.MATCH_PARENT, LayoutHelper.WRAP_CONTENT));
             }
             infoContainer.addView(adminCell, LayoutHelper.createLinear(LayoutHelper.MATCH_PARENT, LayoutHelper.WRAP_CONTENT));
+            for (int a = 0; a < waysGramChannelCells.size(); a++) {
+                infoContainer.addView(waysGramChannelCells.get(a), LayoutHelper.createLinear(LayoutHelper.MATCH_PARENT, LayoutHelper.WRAP_CONTENT));
+            }
             infoContainer.addView(membersCell, LayoutHelper.createLinear(LayoutHelper.MATCH_PARENT, LayoutHelper.WRAP_CONTENT));
             if (memberRequestsCell != null && info != null && info.requests_pending > 0) {
                 infoContainer.addView(memberRequestsCell, LayoutHelper.createLinear(LayoutHelper.MATCH_PARENT, LayoutHelper.WRAP_CONTENT));
