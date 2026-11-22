@@ -1505,7 +1505,7 @@ public class TopicsFragment extends BaseFragment implements NotificationCenter.N
         updateChatInfo();
         updateColors();
 
-        if (!org.telegram.tgnet.WaysGramTransport.ENABLED && ChatObject.isBoostSupported(getCurrentChat())) {
+        if (ChatObject.isBoostSupported(getCurrentChat())) {
             getMessagesController().getBoostsController().getBoostsStats(-chatId, boostsStatus -> this.boostsStatus = boostsStatus);
         }
 
@@ -2638,7 +2638,7 @@ public class TopicsFragment extends BaseFragment implements NotificationCenter.N
 
         other.setVisibility(openedForSelect ? View.GONE : View.VISIBLE);
         addMemberSubMenu.setVisibility(ChatObject.canAddUsers(chatLocal) ? View.VISIBLE : View.GONE);
-        boostGroupSubmenu.setVisibility(!org.telegram.tgnet.WaysGramTransport.ENABLED && ChatObject.isBoostSupported(chatLocal) && (getUserConfig().isPremium() || ChatObject.isBoosted(chatFull) || ChatObject.hasAdminRights(chatLocal)) ? View.VISIBLE : View.GONE);
+        boostGroupSubmenu.setVisibility(ChatObject.isBoostSupported(chatLocal) && (getUserConfig().isPremium() || ChatObject.isBoosted(chatFull) || ChatObject.hasAdminRights(chatLocal)) ? View.VISIBLE : View.GONE);
         deleteChatSubmenu.setVisibility(chatLocal != null && !chatLocal.creator && !ChatObject.isNotInChat(chatLocal) ? View.VISIBLE : View.GONE);
         reportSubmenu.setVisibility(chatLocal != null && !chatLocal.creator && !ChatObject.hasAdminRights(chatLocal) ? View.VISIBLE : View.GONE);
         updateCreateTopicButton(true);

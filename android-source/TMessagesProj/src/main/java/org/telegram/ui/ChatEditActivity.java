@@ -997,7 +997,7 @@ public class ChatEditActivity extends BaseFragment implements ImageUpdater.Image
                 inboxCell.setOnClickListener(v -> WaysGramChannelInbox.settings(this, currentAccount, chatId));
             }
 
-            if (!org.telegram.tgnet.WaysGramTransport.ENABLED && ChatObject.isChannel(currentChat) && (isChannel && ChatObject.canUserDoAdminAction(currentChat, ChatObject.ACTION_CHANGE_INFO) || !isChannel && ChatObject.canUserDoAdminAction(currentChat, ChatObject.ACTION_PIN))) {
+            if (ChatObject.isChannel(currentChat) && (isChannel && ChatObject.canUserDoAdminAction(currentChat, ChatObject.ACTION_CHANGE_INFO) || !isChannel && ChatObject.canUserDoAdminAction(currentChat, ChatObject.ACTION_PIN))) {
                 linkedCell = new TextCell(context);
                 linkedCell.setBackgroundDrawable(Theme.getSelectorDrawable(true));
                 typeEditContainer.addView(linkedCell, LayoutHelper.createLinear(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
@@ -1036,7 +1036,7 @@ public class ChatEditActivity extends BaseFragment implements ImageUpdater.Image
                 });
             }
 
-            if (!org.telegram.tgnet.WaysGramTransport.ENABLED && ChatObject.isChannelAndNotMegaGroup(currentChat) && !ChatObject.isCommunity(currentChat)) {
+            if (ChatObject.isChannelAndNotMegaGroup(currentChat) && !ChatObject.isCommunity(currentChat)) {
                 final long dialogId = -currentChat.id;
                 autoTranslationCell = new TextCell(context, 23, false, true, resourceProvider);
                 autoTranslationCell.setBackground(Theme.getSelectorDrawable(true));
@@ -1058,6 +1058,12 @@ public class ChatEditActivity extends BaseFragment implements ImageUpdater.Image
                         autoTranslationCell.setChecked(newValue);
                     }
                     getMessagesController().getBoostsController().getBoostsStats(dialogId, boostsStatus -> {
+                        if (boostsStatus == null) {
+                            loading[0] = false;
+                            progressDialog.dismiss();
+                            autoTranslationCell.setChecked(currentChat.autotranslation);
+                            return;
+                        }
                         if (currentChat.level != boostsStatus.level) {
                             currentChat.level = boostsStatus.level;
                             getMessagesController().putChat(currentChat, false);
@@ -1159,7 +1165,7 @@ public class ChatEditActivity extends BaseFragment implements ImageUpdater.Image
                 });
             }
 
-            if (!org.telegram.tgnet.WaysGramTransport.ENABLED && ChatObject.isMegagroup(currentChat) && ChatObject.hasAdminRights(currentChat) && !ChatObject.isCommunity(currentChat)) {
+            if (ChatObject.isMegagroup(currentChat) && ChatObject.hasAdminRights(currentChat) && !ChatObject.isCommunity(currentChat)) {
                 MessagesController.getInstance(currentAccount).getBoostsController().getBoostsStats(-currentChat.id, boostsStatus -> this.boostsStatus = boostsStatus);
                 colorCell = new PeerColorActivity.ChangeNameColorCell(currentAccount, -currentChat.id, context, getResourceProvider());
                 colorCell.setBackground(Theme.getSelectorDrawable(true));
@@ -1377,7 +1383,7 @@ public class ChatEditActivity extends BaseFragment implements ImageUpdater.Image
                 logCell.setOnClickListener(v -> presentFragment(new ChannelAdminLogActivity(currentChat)));
             }
 
-            if (!org.telegram.tgnet.WaysGramTransport.ENABLED && ChatObject.isBoostSupported(currentChat)) {
+            if (ChatObject.isBoostSupported(currentChat)) {
                 statsAndBoosts = new TextCell(context);
                 statsAndBoosts.setTextAndIcon(getString(R.string.StatisticsAndBoosts), R.drawable.msg_stats, true);
                 statsAndBoosts.setBackground(Theme.getSelectorDrawable(false));

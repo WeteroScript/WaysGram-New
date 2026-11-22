@@ -1715,6 +1715,7 @@ public class ChatActivity extends BaseFragment implements
     private static final int waysgram_group_stories = 78;
     private static final int waysgram_group_identity = 79;
     private static final int waysgram_channel_giveaways = 77;
+    private static final int waysgram_community_boosts = 80;
 
     private final static int chat_menu_topic_create = 73;
 
@@ -3829,6 +3830,11 @@ public class ChatActivity extends BaseFragment implements
                     }
                 } else if (id == waysgram_channel_giveaways) {
                     if (currentChat != null) WaysGramPaidReactions.showGiveaways(ChatActivity.this, currentAccount, currentChat.id);
+                } else if (id == waysgram_community_boosts) {
+                    if (currentChat != null) {
+                        WaysGramPaidReactions.showCommunityBoosts(ChatActivity.this, currentAccount, currentChat.id,
+                                ChatObject.isChannelAndNotMegaGroup(currentChat));
+                    }
                 } else if (id == waysgram_channel_inbox) {
                     if (currentChat != null && ChatObject.isChannelAndNotMegaGroup(currentChat)) {
                         WaysGramChannelInbox.open(ChatActivity.this, currentAccount, currentChat.id, currentChat.creator);
@@ -3973,10 +3979,7 @@ public class ChatActivity extends BaseFragment implements
                         FileLog.e(e);
                     }
                 } else if (id == boost_group) {
-                    if (org.telegram.tgnet.WaysGramTransport.ENABLED) {
-                        if (currentChat != null) WaysGramPaidReactions.showCommunityBoosts(ChatActivity.this, currentAccount, currentChat.id,
-                                ChatObject.isChannelAndNotMegaGroup(currentChat));
-                    } else if (ChatObject.hasAdminRights(currentChat)) {
+                    if (ChatObject.hasAdminRights(currentChat)) {
                         BoostsActivity boostsActivity = new BoostsActivity(dialog_id);
                         boostsActivity.setBoostsStatus(boostsStatus);
                         presentFragment(boostsActivity);
@@ -4604,16 +4607,12 @@ public class ChatActivity extends BaseFragment implements
                 headerItem.lazilyAddSubItem(waysgram_channel_giveaways, R.drawable.msg_stats, getString(R.string.WaysGramGiveaways));
                 headerItem.lazilyAddSubItem(waysgram_channel_inbox, R.drawable.msg_markunread,
                         getString(currentChat.creator ? R.string.WaysGramInboxTitle : R.string.WaysGramInboxWriteChannel));
-                if (!boostItemAdded) {
-                    headerItem.lazilyAddSubItem(boost_group, R.drawable.msg_stats, getString(R.string.WaysGramCommunityBoosts));
-                }
+                headerItem.lazilyAddSubItem(waysgram_community_boosts, R.drawable.msg_stats, getString(R.string.WaysGramCommunityBoosts));
             } else if (!ChatObject.isChannel(currentChat) && !ChatObject.isLeftFromChat(currentChat)) {
                 headerItem.lazilyAddSubItem(waysgram_group_stories, R.drawable.msg_stats, getString(R.string.WaysGramGroupStories));
                 headerItem.lazilyAddSubItem(waysgram_group_identity, R.drawable.msg_stats, getString(R.string.WaysGramGroupIdentity));
                 headerItem.lazilyAddSubItem(waysgram_group_topics, R.drawable.msg_topics, getString(R.string.WaysGramTopics));
-                if (!boostItemAdded) {
-                    headerItem.lazilyAddSubItem(boost_group, R.drawable.msg_stats, getString(R.string.WaysGramCommunityBoosts));
-                }
+                headerItem.lazilyAddSubItem(waysgram_community_boosts, R.drawable.msg_stats, getString(R.string.WaysGramCommunityBoosts));
             }
         }
         menu.setVisibility(inMenuMode ? View.GONE : View.VISIBLE);
@@ -22980,7 +22979,7 @@ public class ChatActivity extends BaseFragment implements
                 long prevLinkedChatId = chatInfo != null ? chatInfo.linked_chat_id : 0;
                 chatInfo = chatFull;
                 gotChatInfo();
-                if (!org.telegram.tgnet.WaysGramTransport.ENABLED && ChatObject.isBoostSupported(currentChat) && !ChatObject.isMonoForum(currentChat) /*chatMode != MODE_SUGGESTIONS*/) {
+                if (ChatObject.isBoostSupported(currentChat) && !ChatObject.isMonoForum(currentChat) /*chatMode != MODE_SUGGESTIONS*/) {
                     getMessagesController().getBoostsController().getBoostsStats(dialog_id, boostsStatus -> {
                         if (boostsStatus == null) {
                             return;
@@ -31497,11 +31496,9 @@ public class ChatActivity extends BaseFragment implements
 
             List<TLRPC.TL_availableReaction> availableReacts = getMediaDataController().getEnabledReactionsList();
             final boolean isEphemeral = message != null && message.isEphemeral();
-            final boolean isReactionsViewAvailable = !org.telegram.tgnet.WaysGramTransport.ENABLED && !isEphemeral && !suggestEdit && !isSecretChat() && !isInScheduleMode() && currentUser == null && primaryMessage.hasReactions() && (!ChatObject.isChannel(currentChat) || currentChat.megagroup) && !ChatObject.isMonoForum(currentChat) && !availableReacts.isEmpty() && primaryMessage.messageOwner.reactions.can_see_list && !primaryMessage.isSecretMedia();
+            final boolean isReactionsViewAvailable = !isEphemeral && !suggestEdit && !isSecretChat() && !isInScheduleMode() && currentUser == null && primaryMessage.hasReactions() && (!ChatObject.isChannel(currentChat) || currentChat.megagroup) && !ChatObject.isMonoForum(currentChat) && !availableReacts.isEmpty() && primaryMessage.messageOwner.reactions.can_see_list && !primaryMessage.isSecretMedia();
             final boolean isReactionsAvailable;
-            if (org.telegram.tgnet.WaysGramTransport.ENABLED) {
-                isReactionsAvailable = waysGramReactionMenu;
-            } else if (suggestEdit || isEphemeral) {
+            if (suggestEdit || isEphemeral) {
                 isReactionsAvailable = false;
             } else if (message.isForwardedChannelPost()) {
                 TLRPC.ChatFull chatInfo = getMessagesController().getChatFull(-message.getFromChatId());
