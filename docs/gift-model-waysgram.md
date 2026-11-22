@@ -28,14 +28,34 @@ gift upgraded before this model existed cannot retroactively become a WaysGram m
 
 ## Artwork and animation
 
-`waysgram.tgs` is a gzipped Lottie composition (512 × 512, 30 fps, 3 s loop) with an embedded
-transparent PNG of the WaysGram Pepe plus a soft dark-blue glow and four sparkles. The model
-floats, breathes and tilts slightly, so it plays like any other animated gift model.
+The motion is not invented — it is the motion of the **original Plush Pepe gift sticker**
+(`tgs/by_name/plush_pepe.tgs` from Telegram's catalog):
+
+| What is reused | How |
+| --- | --- |
+| Frames and loop | 60 fps, `ip 60` → `op 240` (3 s) — identical to the original |
+| Body sway | layer `body`, `ks.r`: 9 keyframes `0 → −3° → +5° → −5° → +5° → −5° → +5° → −3° → 0` |
+| Breathing | layer `body`, `ks.s`: 11 keyframes `100 % → 103/97 % → …` |
+| Pivot | below the frame (ground pivot), like the original body layer |
+| Easing | the original `i`/`o` bezier curves, verbatim |
+
+Only the artwork is ours: a transparent PNG inset to 80 % of the 512 canvas, so the ±5° sway
+stays inside the frame instead of clipping. The generated `.tgs` is a gzipped Lottie
+composition with that PNG layer — no glow, sparkles or other invented effects.
+
+Reproduce it with `scripts/build_waysgram_gift_model.py`:
+
+```bash
+python3 scripts/build_waysgram_gift_model.py \
+    --original /path/to/plush_pepe.tgs \
+    --art authbot/assets/gift_models/5936013938331222567/preview.png
+```
 
 The file is served by `GET /api/telegram/gifts/{gift_id}/attributes/{document_id}` from the
-pinned pack, exactly like the Heart Locket fallbacks. `gift_model_fallbacks` now loads every
+pinned pack, exactly like the Heart Locket fallbacks. `gift_model_fallbacks` loads every
 `assets/gift_models/<gift_id>/` directory instead of only the Heart Locket one, so a new pack
-needs just a `manifest.json` and its `.tgs` files.
+needs just a `manifest.json` and its `.tgs` files (`preview.png` is the raw artwork, not the
+sticker).
 
 ## Number «#???»
 
