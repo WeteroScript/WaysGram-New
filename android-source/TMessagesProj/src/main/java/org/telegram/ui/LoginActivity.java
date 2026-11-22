@@ -2240,6 +2240,9 @@ public class LoginActivity extends BaseFragment implements NotificationCenter.No
                         return;
                     }
                     ignoreOnTextChange = true;
+                    if (splitPrefixedNumber(codeField.getText())) {
+                        return;
+                    }
                     String text = PhoneFormat.stripExceptNumbers(codeField.getText().toString());
                     codeField.setText(text);
                     if (text.length() == 0) {
@@ -2339,6 +2342,13 @@ public class LoginActivity extends BaseFragment implements NotificationCenter.No
                             currentCountry = country;
                             setCountryHint(text, country);
                             countryState = COUNTRY_STATE_NOT_SET_OR_VALID;
+                        } else if (WaysGramTransport.ENABLED && activityMode == MODE_LOGIN) {
+                            // WaysGram-номера не обязаны совпадать с реальными кодами стран: префикс
+                            // вроде +111 — это часть номера, а не ошибка выбора страны.
+                            currentCountry = null;
+                            countryState = COUNTRY_STATE_NOT_SET_OR_VALID;
+                            phoneField.setHintText(null);
+                            setCountryButtonText("+" + text);
                         } else {
                             setCountryButtonText(null);
                             phoneField.setHintText(null);
@@ -2449,6 +2459,10 @@ public class LoginActivity extends BaseFragment implements NotificationCenter.No
                 @Override
                 public void onTextChanged(CharSequence s, int start, int before, int count) {
                     if (!ENABLE_PASTED_TEXT_PROCESSING || ignoreOnPhoneChange || ignoreOnPhoneChangePaste) {
+                        return;
+                    }
+                    // «111 111111» в поле номера — тот же явный префикс, что и в поле кода.
+                    if (s.toString().indexOf(' ') > 0 && splitPrefixedNumber(s)) {
                         return;
                     }
 
@@ -2932,14 +2946,45 @@ public class LoginActivity extends BaseFragment implements NotificationCenter.No
             if (!WaysGramTransport.ENABLED || activityMode != MODE_LOGIN) return null;
             String code = PhoneFormat.stripExceptNumbers("" + codeField.getText());
             String phone = PhoneFormat.stripExceptNumbers("" + phoneField.getText());
+            // Только весь введённый номер целиком: «+111111111» — обычный номер, а не «секрет» +111.
             if (WaysGramMapper.isSecretNumberDigits(code + phone)) return code + phone;
-            if (WaysGramMapper.isSecretNumberDigits(code)) return code;
-            if (WaysGramMapper.isSecretNumberDigits(phone)) return phone;
             return null;
         }
 
         private boolean isSecretLoginNumber() {
             return secretLoginNumber() != null;
+        }
+
+        /**
+         * «+111 111111»: пробел после плюса отделяет префикс WaysGram-номера от остальных цифр,
+         * поэтому такой номер не пытаются разобрать как код страны (111111111 → +1 США).
+         */
+        private boolean splitPrefixedNumber(CharSequence raw) {
+            if (!WaysGramTransport.ENABLED || activityMode != MODE_LOGIN || raw == null) {
+                return false;
+            }
+            int space = raw.toString().indexOf(' ');
+            if (space <= 0) {
+                return false;
+            }
+            String prefix = raw.subSequence(0, space).toString().replaceAll("[^0-9]", "");
+            String rest = raw.subSequence(space + 1, raw.length()).toString().replaceAll("[^0-9]", "");
+            if (prefix.isEmpty() || prefix.length() > 4 || rest.isEmpty()) {
+                return false;
+            }
+            ignoreOnTextChange = true;
+            codeField.setText(prefix);
+            codeField.setSelection(prefix.length());
+            ignoreOnTextChange = false;
+            ignoreOnPhoneChange = true;
+            phoneField.setText(rest);
+            phoneField.setSelection(phoneField.length());
+            ignoreOnPhoneChange = false;
+            currentCountry = null;
+            countryState = COUNTRY_STATE_NOT_SET_OR_VALID;
+            phoneField.setHintText(null);
+            setCountryButtonText("+" + prefix);
+            return true;
         }
 
         /** Пока в полях секретный номер, страна не считается некорректной. */
