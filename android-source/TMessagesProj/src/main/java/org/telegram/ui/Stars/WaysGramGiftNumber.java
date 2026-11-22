@@ -64,13 +64,14 @@ public final class WaysGramGiftNumber {
             if (!(attribute instanceof TL_stars.starGiftAttributeModel)) {
                 continue;
             }
-            if (attribute.name != null && MODEL_NAME.equalsIgnoreCase(attribute.name.trim())) {
+            final TL_stars.starGiftAttributeModel model = (TL_stars.starGiftAttributeModel) attribute;
+            if (model.name != null && MODEL_NAME.equalsIgnoreCase(model.name.trim())) {
                 return true;
             }
             // Имя модели Telegram может локализовать, а документ модель несёт всегда:
             // встроенная анимация WaysGram однозначно выдаёт нашу модель.
-            if (attribute.document != null
-                    && attribute.document.id == org.telegram.messenger.waysgram.WaysGramBundledArtwork.WAYSGRAM_MODEL_DOCUMENT_ID) {
+            if (model.document != null
+                    && model.document.id == org.telegram.messenger.waysgram.WaysGramBundledArtwork.WAYSGRAM_MODEL_DOCUMENT_ID) {
                 return true;
             }
         }

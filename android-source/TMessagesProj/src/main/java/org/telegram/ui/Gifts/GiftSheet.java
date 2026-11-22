@@ -2060,18 +2060,21 @@ public class GiftSheet extends BottomSheetWithRecyclerListView implements Notifi
         }
 
         /** Единая подпись номера в ленте: «#???» с переливом для модели WaysGram. */
-        private void setRibbonNumber(TL_stars.TL_starGiftUnique unique) {
-            if (unique == null) {
+        private void setRibbonNumber(TL_stars.StarGift gift) {
+            if (gift == null) {
                 return;
             }
-            if (WaysGramGiftNumber.isWaysGramModel(unique)) {
+            if (WaysGramGiftNumber.isWaysGramModel(gift)) {
                 ribbon.setShimmer(true);
                 ribbon.setText(WaysGramGiftNumber.LABEL, true);
                 // Лента — Drawable, а не TextView: перерисовку кадров перелива просим сами.
                 WaysGramGiftNumber.bindShimmer(ribbon);
+            } else if (gift instanceof TL_stars.TL_starGiftUnique) {
+                ribbon.setShimmer(false);
+                ribbon.setText(WaysGramGiftNumber.numberOrLabel((TL_stars.TL_starGiftUnique) gift), true);
             } else {
                 ribbon.setShimmer(false);
-                ribbon.setText(WaysGramGiftNumber.numberOrLabel(unique), true);
+                ribbon.setVisibility(View.GONE);
             }
         }
 
