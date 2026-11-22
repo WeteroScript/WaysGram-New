@@ -71,7 +71,7 @@ public final class WaysGramGiftNumber {
     }
 
     /** Подпись подарка: «Название #???» вместо «Название #913». */
-    public static String titled(@Nullable TL_stars.StarGiftUnique gift, String fallback) {
+    public static String titled(@Nullable TL_stars.TL_starGiftUnique gift, String fallback) {
         if (gift != null && isWaysGramModel(gift)) {
             return gift.title + " " + LABEL;
         }

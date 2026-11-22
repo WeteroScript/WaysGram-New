@@ -229,7 +229,7 @@ public class WaysGramCustomizationActivity extends BaseFragment {
     private static void cover(RectF dst, RectF bounds, Bitmap image) {
         float scale = Math.max(bounds.width() / (float) image.getWidth(), bounds.height() / (float) image.getHeight());
         float width = image.getWidth() * scale, height = image.getHeight() * scale;
-        float centerX = bounds.exactCenterX(), centerY = bounds.exactCenterY();
+        float centerX = bounds.centerX(), centerY = bounds.centerY();
         dst.set(centerX - width / 2f, centerY - height / 2f, centerX + width / 2f, centerY + height / 2f);
     }
 
