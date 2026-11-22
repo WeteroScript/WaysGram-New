@@ -1906,6 +1906,15 @@ async def init_messenger_storage(database_path: Path) -> None:
             await db.execute("ALTER TABLE channels ADD COLUMN profile_background_emoji_id INTEGER NOT NULL DEFAULT 0")
         if "emoji_status_id" not in channel_columns:
             await db.execute("ALTER TABLE channels ADD COLUMN emoji_status_id INTEGER NOT NULL DEFAULT 0")
+        await db.execute("""CREATE TABLE IF NOT EXISTS channel_admin_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            channel_id INTEGER NOT NULL,
+            actor_id INTEGER NOT NULL,
+            date INTEGER NOT NULL,
+            action TEXT NOT NULL,
+            payload TEXT NOT NULL DEFAULT '{}'
+        )""")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_channel_admin_log_channel ON channel_admin_log(channel_id,id DESC)")
         if "avatar_media_id" not in chat_group_columns:
             await db.execute(f"ALTER TABLE {db_split.SCHEMA}.chat_groups ADD COLUMN avatar_media_id TEXT NOT NULL DEFAULT ''")
         if "no_forwards" not in chat_group_columns:
@@ -9459,6 +9468,7 @@ def build_messenger_router(
             )
             if insert.rowcount == 1:
                 await db.execute("UPDATE channel_invites SET uses=uses+1 WHERE channel_id=? AND token=?", (channel[0], invite_token))
+                await log_channel_event(db, int(channel[0]), uid, "participant_join", {"telegram_id": uid})
             await db.commit()
         return {"joined": True, "id": int(channel[0]), "title": str(channel[1]), "is_public": False}
 
@@ -10025,6 +10035,8 @@ def build_messenger_router(
                         raise HTTPException(409, "DISCUSSION_GROUP_ALREADY_LINKED")
                     await db.execute("""INSERT INTO channel_discussion_groups(channel_id,group_id) VALUES(?,?)
                         ON CONFLICT(channel_id) DO UPDATE SET group_id=excluded.group_id""", (channel_id, group_id))
+                await log_channel_event(db, channel_id, uid, "change_linked_chat",
+                                        {"group_id": group_id})
                 await db.commit()
                 return {"group_id": group_id}
             cur = await db.execute("""SELECT g.id,g.title FROM channel_discussion_groups d JOIN chat_groups g ON g.id=d.group_id
@@ -10447,6 +10459,17 @@ def build_messenger_router(
                 for key, value in (("title", title), ("username", username), ("description", description.strip())):
                     if key in payload:
                         await db.execute(f"UPDATE channels SET {key}=? WHERE id=?", (value, channel_id))
+                        previous = str(channel.get(key) or "")
+                        if value != previous:
+                            if key == "title":
+                                await log_channel_event(db, channel_id, uid, "change_title",
+                                                        {"prev": previous, "new": value})
+                            elif key == "description":
+                                await log_channel_event(db, channel_id, uid, "change_about",
+                                                        {"prev": previous, "new": value})
+                            else:
+                                await log_channel_event(db, channel_id, uid, "change_username",
+                                                        {"prev": previous, "new": value})
                 if payload.get("is_public") is False:
                     await db.execute("UPDATE channels SET is_public=0,username=?,invite_token=COALESCE(invite_token,?) WHERE id=?",
                                      ("private_" + secrets.token_hex(16), secrets.token_urlsafe(32), channel_id))
@@ -10465,6 +10488,14 @@ def build_messenger_router(
             "owner_telegram_id": int(channel["owner_telegram_id"]),
             "is_public": is_public,
         }
+
+    async def log_channel_event(db: Any, channel_id: int, actor_id: int, action: str,
+                                payload: dict[str, Any] | None = None) -> None:
+        await db.execute(
+            "INSERT INTO channel_admin_log(channel_id,actor_id,date,action,payload) VALUES(?,?,?,?,?)",
+            (channel_id, actor_id, int(time.time()), action,
+             json.dumps(payload or {}, ensure_ascii=False)),
+        )
 
     async def require_owned_image(db: Any, media_id: str, uid: int) -> None:
         cur = await db.execute("SELECT mime_type FROM media_assets WHERE id=? AND owner_telegram_id=?", (media_id, uid))
@@ -10491,6 +10522,7 @@ def build_messenger_router(
             if media_id:
                 await require_owned_image(db, media_id, uid)
             await db.execute("UPDATE channels SET avatar_media_id=? WHERE id=?", (media_id, channel_id))
+            await log_channel_event(db, channel_id, uid, "change_photo", {"avatar_media_id": media_id})
             await db.commit()
         return {"id": channel_id, "avatar_media_id": media_id}
 
@@ -10507,6 +10539,7 @@ def build_messenger_router(
             if not await channel_has_right(db, channel_id, uid, 64):
                 raise HTTPException(status_code=403, detail="Нет права изменять информацию о канале")
             await db.execute("UPDATE channels SET avatar_media_id='' WHERE id=?", (channel_id,))
+            await log_channel_event(db, channel_id, uid, "change_photo", {"avatar_media_id": ""})
             await db.commit()
         return {"id": channel_id, "avatar_media_id": ""}
 
@@ -10567,11 +10600,83 @@ def build_messenger_router(
                 raise HTTPException(403, "Нет права изменять информацию о канале")
             assignments = ",".join(f"{key}=?" for key in fields)
             await db.execute(f"UPDATE channels SET {assignments} WHERE id=?", (*fields.values(), channel_id))
+            if "slow_mode_seconds" in fields:
+                await log_channel_event(db, channel_id, uid, "toggle_slow_mode",
+                                        {"value": fields["slow_mode_seconds"]})
+            if "signatures_enabled" in fields:
+                await log_channel_event(db, channel_id, uid, "toggle_signatures",
+                                        {"value": bool(fields["signatures_enabled"])})
+            other = {key: value for key, value in fields.items()
+                     if key not in ("slow_mode_seconds", "signatures_enabled")}
+            if other:
+                await log_channel_event(db, channel_id, uid, "change_settings", other)
             await db.commit()
         result: dict[str, Any] = {"id": channel_id}
         for key, value in fields.items():
             result[key] = bool(value) if key in CHANNEL_BOOL_SETTINGS else value
         return result
+
+    @router.get("/api/channels/{channel_id}/admin-log")
+    async def channel_admin_log(
+        channel_id: int,
+        limit: int = 50,
+        max_id: int = 0,
+        q: str = "",
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        user = await current_user(authorization)
+        uid = int(user["telegram_id"])
+        await channel_row(channel_id)
+        limit = max(1, min(100, limit))
+        async with aiosqlite.connect(db_path()) as db:
+            db.row_factory = aiosqlite.Row
+            cur = await db.execute(
+                """SELECT 1 FROM channels WHERE id=? AND owner_telegram_id=?
+                   UNION SELECT 1 FROM channel_admins WHERE channel_id=? AND telegram_id=? LIMIT 1""",
+                (channel_id, uid, channel_id, uid),
+            )
+            if not await cur.fetchone():
+                raise HTTPException(403, "CHAT_ADMIN_REQUIRED")
+            clauses = ["channel_id=?"]
+            params: list[Any] = [channel_id]
+            if max_id > 0:
+                clauses.append("id<?")
+                params.append(max_id)
+            if q:
+                clauses.append("payload LIKE ?")
+                params.append(f"%{q}%")
+            where = " AND ".join(clauses)
+            cur = await db.execute(f"SELECT id,actor_id,date,action,payload FROM channel_admin_log WHERE {where} ORDER BY id DESC LIMIT ?",
+                                   (*params, limit))
+            rows = [dict(row) for row in await cur.fetchall()]
+            cur = await db.execute(f"SELECT COUNT(*) FROM channel_admin_log WHERE {where}", tuple(params))
+            total = int((await cur.fetchone())[0])
+            user_ids: set[int] = set()
+            events = []
+            for row in rows:
+                try:
+                    payload = json.loads(row["payload"] or "{}")
+                except (TypeError, ValueError):
+                    payload = {}
+                if not isinstance(payload, dict):
+                    payload = {}
+                user_ids.add(int(row["actor_id"]))
+                if type(payload.get("telegram_id")) is int:
+                    user_ids.add(int(payload["telegram_id"]))
+                events.append({"id": row["id"], "date": row["date"], "actor_id": row["actor_id"],
+                               "action": row["action"], "payload": payload})
+            users = []
+            for target_id in sorted(user_ids):
+                cur = await db.execute(
+                    "SELECT telegram_id AS id,username,display_name,avatar_media_id FROM accounts WHERE telegram_id=?",
+                    (target_id,),
+                )
+                account = await cur.fetchone()
+                if account is not None:
+                    item = dict(account)
+                    item["labels"] = await entity_labels("account", int(target_id))
+                    users.append(item)
+        return {"events": events, "users": users, "count": total}
 
     async def record_channel_departure(db: Any, channel_id: int, uid: int, voluntary: bool) -> None:
         # Record only actual transitions out of the active roster. Retrying a leave or ban is a no-op.
@@ -10602,6 +10707,7 @@ def build_messenger_router(
                     return {"joined": True, "channel_id": channel_id}
                 await db.execute("INSERT OR IGNORE INTO channel_members(channel_id,telegram_id,joined_at) VALUES(?,?,?)",
                                  (channel_id, uid, int(time.time())))
+                await log_channel_event(db, channel_id, uid, "participant_join", {"telegram_id": uid})
             else:
                 if uid == channel[1]:
                     raise HTTPException(409, "Владелец не может покинуть канал")
@@ -10609,6 +10715,7 @@ def build_messenger_router(
                 await db.execute("DELETE FROM channel_admins WHERE channel_id=? AND telegram_id=?", (channel_id, uid))
                 await db.execute("DELETE FROM channel_members WHERE channel_id=? AND telegram_id=?", (channel_id, uid))
                 await db.execute("DELETE FROM channel_subscriptions WHERE channel_id=? AND telegram_id=?", (channel_id, uid))
+                await log_channel_event(db, channel_id, uid, "participant_leave", {"telegram_id": uid})
             await db.commit()
         return {"joined": joined, "channel_id": channel_id}
 
@@ -10639,6 +10746,9 @@ def build_messenger_router(
                                  [(channel_id, target, int(time.time())) for target in targets])
             await db.executemany("DELETE FROM channel_join_requests WHERE channel_id=? AND telegram_id=?",
                                  [(channel_id, target) for target in targets])
+            for target in targets:
+                await log_channel_event(db, channel_id, uid, "participant_invite",
+                                        {"telegram_id": target, "inviter_id": uid})
             await db.commit()
         return {"channel_id": channel_id, "user_ids": targets}
 
@@ -10893,8 +11003,11 @@ def build_messenger_router(
                     (channel_id, target_id, now, until_date))
                 for table in ("channel_members", "channel_admins", "channel_join_requests", "channel_subscriptions"):
                     await db.execute(f"DELETE FROM {table} WHERE channel_id=? AND telegram_id=?", (channel_id, target_id))
+                await log_channel_event(db, channel_id, uid, "participant_ban",
+                                        {"telegram_id": target_id, "until_date": until_date})
             else:
                 await db.execute("DELETE FROM channel_bans WHERE channel_id=? AND telegram_id=?", (channel_id, target_id))
+                await log_channel_event(db, channel_id, uid, "participant_unban", {"telegram_id": target_id})
             await db.commit()
         return {"banned": banned, "until_date": until_date}
 
@@ -11199,6 +11312,43 @@ def build_messenger_router(
         if await cur.fetchone() is None:
             await db.rollback()
             raise HTTPException(status_code=404, detail="Сообщение, на которое вы отвечаете, не найдено")
+
+    @router.get("/api/channels/posts/search")
+    async def search_public_channel_posts(
+        q: str = "",
+        limit: int = 30,
+        offset_id: int = 0,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        user = await current_user(authorization)
+        uid = int(user["telegram_id"])
+        term = (q or "").strip()
+        limit = max(1, min(50, limit))
+        if not term:
+            return {"query": "", "messages": [], "count": 0}
+        async with aiosqlite.connect(db_path()) as db:
+            db.row_factory = aiosqlite.Row
+            sql = """SELECT id,channel_id,author_telegram_id AS author_id,body,entities_json,
+                            silent,quote_json,media_id,media_album_id,media_album_index,media_album_count,
+                            edited_at,reply_to_id,created_at,
+                            (SELECT mime_type FROM media_assets WHERE id=channel_messages.media_id) AS media_type,
+                            (SELECT original_name FROM media_assets WHERE id=channel_messages.media_id) AS media_name,
+                            (SELECT media_kind FROM media_assets WHERE id=channel_messages.media_id) AS media_kind,
+                            (SELECT media_metadata FROM media_assets WHERE id=channel_messages.media_id) AS media_metadata
+                     FROM channel_messages
+                     WHERE body LIKE ? COLLATE NOCASE
+                       AND channel_id IN (SELECT id FROM channels c WHERE c.is_public=1
+                           AND NOT EXISTS(SELECT 1 FROM channel_bans b WHERE b.channel_id=c.id AND b.telegram_id=?
+                               AND (b.until_date=0 OR b.until_date>CAST(strftime('%s','now') AS INTEGER))))"""
+            params: list[Any] = [f"%{term}%", uid]
+            if offset_id > 0:
+                sql += " AND id<?"
+                params.append(offset_id)
+            sql += " ORDER BY id DESC LIMIT ?"
+            params.append(limit)
+            cur = await db.execute(sql, tuple(params))
+            rows = [dict(row) for row in await cur.fetchall()]
+        return {"query": term, "messages": rows, "count": len(rows)}
 
     @router.get("/api/channels/{channel_id}/messages/search")
     async def search_channel_messages(
@@ -11577,6 +11727,8 @@ def build_messenger_router(
                 (channel_id, target_id, joined_at),
             )
             await db.execute("DELETE FROM channel_join_requests WHERE channel_id=? AND telegram_id=?", (channel_id, target_id))
+            await log_channel_event(db, channel_id, uid, "participant_promote",
+                                    {"telegram_id": target_id, "rights": rights})
             await db.commit()
         return {"channel_id": channel_id, "telegram_id": target_id, "admin": True}
 
@@ -11595,6 +11747,9 @@ def build_messenger_router(
                 "DELETE FROM channel_admins WHERE channel_id=? AND telegram_id=?",
                 (channel_id, telegram_id),
             )
+            if cur.rowcount:
+                await log_channel_event(db, channel_id, int(user["telegram_id"]), "participant_demote",
+                                        {"telegram_id": telegram_id})
             await db.commit()
         if cur.rowcount == 0:
             raise HTTPException(status_code=404, detail="Администратор канала не найден")

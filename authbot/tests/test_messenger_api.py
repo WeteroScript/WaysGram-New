@@ -9531,3 +9531,71 @@ def test_channel_settings_cover_signatures_slowmode_and_join_flags(api_env) -> N
             assert (await client.get(f"/api/groups/{group_id}", headers=owner)).json()["no_forwards"] == 1
 
     run(scenario())
+
+
+def test_channel_admin_log_lists_recent_admin_actions(api_env) -> None:
+    path, _auth_store, _fake_bot, app = api_env
+    add_account(api_env, 89801, "admin_log_owner")
+    add_account(api_env, 89802, "admin_log_member")
+    add_session(path, 89801, "admin-log-owner")
+    add_session(path, 89802, "admin-log-member")
+
+    async def scenario() -> None:
+        owner = {"Authorization": "Bearer admin-log-owner"}
+        member = {"Authorization": "Bearer admin-log-member"}
+        async with await client_for(app) as client:
+            channel = await client.post("/api/channels", headers=owner,
+                                        json={"title": "Log channel", "is_public": False})
+            chat_id = channel.json()["id"]
+            assert (await client.post("/api/channels/join", headers=member,
+                                      json={"invite_link": channel.json()["invite_link"]})).status_code == 200
+            assert (await client.put(f"/api/channels/{chat_id}", headers=owner,
+                                     json={"title": "Renamed channel"})).status_code == 200
+            assert (await client.put(f"/api/channels/{chat_id}/settings", headers=owner,
+                                     json={"slow_mode_seconds": 30})).status_code == 200
+            assert (await client.put(f"/api/channels/{chat_id}/members/89802/ban", headers=owner,
+                                     json={"banned": True})).status_code == 200
+
+            assert (await client.get(f"/api/channels/{chat_id}/admin-log", headers=member)).status_code == 403
+            log = (await client.get(f"/api/channels/{chat_id}/admin-log", headers=owner)).json()
+            actions = [event["action"] for event in log["events"]]
+            assert "participant_join" in actions
+            assert "change_title" in actions
+            assert "toggle_slow_mode" in actions
+            assert "participant_ban" in actions
+            assert log["count"] >= len(actions)
+            assert any(event["actor_id"] == 89801 for event in log["events"])
+            assert all(user["id"] for user in log["users"])
+
+    run(scenario())
+
+
+def test_public_channel_post_search_finds_posts_and_skips_private(api_env) -> None:
+    path, _auth_store, _fake_bot, app = api_env
+    add_account(api_env, 89901, "posts_search_owner")
+    add_account(api_env, 89902, "posts_search_reader")
+    add_session(path, 89901, "posts-search-owner")
+    add_session(path, 89902, "posts-search-reader")
+
+    async def scenario() -> None:
+        owner = {"Authorization": "Bearer posts-search-owner"}
+        reader = {"Authorization": "Bearer posts-search-reader"}
+        async with await client_for(app) as client:
+            public = await client.post("/api/channels", headers=owner,
+                                       json={"title": "Public news", "username": "public_news_log"})
+            private = await client.post("/api/channels", headers=owner,
+                                        json={"title": "Private news", "is_public": False})
+            for channel, body in ((public, "unique hashtag story"), (private, "unique hashtag story")):
+                mid = channel.json()["id"]
+                assert (await client.post(f"/api/channels/{mid}/messages", headers=owner,
+                                          json={"body": body})).status_code == 201
+
+            result = (await client.get("/api/channels/posts/search", headers=reader,
+                                       params={"q": "unique hashtag"})).json()
+            assert result["count"] == 1
+            assert result["messages"][0]["body"] == "unique hashtag story"
+            empty = (await client.get("/api/channels/posts/search", headers=reader,
+                                      params={"q": "nothing-like-this"})).json()
+            assert empty["messages"] == []
+
+    run(scenario())
