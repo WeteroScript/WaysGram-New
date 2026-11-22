@@ -9488,3 +9488,46 @@ def test_channel_and_group_avatar_can_be_set_only_by_managers(api_env) -> None:
             assert (await client.get(f"/api/groups/{group_id}", headers=owner)).json()["avatar_media_id"] == ""
 
     run(scenario())
+
+
+def test_channel_settings_cover_signatures_slowmode_and_join_flags(api_env) -> None:
+    path, _auth_store, _fake_bot, app = api_env
+    add_account(api_env, 89701, "channel_settings_owner")
+    add_account(api_env, 89702, "channel_settings_member")
+    add_session(path, 89701, "channel-settings-owner")
+    add_session(path, 89702, "channel-settings-member")
+
+    async def scenario() -> None:
+        owner = {"Authorization": "Bearer channel-settings-owner"}
+        member = {"Authorization": "Bearer channel-settings-member"}
+        async with await client_for(app) as client:
+            channel = await client.post("/api/channels", headers=owner,
+                                        json={"title": "Settings channel", "is_public": False})
+            chat_id = channel.json()["id"]
+            assert (await client.post("/api/channels/join", headers=member,
+                                      json={"invite_link": channel.json()["invite_link"]})).status_code == 200
+
+            assert (await client.put(f"/api/channels/{chat_id}/settings", headers=member,
+                                     json={"slow_mode_seconds": 60})).status_code == 403
+            assert (await client.put(f"/api/channels/{chat_id}/settings", headers=owner,
+                                     json={"slow_mode_seconds": 7})).status_code == 400
+
+            applied = await client.put(f"/api/channels/{chat_id}/settings", headers=owner, json={
+                "signatures_enabled": True, "signatures_profiles": True, "slow_mode_seconds": 300,
+                "participants_hidden": True, "pre_history_hidden": True, "join_to_send": True,
+                "join_request": True, "no_forwards": True, "color_id": 3, "background_emoji_id": 5368324170671202286,
+            })
+            assert applied.status_code == 200, applied.text
+            row = (await client.get(f"/api/channels/{chat_id}", headers=owner)).json()
+            assert row["signatures_enabled"] == 1 and row["signatures_profiles"] == 1
+            assert row["slow_mode_seconds"] == 300 and row["participants_hidden"] == 1
+            assert row["pre_history_hidden"] == 1 and row["join_to_send"] == 1 and row["join_request"] == 1
+            assert row["no_forwards"] == 1 and row["color_id"] == 3
+
+            group = await client.post("/api/groups", headers=owner, json={"title": "Settings group"})
+            group_id = group.json()["id"]
+            assert (await client.put(f"/api/groups/{group_id}/settings", headers=owner,
+                                     json={"no_forwards": True, "slow_mode_seconds": 30})).status_code == 200
+            assert (await client.get(f"/api/groups/{group_id}", headers=owner)).json()["no_forwards"] == 1
+
+    run(scenario())

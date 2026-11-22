@@ -1890,8 +1890,26 @@ async def init_messenger_storage(database_path: Path) -> None:
             await db.execute("ALTER TABLE channels ADD COLUMN available_reactions TEXT NOT NULL DEFAULT '[]'")
         if "avatar_media_id" not in channel_columns:
             await db.execute("ALTER TABLE channels ADD COLUMN avatar_media_id TEXT NOT NULL DEFAULT ''")
+        for column in ("signatures_enabled", "signatures_profiles", "participants_hidden",
+                       "pre_history_hidden", "join_to_send", "join_request", "no_forwards"):
+            if column not in channel_columns:
+                await db.execute(f"ALTER TABLE channels ADD COLUMN {column} INTEGER NOT NULL DEFAULT 0")
+        if "slow_mode_seconds" not in channel_columns:
+            await db.execute("ALTER TABLE channels ADD COLUMN slow_mode_seconds INTEGER NOT NULL DEFAULT 0")
+        if "color_id" not in channel_columns:
+            await db.execute("ALTER TABLE channels ADD COLUMN color_id INTEGER NOT NULL DEFAULT 0")
+        if "background_emoji_id" not in channel_columns:
+            await db.execute("ALTER TABLE channels ADD COLUMN background_emoji_id INTEGER NOT NULL DEFAULT 0")
+        if "profile_color_id" not in channel_columns:
+            await db.execute("ALTER TABLE channels ADD COLUMN profile_color_id INTEGER NOT NULL DEFAULT 0")
+        if "profile_background_emoji_id" not in channel_columns:
+            await db.execute("ALTER TABLE channels ADD COLUMN profile_background_emoji_id INTEGER NOT NULL DEFAULT 0")
+        if "emoji_status_id" not in channel_columns:
+            await db.execute("ALTER TABLE channels ADD COLUMN emoji_status_id INTEGER NOT NULL DEFAULT 0")
         if "avatar_media_id" not in chat_group_columns:
             await db.execute(f"ALTER TABLE {db_split.SCHEMA}.chat_groups ADD COLUMN avatar_media_id TEXT NOT NULL DEFAULT ''")
+        if "no_forwards" not in chat_group_columns:
+            await db.execute(f"ALTER TABLE {db_split.SCHEMA}.chat_groups ADD COLUMN no_forwards INTEGER NOT NULL DEFAULT 0")
         if "members_can_post_stories" not in chat_group_columns:
             await db.execute(f"ALTER TABLE {db_split.SCHEMA}.chat_groups ADD COLUMN members_can_post_stories INTEGER NOT NULL DEFAULT 0")
         if "boost_slow_mode_bypass" not in chat_group_columns:
@@ -4789,6 +4807,11 @@ def build_messenger_router(
                 """SELECT ch.id,
                           CASE WHEN ch.is_public=1 THEN ch.username ELSE '' END AS username,
                           ch.title,ch.description,ch.owner_telegram_id,ch.is_public,ch.avatar_media_id,
+                          ch.signatures_enabled,ch.signatures_profiles,ch.slow_mode_seconds,
+                          ch.participants_hidden,ch.pre_history_hidden,ch.join_to_send,ch.join_request,
+                          ch.no_forwards,ch.color_id,ch.background_emoji_id,
+                          ch.profile_color_id,ch.profile_background_emoji_id,ch.emoji_status_id,
+                          (SELECT d.group_id FROM channel_discussion_groups d WHERE d.channel_id=ch.id) AS discussion_group_id,
                           (SELECT COUNT(*) FROM active_channel_members m WHERE m.channel_id=ch.id) AS member_count,
                           owner.username AS owner_username
                    FROM channels ch LEFT JOIN accounts owner
@@ -10487,6 +10510,69 @@ def build_messenger_router(
             await db.commit()
         return {"id": channel_id, "avatar_media_id": ""}
 
+    CHANNEL_BOOL_SETTINGS = ("signatures_enabled", "signatures_profiles", "participants_hidden",
+                             "pre_history_hidden", "join_to_send", "join_request", "no_forwards")
+    CHANNEL_SLOW_MODES = (0, 10, 30, 60, 300, 900, 3600, 86400)
+
+    @router.put("/api/channels/{channel_id}/settings")
+    async def update_channel_settings(
+        channel_id: int,
+        payload: dict[str, Any],
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        user = await current_user(authorization)
+        uid = int(user["telegram_id"])
+        await channel_row(channel_id)
+        fields: dict[str, int] = {}
+        for key in CHANNEL_BOOL_SETTINGS:
+            if key in payload:
+                if type(payload[key]) is not bool:
+                    raise HTTPException(400, "Некорректное значение настройки канала")
+                fields[key] = int(payload[key])
+        if "slow_mode_seconds" in payload:
+            value = payload["slow_mode_seconds"]
+            if type(value) is not int or value not in CHANNEL_SLOW_MODES:
+                raise HTTPException(400, "INVALID_SLOW_MODE")
+            fields["slow_mode_seconds"] = value
+        if "color_id" in payload:
+            value = payload["color_id"]
+            if type(value) is not int or not 0 <= value <= 7:
+                raise HTTPException(400, "INVALID_PEER_COLOR")
+            fields["color_id"] = value
+        if "background_emoji_id" in payload:
+            value = payload["background_emoji_id"]
+            if type(value) is not int or value < 0:
+                raise HTTPException(400, "INVALID_PEER_COLOR")
+            fields["background_emoji_id"] = value
+        if "profile_color_id" in payload:
+            value = payload["profile_color_id"]
+            if type(value) is not int or not 0 <= value <= 7:
+                raise HTTPException(400, "INVALID_PEER_COLOR")
+            fields["profile_color_id"] = value
+        if "profile_background_emoji_id" in payload:
+            value = payload["profile_background_emoji_id"]
+            if type(value) is not int or value < 0:
+                raise HTTPException(400, "INVALID_PEER_COLOR")
+            fields["profile_background_emoji_id"] = value
+        if "emoji_status_id" in payload:
+            value = payload["emoji_status_id"]
+            if type(value) is not int or value < 0:
+                raise HTTPException(400, "INVALID_EMOJI_STATUS")
+            fields["emoji_status_id"] = value
+        if not fields:
+            raise HTTPException(400, "Нет полей для изменения")
+        async with aiosqlite.connect(db_path()) as db:
+            await db.execute("BEGIN IMMEDIATE")
+            if not await channel_has_right(db, channel_id, uid, 64):
+                raise HTTPException(403, "Нет права изменять информацию о канале")
+            assignments = ",".join(f"{key}=?" for key in fields)
+            await db.execute(f"UPDATE channels SET {assignments} WHERE id=?", (*fields.values(), channel_id))
+            await db.commit()
+        result: dict[str, Any] = {"id": channel_id}
+        for key, value in fields.items():
+            result[key] = bool(value) if key in CHANNEL_BOOL_SETTINGS else value
+        return result
+
     async def record_channel_departure(db: Any, channel_id: int, uid: int, voluntary: bool) -> None:
         # Record only actual transitions out of the active roster. Retrying a leave or ban is a no-op.
         await db.execute("""INSERT INTO channel_member_departures(channel_id,occurred_at,voluntary)
@@ -16005,7 +16091,7 @@ def build_messenger_router(
             membership = await require_group_member(db, group_id, uid)
             cur = await db.execute(
                 """SELECT g.id,g.username,g.title,g.description,g.owner_telegram_id,g.created_at,
-                          g.avatar_media_id,
+                          g.avatar_media_id,g.no_forwards,
                           g.slow_mode_seconds,g.members_hidden,g.default_send_restrictions,g.anti_spam_enabled,
                           (SELECT COUNT(*) FROM group_members m WHERE m.group_id=g.id) AS member_count
                    FROM chat_groups g WHERE g.id=?""",
@@ -16286,6 +16372,39 @@ def build_messenger_router(
                 await db.execute(f"UPDATE chat_groups SET {key}=? WHERE id=?", (value, group_id))
             await db.commit()
         return {"id": group_id, **fields}
+
+    @router.put("/api/groups/{group_id}/settings")
+    async def update_group_settings(group_id: int, payload: dict[str, Any],
+                                    authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        uid = int((await current_user(authorization))["telegram_id"])
+        fields: dict[str, int] = {}
+        if "no_forwards" in payload:
+            if type(payload["no_forwards"]) is not bool:
+                raise HTTPException(400, "Некорректное значение настройки группы")
+            fields["no_forwards"] = int(payload["no_forwards"])
+        if "slow_mode_seconds" in payload:
+            value = payload["slow_mode_seconds"]
+            if type(value) is not int or value not in (0, 5, 10, 15, 30, 60, 120, 300):
+                raise HTTPException(400, "INVALID_SLOW_MODE")
+            fields["slow_mode_seconds"] = value
+        if "members_hidden" in payload:
+            if type(payload["members_hidden"]) is not bool:
+                raise HTTPException(400, "INVALID_MEMBER_VISIBILITY")
+            fields["members_hidden"] = int(payload["members_hidden"])
+        if not fields:
+            raise HTTPException(400, "Нет полей для изменения")
+        async with aiosqlite.connect(db_path()) as db:
+            await db.execute("BEGIN IMMEDIATE")
+            membership = await require_group_member(db, group_id, uid)
+            if not group_has_right(membership, 1):
+                raise HTTPException(403, "Изменять группу может только владелец или администратор")
+            assignments = ",".join(f"{key}=?" for key in fields)
+            await db.execute(f"UPDATE chat_groups SET {assignments} WHERE id=?", (*fields.values(), group_id))
+            await db.commit()
+        result: dict[str, Any] = {"id": group_id}
+        for key, value in fields.items():
+            result[key] = bool(value) if key in ("no_forwards", "members_hidden") else value
+        return result
 
     @router.put("/api/groups/{group_id}/avatar")
     async def set_group_avatar(group_id: int, payload: dict[str, Any],
