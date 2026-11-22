@@ -875,7 +875,8 @@ async def get_number_handler(message: Message) -> None:
             log.warning("Internal number allocation failed (%s)", type(exc).__name__)
             await message.answer(tr(lang, "number_error"))
             return
-        await ensure_account(message.from_user.id, number, message.from_user.username or "", message.from_user.full_name or "")
+        await ensure_account(message.from_user.id, number, message.from_user.username or "",
+                             name_or_empty(message.from_user.full_name))
         await message.answer(tr(lang, "number_ready", number=number))
 
 
@@ -1290,9 +1291,28 @@ app.include_router(
 )
 
 
+_PHONE_NAME_CHARS = set("0123456789+ -()")
+
+
+def looks_like_phone_name(value: str | None) -> bool:
+    """Похоже ли значение на номер телефона, а не на имя."""
+    text = str(value or "").strip()
+    if len(text) < 5:
+        return False
+    digits = sum(1 for ch in text if ch.isdigit())
+    return digits >= 5 and all(ch.isdigit() or ch in _PHONE_NAME_CHARS for ch in text)
+
+
+def name_or_empty(value: str | None) -> str:
+    """Имя из Telegram: телефонные номера именем не считаем (см. «в чатах вместо имени номер»)."""
+    text = str(value or "").strip()
+    return "" if looks_like_phone_name(text) else text
+
+
 async def ensure_account(telegram_id: int, number: str, username: str = "", display_name: str = "") -> None:
     """Create a WaysGram account once and grant its one-time welcome balance."""
     now = int(time.time())
+    display_name = name_or_empty(display_name)
     async with aiosqlite.connect(DATABASE_PATH) as db:
         await db.execute("BEGIN IMMEDIATE")
         cur = await db.execute(
@@ -1303,10 +1323,16 @@ async def ensure_account(telegram_id: int, number: str, username: str = "", disp
         )
         created = cur.rowcount == 1
         if not created:
+            # Имя, которое человек выбрал в приложении, не перетираем повторным входом
+            # в бота; меняем только пустое или записанное номером телефона.
+            cur = await db.execute("SELECT display_name FROM accounts WHERE telegram_id=?", (telegram_id,))
+            stored = await cur.fetchone()
+            current = str(stored[0] or "").strip() if stored else ""
+            keep = current if current and not looks_like_phone_name(current) else display_name
             await db.execute(
                 """UPDATE accounts SET virtual_number=?,username=?,display_name=?,updated_at=?
                    WHERE telegram_id=?""",
-                (number, username[:64], display_name[:128], now, telegram_id),
+                (number, username[:64], keep[:128], now, telegram_id),
             )
         else:
             # Keep both welcome grants visible in the same transaction as their balances.

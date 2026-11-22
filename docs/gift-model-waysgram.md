@@ -80,9 +80,18 @@ The database still assigns a real collection number, so uniqueness and the marke
 The client hides it for this model only: `org.telegram.ui.Stars.WaysGramGiftNumber` detects the
 `WaysGram` model in the gift attributes (by name or by the bundled document id) and draws `#???`
 — three question marks in a gradient that shimmers from dark blue to near-black
-(`Choreographer`-driven, 2 s cycle). Applied to the unique-gift card title, the rotated ribbon of
+(`Choreographer`-driven, 3.6 s cycle). Applied to the unique-gift card title, the rotated ribbon of
 the gift grid (`Gifts.GiftSheet.Ribbon`, drawn with the same gradient), `getGiftName(...)`, the
 wear page, offer sheets, service messages and resale bulletins.
+
+The shimmer loops without a jump. The first version moved the gradient from −0.8 to +0.8 of the
+text width with `TileMode.CLAMP`: at the end of the cycle the highlight snapped back to the start
+and `#???` twitched. Now the palette is symmetric (`near-black → deep blue → shimmer → deep blue →
+near-black`), the tile is `Shader.TileMode.MIRROR`, and one cycle shifts the gradient by exactly
+one mirrored period (`phase * 2 * length`). The frame at `phase = 1` is pixel-identical to the
+frame at `phase = 0`, so the loop is seamless while still moving in one direction. The gradient is
+built horizontally (1 px of vertical extent so the shader is not degenerate), so nothing is
+mirrored along the text height.
 
 The cycle never stops while a card or a grid cell is registered: views are invalidated with
 `postInvalidateOnAnimation()` for as long as they live, so the colour keeps moving while the card
