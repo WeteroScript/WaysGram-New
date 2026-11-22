@@ -1661,6 +1661,13 @@ async def init_messenger_storage(database_path: Path) -> None:
                 "ON waysgram_label_assignments(target_type,target_id)"
             )
             await db.commit()
+        # «Кто может присылать мне подарки» раньше хранилось в ключе отображения подарков на профиле.
+        # Переносим уже сделанный выбор пользователя, чтобы запрет начал работать без повторной настройки.
+        await db.execute(
+            """INSERT OR IGNORE INTO account_profile_privacy(telegram_id, setting, rules)
+               SELECT telegram_id, 'gifts', rules FROM account_profile_privacy WHERE setting='gift-autosave'"""
+        )
+        await db.commit()
         # Snapshot only models that Telegram explicitly marks as auction-issued.
         # Keep this registry append-only; live availability and active auction
         # state are separate from the model's historical distribution method.
@@ -5459,7 +5466,7 @@ def build_messenger_router(
         else:
             cur = await db.execute("SELECT rules FROM account_profile_privacy WHERE telegram_id=? AND setting=?", (uid, setting))
         row = await cur.fetchone()
-        return json.loads(row[0]) if row else {"mode": {"invites": "everyone", "find-by-phone": "contacts", "avatar": "everyone", "bio": "everyone", "music": "everyone", "voice": "everyone", "forwards": "everyone", "gift-autosave": "everyone", "calls": "everyone"}.get(setting, "nobody"), "allow": [], "deny": []}
+        return json.loads(row[0]) if row else {"mode": {"invites": "everyone", "find-by-phone": "contacts", "avatar": "everyone", "bio": "everyone", "music": "everyone", "voice": "everyone", "forwards": "everyone", "gift-autosave": "everyone", "gifts": "everyone", "calls": "everyone"}.get(setting, "nobody"), "allow": [], "deny": []}
 
     async def privacy_allows(db: Any, owner: int, viewer: int, setting: str) -> bool:
         if owner == viewer:
@@ -5504,7 +5511,7 @@ def build_messenger_router(
     @router.get("/api/me/privacy/{setting}")
     async def get_privacy(setting: str, authorization: str | None = Header(default=None)):
         uid = int((await current_user(authorization))["telegram_id"])
-        if setting not in ("invites", "phone", "last-seen", "find-by-phone", "avatar", "bio", "birthday", "music", "voice", "forwards", "gift-autosave", "calls", "calls-p2p"):
+        if setting not in ("invites", "phone", "last-seen", "find-by-phone", "avatar", "bio", "birthday", "music", "voice", "forwards", "gift-autosave", "gifts", "calls", "calls-p2p"):
             raise HTTPException(404, "PRIVACY_KEY_INVALID")
         async with aiosqlite.connect(db_path()) as db:
             return await privacy_rules(db, uid, setting)
@@ -5512,7 +5519,7 @@ def build_messenger_router(
     @router.put("/api/me/privacy/{setting}")
     async def set_privacy(setting: str, payload: dict[str, Any], authorization: str | None = Header(default=None)):
         uid = int((await current_user(authorization))["telegram_id"])
-        if setting not in ("invites", "phone", "last-seen", "find-by-phone", "avatar", "bio", "birthday", "music", "voice", "forwards", "gift-autosave", "calls", "calls-p2p"):
+        if setting not in ("invites", "phone", "last-seen", "find-by-phone", "avatar", "bio", "birthday", "music", "voice", "forwards", "gift-autosave", "gifts", "calls", "calls-p2p"):
             raise HTTPException(404, "PRIVACY_KEY_INVALID")
         mode = payload.get("mode")
         if mode not in ("everyone", "contacts", "nobody"):
@@ -6032,6 +6039,9 @@ def build_messenger_router(
         )
         if await cur.fetchone():
             raise HTTPException(403, "Нельзя отправить подарок: пользователь находится в чёрном списке")
+        # «Кто может присылать мне подарки»: все / только контакты / никто.
+        if not await privacy_allows(db, recipient, sender, "gifts"):
+            raise HTTPException(403, "GIFT_PRIVACY_FORBIDDEN")
 
     async def apply_gift_autosave(db: Any, serial: str, owner: int, sender: int) -> None:
         visible = await privacy_allows(db, owner, sender, "gift-autosave")
@@ -12119,6 +12129,8 @@ def build_messenger_router(
                 await db.rollback()
                 raise HTTPException(status_code=403, detail="Нельзя делиться геолокацией: пользователь находится в чёрном списке")
 
+            if not live_id:
+                await require_free_dm(db, uid, recipient_id)
             if live_id:
                 if not re.fullmatch(r"[a-f0-9]{32}", live_id):
                     await db.rollback()
@@ -12539,6 +12551,7 @@ def build_messenger_router(
                 if await cur.fetchone():
                     await db.rollback()
                     raise HTTPException(status_code=403, detail="Нельзя запланировать сообщение: пользователь находится в чёрном списке")
+            await require_free_dm(db, uid, recipient_id)
             cur = await db.execute(
                 """INSERT INTO scheduled_messages
                    (sender_telegram_id,recipient_telegram_id,body,scheduled_at,
@@ -12623,6 +12636,7 @@ def build_messenger_router(
             if await cur.fetchone():
                 await db.rollback()
                 raise HTTPException(status_code=403, detail="Нельзя отправить сообщение: пользователь находится в чёрном списке")
+            await require_free_dm(db, uid, recipient_id)
             cur = await db.execute(
                 "SELECT COUNT(*) FROM online_scheduled_messages WHERE sender_telegram_id=? AND status='pending'",
                 (uid,),

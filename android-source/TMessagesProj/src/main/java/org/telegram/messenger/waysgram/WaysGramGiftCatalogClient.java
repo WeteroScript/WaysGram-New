@@ -763,6 +763,9 @@ public final class WaysGramGiftCatalogClient implements AutoCloseable {
                 return "Сессия WaysGram недействительна (HTTP 401)";
             }
             if (status == 403) {
+                if (http.detail.contains("GIFT_PRIVACY_FORBIDDEN")) {
+                    return "Пользователь ограничил получение подарков";
+                }
                 return "Доступ к инвентарю запрещён (HTTP 403)";
             }
             if (status >= 500) {

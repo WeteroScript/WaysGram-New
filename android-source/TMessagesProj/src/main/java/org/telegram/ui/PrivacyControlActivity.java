@@ -49,6 +49,7 @@ import org.telegram.messenger.BotWebViewVibrationEffect;
 import org.telegram.messenger.ContactsController;
 import org.telegram.messenger.DialogObject;
 import org.telegram.messenger.FileLoader;
+import org.telegram.messenger.FileLog;
 import org.telegram.messenger.ImageLoader;
 import org.telegram.messenger.ImageLocation;
 import org.telegram.messenger.LocaleController;
@@ -59,6 +60,8 @@ import org.telegram.messenger.R;
 import org.telegram.messenger.UserConfig;
 import org.telegram.messenger.UserObject;
 import org.telegram.messenger.Utilities;
+import org.json.JSONArray;
+import org.json.JSONObject;
 import org.telegram.tgnet.ConnectionsManager;
 import org.telegram.tgnet.WaysGramApi;
 import org.telegram.tgnet.TLRPC;
@@ -978,9 +981,125 @@ public class PrivacyControlActivity extends BaseFragment implements Notification
         }
     }
 
+    /** Путь WaysGram: кто может присылать подарки (все / только контакты / никто). */
+    private static final String WAYSGRAM_GIFTS_PRIVACY_PATH = WaysGramGiftPrivacy.PATH;
+
+    private void applyWaysGramGiftsSettings() {
+        final String token = WaysGramApi.getToken(currentAccount);
+        if (android.text.TextUtils.isEmpty(token) || getParentActivity() == null) {
+            showErrorAlert();
+            return;
+        }
+        final String mode = currentType == TYPE_NOBODY ? "nobody" : currentType == TYPE_CONTACTS ? "contacts" : "everyone";
+        final JSONObject body = new JSONObject();
+        try {
+            body.put("mode", mode);
+            JSONArray allow = new JSONArray();
+            JSONArray deny = new JSONArray();
+            if (currentType != TYPE_EVERYBODY) {
+                for (int a = 0; a < currentMinus.size(); a++) {
+                    Long id = currentMinus.get(a);
+                    if (id != null && id > 0) deny.put(id);
+                }
+            }
+            if (currentType != TYPE_NOBODY) {
+                for (int a = 0; a < currentPlus.size(); a++) {
+                    Long id = currentPlus.get(a);
+                    if (id != null && id > 0) allow.put(id);
+                }
+            }
+            body.put("allow", allow);
+            body.put("deny", deny);
+        } catch (Exception e) {
+            showErrorAlert();
+            return;
+        }
+        WaysGramApi.NETWORK.execute(() -> {
+            boolean saved = false;
+            try {
+                WaysGramApi.request("PUT", WAYSGRAM_GIFTS_PRIVACY_PATH, body, token, 20000);
+                saved = true;
+            } catch (Exception e) {
+                FileLog.e(e);
+            }
+            if (saved) {
+                try {
+                    // Экран «Подарки» отвечает и за показ подарков на профиле: держим обе настройки в одном выборе.
+                    WaysGramApi.request("PUT", "/api/me/privacy/gift-autosave", body, token, 20000);
+                } catch (Exception e) {
+                    FileLog.e(e);
+                }
+            }
+            final boolean success = saved;
+            AndroidUtilities.runOnUIThread(() -> {
+                if (success) WaysGramGiftPrivacy.setMode(currentAccount, mode);
+                if (!success) {
+                    if (getParentActivity() != null) showErrorAlert();
+                    return;
+                }
+                initialRulesType = currentType;
+                initialPlus.clear();
+                initialPlus.addAll(currentPlus);
+                initialMinus.clear();
+                initialMinus.addAll(currentMinus);
+                finished();
+            });
+        });
+    }
+
+    /** Текущие правила подарков берём из WaysGram: ключ Telegram для них не подходит. */
+    private void loadWaysGramGiftsSettings() {
+        final String token = WaysGramApi.getToken(currentAccount);
+        if (android.text.TextUtils.isEmpty(token)) return;
+        WaysGramApi.NETWORK.execute(() -> {
+            int mode = -1;
+            ArrayList<Long> allow = new ArrayList<>();
+            ArrayList<Long> deny = new ArrayList<>();
+            try {
+                JSONObject data = WaysGramApi.request("GET", WAYSGRAM_GIFTS_PRIVACY_PATH, null, token, 20000);
+                String value = data.optString("mode", "");
+                if ("everyone".equals(value)) mode = TYPE_EVERYBODY;
+                else if ("contacts".equals(value)) mode = TYPE_CONTACTS;
+                else if ("nobody".equals(value)) mode = TYPE_NOBODY;
+                JSONArray allowArray = data.optJSONArray("allow");
+                for (int a = 0; allowArray != null && a < allowArray.length(); a++) {
+                    long id = allowArray.optLong(a);
+                    if (id > 0) allow.add(id);
+                }
+                JSONArray denyArray = data.optJSONArray("deny");
+                for (int a = 0; denyArray != null && a < denyArray.length(); a++) {
+                    long id = denyArray.optLong(a);
+                    if (id > 0) deny.add(id);
+                }
+            } catch (Exception e) {
+                FileLog.e(e);
+            }
+            final int loadedMode = mode;
+            AndroidUtilities.runOnUIThread(() -> {
+                if (isFinished || getParentActivity() == null || loadedMode < 0 || hasChanges()) return;
+                WaysGramGiftPrivacy.setMode(currentAccount, loadedMode == TYPE_NOBODY ? "nobody"
+                        : loadedMode == TYPE_CONTACTS ? "contacts" : "everyone");
+                initialRulesType = currentType = loadedMode;
+                currentPlus = new ArrayList<>(allow);
+                currentMinus = new ArrayList<>(deny);
+                initialPlus.clear();
+                initialPlus.addAll(allow);
+                initialMinus.clear();
+                initialMinus.addAll(deny);
+                updateRows(true);
+                if (listAdapter != null) listAdapter.notifyDataSetChanged();
+                updateDoneButton();
+            });
+        });
+    }
+
     private void applyCurrentPrivacySettings() {
         if (rulesType == PRIVACY_RULES_TYPE_MESSAGES && org.telegram.tgnet.WaysGramTransport.ENABLED) {
             applyWaysGramMessagesSettings();
+            return;
+        }
+        if (rulesType == PRIVACY_RULES_TYPE_GIFTS && org.telegram.tgnet.WaysGramTransport.ENABLED) {
+            applyWaysGramGiftsSettings();
             return;
         }
         if (rulesType == PRIVACY_RULES_TYPE_MESSAGES) {
@@ -1291,6 +1410,15 @@ public class PrivacyControlActivity extends BaseFragment implements Notification
     }
 
     private void checkPrivacy() {
+        if (rulesType == PRIVACY_RULES_TYPE_GIFTS && org.telegram.tgnet.WaysGramTransport.ENABLED) {
+            currentMinus = new ArrayList<>();
+            currentPlus = new ArrayList<>();
+            initialPlus.clear();
+            initialMinus.clear();
+            initialRulesType = currentType = TYPE_EVERYBODY;
+            loadWaysGramGiftsSettings();
+            return;
+        }
         if (rulesType == PRIVACY_RULES_TYPE_MESSAGES && org.telegram.tgnet.WaysGramTransport.ENABLED) {
             currentMinus = new ArrayList<>();
             currentPlus = new ArrayList<>();

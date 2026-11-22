@@ -1408,6 +1408,15 @@ public class WaysGramTransport {
                 // The session is gone (expired or revoked): the app treats this as a logout.
                 return error(401, "AUTH_KEY_UNREGISTERED");
             }
+            final String detail = e.detail == null ? "" : e.detail;
+            if (detail.contains("MESSAGE_FEE_UNSUPPORTED_FOR_SEND_TYPE")) {
+                // Медиаальбом, пересылка, живая геолокация и отложенная отправка в платный чат
+                // сервер не принимает бесплатно, а оплату для них проводит только сам текст.
+                return error(402, "Пользователь принимает только платные сообщения");
+            }
+            if (detail.contains("GIFT_PRIVACY_FORBIDDEN")) {
+                return error(403, "Пользователь ограничил получение подарков");
+            }
             return error(e.status >= 500 ? 500 : 400, TextUtils.isEmpty(e.detail) ? "ERROR" : e.detail);
         }
         if (e.status == 401) {

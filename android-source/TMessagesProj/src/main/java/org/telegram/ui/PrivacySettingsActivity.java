@@ -189,6 +189,14 @@ public class PrivacySettingsActivity extends BaseFragment implements Notificatio
     public boolean onFragmentCreate() {
         super.onFragmentCreate();
 
+        if (WaysGramTransport.ENABLED) {
+            // Сводка «Подарки» показывает режим, сохранённый в WaysGram, а не ключ Telegram.
+            WaysGramGiftPrivacy.load(currentAccount, mode -> {
+                if (listAdapter != null) {
+                    listAdapter.notifyDataSetChanged();
+                }
+            });
+        }
         getContactsController().loadPrivacySettings();
         getMessagesController().getBlockedPeers(true);
         currentSync = newSync = getUserConfig().syncContacts;
@@ -1498,7 +1506,12 @@ public class PrivacySettingsActivity extends BaseFragment implements Notificatio
                     } else if (position == waysGramGiftReceiveRow) {
                         textCell.setTextAndValue(getString(R.string.WaysGramGiftReceiveTitle), "", true);
                     } else if (position == giftsRow) {
-                        if (getContactsController().getLoadingPrivacyInfo(ContactsController.PRIVACY_RULES_TYPE_GIFTS)) {
+                        if (WaysGramTransport.ENABLED) {
+                            final int giftsType = WaysGramGiftPrivacy.rulesType(currentAccount);
+                            value = getString(giftsType == PrivacyControlActivity.TYPE_CONTACTS ? R.string.LastSeenContacts
+                                    : giftsType == PrivacyControlActivity.TYPE_NOBODY ? R.string.LastSeenNobody
+                                    : R.string.LastSeenEverybody);
+                        } else if (getContactsController().getLoadingPrivacyInfo(ContactsController.PRIVACY_RULES_TYPE_GIFTS)) {
                             showLoading = true;
                             loadingLen = 30;
                         } else {
