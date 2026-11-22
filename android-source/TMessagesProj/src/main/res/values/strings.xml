@@ -11659,6 +11659,8 @@
     <string name="WaysGramMessagePrivacyPending">Not available yet</string>
     <string name="WaysGramMessagePrivacyUnavailable">WaysGram does not yet support access rules or fees for incoming messages. No Stars are charged for messages.</string>
     <string name="WaysGramUnsupportedOperation">WaysGram does not support this action yet.</string>
+    <string name="WaysGramMyGifts">My Gifts</string>
+    <string name="WaysGramGifts">Gifts</string>
     <string name="WaysGramUnsupportedOperationWithMethod">WaysGram does not support this action yet (%1$s).</string>
     <string name="WaysGramPaidReactions">Paid reactions</string>
     <string name="WaysGramPaidOn">Paid reactions are enabled.</string>

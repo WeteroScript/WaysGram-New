@@ -7108,8 +7108,8 @@ public class SharedMediaLayout extends FrameLayout implements NotificationCenter
                 }
             }
             if (hasWaysGramGifts) {
-                tabs.add(new Pair(TAB_WAYSGRAM_GIFTS,
-                        waysGramProfileOwner == profileActivity.getUserConfig().getClientUserId() ? "Мои подарки" : "Подарки"));
+                tabs.add(new Pair(TAB_WAYSGRAM_GIFTS, getString(waysGramProfileOwner == profileActivity.getUserConfig().getClientUserId()
+                        ? R.string.WaysGramMyGifts : R.string.WaysGramGifts)));
             }
             if (scrollSlidingTextTabStrip.isReordering()) {
                 final Utilities.CallbackReturn<Integer, Boolean> has = id -> {
