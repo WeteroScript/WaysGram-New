@@ -74,7 +74,13 @@ jobs:
             mkdir -p "$(dirname "$path")"
             if [ ! -d "$path/.git" ]; then
               if [ "$path" = "TMessagesProj_Modules/media" ]; then
-                git clone --depth 1 --branch telegram-v1.10.1-ffmpeg --recurse-submodules --shallow-submodules "$url" "$path"
+                # Upstream moved the fork to AGP 9 (commit 6f52386, "Build with AGP 9") on 2026-11-22:
+                # libraries/common_ktx/build.gradle now calls android.kotlin { }, which AGP 8.13.2 does
+                # not provide. Pin the last 8.x-compatible revision so configuration stays deterministic.
+                git clone --depth 1 --recurse-submodules --shallow-submodules "$url" "$path"
+                git -C "$path" fetch --depth 1 origin 09b6c97c0d691c50cd4541e1573995d4066d6f5c
+                git -C "$path" checkout --detach 09b6c97c0d691c50cd4541e1573995d4066d6f5c
+                git -C "$path" submodule update --init --recursive --depth 1
               elif [ "$path" = "TMessagesProj/jni/third_party/absl" ]; then
                 git clone --depth 1 --branch 20250127.1 --recurse-submodules --shallow-submodules "$url" "$path"
               elif [ "$path" = "TMessagesProj/jni/tgcalls" ]; then
