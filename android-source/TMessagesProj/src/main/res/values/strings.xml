@@ -11885,4 +11885,12 @@
     <string name="WgCustomName">Config name</string>
     <string name="WgCustomApply">Apply</string>
     <string name="WgCustomError">Could not load or save the customization.</string>
+    <string name="WgCustomConfigs">Saved configurations</string>
+    <string name="WgCustomActive">Active</string>
+    <string name="WgCustomUntitled">Untitled</string>
+    <string name="WgCustomDelete">Delete</string>
+    <string name="WgCustomDeleteConfirm">Delete this configuration?</string>
+    <string name="WgCustomLayerEmpty">Tap to upload an image</string>
+    <string name="WgCustomLayerSet">Image selected</string>
+    <string name="WgCustomEmpty">No saved configurations yet. Upload an image and save it as a configuration.</string>
 </resources>

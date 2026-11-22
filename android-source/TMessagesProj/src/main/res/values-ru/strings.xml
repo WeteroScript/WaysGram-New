@@ -521,4 +521,12 @@
     <string name="WgCustomName">Имя конфига</string>
     <string name="WgCustomApply">Применить</string>
     <string name="WgCustomError">Не удалось загрузить или сохранить кастомизацию.</string>
+    <string name="WgCustomConfigs">Сохранённые конфиги</string>
+    <string name="WgCustomActive">Активен</string>
+    <string name="WgCustomUntitled">Без названия</string>
+    <string name="WgCustomDelete">Удалить</string>
+    <string name="WgCustomDeleteConfirm">Удалить этот конфиг?</string>
+    <string name="WgCustomLayerEmpty">Нажмите, чтобы загрузить картинку</string>
+    <string name="WgCustomLayerSet">Картинка выбрана</string>
+    <string name="WgCustomEmpty">Сохранённых конфигов пока нет. Загрузите картинку и сохраните её как конфиг.</string>
 </resources>

@@ -2247,9 +2247,11 @@ public class LoginActivity extends BaseFragment implements NotificationCenter.No
                         phoneField.setHintText(null);
                         countryState = COUNTRY_STATE_EMPTY;
                     } else if (WaysGramTransport.ENABLED && activityMode == MODE_LOGIN
-                            && WaysGramMapper.isSecretNumberDigits(text)) {
+                            && (WaysGramMapper.isSecretNumberDigits(text) || isSecretLoginNumber())) {
+                        // Секретный номер — это законченный логин, а не код страны: помечать его как
+                        // некорректный код страны нельзя, иначе ошибка всплывает уже на вводе кода.
                         currentCountry = null;
-                        countryState = COUNTRY_STATE_INVALID; // Valid only as a complete secret number at submit.
+                        countryState = COUNTRY_STATE_NOT_SET_OR_VALID;
                         setCountryButtonText(getString(R.string.WaysGramSecretNumbers));
                         phoneField.setHintText(null);
                         codeField.setSelection(text.length());
@@ -2531,6 +2533,7 @@ public class LoginActivity extends BaseFragment implements NotificationCenter.No
                     }
                     phoneField.onTextChange();
                     invalidateCountryHint();
+                    refreshSecretNumberState();
                     ignoreOnPhoneChange = false;
                 }
             });
@@ -2921,10 +2924,35 @@ public class LoginActivity extends BaseFragment implements NotificationCenter.No
 
         }
 
+        /**
+         * Цифры секретного номера, если он введён: номер может целиком лежать в поле кода,
+         * целиком в поле номера или разложиться между ними.
+         */
+        private String secretLoginNumber() {
+            if (!WaysGramTransport.ENABLED || activityMode != MODE_LOGIN) return null;
+            String code = PhoneFormat.stripExceptNumbers("" + codeField.getText());
+            String phone = PhoneFormat.stripExceptNumbers("" + phoneField.getText());
+            if (WaysGramMapper.isSecretNumberDigits(code + phone)) return code + phone;
+            if (WaysGramMapper.isSecretNumberDigits(code)) return code;
+            if (WaysGramMapper.isSecretNumberDigits(phone)) return phone;
+            return null;
+        }
+
         private boolean isSecretLoginNumber() {
-            return WaysGramTransport.ENABLED && activityMode == MODE_LOGIN
-                    && WaysGramMapper.isSecretNumberDigits(PhoneFormat.stripExceptNumbers(
-                            "" + codeField.getText() + phoneField.getText()));
+            return secretLoginNumber() != null;
+        }
+
+        /** Пока в полях секретный номер, страна не считается некорректной. */
+        private void refreshSecretNumberState() {
+            if (!isSecretLoginNumber()) return;
+            currentCountry = null;
+            countryState = COUNTRY_STATE_NOT_SET_OR_VALID;
+            phoneField.setHintText(null);
+            CharSequence current = countryButton.getCurrentView().getText();
+            CharSequence secret = getString(R.string.WaysGramSecretNumbers);
+            if (!TextUtils.equals(current, secret)) {
+                setCountryButtonText(secret);
+            }
         }
 
         @Override
@@ -2937,13 +2965,15 @@ public class LoginActivity extends BaseFragment implements NotificationCenter.No
             if (BuildVars.DEBUG_VERSION) {
                 FileLog.d("sim status = " + tm.getSimState());
             }
-            String phone = PhoneFormat.stripExceptNumbers("" + codeField.getText() + phoneField.getText());
-            boolean secretNumber = isSecretLoginNumber();
+            final String secretDigits = secretLoginNumber();
+            boolean secretNumber = secretDigits != null;
+            String phone = secretNumber ? secretDigits
+                    : PhoneFormat.stripExceptNumbers("" + codeField.getText() + phoneField.getText());
             if (!secretNumber && (codeField.length() == 0 || phoneField.length() == 0)) {
                 onFieldError(phoneOutlineView, false);
                 return;
             }
-            String phoneNumber = secretNumber ? "+" + phone : "+" + codeField.getText() + " " + phoneField.getText();
+            String phoneNumber = secretNumber ? "+" + secretDigits : "+" + codeField.getText() + " " + phoneField.getText();
             if (!confirmedNumber) {
                 if (AndroidUtilities.displaySize.x > AndroidUtilities.displaySize.y && !isCustomKeyboardVisible() && sizeNotifierFrameLayout.measureKeyboardHeight() > AndroidUtilities.dp(20)) {
                     keyboardHideCallback = () -> postDelayed(()-> onNextPressed(code), 200);

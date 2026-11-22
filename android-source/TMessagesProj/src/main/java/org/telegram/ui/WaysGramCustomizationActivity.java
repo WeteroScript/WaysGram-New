@@ -131,10 +131,11 @@ public class WaysGramCustomizationActivity extends BaseFragment {
             @Override public void onItemClick(int id) { if (id == -1) finishFragment(); }
         });
         ScrollView scroll = new ScrollView(context);
+        scroll.setBackgroundColor(Theme.getColor(Theme.key_windowBackgroundGray));
         content = new LinearLayout(context);
         content.setOrientation(LinearLayout.VERTICAL);
+        content.setPadding(0, AndroidUtilities.dp(8), 0, AndroidUtilities.dp(20));
         scroll.addView(content);
-        scroll.setBackgroundColor(Theme.getColor(Theme.key_windowBackgroundGray));
         fragmentView = scroll;
         rebuild();
         return scroll;
@@ -158,94 +159,388 @@ public class WaysGramCustomizationActivity extends BaseFragment {
         return value == null || value.startsWith("LOC_ERR") ? "" : value;
     }
 
-    private void toggle(LinearLayout parent, String label, boolean value, Runnable action) {
-        TextCheckCell cell = new TextCheckCell(getContext());
-        cell.setBackgroundColor(Theme.getColor(Theme.key_windowBackgroundWhite));
-        cell.setTextAndCheck(label, value, false);
-        cell.setOnClickListener(v -> action.run());
-        parent.addView(cell);
+    /* ─────────────────────────────  Интерфейс  ───────────────────────────── */
+
+    private static final long REVEAL_DELAY = 26L, REVEAL_DURATION = 220L;
+
+    private final java.util.ArrayList<View> revealViews = new java.util.ArrayList<>();
+    private final java.util.ArrayList<Integer> revealOrder = new java.util.ArrayList<>();
+
+    /** Запоминает блок, который проявится после сборки экрана. */
+    private void reveal(View view, int index) {
+        view.setAlpha(0f);
+        view.setTranslationY(AndroidUtilities.dp(12));
+        revealViews.add(view);
+        revealOrder.add(index);
     }
 
-    private Button button(String text, Runnable click) {
-        Button b = new Button(getContext(), null, android.R.attr.borderlessButtonStyle);
-        b.setAllCaps(false);
-        b.setText(text);
-        b.setTextColor(Theme.getColor(Theme.key_windowBackgroundWhiteBlueText));
-        b.setOnClickListener(v -> click.run());
-        return b;
+    /** Мягкий сдвиг вверх и проявление, с нарастающей задержкой по порядку блоков. */
+    private void runReveal() {
+        if (getContext() == null) return;
+        for (int i = 0; i < revealViews.size(); i++) {
+            View view = revealViews.get(i);
+            int order = revealOrder.get(i);
+            view.animate().alpha(1f).translationY(0f)
+                    .setStartDelay(Math.min(order, 8) * REVEAL_DELAY)
+                    .setDuration(REVEAL_DURATION)
+                    .setInterpolator(org.telegram.ui.Components.CubicBezierInterpolator.EASE_OUT)
+                    .start();
+        }
+        revealViews.clear();
+        revealOrder.clear();
+    }
+
+    /** Картинка слоя: сначала несохранённый черновик, затем активный конфиг. */
+    private Bitmap draftBitmap(int layer) {
+        if (!draft[layer].isEmpty()) {
+            Bitmap image = bitmap(draft[layer]);
+            if (image != null) return image;
+        }
+        refreshLayers(currentAccount);
+        return layers[layer];
+    }
+
+    private LinearLayout card(int index) {
+        LinearLayout card = new LinearLayout(getContext());
+        card.setOrientation(LinearLayout.VERTICAL);
+        card.setBackground(Theme.createRoundRectDrawable(AndroidUtilities.dp(14), Theme.getColor(Theme.key_windowBackgroundWhite)));
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(-1, -2);
+        params.leftMargin = AndroidUtilities.dp(12);
+        params.rightMargin = AndroidUtilities.dp(12);
+        card.setLayoutParams(params);
+        reveal(card, index);
+        return card;
+    }
+
+    private TextView sectionHeader(int titleRes, int topMargin, int index) {
+        TextView view = new TextView(getContext());
+        view.setText(text(titleRes));
+        view.setTextSize(13);
+        view.setTypeface(Typeface.DEFAULT_BOLD);
+        view.setTextColor(Theme.getColor(Theme.key_windowBackgroundWhiteGrayText2));
+        view.setPadding(AndroidUtilities.dp(22), AndroidUtilities.dp(topMargin), AndroidUtilities.dp(22), AndroidUtilities.dp(6));
+        view.setLayoutParams(new LinearLayout.LayoutParams(-1, -2));
+        reveal(view, index);
+        return view;
+    }
+
+    private View divider() {
+        View divider = new View(getContext());
+        divider.setBackgroundColor(Theme.getColor(Theme.key_divider));
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(-1, Math.max(1, AndroidUtilities.dp(0.5f)));
+        params.leftMargin = AndroidUtilities.dp(16);
+        divider.setLayoutParams(params);
+        return divider;
+    }
+
+    private View toggleRow(int labelRes, boolean value, Runnable action, int index) {
+        TextCheckCell cell = new TextCheckCell(getContext());
+        cell.setBackground(null);
+        cell.setTextAndCheck(text(labelRes), value, false);
+        cell.setOnClickListener(v -> action.run());
+        reveal(cell, index);
+        return cell;
+    }
+
+    private View layerRow(int layer, int index) {
+        Context context = getContext();
+        LinearLayout row = new LinearLayout(context);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        row.setBackground(Theme.createSimpleSelectorRoundRectDrawable(AndroidUtilities.dp(14),
+                Theme.getColor(Theme.key_windowBackgroundWhite), Theme.getColor(Theme.key_listSelector)));
+        row.setPadding(AndroidUtilities.dp(14), AndroidUtilities.dp(10), AndroidUtilities.dp(8), AndroidUtilities.dp(10));
+
+        LayerChip chip = new LayerChip(context, draftBitmap(layer), layer == 0);
+        row.addView(chip, new LinearLayout.LayoutParams(AndroidUtilities.dp(layer == 0 ? 62 : 40), AndroidUtilities.dp(30)));
+
+        LinearLayout texts = new LinearLayout(context);
+        texts.setOrientation(LinearLayout.VERTICAL);
+        LinearLayout.LayoutParams textsParams = new LinearLayout.LayoutParams(0, -2, 1f);
+        textsParams.leftMargin = AndroidUtilities.dp(14);
+        textsParams.rightMargin = AndroidUtilities.dp(8);
+        TextView title = new TextView(context);
+        title.setText(text(layer == 0 ? R.string.WgCustomBackground : R.string.WgCustomIndicator));
+        title.setTextSize(16);
+        title.setTextColor(Theme.getColor(Theme.key_windowBackgroundWhiteBlackText));
+        title.setSingleLine(true);
+        title.setEllipsize(android.text.TextUtils.TruncateAt.END);
+        TextView state = new TextView(context);
+        state.setText(text(draft[layer].isEmpty() ? R.string.WgCustomLayerEmpty : R.string.WgCustomLayerSet));
+        state.setTextSize(13);
+        state.setTextColor(Theme.getColor(Theme.key_windowBackgroundWhiteGrayText2));
+        texts.addView(title);
+        texts.addView(state);
+        row.addView(texts, textsParams);
+
+        ImageView action = new ImageView(context);
+        action.setImageResource(R.drawable.msg_gallery);
+        action.setColorFilter(Theme.getColor(Theme.key_windowBackgroundWhiteBlueText));
+        action.setScaleType(ImageView.ScaleType.CENTER_INSIDE);
+        action.setBackground(Theme.createSimpleSelectorCircleDrawable(AndroidUtilities.dp(40), 0, Theme.getColor(Theme.key_listSelector)));
+        action.setContentDescription(text(R.string.WgCustomUpload));
+        action.setOnClickListener(v -> pick(layer));
+        row.addView(action, new LinearLayout.LayoutParams(AndroidUtilities.dp(40), AndroidUtilities.dp(40)));
+
+        row.setOnClickListener(v -> pick(layer));
+        reveal(row, index);
+        return row;
+    }
+
+    private View primaryButton(int labelRes, boolean clickable, Runnable click, int index) {
+        TextView button = new TextView(getContext());
+        button.setText(text(labelRes));
+        button.setTextSize(15);
+        button.setTypeface(Typeface.DEFAULT_BOLD);
+        button.setTextColor(0xFFFFFFFF);
+        button.setGravity(Gravity.CENTER);
+        button.setBackground(Theme.createSimpleSelectorRoundRectDrawable(AndroidUtilities.dp(12),
+                Theme.getColor(Theme.key_windowBackgroundWhiteBlueButton), Theme.getColor(Theme.key_listSelector)));
+        button.setAlpha(clickable ? 1f : .45f);
+        button.setEnabled(clickable);
+        if (clickable) {
+            button.setOnClickListener(v -> click.run());
+        }
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(-1, AndroidUtilities.dp(46));
+        params.leftMargin = AndroidUtilities.dp(12);
+        params.rightMargin = AndroidUtilities.dp(12);
+        params.topMargin = AndroidUtilities.dp(14);
+        button.setLayoutParams(params);
+        reveal(button, index);
+        return button;
+    }
+
+    private View configRow(String id, JSONObject config, boolean active, int index) {
+        Context context = getContext();
+        SharedPreferences p = prefs(currentAccount);
+        String name = config.optString("name");
+        if (name == null || name.isEmpty()) name = text(R.string.WgCustomUntitled);
+        final String title = name;
+
+        LinearLayout row = new LinearLayout(context);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        row.setBackground(Theme.createSimpleSelectorRoundRectDrawable(AndroidUtilities.dp(14),
+                Theme.getColor(Theme.key_windowBackgroundWhite), Theme.getColor(Theme.key_listSelector)));
+        row.setPadding(AndroidUtilities.dp(14), AndroidUtilities.dp(8), AndroidUtilities.dp(6), AndroidUtilities.dp(8));
+
+        View dot = new View(context);
+        dot.setBackground(Theme.createRoundRectDrawable(AndroidUtilities.dp(4),
+                Theme.getColor(active ? Theme.key_windowBackgroundWhiteBlueText : Theme.key_windowBackgroundWhiteGrayText3)));
+        row.addView(dot, new LinearLayout.LayoutParams(AndroidUtilities.dp(8), AndroidUtilities.dp(8)));
+
+        LinearLayout texts = new LinearLayout(context);
+        texts.setOrientation(LinearLayout.VERTICAL);
+        LinearLayout.LayoutParams textsParams = new LinearLayout.LayoutParams(0, -2, 1f);
+        textsParams.leftMargin = AndroidUtilities.dp(12);
+        TextView nameView = new TextView(context);
+        nameView.setText(name);
+        nameView.setTextSize(15);
+        nameView.setTextColor(Theme.getColor(Theme.key_windowBackgroundWhiteBlackText));
+        nameView.setSingleLine(true);
+        nameView.setEllipsize(android.text.TextUtils.TruncateAt.END);
+        texts.addView(nameView);
+        if (active) {
+            TextView badge = new TextView(context);
+            badge.setText(text(R.string.WgCustomActive));
+            badge.setTextSize(12);
+            badge.setTextColor(Theme.getColor(Theme.key_windowBackgroundWhiteBlueText));
+            texts.addView(badge);
+        }
+        row.addView(texts, textsParams);
+
+        ImageView copy = new ImageView(context);
+        copy.setImageResource(R.drawable.msg_copy);
+        copy.setColorFilter(Theme.getColor(Theme.key_windowBackgroundWhiteBlueText));
+        copy.setScaleType(ImageView.ScaleType.CENTER_INSIDE);
+        copy.setBackground(Theme.createSimpleSelectorCircleDrawable(AndroidUtilities.dp(38), 0, Theme.getColor(Theme.key_listSelector)));
+        copy.setContentDescription(getString(R.string.CopyLink));
+        copy.setOnClickListener(v -> share(config));
+        row.addView(copy, new LinearLayout.LayoutParams(AndroidUtilities.dp(38), AndroidUtilities.dp(38)));
+
+        ImageView delete = new ImageView(context);
+        delete.setImageResource(R.drawable.msg_delete);
+        delete.setColorFilter(Theme.getColor(Theme.key_text_RedRegular));
+        delete.setScaleType(ImageView.ScaleType.CENTER_INSIDE);
+        delete.setBackground(Theme.createSimpleSelectorCircleDrawable(AndroidUtilities.dp(38), 0, Theme.getColor(Theme.key_listSelector)));
+        delete.setContentDescription(text(R.string.WgCustomDelete));
+        delete.setOnClickListener(v -> confirmDelete(id, title, row));
+        row.addView(delete, new LinearLayout.LayoutParams(AndroidUtilities.dp(38), AndroidUtilities.dp(38)));
+
+        org.telegram.ui.Components.Switch select = new org.telegram.ui.Components.Switch(context);
+        select.setChecked(active, false);
+        select.setContentDescription(name);
+        select.setOnClickListener(v -> {
+            p.edit().putString("active", active ? "" : id).apply();
+            changed();
+        });
+        row.addView(select, new LinearLayout.LayoutParams(AndroidUtilities.dp(46), AndroidUtilities.dp(40)));
+
+        reveal(row, index);
+        return row;
+    }
+
+    private View emptyState(int index) {
+        TextView view = new TextView(getContext());
+        view.setText(text(R.string.WgCustomEmpty));
+        view.setTextSize(14);
+        view.setTextColor(Theme.getColor(Theme.key_windowBackgroundWhiteGrayText2));
+        view.setPadding(AndroidUtilities.dp(22), AndroidUtilities.dp(18), AndroidUtilities.dp(22), AndroidUtilities.dp(8));
+        view.setLayoutParams(new LinearLayout.LayoutParams(-1, -2));
+        reveal(view, index);
+        return view;
+    }
+
+    private void confirmDelete(String id, String name, View row) {
+        if (getContext() == null) return;
+        AlertDialog dialog = new AlertDialog.Builder(getContext())
+                .setTitle(name)
+                .setMessage(text(R.string.WgCustomDeleteConfirm))
+                .setPositiveButton(text(R.string.WgCustomDelete), (d, w) -> deleteConfig(id, row))
+                .setNegativeButton(text(R.string.Cancel), null)
+                .create();
+        showDialog(dialog);
+    }
+
+    private void deleteConfig(String id, View row) {
+        SharedPreferences p = prefs(currentAccount);
+        boolean wasActive = id.equals(p.getString("active", ""));
+        android.content.SharedPreferences.Editor editor = p.edit().remove("config_" + id);
+        if (wasActive) editor.putString("active", "");
+        editor.apply();
+        refreshLayers(currentAccount);
+        invalidateNavigation(currentAccount);
+        if (row != null) {
+            row.animate().alpha(0f).translationX(AndroidUtilities.dp(32))
+                    .setDuration(160)
+                    .setInterpolator(org.telegram.ui.Components.CubicBezierInterpolator.EASE_OUT)
+                    .withEndAction(this::rebuild)
+                    .start();
+        } else {
+            rebuild();
+        }
+    }
+
+    /** Мини-превью панели навигации: подложка + «пилюля» активной вкладки. */
+    private static class LayersPreview extends View {
+        private final Bitmap background, indicator;
+        private final Paint bitmapPaint = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.FILTER_BITMAP_FLAG);
+        private final Paint shapePaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final RectF box = new RectF(), pill = new RectF();
+        private final Path path = new Path();
+
+        LayersPreview(Context context, Bitmap background, Bitmap indicator) {
+            super(context);
+            this.background = background;
+            this.indicator = indicator;
+        }
+
+        @Override protected void onDraw(Canvas canvas) {
+            float radius = getHeight() / 2f;
+            box.set(0, 0, getWidth(), getHeight());
+            path.rewind();
+            path.addRoundRect(box, radius, radius, Path.Direction.CW);
+            int save = canvas.save();
+            canvas.clipPath(path);
+            shapePaint.setColor(Theme.getColor(Theme.key_windowBackgroundGray));
+            canvas.drawRect(box, shapePaint);
+            if (background != null) canvas.drawBitmap(background, null, box, bitmapPaint);
+
+            float pillWidth = box.width() * .3f, pillHeight = box.height() * .66f;
+            float left = box.left + box.width() * .38f - pillWidth / 2f;
+            pill.set(left, box.centerY() - pillHeight / 2f, left + pillWidth, box.centerY() + pillHeight / 2f);
+            if (indicator != null) {
+                canvas.drawBitmap(indicator, null, pill, bitmapPaint);
+            } else {
+                shapePaint.setColor(Theme.getColor(Theme.key_windowBackgroundWhiteBlueText));
+                canvas.drawRoundRect(pill, pillHeight / 2f, pillHeight / 2f, shapePaint);
+            }
+            canvas.restoreToCount(save);
+
+            shapePaint.setStyle(Paint.Style.STROKE);
+            shapePaint.setStrokeWidth(AndroidUtilities.dp(1));
+            shapePaint.setColor(Theme.getColor(Theme.key_divider));
+            canvas.drawRoundRect(box, radius, radius, shapePaint);
+            shapePaint.setStyle(Paint.Style.FILL);
+        }
+    }
+
+    /** Маленькая скруглённая плашка со своей картинкой слоя. */
+    private static class LayerChip extends View {
+        private final Bitmap image;
+        private final boolean accent;
+        private final Paint bitmapPaint = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.FILTER_BITMAP_FLAG);
+        private final Paint shapePaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final RectF box = new RectF();
+        private final Path path = new Path();
+
+        LayerChip(Context context, Bitmap image, boolean accent) {
+            super(context);
+            this.image = image;
+            this.accent = accent;
+        }
+
+        @Override protected void onDraw(Canvas canvas) {
+            float radius = AndroidUtilities.dp(8);
+            box.set(0, 0, getWidth(), getHeight());
+            path.rewind();
+            path.addRoundRect(box, radius, radius, Path.Direction.CW);
+            int save = canvas.save();
+            canvas.clipPath(path);
+            shapePaint.setColor(Theme.getColor(accent ? Theme.key_windowBackgroundGray : Theme.key_windowBackgroundWhiteBlueText));
+            canvas.drawRect(box, shapePaint);
+            if (image != null) canvas.drawBitmap(image, null, box, bitmapPaint);
+            canvas.restoreToCount(save);
+        }
     }
 
     private void rebuild() {
         if (content == null || getContext() == null) return;
         content.removeAllViews();
+        revealViews.clear();
+        revealOrder.clear();
+        int index = 0;
         SharedPreferences p = prefs(currentAccount);
         boolean enabled = p.getBoolean("enabled", false);
-        toggle(content, getString(R.string.WgCustomization), enabled, () -> {
+
+        LinearLayout hero = card(index++);
+        LayersPreview preview = new LayersPreview(getContext(), draftBitmap(0), draftBitmap(1));
+        LinearLayout.LayoutParams previewParams = new LinearLayout.LayoutParams(-1, AndroidUtilities.dp(58));
+        previewParams.setMargins(AndroidUtilities.dp(14), AndroidUtilities.dp(14), AndroidUtilities.dp(14), 0);
+        hero.addView(preview, previewParams);
+        hero.addView(toggleRow(R.string.WgCustomization, enabled, () -> {
             p.edit().putBoolean("enabled", !enabled).apply();
             changed();
-        });
-        for (int i = 0; i < 2; i++) {
-            final int layer = i;
-            TextView label = new TextView(getContext());
-            label.setText(text(i == 0 ? R.string.WgCustomBackground : R.string.WgCustomIndicator));
-            label.setTextColor(Theme.getColor(Theme.key_windowBackgroundWhiteBlackText));
-            label.setPadding(AndroidUtilities.dp(16), AndroidUtilities.dp(16), 0, 0);
-            LinearLayout section = new LinearLayout(getContext());
-            section.setOrientation(LinearLayout.VERTICAL);
-            section.setBackgroundColor(Theme.getColor(Theme.key_windowBackgroundWhite));
-            LinearLayout.LayoutParams sectionParams = new LinearLayout.LayoutParams(-1, -2);
-            sectionParams.topMargin = AndroidUtilities.dp(8);
-            content.addView(section, sectionParams);
-            section.addView(label);
-            LinearLayout row = new LinearLayout(getContext());
-            row.setGravity(Gravity.CENTER_VERTICAL);
-            ImageView preview = new ImageView(getContext());
-            preview.setContentDescription(label.getText());
-            preview.setScaleType(ImageView.ScaleType.FIT_XY);
-            Bitmap image = bitmap(draft[i]);
-            if (image == null) preview.setBackground(Theme.createRoundRectDrawable(AndroidUtilities.dp(22), Theme.getColor(i == 0 ? Theme.key_windowBackgroundGray : Theme.key_windowBackgroundWhiteBlueText)));
-            else preview.setImageBitmap(image);
-            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(AndroidUtilities.dp(i == 0 ? 155 : 70), AndroidUtilities.dp(44));
-            lp.setMargins(AndroidUtilities.dp(16), AndroidUtilities.dp(8), AndroidUtilities.dp(8), AndroidUtilities.dp(8));
-            row.addView(preview, lp);
-            row.addView(button(text(R.string.WgCustomUpload), () -> pick(layer)));
-            section.addView(row);
-        }
-        content.addView(button(text(R.string.WgCustomSave), this::nameConfig));
+        }, index++));
+        content.addView(hero);
+
+        LinearLayout layersCard = card(index++);
+        layersCard.addView(layerRow(0, index++));
+        layersCard.addView(divider());
+        layersCard.addView(layerRow(1, index++));
+        content.addView(layersCard);
+
+        content.addView(primaryButton(R.string.WgCustomSave, !draft[0].isEmpty() || !draft[1].isEmpty(), this::nameConfig, index++));
+
         java.util.TreeMap<String, ?> sorted = new java.util.TreeMap<>(p.getAll());
+        String activeId = p.getString("active", "");
+        LinearLayout configs = null;
         for (String key : sorted.keySet()) {
             if (!key.startsWith("config_")) continue;
             String id = key.substring(7);
             JSONObject config = object(p.getString(key, ""));
-            boolean active = id.equals(p.getString("active", ""));
-            LinearLayout row = new LinearLayout(getContext());
-            row.setGravity(Gravity.CENTER_VERTICAL);
-            row.setBackgroundColor(Theme.getColor(Theme.key_windowBackgroundWhite));
-            TextView title = new TextView(getContext());
-            title.setText(config.optString("name"));
-            title.setTextColor(Theme.getColor(Theme.key_windowBackgroundWhiteBlackText));
-            title.setTextSize(16);
-            title.setSingleLine(true);
-            title.setEllipsize(android.text.TextUtils.TruncateAt.END);
-            title.setPaddingRelative(AndroidUtilities.dp(16), 0, 0, 0);
-            row.addView(title, new LinearLayout.LayoutParams(0, -2, 1));
-            ImageButton copy = new ImageButton(getContext());
-            copy.setImageResource(R.drawable.msg_copy);
-            copy.setColorFilter(Theme.getColor(Theme.key_windowBackgroundWhiteBlueText));
-            copy.setBackgroundColor(Theme.getColor(Theme.key_windowBackgroundWhite));
-            copy.setContentDescription(getString(R.string.CopyLink));
-            copy.setOnClickListener(v -> share(config));
-            row.addView(copy, new LinearLayout.LayoutParams(AndroidUtilities.dp(48), AndroidUtilities.dp(48)));
-            org.telegram.ui.Components.Switch select = new org.telegram.ui.Components.Switch(getContext());
-            select.setChecked(active, false);
-            select.setContentDescription(config.optString("name"));
-            select.setOnClickListener(v -> {
-                p.edit().putString("active", active ? "" : id).apply();
-                changed();
-            });
-            row.addView(select, new LinearLayout.LayoutParams(AndroidUtilities.dp(56), AndroidUtilities.dp(48)));
-            content.addView(row);
+            if (configs == null) {
+                content.addView(sectionHeader(R.string.WgCustomConfigs, 18, index++));
+                configs = card(index++);
+            } else {
+                configs.addView(divider());
+            }
+            configs.addView(configRow(id, config, id.equals(activeId), index++));
         }
+        if (configs != null) content.addView(configs);
+        else content.addView(emptyState(index));
+
+        content.post(this::runReveal);
     }
 
     private void changed() {
