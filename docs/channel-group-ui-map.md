@@ -347,11 +347,11 @@ waysgram_group_stories = 78   waysgram_group_identity = 79   chat_menu_topic_cre
 
 | Место | В исходном Telegram | В нашей копии | Файл (наш) |
 |---|---|---|---|
-| Топбар чата | search, mute, clear, leave, report, boost, translate, colors | те же + 5 своих пунктов (inbox, giveaways, topics, stories, identity) | `ui/ChatActivity.java:4482-4494` |
+| Топбар чата | search, mute, clear, leave, report, boost, translate, colors | те же в стоковом порядке; 5 своих пунктов (inbox, giveaways, topics, stories, identity) добавлены **в конец** списка | `ui/ChatActivity.java`, блок перед `menu.setVisibility` |
 | Нижняя панель канала | Join / Mute + Gift / Suggest / Search / Giga info | те же кнопки; «Подарок» ведёт в `GiftSheet`, «Предложить» — в моногруппу | `ui/ChatActivity.java:8465-8512` |
 | Карточка: «карандаш» | `ChatEditActivity` | тот же экран, но часть строк скрыта флагами | `ui/ProfileActivity.java:4108`, `ui/ChatEditActivity.java:891-1000` |
-| Статистика канала | `StatisticActivity` | для WaysGram-канала скрыто (`waysGramBroadcast`), вместо неё `WaysGramPaidReactions.showAnalytics` | `ui/ProfileActivity.java:12469-12482`, `ui/ChatEditActivity.java:976-980` |
-| Голосовой чат / звонки | `canManageCalls` | для broadcast-каналов WaysGram скрыто условием `!waysGramBroadcast` | `ui/ProfileActivity.java:12470-12474` |
+| Статистика канала | `StatisticActivity` | стоковое условие (`can_view_stats` и т.п.); у WaysGram данных пока нет, своя аналитика — в конце экрана редактирования | `ui/ProfileActivity.java:12480-12482`, `ui/ChatEditActivity.java:976-980` |
+| Голосовой чат / звонки | `canManageCalls` | стоковое условие без WaysGram-гейтов (`!waysGramBroadcast` убрано) | `ui/ProfileActivity.java:12469-12474` |
 | Аватар канала | `channels.editPhoto` | **не перехвачен** → `METHOD_NOT_SUPPORTED`; сервер аватар не хранит | `tgnet/WaysGramTransport.java` (нет ветки), `messenger/MessagesController.java:16124` |
 | Имя/описание канала | `channels.editTitle`, `messages.editChatAbout` | перехвачены, идут в `/api/channels/{id}` | `tgnet/WaysGramTransport.java:600-604`, `622-630` |
 | Создание канала | `channels.createChannel` | `WaysGramProfile.createChannel` (`POST /api/channels`) | `tgnet/WaysGramTransport.java:594`, `tgnet/WaysGramProfile.java:433` |
@@ -360,7 +360,7 @@ waysgram_group_stories = 78   waysgram_group_identity = 79   chat_menu_topic_cre
 | Пригласительные ссылки | `messages.*ChatInvite*` | перехвачены, реализованы в `WaysGramInvites` | `tgnet/WaysGramTransport.java:470-489` |
 | Список участников | фильтры admins/recent/contacts | для WaysGram-канала всегда `channelParticipantsRecent` | `ui/ChatUsersActivity.java:2407` |
 | Ярлык «подписан на канал» | хранится на сервере | хранится на устройстве (`waysgram_session`) | `tgnet/WaysGramChats.java:63-88` |
-| Группы: «Медленный режим» | нет такого пункта | свой пункт `WAYSGRAM_SLOW_MODE` | `ui/ProfileActivity.java:12554-12557` |
+| Группы: «Медленный режим» | нет такого пункта | свой пункт `WAYSGRAM_SLOW_MODE`, перенесён в конец меню группы | `ui/ProfileActivity.java:12570-12575` |
 
 Что из этого **уже проверено по коду** и что **нужно проверить отдельно**:
 
@@ -371,6 +371,12 @@ waysgram_group_stories = 78   waysgram_group_identity = 79   chat_menu_topic_cre
   (тост/ошибка/молчание) нужно смотреть в рантайме.
 
 ---
+
+## 12a. Что уже приведено к Telegram
+
+Порядок кнопок и правила их включения приведены к стоковым в `ChatActivity`, `ProfileActivity` и
+`ChatEditActivity`; подробности и список оставшихся серверных зависимостей —
+[`channel-group-ui-parity.md`](channel-group-ui-parity.md).
 
 ## 13. Что дальше (глубокое сравнение)
 

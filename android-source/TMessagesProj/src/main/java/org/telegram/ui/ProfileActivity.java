@@ -12466,9 +12466,8 @@ public class ProfileActivity extends BaseFragment implements NotificationCenter.
                         editItemVisible = true;
                     }
                 }
-                boolean waysGramBroadcast = org.telegram.tgnet.WaysGramTransport.ENABLED && chat.id > org.telegram.tgnet.WaysGramChats.CHANNEL_OFFSET && !chat.megagroup;
                 if (chatInfo != null) {
-                    if (!waysGramBroadcast && ChatObject.canManageCalls(chat) && chatInfo.call == null) {
+                    if (ChatObject.canManageCalls(chat) && chatInfo.call == null) {
                         otherItem.addSubItem(call_item, R.drawable.msg_voicechat, chat.megagroup && !chat.gigagroup ? LocaleController.getString(R.string.StartVoipChat) : LocaleController.getString(R.string.StartVoipChannel));
                         hasVoiceChatItem = true;
                         if (chat.megagroup && !chat.gigagroup) {
@@ -12484,14 +12483,12 @@ public class ProfileActivity extends BaseFragment implements NotificationCenter.
                     callItemVisible = call != null;
                     voiceChatAction = call != null || voiceChatAction;
                 }
-                boolean canAddStory = waysGramBroadcast ? chat.creator || chat.admin_rights != null && chat.admin_rights.post_messages
-                        : getMessagesController().getStoriesController().canPostStories(chat);
-                boolean canArchiveStory = waysGramBroadcast ? chat.creator || chat.admin_rights != null && chat.admin_rights.delete_messages
-                        : getMessagesController().getStoriesController().canEditStories(chat);
+                boolean canAddStory = getMessagesController().getStoriesController().canPostStories(chat);
+                boolean canArchiveStory = getMessagesController().getStoriesController().canEditStories(chat);
                 if (canAddStory) {
                     addStoryAction = true;
                 }
-                if (canAddStory && !waysGramBroadcast || canArchiveStory) {
+                if (canAddStory || canArchiveStory) {
                     otherItem.addSubItem(channel_stories, R.drawable.msg_archive, LocaleController.getString(R.string.OpenChannelArchiveStories));
                 }
                 if (chat.megagroup) {
@@ -12549,12 +12546,8 @@ public class ProfileActivity extends BaseFragment implements NotificationCenter.
                     }
                 }
             } else {
-                boolean waysGramGroup = org.telegram.tgnet.WaysGramTransport.ENABLED && chat instanceof TLRPC.TL_chat;
-                if (waysGramGroup && (chat.creator || chat.admin_rights != null && chat.admin_rights.manage_call)) {
-                    otherItem.addSubItem(WAYSGRAM_SLOW_MODE, R.drawable.msg_edit, "Медленный режим");
-                }
                 if (chatInfo != null) {
-                    if (!waysGramGroup && ChatObject.canManageCalls(chat) && chatInfo.call == null) {
+                    if (ChatObject.canManageCalls(chat) && chatInfo.call == null) {
                         otherItem.addSubItem(call_item, R.drawable.msg_voicechat, LocaleController.getString(R.string.StartVoipChat));
                         hasVoiceChatItem = true;
                         voiceChatAction = true;
@@ -12577,6 +12570,11 @@ public class ProfileActivity extends BaseFragment implements NotificationCenter.
                 }
                 otherItem.addSubItem(leave_group, R.drawable.msg_leave, LocaleController.getString(R.string.DeleteAndExit));
                 leaveAction = true;
+                // WaysGram-only entry: appended after the stock items so their order is untouched.
+                if (org.telegram.tgnet.WaysGramTransport.ENABLED
+                        && (chat.creator || chat.admin_rights != null && chat.admin_rights.manage_call)) {
+                    otherItem.addSubItem(WAYSGRAM_SLOW_MODE, R.drawable.msg_edit, "Медленный режим");
+                }
             }
         }
 

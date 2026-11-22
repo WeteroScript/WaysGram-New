@@ -4371,6 +4371,7 @@ public class ChatActivity extends BaseFragment implements
         );
         otherIcon.setIconTranslate(-dp(6), dp(6.66f));
 
+        boolean boostItemAdded = false;
         if (((chatMode == 0 && (threadMessageId == 0 || isTopic)) || chatMode == MODE_SUGGESTIONS) && !UserObject.isReplyUser(currentUser) && !isReport()) {
             TLRPC.UserFull userFull = null;
             if (currentUser != null) {
@@ -4478,18 +4479,6 @@ public class ChatActivity extends BaseFragment implements
                 headerItem.lazilyAddSubItem(open_direct, R.drawable.msg_markunread, getString(R.string.ChannelOpenDirect));
                 headerItem.setSubItemShown(open_direct, ChatObject.isChannel(currentChat) && !ChatObject.isMonoForum(currentChat) && currentChat.linked_monoforum_id != 0 && ChatObject.canManageMonoForum(currentAccount, -currentChat.linked_monoforum_id));
             }
-            if (org.telegram.tgnet.WaysGramTransport.ENABLED && currentChat != null
-                    && chatMode == MODE_DEFAULT && ChatObject.isChannelAndNotMegaGroup(currentChat)) {
-                headerItem.lazilyAddSubItem(waysgram_channel_giveaways, R.drawable.msg_stats, getString(R.string.WaysGramGiveaways));
-                headerItem.lazilyAddSubItem(waysgram_channel_inbox, R.drawable.msg_markunread,
-                        getString(currentChat.creator ? R.string.WaysGramInboxTitle : R.string.WaysGramInboxWriteChannel));
-            }
-            if (org.telegram.tgnet.WaysGramTransport.ENABLED && chatMode == MODE_DEFAULT
-                    && currentChat != null && !ChatObject.isChannel(currentChat) && !ChatObject.isLeftFromChat(currentChat)) {
-                headerItem.lazilyAddSubItem(waysgram_group_stories, R.drawable.msg_stats, getString(R.string.WaysGramGroupStories));
-                headerItem.lazilyAddSubItem(waysgram_group_identity, R.drawable.msg_stats, getString(R.string.WaysGramGroupIdentity));
-                headerItem.lazilyAddSubItem(waysgram_group_topics, R.drawable.msg_topics, getString(R.string.WaysGramTopics));
-            }
             if (currentUser != null && chatMode != MODE_SAVED) {
                 headerItem.lazilyAddSubItem(call, R.drawable.msg_callback, LocaleController.getString(R.string.Call));
                 headerItem.lazilyAddSubItem(video_call, R.drawable.msg_videocall, LocaleController.getString(R.string.VideoCall));
@@ -4509,12 +4498,10 @@ public class ChatActivity extends BaseFragment implements
             if (searchItem != null) {
                 headerItem.lazilyAddSubItem(search, R.drawable.msg_search, LocaleController.getString(R.string.Search));
             }
-            if (org.telegram.tgnet.WaysGramTransport.ENABLED && currentChat != null && chatMode == MODE_DEFAULT
-                    && (ChatObject.isChannelAndNotMegaGroup(currentChat) || !ChatObject.isChannel(currentChat))) {
-                headerItem.lazilyAddSubItem(boost_group, R.drawable.msg_stats, getString(R.string.WaysGramCommunityBoosts));
-            } else if (!org.telegram.tgnet.WaysGramTransport.ENABLED && ChatObject.isBoostSupported(currentChat) && (getUserConfig().isPremium() || ChatObject.isBoosted(chatInfo) || ChatObject.hasAdminRights(currentChat))) {
+            if (ChatObject.isBoostSupported(currentChat) && (getUserConfig().isPremium() || ChatObject.isBoosted(chatInfo) || ChatObject.hasAdminRights(currentChat))) {
                 RLottieDrawable drawable = new RLottieDrawable(R.raw.boosts, dp(24), dp(24));
                 headerItem.lazilyAddSubItem(boost_group, drawable, LocaleController.getString(ChatObject.isChannelAndNotMegaGroup(currentChat) ? R.string.BoostingBoostChannelMenu : R.string.BoostingBoostGroupMenu));
+                boostItemAdded = true;
             }
             translateItem = headerItem.lazilyAddSubItem(translate, R.drawable.msg_translate, LocaleController.getString(R.string.TranslateMessage));
             updateTranslateItemVisibility();
@@ -4607,6 +4594,27 @@ public class ChatActivity extends BaseFragment implements
         if (currentChat != null && forumTopic != null && chatMode == 0) {
             closeTopicItem = headerItem.lazilyAddSubItem(topic_close, R.drawable.msg_topic_close, LocaleController.getString(R.string.CloseTopic));
             closeTopicItem.setVisibility(currentChat != null && ChatObject.canManageTopic(currentAccount, currentChat, forumTopic) && forumTopic != null && !forumTopic.closed ? View.VISIBLE : View.GONE);
+        }
+
+        // WaysGram-only entry points live after the stock items: the Telegram menu keeps its
+        // original order and positions, the extra rows are always at the end of the list.
+        if (headerItem != null && org.telegram.tgnet.WaysGramTransport.ENABLED
+                && chatMode == MODE_DEFAULT && currentChat != null) {
+            if (ChatObject.isChannelAndNotMegaGroup(currentChat)) {
+                headerItem.lazilyAddSubItem(waysgram_channel_giveaways, R.drawable.msg_stats, getString(R.string.WaysGramGiveaways));
+                headerItem.lazilyAddSubItem(waysgram_channel_inbox, R.drawable.msg_markunread,
+                        getString(currentChat.creator ? R.string.WaysGramInboxTitle : R.string.WaysGramInboxWriteChannel));
+                if (!boostItemAdded) {
+                    headerItem.lazilyAddSubItem(boost_group, R.drawable.msg_stats, getString(R.string.WaysGramCommunityBoosts));
+                }
+            } else if (!ChatObject.isChannel(currentChat) && !ChatObject.isLeftFromChat(currentChat)) {
+                headerItem.lazilyAddSubItem(waysgram_group_stories, R.drawable.msg_stats, getString(R.string.WaysGramGroupStories));
+                headerItem.lazilyAddSubItem(waysgram_group_identity, R.drawable.msg_stats, getString(R.string.WaysGramGroupIdentity));
+                headerItem.lazilyAddSubItem(waysgram_group_topics, R.drawable.msg_topics, getString(R.string.WaysGramTopics));
+                if (!boostItemAdded) {
+                    headerItem.lazilyAddSubItem(boost_group, R.drawable.msg_stats, getString(R.string.WaysGramCommunityBoosts));
+                }
+            }
         }
         menu.setVisibility(inMenuMode ? View.GONE : View.VISIBLE);
 
