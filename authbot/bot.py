@@ -2078,21 +2078,30 @@ USERNAME_RE = re.compile(r"[a-z][a-z0-9_]{1,31}")
 
 
 def normalize_admin_number(value: str) -> str | None:
-    """Normalize a WaysGram number, retaining legacy US input shortcuts."""
+    """Normalize a WaysGram number, retaining legacy US input shortcuts.
+
+    WaysGram numbers are not real telephone lines, so a prefix typed as «+111 111111»
+    is part of the number: the space only separates it from the remaining digits.
+    """
     raw = value.strip()
     if not re.fullmatch(r"[+0-9().\s-]+", raw):
         return None
     digits = re.sub(r"\D", "", raw)
+    if not digits:
+        return None
     if raw.startswith("+"):
         normalized = "+" + digits
         return normalized if is_virtual_number(normalized) else None
     if "+" + digits in SECRET_NUMBERS:
         return "+" + digits
+    # Без плюса номер тоже принимаем, если он вообще может быть WaysGram-номером:
+    # раньше всё, что не 10–11 цифр, отклонялось как «некорректный номер».
+    normalized = "+" + digits
+    if not is_virtual_number(normalized):
+        return None
     if len(digits) == 10:
         return "+1" + digits
-    if len(digits) == 11 and digits.startswith("1"):
-        return "+" + digits
-    return None
+    return normalized
 
 
 async def telegram_gift_rows() -> list[dict[str, Any]]:
@@ -3259,7 +3268,8 @@ async def admin_callback(callback: CallbackQuery) -> None:
     elif action == "newacct":
         ADMIN_INPUT[actor_id] = ("newacct_number", None)
         await callback.message.answer(
-            "Создание аккаунта. Введите международный номер в формате +код страны и номер (например, +44 7700 900123).\n"
+            "Создание аккаунта. Введите номер: префикс и цифры (например, +44 7700 900123, +111 111111) "
+            "или секретный номер: +111, +999, +0, +333, +666.\n"
             "Коды входа для этого номера будут приходить вам в этот чат."
         )
     elif action == "newuname":

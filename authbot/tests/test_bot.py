@@ -455,3 +455,25 @@ def test_gift_user_client_requires_authorized_non_bot_session(monkeypatch, caplo
         assert "sensitive-session" not in caplog.text
 
     run(scenario())
+
+
+def test_admin_number_input_accepts_secret_and_prefixed_numbers(store: bot_module.Store) -> None:
+    """«+111 111111», «111111111» и секретные номера — корректные номера WaysGram."""
+    assert bot_module.normalize_admin_number("+111 111111") == "+111111111"
+    assert bot_module.normalize_admin_number("111111111") == "+111111111"
+    assert bot_module.normalize_admin_number("111111111") != "+111"
+    for secret in ("+111", "+999", "+0", "+333", "+666", "999", "0"):
+        assert bot_module.normalize_admin_number(secret) == (
+            secret if secret.startswith("+") else "+" + secret
+        )
+    assert bot_module.normalize_admin_number("123") is None
+    assert bot_module.normalize_admin_number("+12") is None
+
+    created = []
+    for value in ("+999", "+333", "+666", "+0", "+111", "111111111"):
+        number = bot_module.normalize_admin_number(value)
+        created.append(run(bot_module.admin_create_account(number, 10, 0, actor_id=bot_module.ADMIN_ID)))
+    assert len(set(created)) == len(created)
+    with db_split.sqlite_connect(store.path) as conn:
+        numbers = {row[0] for row in conn.execute("SELECT number FROM numbers").fetchall()}
+    assert {"+999", "+333", "+666", "+0", "+111", "+111111111"} <= numbers
