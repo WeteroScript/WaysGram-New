@@ -1968,7 +1968,8 @@ public class PeerColorActivity extends BaseFragment implements NotificationCente
         StarsController.getInstance(currentAccount, currency).getResellingGiftForm(gift, to, form -> {
             if (form == null) return;
             final StarGiftSheet.PaymentFormState initial = new StarGiftSheet.PaymentFormState(currency, form);
-            final String giftName = gift.title + " #" + LocaleController.formatNumber(gift.num, ',');
+            final String giftName = org.telegram.ui.Stars.WaysGramGiftNumber.titled(gift,
+                    gift.title + " #" + LocaleController.formatNumber(gift.num, ','));
             final boolean[] buying = new boolean[1];
             final StarGiftSheet.ResaleBuyTransferAlert sheet = new StarGiftSheet.ResaleBuyTransferAlert(getContext(), resourceProvider, gift, initial, currentAccount, to, giftName, false, (state, progress) -> {
                 buying[0] = true;

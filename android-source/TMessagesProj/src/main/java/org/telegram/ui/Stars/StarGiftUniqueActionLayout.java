@@ -249,7 +249,8 @@ public class StarGiftUniqueActionLayout {
         if (repost) {
             subtitle = new Text(formatPluralStringComma("Gift2CollectionNumber", gift.num), 12, AndroidUtilities.bold());
         } else {
-            subtitle = new Text(gift.num > 0 ? gift.title + " #" + LocaleController.formatNumber(gift.num, ',') : gift.title, 12);
+            subtitle = new Text(WaysGramGiftNumber.titled(gift,
+                    gift.num > 0 ? gift.title + " #" + LocaleController.formatNumber(gift.num, ',') : gift.title), 12);
         }
         subtitleY = h + subtitle.getHeight() / 2.0f;
         h += subtitle.getHeight();
@@ -416,7 +417,8 @@ public class StarGiftUniqueActionLayout {
         h += this.title.getHeight();
         h += dp(3);
 
-        subtitle = new Text(gift.title + " #" + LocaleController.formatNumber(gift.num, ','), 12);
+        subtitle = new Text(WaysGramGiftNumber.titled(gift,
+                gift.title + " #" + LocaleController.formatNumber(gift.num, ',')), 12);
         subtitleY = h + subtitle.getHeight() / 2.0f;
         h += subtitle.getHeight();
         h += dp(11);

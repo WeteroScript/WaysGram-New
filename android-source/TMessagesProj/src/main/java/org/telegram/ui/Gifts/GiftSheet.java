@@ -139,6 +139,7 @@ import org.telegram.ui.Stars.StarGiftSheet;
 import org.telegram.ui.Stars.StarsController;
 import org.telegram.ui.Stars.StarsIntroActivity;
 import org.telegram.ui.Stars.StarsReactionsSheet;
+import org.telegram.ui.Stars.WaysGramGiftNumber;
 import org.telegram.ui.Stories.recorder.HintView2;
 
 import java.util.ArrayList;
@@ -1389,7 +1390,12 @@ public class GiftSheet extends BottomSheetWithRecyclerListView implements Notifi
                 walletOnCard = onCard;
                 TL_stars.TL_starGiftUnique gift = getUniqueStarGift();
                 if (gift != null) {
-                    final CharSequence text = onCard ? getString(R.string.WalletGiftOnCard) : "#" + LocaleController.formatNumber(gift.num, ',');
+                    final boolean waysGram = !onCard && WaysGramGiftNumber.isWaysGramModel(gift);
+                    final CharSequence text = onCard ? getString(R.string.WalletGiftOnCard) : WaysGramGiftNumber.numberOrLabel(gift);
+                    ribbon.setShimmer(waysGram);
+                    if (waysGram) {
+                        WaysGramGiftNumber.bindShimmer(ribbon);
+                    }
                     if (animated) ribbon.setTextAnimated(text, true);
                     else ribbon.setText(text, true);
                 }
@@ -2053,6 +2059,22 @@ public class GiftSheet extends BottomSheetWithRecyclerListView implements Notifi
             checkBox.setChecked(checked, animated);
         }
 
+        /** Единая подпись номера в ленте: «#???» с переливом для модели WaysGram. */
+        private void setRibbonNumber(TL_stars.TL_starGiftUnique unique) {
+            if (unique == null) {
+                return;
+            }
+            if (WaysGramGiftNumber.isWaysGramModel(unique)) {
+                ribbon.setShimmer(true);
+                ribbon.setText(WaysGramGiftNumber.LABEL, true);
+                // Лента — Drawable, а не TextView: перерисовку кадров перелива просим сами.
+                WaysGramGiftNumber.bindShimmer(ribbon);
+            } else {
+                ribbon.setShimmer(false);
+                ribbon.setText(WaysGramGiftNumber.numberOrLabel(unique), true);
+            }
+        }
+
         private void updateRibbonText() {
             if (userGift != null) {
                 if (userGift.gift instanceof TL_stars.TL_starGiftUnique) {
@@ -2065,16 +2087,13 @@ public class GiftSheet extends BottomSheetWithRecyclerListView implements Notifi
                         ribbon.setColor(Theme.getColor(Theme.key_color_green, resourcesProvider));
                         ribbon.setStrokeColor(backgroundColor);
                         ribbon.setBackdrop(null);
+                        ribbon.setShimmer(false);
                         ribbon.setText(getString(R.string.Gift2OnSale), false);
                     } else {
                         ribbon.setColor(Theme.getColor(Theme.key_gift_ribbon, resourcesProvider));
                         ribbon.setStrokeColor(0);
                         ribbon.setBackdrop(findAttribute(userGift.gift.attributes, TL_stars.starGiftAttributeBackdrop.class));
-//                        if (pinned) {
-                            ribbon.setText("#" + LocaleController.formatNumber(userGift.gift.num, ','), true);
-//                        } else {
-//                            ribbon.setText(formatString(R.string.Gift2Limited1OfRibbon, AndroidUtilities.formatWholeNumber(userGift.gift.availability_issued, 0)), true);
-//                        }
+                        setRibbonNumber((TL_stars.TL_starGiftUnique) userGift.gift);
                     }
                 } else if (userGift.gift.limited) {
                     ribbon.setVisibility(View.VISIBLE);
@@ -2084,6 +2103,7 @@ public class GiftSheet extends BottomSheetWithRecyclerListView implements Notifi
                     ribbon.setText(formatString(R.string.Gift2Limited1OfRibbon, AndroidUtilities.formatWholeNumber(userGift.gift.availability_total, 0)), true);
                 } else {
                     ribbon.setBackdrop(null);
+                    ribbon.setShimmer(false);
                     ribbon.setVisibility(View.GONE);
                 }
             } else if (gift != null) {
@@ -2092,12 +2112,13 @@ public class GiftSheet extends BottomSheetWithRecyclerListView implements Notifi
                     ribbon.setColor(Theme.getColor(Theme.key_gift_ribbon, resourcesProvider));
                     ribbon.setBackdrop(findAttribute(gift.attributes, TL_stars.starGiftAttributeBackdrop.class));
                     ribbon.setStrokeColor(0);
-                    ribbon.setText("#" + LocaleController.formatNumber(gift.num, ','), true);
+                    setRibbonNumber(gift);
                 } else if (allowResaleInGifts && gift.availability_resale > 0) {
                     ribbon.setVisibility(View.VISIBLE);
                     ribbon.setColor(Theme.getColor(Theme.key_color_green, resourcesProvider));
                     ribbon.setStrokeColor(0);
                     ribbon.setBackdrop(null);
+                    ribbon.setShimmer(false);
                     ribbon.setText(getString(R.string.Gift2Resale), false);
                 } else if (giftMine) {
                     ribbon.setVisibility(View.VISIBLE);
@@ -2342,6 +2363,10 @@ public class GiftSheet extends BottomSheetWithRecyclerListView implements Notifi
         }
 
         public void setText(int textSizeDp, CharSequence text, boolean bold) {
+            if (shimmer && !TextUtils.equals(text, WaysGramGiftNumber.LABEL)) {
+                // Любая другая подпись ленты («Sold out», «На продаже») — обычный текст.
+                shimmer = false;
+            }
             oldText = null;
             textAnimation.force(1);
             this.text = new Text(text, textSizeDp, bold ? AndroidUtilities.bold() : null);
@@ -2349,6 +2374,9 @@ public class GiftSheet extends BottomSheetWithRecyclerListView implements Notifi
         }
 
         public void setTextAnimated(int textSizeDp, CharSequence text, boolean bold) {
+            if (shimmer && !TextUtils.equals(text, WaysGramGiftNumber.LABEL)) {
+                shimmer = false;
+            }
             if (this.text == null) {
                 setText(textSizeDp, text, bold);
                 return;
@@ -2370,6 +2398,15 @@ public class GiftSheet extends BottomSheetWithRecyclerListView implements Notifi
         private int textColor = 0xFFFFFFFF;
         public void setTextColor(int textColor) {
             this.textColor = textColor;
+        }
+
+        /** «#???» модели WaysGram переливается, остальной номер ленты — обычный текст. */
+        private boolean shimmer;
+        public void setShimmer(boolean shimmer) {
+            if (this.shimmer != shimmer) {
+                this.shimmer = shimmer;
+                invalidateSelf();
+            }
         }
 
         @Override
@@ -2419,7 +2456,13 @@ public class GiftSheet extends BottomSheetWithRecyclerListView implements Notifi
             canvas.rotate(left ? -45 : 45, cx, cy);
             final float textScale = Math.min(1, dp(40) / text.getCurrentWidth());
             canvas.scale(textScale, textScale, cx, cy);
+            if (shimmer) {
+                WaysGramGiftNumber.applyShimmer(text.paint, text.getCurrentWidth(), text.paint.getTextSize());
+            }
             text.draw(canvas, cx - text.getWidth() / 2f, cy + dp(1), textColor, 1f);
+            if (shimmer) {
+                WaysGramGiftNumber.clearShimmer(text.paint);
+            }
             canvas.restore();
         }
     }
@@ -2459,6 +2502,10 @@ public class GiftSheet extends BottomSheetWithRecyclerListView implements Notifi
 
         public void setColor(int color) {
             drawable.setColor(color);
+        }
+
+        public void setShimmer(boolean shimmer) {
+            drawable.setShimmer(shimmer);
         }
 
         public void setStrokeColor(int strokeColor) {

@@ -210,6 +210,10 @@ public class WaysGramProfile {
         JSONObject traits = gift.optJSONObject("traits");
         org.telegram.messenger.waysgram.WaysGramGiftAttributes.wantRolled(giftId, traits);
         TLRPC.Document model = org.telegram.messenger.waysgram.WaysGramGiftAttributes.traitDocument(giftId, "model", traits, "model");
+        if (model == null && org.telegram.messenger.waysgram.WaysGramBundledArtwork.isBundledName(
+                org.telegram.messenger.waysgram.WaysGramGiftTraits.name(traits, "model"))) {
+            model = org.telegram.messenger.waysgram.WaysGramBundledArtwork.document();
+        }
         TLRPC.Document pattern = org.telegram.messenger.waysgram.WaysGramGiftAttributes.traitDocument(giftId, "pattern", traits, "pattern");
         // Resolve the pattern by its exact name if the old payload lacks a
         // distinct document ID. Never let the model become the header pattern.

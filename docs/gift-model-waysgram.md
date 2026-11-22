@@ -57,13 +57,36 @@ pinned pack, exactly like the Heart Locket fallbacks. `gift_model_fallbacks` loa
 needs just a `manifest.json` and its `.tgs` files (`preview.png` is the raw artwork, not the
 sticker).
 
+## Artwork bundled in the app
+
+The model document id is synthetic, so it never exists in Telegram's catalog: the client can
+only draw it after the artwork has been downloaded into the shared sticker folder
+(`files/waysgram_gifts/<documentId>.bin`), which the WaysGram transport serves through
+`upload.getFile`. Until that first download landed (or after the app data was cleared) the gift
+cell stayed empty — the model had nothing to draw.
+
+The same animation is therefore shipped inside the APK as `res/raw/waysgram_model.tgs` and
+`WaysGramBundledArtwork.install()` copies it into the sticker folder once per launch (it is
+called from `WaysGramGiftDocuments.stickerFile(...)`, the single accessor used by attributes,
+gift cards and the transport). The model then plays through the ordinary media stack, offline,
+in the profile grid, the saved-gift card and chat service messages. When the rolled traits of an
+older gift carry no `document_id`, `WaysGramGiftAttributes.resolveEntry` still resolves the
+bundled id by the model name, and `WaysGramProfileGiftsController` falls back to the bundled
+document when the network copy is not there yet.
+
 ## Number «#???»
 
 The database still assigns a real collection number, so uniqueness and the market keep working.
 The client hides it for this model only: `org.telegram.ui.Stars.WaysGramGiftNumber` detects the
-`WaysGram` model in the gift attributes and draws `#???` — three question marks in a gradient
-that shimmers from dark blue to near-black (`Choreographer`-driven, 2 s cycle). Applied to the
-unique-gift card title and to `StarGiftSheet.getGiftName(...)`.
+`WaysGram` model in the gift attributes (by name or by the bundled document id) and draws `#???`
+— three question marks in a gradient that shimmers from dark blue to near-black
+(`Choreographer`-driven, 2 s cycle). Applied to the unique-gift card title, the rotated ribbon of
+the gift grid (`Gifts.GiftSheet.Ribbon`, drawn with the same gradient), `getGiftName(...)`, the
+wear page, offer sheets, service messages and resale bulletins.
+
+The cycle never stops while a card or a grid cell is registered: views are invalidated with
+`postInvalidateOnAnimation()` for as long as they live, so the colour keeps moving while the card
+is open instead of freezing until it is reopened.
 
 ## Issuing from the admin bot
 

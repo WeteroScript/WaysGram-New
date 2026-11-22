@@ -35,6 +35,7 @@ import org.telegram.tgnet.tl.TL_stars;
 import org.telegram.ui.ActionBar.BottomSheet;
 import org.telegram.ui.ActionBar.Theme;
 import org.telegram.ui.ChatActivity;
+import org.telegram.ui.Stars.WaysGramGiftNumber;
 import org.telegram.ui.Components.AnimatedTextView;
 import org.telegram.ui.Components.Bulletin;
 import org.telegram.ui.Components.BulletinFactory;
@@ -489,7 +490,8 @@ public class GiftMessageBottomSheet extends BottomSheet {
         if (HintsController.Hint.GiftMessageHint.show()) {
             HintsController.Hint.GiftMessageHint.increment();
             final TLObject toObject = MessagesController.getInstance(currentAccount).getUserOrChat(toDialogId);
-            final String giftName = gift.title + " #" + LocaleController.formatNumber(gift.num, ',');
+            final String giftName = WaysGramGiftNumber.titled(gift,
+                    gift.title + " #" + LocaleController.formatNumber(gift.num, ','));
 
             BulletinFactory.of(container, resourcesProvider).createUsersBulletin(toObject,
                             LocaleController.getString(R.string.GiftMessageAddTitle),

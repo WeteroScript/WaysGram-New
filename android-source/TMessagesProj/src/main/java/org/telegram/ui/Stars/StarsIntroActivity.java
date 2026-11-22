@@ -4165,7 +4165,7 @@ public class StarsIntroActivity extends GradientHeaderActivity implements Notifi
             } else if (transaction.stargift instanceof TL_stars.TL_starGiftUnique) {
                 final String slug = transaction.stargift.slug;
                 if (!TextUtils.isEmpty(slug)) {
-                    tableView.addRowLink(getString(R.string.Gift2Gift), transaction.stargift.title + " #" + transaction.stargift.num, () -> {
+                    tableView.addRowLink(getString(R.string.Gift2Gift), org.telegram.ui.Stars.WaysGramGiftNumber.titled(transaction.stargift, transaction.stargift.title + " #" + transaction.stargift.num), () -> {
                         Browser.openUrl(context, "https://" + MessagesController.getInstance(currentAccount).linkPrefix + "/nft/" + slug);
                     });
                 }

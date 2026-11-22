@@ -61,13 +61,28 @@ public final class WaysGramGiftNumber {
             return false;
         }
         for (TL_stars.StarGiftAttribute attribute : gift.attributes) {
-            if (attribute instanceof TL_stars.starGiftAttributeModel
-                    && attribute.name != null
-                    && MODEL_NAME.equalsIgnoreCase(attribute.name.trim())) {
+            if (!(attribute instanceof TL_stars.starGiftAttributeModel)) {
+                continue;
+            }
+            if (attribute.name != null && MODEL_NAME.equalsIgnoreCase(attribute.name.trim())) {
+                return true;
+            }
+            // Имя модели Telegram может локализовать, а документ модель несёт всегда:
+            // встроенная анимация WaysGram однозначно выдаёт нашу модель.
+            if (attribute.document != null
+                    && attribute.document.id == org.telegram.messenger.waysgram.WaysGramBundledArtwork.WAYSGRAM_MODEL_DOCUMENT_ID) {
                 return true;
             }
         }
         return false;
+    }
+
+    /** Номер подарка: «#???» для модели WaysGram, иначе «#913». */
+    public static String numberOrLabel(@Nullable TL_stars.TL_starGiftUnique gift) {
+        if (gift != null && isWaysGramModel(gift)) {
+            return LABEL;
+        }
+        return gift == null ? "" : "#" + org.telegram.messenger.LocaleController.formatNumber(gift.num, ',');
     }
 
     /** Подпись подарка: «Название #???» вместо «Название #913». */
@@ -132,25 +147,55 @@ public final class WaysGramGiftNumber {
             public void doFrame(long frameTimeNanos) {
                 // Полный цикл перелива — 2 секунды.
                 phase = (frameTimeNanos / 1_000_000L % 2000L) / 2000f;
-                boolean alive = false;
+                boolean pending = false;
                 for (Iterator<WeakReference<View>> iterator = targets.iterator(); iterator.hasNext(); ) {
                     View view = iterator.next().get();
                     if (view == null) {
                         iterator.remove();
                         continue;
                     }
+                    // Вид может быть ещё не прикреплён в момент bind: цикл не должен
+                    // останавливаться, иначе перелив замирает до повторного открытия карточки.
+                    pending = true;
                     if (view.isAttachedToWindow() && view.getVisibility() == View.VISIBLE) {
-                        view.invalidate();
-                        alive = true;
+                        view.postInvalidateOnAnimation();
                     }
                 }
-                if (alive) {
+                if (pending) {
                     Choreographer.getInstance().postFrameCallback(this);
                 } else {
                     ticking = false;
                 }
             }
         });
+    }
+
+    /** Текущая фаза перелива: общая для карточек, заголовков и лент подарков. */
+    public static float phase() {
+        return phase;
+    }
+
+    /**
+     * Градиент перелива для произвольной кисти: используется там, где номер рисуется
+     * не span-ом, а вручную (лента «#???» в ячейке подарка).
+     */
+    public static void applyShimmer(@Nullable Paint paint, float width, float textSize) {
+        if (paint == null || width <= 0) {
+            return;
+        }
+        final float shift = (phase - 0.5f) * width * 1.6f;
+        paint.setShader(new LinearGradient(
+                shift, 0f, shift + width * 1.4f, Math.max(1f, textSize),
+                new int[]{COLOR_NEAR_BLACK, COLOR_DEEP_BLUE, COLOR_SHIMMER, COLOR_NEAR_BLACK},
+                new float[]{0f, 0.38f, 0.55f, 1f},
+                Shader.TileMode.CLAMP));
+    }
+
+    /** Снимает градиент перелива с кисти. */
+    public static void clearShimmer(@Nullable Paint paint) {
+        if (paint != null) {
+            paint.setShader(null);
+        }
     }
 
     /** «#???» тёмно-синим с переливом в тёмно-чёрный. */

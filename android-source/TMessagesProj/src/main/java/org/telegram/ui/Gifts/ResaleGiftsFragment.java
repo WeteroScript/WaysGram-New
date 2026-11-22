@@ -84,6 +84,7 @@ import org.telegram.ui.Components.blur3.BlurredBackgroundDrawableViewFactory;
 import org.telegram.ui.Components.blur3.drawable.color.impl.BlurredBackgroundProviderImpl;
 import org.telegram.ui.Components.blur3.source.BlurredBackgroundSourceColor;
 import org.telegram.ui.LaunchActivity;
+import org.telegram.ui.Stars.WaysGramGiftNumber;
 import org.telegram.ui.Stars.StarGiftSheet;
 import org.telegram.ui.Stars.StarsController;
 import org.telegram.ui.Stars.StarsIntroActivity;
@@ -863,7 +864,7 @@ public class ResaleGiftsFragment extends BaseFragment implements FactorAnimator.
                     updateList(false);
                     if (dialogId == UserConfig.getInstance(currentAccount).getClientUserId()) {
                         BulletinFactory.of(this)
-                            .createSimpleBulletin(boughtGift.getDocument(), getString(R.string.BoughtResoldGiftTitle), formatString(R.string.BoughtResoldGiftText, boughtGift.title + " #" + LocaleController.formatNumber(boughtGift.num, ',')))
+                            .createSimpleBulletin(boughtGift.getDocument(), getString(R.string.BoughtResoldGiftTitle), formatString(R.string.BoughtResoldGiftText, WaysGramGiftNumber.titled(boughtGift, boughtGift.title + " #" + LocaleController.formatNumber(boughtGift.num, ','))))
                             .hideAfterBottomSheet(false)
                             .show();
                     } else {
@@ -2150,7 +2151,7 @@ public class ResaleGiftsFragment extends BaseFragment implements FactorAnimator.
                 if (form == null) return;
                 final StarGiftSheet.PaymentFormState initial = new StarGiftSheet.PaymentFormState(currency, form);
 
-                new StarGiftSheet.ResaleBuyTransferAlert(getContext(), resourcesProvider, gift, initial, currentAccount, to, gift.title + " #" + LocaleController.formatNumber(gift.num, ','), true, (state, progress) -> {
+                new StarGiftSheet.ResaleBuyTransferAlert(getContext(), resourcesProvider, gift, initial, currentAccount, to, WaysGramGiftNumber.titled(gift, gift.title + " #" + LocaleController.formatNumber(gift.num, ',')), true, (state, progress) -> {
                     progress.init();
                     StarsController.getInstance(currentAccount, state.currency).buyResellingGift(state.form, gift, to, (status, err) -> {
                         progress.end();

@@ -1221,7 +1221,7 @@ public class StarGiftSheet extends BottomSheetWithRecyclerListView implements No
         final TL_stars.TL_starGiftUnique gift = getUniqueGift();
         if (gift == null) return;
         final long owner_id = gift.owner_id != null ? DialogObject.getPeerDialogId(gift.owner_id) : DialogObject.getPeerDialogId(gift.host_id);
-        final String product = gift.title + " #" + LocaleController.formatNumber(gift.num, ',');
+        final String product = WaysGramGiftNumber.titled(gift, gift.title + " #" + LocaleController.formatNumber(gift.num, ','));
         wearTitle.setText(LocaleController.formatString(R.string.Gift2WearTitle, product));
         SpannableStringBuilder buttonText = new SpannableStringBuilder(getString(R.string.Gift2WearStart));
         if (!UserConfig.getInstance(currentAccount).isPremium()) {
@@ -1245,7 +1245,7 @@ public class StarGiftSheet extends BottomSheetWithRecyclerListView implements No
         final TL_stars.TL_starGiftUnique gift = getUniqueGift();
         if (gift == null) return this;
         final long dialogId = gift.owner_id != null ? DialogObject.getPeerDialogId(gift.owner_id) : DialogObject.getPeerDialogId(gift.host_id);
-        final String product = gift.title + " #" + LocaleController.formatNumber(gift.num, ',');
+        final String product = WaysGramGiftNumber.titled(gift, gift.title + " #" + LocaleController.formatNumber(gift.num, ','));
         wearTitle.setText(LocaleController.formatString(R.string.Gift2WearTitle, product));
         SpannableStringBuilder buttonText = new SpannableStringBuilder(getString(R.string.Gift2WearStart));
         if (dialogId == UserConfig.getInstance(currentAccount).getClientUserId() && !UserConfig.getInstance(currentAccount).isPremium()) {
@@ -4913,7 +4913,8 @@ public class StarGiftSheet extends BottomSheetWithRecyclerListView implements No
             }, () -> {
                 String product = "";
                 if (getGift() != null) {
-                    product = getGift().title + " #" + LocaleController.formatNumber(getGift().num, ',');
+                    product = WaysGramGiftNumber.titled(getGift(),
+                            getGift().title + " #" + LocaleController.formatNumber(getGift().num, ','));
                 }
                 getBulletinFactory()
                     .createSimpleBulletin(R.raw.gift_upgrade, getString(R.string.Gift2UpgradedTitle), AndroidUtilities.replaceTags(formatString(R.string.Gift2UpgradedText, product)))
@@ -5013,7 +5014,7 @@ public class StarGiftSheet extends BottomSheetWithRecyclerListView implements No
 
                                 AndroidUtilities.runOnUIThread(() -> {
                                     getBulletinFactory()
-                                        .createSimpleBulletin(R.raw.ic_delete, AndroidUtilities.replaceTags(formatString(R.string.GiftRemovedDescription, gift.title + " #" + gift.num)))
+                                        .createSimpleBulletin(R.raw.ic_delete, AndroidUtilities.replaceTags(formatString(R.string.GiftRemovedDescription, WaysGramGiftNumber.titled(gift, gift.title + " #" + gift.num))))
                                         .show();
                                 });
                             } else if (err2 != null && "BALANCE_TOO_LOW".equalsIgnoreCase(err2.text)) {
@@ -5124,7 +5125,7 @@ public class StarGiftSheet extends BottomSheetWithRecyclerListView implements No
             tableView.clear();
             if (self) {
                 title = savedStarGift.gift_num != 0 && savedStarGift.gift != null && savedStarGift.gift.title != null ?
-                    savedStarGift.gift.title + " #" + formatNumber(savedStarGift.gift_num, ',') : getString(R.string.Gift2TitleSaved);
+                    WaysGramGiftNumber.titled(savedStarGift.gift, savedStarGift.gift.title + " #" + formatNumber(savedStarGift.gift_num, ',')) : getString(R.string.Gift2TitleSaved);
 
                 topView.setText(0, title, refunded ? null :
                     savedStarGift.can_upgrade ? AndroidUtilities.replaceTags(getString(R.string.Gift2SelfInfoUpgrade)) :
@@ -5142,7 +5143,7 @@ public class StarGiftSheet extends BottomSheetWithRecyclerListView implements No
                 );
             } else {
                 title = savedStarGift.gift_num != 0 && savedStarGift.gift != null && savedStarGift.gift.title != null ?
-                        savedStarGift.gift.title + " #" + formatNumber(savedStarGift.gift_num, ',') : getString(myProfile ? R.string.Gift2TitleReceived : R.string.Gift2TitleProfile);
+                        WaysGramGiftNumber.titled(savedStarGift.gift, savedStarGift.gift.title + " #" + formatNumber(savedStarGift.gift_num, ',')) : getString(myProfile ? R.string.Gift2TitleReceived : R.string.Gift2TitleProfile);
 
                 topView.setText(
                     0,
@@ -5495,7 +5496,7 @@ public class StarGiftSheet extends BottomSheetWithRecyclerListView implements No
             topView.setShowOptions(canDelete());
             if (self) {
                 title = giftNum != 0 && stargift != null && stargift.title != null ?
-                    stargift.title + " #" + formatNumber(giftNum, ',') : getString(R.string.Gift2TitleSaved);
+                    WaysGramGiftNumber.titled(stargift, stargift.title + " #" + formatNumber(giftNum, ',')) : getString(R.string.Gift2TitleSaved);
 
                 topView.setText(0, title, refunded ? null :
                     can_upgrade ? AndroidUtilities.replaceTags(getString(R.string.Gift2SelfInfoUpgrade)) :
@@ -5513,7 +5514,7 @@ public class StarGiftSheet extends BottomSheetWithRecyclerListView implements No
                 );
             } else {
                 title = giftNum != 0 && stargift != null && stargift.title != null ?
-                        stargift.title + " #" + formatNumber(giftNum, ',') : getString(out ? R.string.Gift2TitleSent : R.string.Gift2TitleReceived);
+                        WaysGramGiftNumber.titled(stargift, stargift.title + " #" + formatNumber(giftNum, ',')) : getString(out ? R.string.Gift2TitleSent : R.string.Gift2TitleReceived);
 
                 topView.setText(
                     0,
@@ -10768,7 +10769,8 @@ public class StarGiftSheet extends BottomSheetWithRecyclerListView implements No
             for (int i = 0; i < this.gifts.length; ++i) {
                 if (this.gifts[i] != null && this.gifts[i].getGift() != null) {
                     final TL_stars.StarGift gift = this.gifts[i].getGift();
-                    craftingSubtitleView.setText(gift.title + " #" + LocaleController.formatNumber(gift.num, ','));
+                    craftingSubtitleView.setText(WaysGramGiftNumber.titled(gift,
+                            gift.title + " #" + LocaleController.formatNumber(gift.num, ',')));
                     break;
                 }
             }

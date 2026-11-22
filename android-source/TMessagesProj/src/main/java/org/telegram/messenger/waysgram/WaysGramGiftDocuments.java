@@ -63,6 +63,9 @@ public final class WaysGramGiftDocuments {
     }
 
     public static File stickerFile(long documentId) {
+        // Встроенные анимации моделей WaysGram должны быть на диске до первого показа:
+        // их документы имеют синтетические id и не приходят из каталога Telegram.
+        WaysGramBundledArtwork.install();
         File folder = stickerFolder();
         return folder == null ? null : new File(folder, documentId + ".bin");
     }

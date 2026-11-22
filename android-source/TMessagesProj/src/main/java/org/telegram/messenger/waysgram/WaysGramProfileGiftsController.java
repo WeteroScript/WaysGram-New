@@ -346,6 +346,11 @@ public final class WaysGramProfileGiftsController {
                 TLRPC.TL_document modelDocument = WaysGramGiftAttributes.traitDocument(
                         telegramGiftIdText, WaysGramGiftAttributes.MODEL, traits, "model"
                 );
+                if (modelDocument == null && WaysGramBundledArtwork.isBundledName(model)) {
+                    // Анимация эксклюзивной модели WaysGram лежит в приложении: даже если
+                    // сеть ещё не отдала документ, подарок не должен оставаться без модели.
+                    modelDocument = WaysGramBundledArtwork.document();
+                }
                 TLRPC.TL_document patternDocument = WaysGramGiftAttributes.traitDocument(
                         telegramGiftIdText, WaysGramGiftAttributes.PATTERN, traits, "pattern"
                 );

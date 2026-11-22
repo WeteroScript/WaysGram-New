@@ -2396,7 +2396,8 @@ public class ChatActionCell extends BaseCell implements DownloadController.FileD
                         sb.append(DialogObject.getShortName(recipient));
                     } else if (self) {
                         if (action.gift_num > 0 && action.gift != null && action.gift.title != null) {
-                            sb.append(action.gift.title).append(" #").append(formatNumber(action.gift_num, ','));
+                            sb.append(org.telegram.ui.Stars.WaysGramGiftNumber.titled(action.gift,
+                                    action.gift.title + " #" + formatNumber(action.gift_num, ',')));
                         } else {
                             sb.append(getString(R.string.Gift2ActionSelfTitle));
                         }

@@ -387,6 +387,12 @@ public final class WaysGramGiftAttributes {
         if (documentId != 0L) {
             return directEntry(giftId, documentId);
         }
+        // Встроенные модели WaysGram известны локально: старые черты могли быть записаны
+        // без document_id, но анимация у приложения уже есть.
+        if (WaysGramBundledArtwork.isBundledName(WaysGramGiftTraits.name(traits, key))) {
+            WaysGramBundledArtwork.install();
+            return directEntry(giftId, WaysGramBundledArtwork.WAYSGRAM_MODEL_DOCUMENT_ID);
+        }
         // New rolls only use a server-verified document ID. A later inventory refresh
         // can add one after exact-name matching on the server; no local guess is safe.
         if (traits.optBoolean("strict_artwork", false)) {

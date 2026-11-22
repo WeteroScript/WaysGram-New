@@ -107,6 +107,7 @@ import org.telegram.ui.Components.blur3.source.BlurredBackgroundSourceColor;
 import org.telegram.ui.LaunchActivity;
 import org.telegram.ui.PeerColorActivity;
 import org.telegram.ui.ProfileActivity;
+import org.telegram.ui.Stars.WaysGramGiftNumber;
 import org.telegram.ui.Stars.StarGiftSheet;
 import org.telegram.ui.Stars.StarsController;
 import org.telegram.ui.Stories.recorder.ButtonWithCounterView;
@@ -1106,7 +1107,7 @@ public class ProfileGiftsContainer extends FrameLayout implements NotificationCe
 
                             if (dialogId == UserConfig.getInstance(currentAccount).getClientUserId()) {
                                 BulletinFactory.of(parent.fragment)
-                                    .createSimpleBulletin(boughtGift.getDocument(), getString(R.string.BoughtResoldGiftTitle), formatString(R.string.BoughtResoldGiftText, boughtGift.title + " #" + LocaleController.formatNumber(boughtGift.num, ',')))
+                                    .createSimpleBulletin(boughtGift.getDocument(), getString(R.string.BoughtResoldGiftTitle), formatString(R.string.BoughtResoldGiftText, WaysGramGiftNumber.titled(boughtGift, boughtGift.title + " #" + LocaleController.formatNumber(boughtGift.num, ','))))
                                     .hideAfterBottomSheet(false)
                                     .show();
                             } else {

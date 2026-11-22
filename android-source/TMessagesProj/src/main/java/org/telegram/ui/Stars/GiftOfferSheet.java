@@ -138,7 +138,8 @@ public class GiftOfferSheet extends BottomSheetWithRecyclerListView {
 
         this.dialogId = dialogId;
         this.giftUnique = giftUnique;
-        this.giftName = giftUnique.title + " #" + LocaleController.formatNumber(giftUnique.num, ',');
+        this.giftName = WaysGramGiftNumber.titled(giftUnique,
+                giftUnique.title + " #" + LocaleController.formatNumber(giftUnique.num, ','));
         this.closeParentSheet = closeParentSheet;
 
         waitingKeyboard = true;
@@ -763,7 +764,8 @@ public class GiftOfferSheet extends BottomSheetWithRecyclerListView {
         final AmountUtils.Amount amountWithFee = getAmountMinusFee(currentAccount, amount);
 
         final TL_stars.StarGift gift = offer.gift;
-        final String giftName = gift.title + " #" + LocaleController.formatNumber(gift.num, ',');
+        final String giftName = WaysGramGiftNumber.titled(gift,
+                gift.title + " #" + LocaleController.formatNumber(gift.num, ','));
 
         final TLObject obj;
         if (dialogId >= 0) {
