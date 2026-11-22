@@ -9425,3 +9425,66 @@ def test_secret_numbers_support_admin_creation_and_otp_login(api_env):
             assert bot_module.normalize_admin_number('+222') is None
 
     run(scenario())
+
+
+def test_channel_and_group_avatar_can_be_set_only_by_managers(api_env) -> None:
+    path, _auth_store, _fake_bot, app = api_env
+    add_account(api_env, 89601, "chat_avatar_owner")
+    add_account(api_env, 89602, "chat_avatar_member")
+    add_session(path, 89601, "chat-avatar-owner")
+    add_session(path, 89602, "chat-avatar-member")
+
+    image_buffer = BytesIO()
+    Image.new("RGB", (5, 5), (10, 20, 30)).save(image_buffer, format="PNG")
+    image_bytes = image_buffer.getvalue()
+
+    async def scenario() -> None:
+        owner = {"Authorization": "Bearer chat-avatar-owner"}
+        member = {"Authorization": "Bearer chat-avatar-member"}
+        async with await client_for(app) as client:
+            uploaded = await client.post(
+                "/api/media/images",
+                headers={**owner, "Content-Type": "image/png"},
+                content=image_bytes,
+            )
+            assert uploaded.status_code == 201
+            media_id = uploaded.json()["id"]
+
+            channel = await client.post("/api/channels", headers=owner,
+                                        json={"title": "Avatar channel", "is_public": False})
+            assert channel.status_code == 201
+            chat_id = channel.json()["id"]
+            assert (await client.post("/api/channels/join", headers=member,
+                                      json={"invite_link": channel.json()["invite_link"]})).status_code == 200
+
+            # A plain member cannot change the channel photo.
+            forbidden = await client.put(f"/api/channels/{chat_id}/avatar", headers=member,
+                                         json={"media_id": media_id})
+            assert forbidden.status_code == 403
+
+            assigned = await client.put(f"/api/channels/{chat_id}/avatar", headers=owner,
+                                        json={"media_id": media_id})
+            assert assigned.status_code == 200
+            assert assigned.json()["avatar_media_id"] == media_id
+            assert (await client.get(f"/api/channels/{chat_id}", headers=owner)).json()["avatar_media_id"] == media_id
+            assert (await client.get("/api/channels", headers=owner)).json()["channels"][0]["avatar_media_id"] == media_id
+
+            removed = await client.delete(f"/api/channels/{chat_id}/avatar", headers=owner)
+            assert removed.status_code == 200
+            assert (await client.get(f"/api/channels/{chat_id}", headers=owner)).json()["avatar_media_id"] == ""
+
+            group = await client.post("/api/groups", headers=owner, json={"title": "Avatar group"})
+            assert group.status_code == 201
+            group_id = group.json()["id"]
+            assert (await client.post(f"/api/groups/{group_id}/members", headers=owner,
+                                      json={"telegram_id": 89602})).status_code == 201
+
+            assert (await client.put(f"/api/groups/{group_id}/avatar", headers=member,
+                                     json={"media_id": media_id})).status_code == 403
+            assert (await client.put(f"/api/groups/{group_id}/avatar", headers=owner,
+                                     json={"media_id": media_id})).status_code == 200
+            assert (await client.get(f"/api/groups/{group_id}", headers=owner)).json()["avatar_media_id"] == media_id
+            assert (await client.delete(f"/api/groups/{group_id}/avatar", headers=owner)).status_code == 200
+            assert (await client.get(f"/api/groups/{group_id}", headers=owner)).json()["avatar_media_id"] == ""
+
+    run(scenario())

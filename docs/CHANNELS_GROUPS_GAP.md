@@ -18,7 +18,7 @@ Telegram-клиент уже умеет все эти экраны; менять
 | Создание канала | ✅ `POST /api/channels` | ✅ `channels.createChannel` |
 | Удаление канала | ✅ `DELETE /api/channels/{id}` | ✅ `channels.deleteChannel` |
 | Изменение названия | ✅ `PUT /api/channels/{id}` | ✅ `channels.editTitle` |
-| Изменение фотографии | 🟡 `PUT /api/channels/{id}` (нет поля фото) | ❌ `channels.editPhoto` |
+| Изменение фотографии | ✅ `PUT/DELETE /api/channels/{id}/avatar`, `avatar_media_id` в выдаче | ✅ `channels.editPhoto` |
 | Изменение описания | ✅ `PUT /api/channels/{id}` | ❌ `messages.editChatAbout`/`channels.editAbout` не подключены |
 | Установка username | ✅ `PUT /api/channels/{id}` | ✅ `channels.updateUsername` |
 | Проверка username | ✅ | ✅ `channels.checkUsername` |
@@ -62,7 +62,7 @@ Telegram-клиент уже умеет все эти экраны; менять
 | --- | --- | --- |
 | Создание / удаление | ✅ `POST`, `DELETE /api/groups/{id}` | ✅ `messages.createChat`, `deleteChat` |
 | Название / описание | ✅ `PUT /api/groups/{id}` | ✅ `messages.editChatTitle`, `editChatAbout` |
-| Фотография | 🟡 тот же `PUT` | ❌ `messages.editChatPhoto` не подключён |
+| Фотография | ✅ `PUT/DELETE /api/groups/{id}/avatar`, `avatar_media_id` в выдаче | ✅ `messages.editChatPhoto` |
 | Информация о группе | ✅ `GET /api/groups/{id}` | ✅ `messages.getFullChat` |
 | Участники и их данные | ✅ | ✅ `getFullChat`, `channels.getParticipants` (для супергрупп) |
 | Приглашение / вступление / выход | ✅ `…/members`, `…/invites`, `/api/groups/join` | ✅ `addChatUser`, `importChatInvite`, `deleteChatUser` |
@@ -85,16 +85,18 @@ Telegram-клиент уже умеет все эти экраны; менять
 3. `messages.getMessages` (список id без пира, служебные запросы кэша файлов) — пустой ответ
    вместо ошибки: тост больше не появляется.
 4. `channels.getInactiveChannels` — пустой список; `channels.reportSpam` — `true`.
-5. Убраны наши «Платные реакции» и «Платное медиа»: пункты меню поста канала и тумблер
+5. Фото канала и группы: `channels.editPhoto` / `messages.editChatPhoto` (и удаление через
+   `inputChatPhotoEmpty`) сохраняют `avatar_media_id`, клиент отдаёт `chatPhoto`/`photo` и
+   подгружает байты через `upload.getFile`.
+6. Убраны наши «Платные реакции» и «Платное медиа»: пункты меню поста канала и тумблер
    платных реакций на экране реакций канала удалены. Реакции теперь штатные (бесплатные,
    серверный роут `POST/PUT /api/channels/{id}/messages/{mid}/reactions*`), как в эталоне.
 
 ## Следующие заходы (по одному пункту за раз)
 
-1. Фото канала/группы: `channels.editPhoto`, `messages.editChatPhoto` + `avatar_media_id` в `PUT`.
-2. Флаги канала: `toggleSignatures`, `toggleSlowMode`, `toggleParticipantsHidden`,
+1. Флаги канала: `toggleSignatures`, `toggleSlowMode`, `toggleParticipantsHidden`,
    `togglePreHistoryHidden` + поля в `PUT /api/channels/{id}`.
-3. Обсуждения: `channels.getGroupsForDiscussion`, `channels.setDiscussionGroup` нативно.
-4. `channels.getAdminLog`, `channels.searchPosts`, `channels.updateColor`, `updateEmojiStatus`.
-5. Заявки на вход: `toggleJoinToSend`, `toggleJoinRequest` + поля на сервере.
-6. `messages.toggleNoForwards`, `messages.setChatTheme` и прочие «мелочи» групп.
+2. Обсуждения: `channels.getGroupsForDiscussion`, `channels.setDiscussionGroup` нативно.
+3. `channels.getAdminLog`, `channels.searchPosts`, `channels.updateColor`, `updateEmojiStatus`.
+4. Заявки на вход: `toggleJoinToSend`, `toggleJoinRequest` + поля на сервере.
+5. `messages.toggleNoForwards`, `messages.setChatTheme` и прочие «мелочи» групп.

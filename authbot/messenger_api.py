@@ -1888,6 +1888,10 @@ async def init_messenger_storage(database_path: Path) -> None:
             await db.execute("ALTER TABLE channels ADD COLUMN reactions_limit INTEGER NOT NULL DEFAULT 11")
         if "available_reactions" not in channel_columns:
             await db.execute("ALTER TABLE channels ADD COLUMN available_reactions TEXT NOT NULL DEFAULT '[]'")
+        if "avatar_media_id" not in channel_columns:
+            await db.execute("ALTER TABLE channels ADD COLUMN avatar_media_id TEXT NOT NULL DEFAULT ''")
+        if "avatar_media_id" not in chat_group_columns:
+            await db.execute(f"ALTER TABLE {db_split.SCHEMA}.chat_groups ADD COLUMN avatar_media_id TEXT NOT NULL DEFAULT ''")
         if "members_can_post_stories" not in chat_group_columns:
             await db.execute(f"ALTER TABLE {db_split.SCHEMA}.chat_groups ADD COLUMN members_can_post_stories INTEGER NOT NULL DEFAULT 0")
         if "boost_slow_mode_bypass" not in chat_group_columns:
@@ -4784,7 +4788,7 @@ def build_messenger_router(
             cur = await db.execute(
                 """SELECT ch.id,
                           CASE WHEN ch.is_public=1 THEN ch.username ELSE '' END AS username,
-                          ch.title,ch.description,ch.owner_telegram_id,ch.is_public,
+                          ch.title,ch.description,ch.owner_telegram_id,ch.is_public,ch.avatar_media_id,
                           (SELECT COUNT(*) FROM active_channel_members m WHERE m.channel_id=ch.id) AS member_count,
                           owner.username AS owner_username
                    FROM channels ch LEFT JOIN accounts owner
@@ -9145,7 +9149,7 @@ def build_messenger_router(
             cur = await db.execute(
                 """SELECT ch.id,
                           CASE WHEN ch.is_public=1 THEN ch.username ELSE '' END AS username,
-                          ch.title,ch.owner_telegram_id,ch.is_public,ch.created_at,
+                          ch.title,ch.owner_telegram_id,ch.is_public,ch.created_at,ch.avatar_media_id,
                           owner.username AS owner_username,
                           EXISTS(SELECT 1 FROM channel_admins ca WHERE ca.channel_id=ch.id AND ca.telegram_id=?) AS is_admin,
                           COALESCE((SELECT ca.rights FROM channel_admins ca WHERE ca.channel_id=ch.id AND ca.telegram_id=?),0) AS admin_rights,
@@ -10438,6 +10442,50 @@ def build_messenger_router(
             "owner_telegram_id": int(channel["owner_telegram_id"]),
             "is_public": is_public,
         }
+
+    async def require_owned_image(db: Any, media_id: str, uid: int) -> None:
+        cur = await db.execute("SELECT mime_type FROM media_assets WHERE id=? AND owner_telegram_id=?", (media_id, uid))
+        media = await cur.fetchone()
+        if media is None or not str(media[0]).startswith("image/"):
+            raise HTTPException(status_code=404, detail="Изображение не найдено")
+
+    @router.put("/api/channels/{channel_id}/avatar")
+    async def set_channel_avatar(
+        channel_id: int,
+        payload: dict[str, Any],
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        user = await current_user(authorization)
+        uid = int(user["telegram_id"])
+        await channel_row(channel_id)
+        media_id = str(payload.get("media_id") or "").strip()
+        if media_id and not re.fullmatch(r"[a-f0-9]{32}", media_id):
+            raise HTTPException(status_code=400, detail="Некорректный идентификатор изображения")
+        async with aiosqlite.connect(db_path()) as db:
+            await db.execute("BEGIN IMMEDIATE")
+            if not await channel_has_right(db, channel_id, uid, 64):
+                raise HTTPException(status_code=403, detail="Нет права изменять информацию о канале")
+            if media_id:
+                await require_owned_image(db, media_id, uid)
+            await db.execute("UPDATE channels SET avatar_media_id=? WHERE id=?", (media_id, channel_id))
+            await db.commit()
+        return {"id": channel_id, "avatar_media_id": media_id}
+
+    @router.delete("/api/channels/{channel_id}/avatar")
+    async def remove_channel_avatar(
+        channel_id: int,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        user = await current_user(authorization)
+        uid = int(user["telegram_id"])
+        await channel_row(channel_id)
+        async with aiosqlite.connect(db_path()) as db:
+            await db.execute("BEGIN IMMEDIATE")
+            if not await channel_has_right(db, channel_id, uid, 64):
+                raise HTTPException(status_code=403, detail="Нет права изменять информацию о канале")
+            await db.execute("UPDATE channels SET avatar_media_id='' WHERE id=?", (channel_id,))
+            await db.commit()
+        return {"id": channel_id, "avatar_media_id": ""}
 
     async def record_channel_departure(db: Any, channel_id: int, uid: int, voluntary: bool) -> None:
         # Record only actual transitions out of the active roster. Retrying a leave or ban is a no-op.
@@ -15957,6 +16005,7 @@ def build_messenger_router(
             membership = await require_group_member(db, group_id, uid)
             cur = await db.execute(
                 """SELECT g.id,g.username,g.title,g.description,g.owner_telegram_id,g.created_at,
+                          g.avatar_media_id,
                           g.slow_mode_seconds,g.members_hidden,g.default_send_restrictions,g.anti_spam_enabled,
                           (SELECT COUNT(*) FROM group_members m WHERE m.group_id=g.id) AS member_count
                    FROM chat_groups g WHERE g.id=?""",
@@ -16237,6 +16286,36 @@ def build_messenger_router(
                 await db.execute(f"UPDATE chat_groups SET {key}=? WHERE id=?", (value, group_id))
             await db.commit()
         return {"id": group_id, **fields}
+
+    @router.put("/api/groups/{group_id}/avatar")
+    async def set_group_avatar(group_id: int, payload: dict[str, Any],
+                               authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        uid = int((await current_user(authorization))["telegram_id"])
+        media_id = str(payload.get("media_id") or "").strip()
+        if media_id and not re.fullmatch(r"[a-f0-9]{32}", media_id):
+            raise HTTPException(400, "Некорректный идентификатор изображения")
+        async with aiosqlite.connect(db_path()) as db:
+            await db.execute("BEGIN IMMEDIATE")
+            membership = await require_group_member(db, group_id, uid)
+            if not group_has_right(membership, 1):
+                raise HTTPException(403, "Изменять группу может только владелец или администратор")
+            if media_id:
+                await require_owned_image(db, media_id, uid)
+            await db.execute("UPDATE chat_groups SET avatar_media_id=? WHERE id=?", (media_id, group_id))
+            await db.commit()
+        return {"id": group_id, "avatar_media_id": media_id}
+
+    @router.delete("/api/groups/{group_id}/avatar")
+    async def remove_group_avatar(group_id: int, authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        uid = int((await current_user(authorization))["telegram_id"])
+        async with aiosqlite.connect(db_path()) as db:
+            await db.execute("BEGIN IMMEDIATE")
+            membership = await require_group_member(db, group_id, uid)
+            if not group_has_right(membership, 1):
+                raise HTTPException(403, "Изменять группу может только владелец или администратор")
+            await db.execute("UPDATE chat_groups SET avatar_media_id='' WHERE id=?", (group_id,))
+            await db.commit()
+        return {"id": group_id, "avatar_media_id": ""}
 
     @router.put("/api/groups/{group_id}/send-permissions")
     async def set_group_send_permissions(group_id: int, payload: dict[str, Any],
