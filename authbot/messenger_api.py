@@ -939,6 +939,18 @@ async def init_messenger_storage(database_path: Path) -> None:
                 voter INTEGER NOT NULL, item_id INTEGER NOT NULL,
                 PRIMARY KEY(scope,message_id,voter,item_id)
             );
+            CREATE TABLE IF NOT EXISTS message_reports (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                scope TEXT NOT NULL CHECK(scope IN ('dm','group','channel')),
+                peer_id INTEGER NOT NULL,
+                message_id INTEGER NOT NULL,
+                reporter_telegram_id INTEGER NOT NULL,
+                option TEXT NOT NULL DEFAULT '',
+                text TEXT NOT NULL DEFAULT '',
+                created_at INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_message_reports_peer
+                ON message_reports(scope,peer_id,created_at);
             CREATE TABLE IF NOT EXISTS message_cards (
                 scope TEXT NOT NULL CHECK(scope IN ('dm','group','channel')),
                 message_id INTEGER NOT NULL,
@@ -1891,9 +1903,14 @@ async def init_messenger_storage(database_path: Path) -> None:
         if "avatar_media_id" not in channel_columns:
             await db.execute("ALTER TABLE channels ADD COLUMN avatar_media_id TEXT NOT NULL DEFAULT ''")
         for column in ("signatures_enabled", "signatures_profiles", "participants_hidden",
-                       "pre_history_hidden", "join_to_send", "join_request", "no_forwards"):
+                       "pre_history_hidden", "join_to_send", "join_request", "no_forwards",
+                       "forum_enabled"):
             if column not in channel_columns:
                 await db.execute(f"ALTER TABLE channels ADD COLUMN {column} INTEGER NOT NULL DEFAULT 0")
+        for members_table in ("channel_members", "group_members"):
+            cur = await db.execute(f"PRAGMA table_info({members_table})")
+            if "rank" not in {row[1] for row in await cur.fetchall()}:
+                await db.execute(f"ALTER TABLE {members_table} ADD COLUMN rank TEXT NOT NULL DEFAULT ''")
         if "slow_mode_seconds" not in channel_columns:
             await db.execute("ALTER TABLE channels ADD COLUMN slow_mode_seconds INTEGER NOT NULL DEFAULT 0")
         if "color_id" not in channel_columns:
@@ -1931,6 +1948,8 @@ async def init_messenger_storage(database_path: Path) -> None:
             await db.execute(f"ALTER TABLE {db_split.SCHEMA}.chat_groups ADD COLUMN default_send_restrictions INTEGER NOT NULL DEFAULT 0")
         if "members_hidden" not in chat_group_columns:
             await db.execute(f"ALTER TABLE {db_split.SCHEMA}.chat_groups ADD COLUMN members_hidden INTEGER NOT NULL DEFAULT 0")
+        if "forum_enabled" not in chat_group_columns:
+            await db.execute(f"ALTER TABLE {db_split.SCHEMA}.chat_groups ADD COLUMN forum_enabled INTEGER NOT NULL DEFAULT 0")
         if "pre_history_hidden" not in chat_group_columns:
             await db.execute(f"ALTER TABLE {db_split.SCHEMA}.chat_groups ADD COLUMN pre_history_hidden INTEGER NOT NULL DEFAULT 0")
         if "join_request" not in chat_group_columns:
@@ -9598,10 +9617,11 @@ def build_messenger_router(
                 channel["requests_pending"] = pending[0][1] if pending else 0
                 channel["recent_requesters"] = [row[0] for row in pending]
             cur = await db.execute(
-                "SELECT paid_reactions_enabled,reactions_enabled,reactions_limit,available_reactions FROM channels WHERE id=?",
+                """SELECT paid_reactions_enabled,reactions_enabled,reactions_limit,available_reactions,
+                          COALESCE(forum_enabled,0) FROM channels WHERE id=?""",
                 (channel_id,),
             )
-            reactions_row = await cur.fetchone() or (0, 1, 11, "[]")
+            reactions_row = await cur.fetchone() or (0, 1, 11, "[]", 0)
             channel["paid_reactions_enabled"] = bool(reactions_row[0])
             channel["reactions_enabled"] = bool(reactions_row[1])
             channel["reactions_limit"] = int(reactions_row[2])
@@ -9609,6 +9629,7 @@ def build_messenger_router(
                 channel["available_reactions"] = json.loads(reactions_row[3] or "[]")
             except (TypeError, ValueError):
                 channel["available_reactions"] = []
+            channel["forum_enabled"] = bool(reactions_row[4]) if len(reactions_row) > 4 else False
         channel["labels"] = await entity_labels("channel", channel_id)
         return channel
 
@@ -10587,7 +10608,8 @@ def build_messenger_router(
         return {"id": channel_id, "avatar_media_id": ""}
 
     CHANNEL_BOOL_SETTINGS = ("signatures_enabled", "signatures_profiles", "participants_hidden",
-                             "pre_history_hidden", "join_to_send", "join_request", "no_forwards")
+                             "pre_history_hidden", "join_to_send", "join_request", "no_forwards",
+                             "forum_enabled")
     CHANNEL_SLOW_MODES = (0, 10, 30, 60, 300, 900, 3600, 86400)
 
     @router.put("/api/channels/{channel_id}/settings")
@@ -12100,6 +12122,284 @@ def build_messenger_router(
             "truncated": truncated,
             "text": "\n".join(output),
         }
+
+    # ---------------------------------------------------------------- polls, reports, ownership
+
+    # Telegram asks for poll voters by option (option bytes are the option id as ASCII text);
+    # an empty option means "every option". Voters are paged by offset, exactly like the client.
+    def _poll_voter_entry(voter: int, item: int) -> dict[str, Any]:
+        return {"user_id": voter, "option": item}
+
+    async def _poll_votes_page(db: Any, scope: str, message_id: int, option: int | None,
+                               offset: str, limit: int) -> dict[str, Any]:
+        cur = await db.execute("SELECT data_json FROM message_cards WHERE scope=? AND message_id=?",
+                               (scope, message_id))
+        row = await cur.fetchone()
+        if row is None:
+            raise HTTPException(404, "Опрос не найден")
+        card = json.loads(row[0])
+        if card.get("kind") != "poll":
+            raise HTTPException(400, "Это не опрос")
+        cur = await db.execute(
+            "SELECT voter,item_id FROM message_card_votes WHERE scope=? AND message_id=? ORDER BY item_id,voter",
+            (scope, message_id),
+        )
+        rows = [tuple(item) for item in await cur.fetchall()]
+        if option is not None:
+            rows = [item for item in rows if item[1] == option]
+        start = 0
+        if offset:
+            try:
+                start = max(0, int(offset))
+            except ValueError:
+                raise HTTPException(400, "Некорректное смещение")
+        page = rows[start:start + limit]
+        users: list[dict[str, Any]] = []
+        voter_ids = sorted({voter for voter, _item in page})
+        if voter_ids:
+            placeholders = ",".join("?" for _ in voter_ids)
+            cur = await db.execute(
+                f"""SELECT telegram_id,display_name,username FROM accounts
+                    WHERE telegram_id IN ({placeholders})""",
+                tuple(voter_ids),
+            )
+            users = [{"telegram_id": int(row[0]), "display_name": str(row[1] or ""),
+                      "username": str(row[2] or "")} for row in await cur.fetchall()]
+        return {
+            "count": len(rows),
+            "votes": [_poll_voter_entry(voter, item) for voter, item in page],
+            "users": users,
+            "next_offset": str(start + limit) if start + limit < len(rows) else "",
+        }
+
+    def _poll_option_bytes(option: str) -> int | None:
+        if not option:
+            return None
+        try:
+            return int(option)
+        except ValueError:
+            raise HTTPException(400, "Некорректный вариант ответа")
+
+    @router.get("/api/channels/{channel_id}/messages/{message_id}/poll-votes")
+    async def channel_poll_votes(
+        channel_id: int,
+        message_id: int,
+        offset: str = Query(default="", max_length=16),
+        limit: int = Query(default=50, ge=1, le=100),
+        option: str = Query(default="", max_length=16),
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        uid = int((await current_user(authorization))["telegram_id"])
+        await require_channel_access(channel_id, uid)
+        async with aiosqlite.connect(db_path()) as db:
+            return await _poll_votes_page(db, "channel", message_id, _poll_option_bytes(option), offset, limit)
+
+    @router.get("/api/groups/{group_id}/messages/{message_id}/poll-votes")
+    async def group_poll_votes(
+        group_id: int,
+        message_id: int,
+        offset: str = Query(default="", max_length=16),
+        limit: int = Query(default=50, ge=1, le=100),
+        option: str = Query(default="", max_length=16),
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        uid = int((await current_user(authorization))["telegram_id"])
+        async with aiosqlite.connect(db_path()) as db:
+            await require_group_member(db, group_id, uid)
+            return await _poll_votes_page(db, "group", message_id, _poll_option_bytes(option), offset, limit)
+
+    @router.get("/api/messages/{message_id}/poll-votes")
+    async def dm_poll_votes(
+        message_id: int,
+        peer: int = Query(alias="with", gt=0),
+        offset: str = Query(default="", max_length=16),
+        limit: int = Query(default=50, ge=1, le=100),
+        option: str = Query(default="", max_length=16),
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        uid = int((await current_user(authorization))["telegram_id"])
+        async with aiosqlite.connect(db_path()) as db:
+            cur = await db.execute(
+                """SELECT 1 FROM messages WHERE id=? AND
+                   ((sender_telegram_id=? AND recipient_telegram_id=?) OR
+                    (sender_telegram_id=? AND recipient_telegram_id=?))""",
+                (message_id, uid, peer, peer, uid),
+            )
+            if not await cur.fetchone():
+                raise HTTPException(404, "Опрос не найден")
+            return await _poll_votes_page(db, "dm", message_id, _poll_option_bytes(option), offset, limit)
+
+    @router.post("/api/reports", status_code=201)
+    async def report_content(payload: dict[str, Any],
+                             authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        uid = int((await current_user(authorization))["telegram_id"])
+        scope = payload.get("scope")
+        peer_id = payload.get("peer_id")
+        message_ids = payload.get("message_ids") or []
+        option = payload.get("option") or ""
+        text = payload.get("message") or ""
+        if (scope not in ("dm", "group", "channel") or type(peer_id) is not int or not 0 < peer_id < 2**63
+                or not isinstance(message_ids, list) or not message_ids or len(message_ids) > 100
+                or any(type(item) is not int or not 0 < item < 2**63 for item in message_ids)
+                or not isinstance(option, str) or len(option) > 64
+                or not isinstance(text, str) or len(text) > 500):
+            raise HTTPException(400, "Некорректная жалоба")
+        now = int(time.time())
+        async with aiosqlite.connect(db_path()) as db:
+            await db.executemany(
+                """INSERT INTO message_reports(scope,peer_id,message_id,reporter_telegram_id,option,text,created_at)
+                   VALUES(?,?,?,?,?,?,?)""",
+                [(scope, peer_id, message_id, uid, option, text, now) for message_id in message_ids],
+            )
+            await db.commit()
+        return {"reported": len(message_ids)}
+
+    @router.delete("/api/channels/{channel_id}/messages/{message_id}/reactions")
+    async def channel_remove_participant_reactions(
+        channel_id: int,
+        message_id: int,
+        user: int = Query(gt=0),
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        uid = int((await current_user(authorization))["telegram_id"])
+        await channel_row(channel_id)
+        async with aiosqlite.connect(db_path()) as db:
+            await db.execute("BEGIN IMMEDIATE")
+            if not await channel_has_right(db, channel_id, uid, 4):
+                raise HTTPException(403, "Нет права удалять сообщения канала")
+            cur = await db.execute(
+                """DELETE FROM message_reactions
+                   WHERE scope='channel' AND chat_id=? AND message_id=? AND user_telegram_id=?""",
+                (channel_id, message_id, user),
+            )
+            removed = cur.rowcount or 0
+            await db.commit()
+        return {"removed": removed}
+
+    @router.delete("/api/groups/{group_id}/messages/{message_id}/reactions")
+    async def group_remove_participant_reactions(
+        group_id: int,
+        message_id: int,
+        user: int = Query(gt=0),
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        uid = int((await current_user(authorization))["telegram_id"])
+        async with aiosqlite.connect(db_path()) as db:
+            await db.execute("BEGIN IMMEDIATE")
+            member = await require_group_member(db, group_id, uid)
+            if member["role"] != "owner" and not group_has_right(member, 64):
+                raise HTTPException(403, "Нет права удалять сообщения группы")
+            cur = await db.execute(
+                """DELETE FROM message_reactions
+                   WHERE scope='group' AND chat_id=? AND message_id=? AND user_telegram_id=?""",
+                (group_id, message_id, user),
+            )
+            removed = cur.rowcount or 0
+            await db.commit()
+        return {"removed": removed}
+
+    @router.put("/api/channels/{channel_id}/owner")
+    async def transfer_channel_owner(
+        channel_id: int,
+        payload: dict[str, Any],
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        uid = int((await current_user(authorization))["telegram_id"])
+        target = payload.get("telegram_id")
+        if type(target) is not int or not 0 < target < 2**63 or target == uid:
+            raise HTTPException(400, "Некорректный новый владелец")
+        await channel_row(channel_id)
+        async with aiosqlite.connect(db_path()) as db:
+            await db.execute("BEGIN IMMEDIATE")
+            cur = await db.execute("SELECT owner_telegram_id FROM channels WHERE id=?", (channel_id,))
+            owner_row = await cur.fetchone()
+            if owner_row is None or int(owner_row[0]) != uid:
+                raise HTTPException(403, "Передать канал может только владелец")
+            cur = await db.execute("SELECT 1 FROM accounts WHERE telegram_id=?", (target,))
+            if not await cur.fetchone():
+                raise HTTPException(404, "Пользователь не найден")
+            now = int(time.time())
+            await db.execute("INSERT OR IGNORE INTO channel_members(channel_id,telegram_id,joined_at) VALUES(?,?,?)",
+                             (channel_id, target, now))
+            await db.execute("UPDATE channels SET owner_telegram_id=? WHERE id=?", (target, channel_id))
+            await db.execute("""INSERT INTO channel_admins(channel_id,telegram_id,created_at,rights) VALUES(?,?,?,?)
+                                ON CONFLICT(channel_id,telegram_id) DO UPDATE SET rights=excluded.rights""",
+                             (channel_id, target, now, 127))
+            await db.execute("""INSERT INTO channel_admins(channel_id,telegram_id,created_at,rights) VALUES(?,?,?,?)
+                                ON CONFLICT(channel_id,telegram_id) DO UPDATE SET rights=excluded.rights""",
+                             (channel_id, uid, now, 127))
+            await log_channel_event(db, channel_id, uid, "edit_creator", {"value": target})
+            await db.commit()
+        return {"id": channel_id, "owner_telegram_id": target}
+
+    @router.put("/api/groups/{group_id}/owner")
+    async def transfer_group_owner(
+        group_id: int,
+        payload: dict[str, Any],
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        uid = int((await current_user(authorization))["telegram_id"])
+        target = payload.get("telegram_id")
+        if type(target) is not int or not 0 < target < 2**63 or target == uid:
+            raise HTTPException(400, "Некорректный новый владелец")
+        async with aiosqlite.connect(db_path()) as db:
+            await db.execute("BEGIN IMMEDIATE")
+            member = await require_group_member(db, group_id, uid)
+            if member["role"] != "owner":
+                raise HTTPException(403, "Передать группу может только владелец")
+            cur = await db.execute("SELECT 1 FROM accounts WHERE telegram_id=?", (target,))
+            if not await cur.fetchone():
+                raise HTTPException(404, "Пользователь не найден")
+            now = int(time.time())
+            await db.execute("""INSERT INTO group_members(group_id,telegram_id,role,joined_at) VALUES(?,?,'owner',?)
+                                ON CONFLICT(group_id,telegram_id) DO UPDATE SET role='owner'""",
+                             (group_id, target, now))
+            await db.execute("UPDATE group_members SET role='admin' WHERE group_id=? AND telegram_id=?",
+                             (group_id, uid))
+            await db.execute("UPDATE chat_groups SET owner_telegram_id=? WHERE id=?", (target, group_id))
+            await db.commit()
+        return {"id": group_id, "owner_telegram_id": target}
+
+    @router.put("/api/channels/{channel_id}/members/{target_id}/rank")
+    async def set_channel_member_rank(
+        channel_id: int,
+        target_id: int,
+        payload: dict[str, Any],
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        uid = int((await current_user(authorization))["telegram_id"])
+        rank = payload.get("rank")
+        if not isinstance(rank, str) or len(rank) > 32:
+            raise HTTPException(400, "Некорректная должность")
+        await channel_row(channel_id)
+        async with aiosqlite.connect(db_path()) as db:
+            if not await can_manage_channel(channel_id, uid):
+                raise HTTPException(403, "Нет права изменять администраторов")
+            await db.execute("UPDATE channel_members SET rank=? WHERE channel_id=? AND telegram_id=?",
+                             (rank.strip(), channel_id, target_id))
+            await log_channel_event(db, channel_id, uid, "edit_rank", {"value": rank.strip(), "user": target_id})
+            await db.commit()
+        return {"channel_id": channel_id, "telegram_id": target_id, "rank": rank.strip()}
+
+    @router.put("/api/groups/{group_id}/members/{target_id}/rank")
+    async def set_group_member_rank(
+        group_id: int,
+        target_id: int,
+        payload: dict[str, Any],
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        uid = int((await current_user(authorization))["telegram_id"])
+        rank = payload.get("rank")
+        if not isinstance(rank, str) or len(rank) > 32:
+            raise HTTPException(400, "Некорректная должность")
+        async with aiosqlite.connect(db_path()) as db:
+            member = await require_group_member(db, group_id, uid)
+            if member["role"] == "member":
+                raise HTTPException(403, "Нет права изменять администраторов")
+            await db.execute("UPDATE group_members SET rank=? WHERE group_id=? AND telegram_id=?",
+                             (rank.strip(), group_id, target_id))
+            await db.commit()
+        return {"group_id": group_id, "telegram_id": target_id, "rank": rank.strip()}
 
     @router.get("/api/messages/search")
     async def search_messages(
@@ -16340,7 +16640,7 @@ def build_messenger_router(
                 """SELECT g.id,g.username,g.title,g.description,g.owner_telegram_id,g.created_at,
                           g.avatar_media_id,g.no_forwards,
                           g.slow_mode_seconds,g.members_hidden,g.default_send_restrictions,g.anti_spam_enabled,
-                          g.pre_history_hidden,g.join_request,
+                          g.pre_history_hidden,g.join_request,COALESCE(g.forum_enabled,0) AS forum_enabled,
                           (SELECT COUNT(*) FROM group_members m WHERE m.group_id=g.id) AS member_count
                    FROM chat_groups g WHERE g.id=?""",
                 (group_id,),
@@ -16372,6 +16672,7 @@ def build_messenger_router(
         result["anti_spam_enabled"] = bool(result["anti_spam_enabled"])
         result["pre_history_hidden"] = bool(result["pre_history_hidden"])
         result["join_request"] = bool(result["join_request"])
+        result["forum_enabled"] = bool(result.get("forum_enabled") or 0)
         result["labels"] = await entity_labels("group", group_id)
         result["my_role"] = membership["role"]
         result["admin_rights"] = membership["admin_rights"] if membership["role"] in ("owner", "admin") else 0
@@ -16669,6 +16970,10 @@ def build_messenger_router(
             if type(payload["join_request"]) is not bool:
                 raise HTTPException(400, "INVALID_JOIN_REQUEST")
             fields["join_request"] = int(payload["join_request"])
+        if "forum_enabled" in payload:
+            if type(payload["forum_enabled"]) is not bool:
+                raise HTTPException(400, "INVALID_FORUM_FLAG")
+            fields["forum_enabled"] = int(payload["forum_enabled"])
         if not fields:
             raise HTTPException(400, "Нет полей для изменения")
         async with aiosqlite.connect(db_path()) as db:
@@ -16681,7 +16986,8 @@ def build_messenger_router(
             await db.commit()
         result: dict[str, Any] = {"id": group_id}
         for key, value in fields.items():
-            result[key] = bool(value) if key in ("no_forwards", "members_hidden", "pre_history_hidden", "join_request") else value
+            result[key] = bool(value) if key in ("no_forwards", "members_hidden", "pre_history_hidden",
+                                                 "join_request", "forum_enabled") else value
         return result
 
     @router.put("/api/groups/{group_id}/avatar")

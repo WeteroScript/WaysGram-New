@@ -145,33 +145,33 @@ Telegram-клиент уже умеет все эти экраны; менять
 * Форум-топики, спонсорские отчёты, геолокация канала, переводчик (`toggleAutotranslation`) —
   отвечают пустым успехом или заглушкой, отдельной функциональности не несут.
 
-## Всплывашки «не поддерживается» в каналах (проверено по коду клиента)
+## Всплывашки «не поддерживается»: что закрыто
 
-Таблица выше описывает пункты задания. Кроме них официальный клиент в канальных экранах
-отправляет ещё ряд TL-методов, которых в диспетчере нет — каждый даёт bulletin
-`WaysGramUnsupportedOperation` («Это действие пока не поддерживается WaysGram»).
-Проверено поиском по `tgnet/WaysGram*.java`: метода нет ни в `instanceof`, ни в заглушках.
+Раньше любой TL-метод без обработчика давал bulletin `WaysGramUnsupportedOperation`
+(«Это действие пока не поддерживается WaysGram»). Теперь редкие методы канальных, групповых и
+общих экранов обслуживает `WaysGramExtras.handle()`, а сервер получил нужные маршруты.
 
-| TL-метод | Откуда вызывается |
+| TL-метод | Что делает WaysGram |
 | --- | --- |
-| `messages.getPollVotes`, `messages.readPollVotes`, `messages.getUnreadPollVotes` | результаты опроса, «непрочитанные голоса» |
-| `messages.getUnreadReactions`, `messages.readReactions` | раздел «Реакции» в профиле канала (дёргает `MessagesController` при открытии) |
-| `messages.translateText` | «Перевести» публикацию (`TranslateAlert2/3`, `TranslateController`) |
-| `messages.report` | «Пожаловаться» (`ReportBottomSheet`) |
-| `messages.editChatParticipantRank` | «Должность» администратора (`ChatRightsEditActivity`) |
-| `channels.editCreator` | «Передать канал» (`ChatRightsEditActivity`, `SelectChatUserSheet`) |
-| `channels.toggleForum` | тумблер «Форум» (`MessagesController`) |
-| `channels.reorderProfileTabs`, `account.reorderProfileTabs` | перестановка вкладок профиля (`SharedMediaLayout`) |
-| `help.getCountriesList` | выбор страны (`LoginActivity`, бусты) |
-| `messages.getBotCallbackAnswer` | кнопки-боты под постами |
-| `messages.getInlineBotResults`, `messages.searchGlobal`, `messages.searchStickers` | поиск и инлайн-боты из канала |
-| `messages.acceptUrlAuth`, `messages.requestUrlAuth`, `messages.checkUrlAuthMatchCode` | ссылки с авторизацией |
-| `messages.sendBotRequestedPeer`, `messages.reportReadMetrics` | мелкие вызовы из `ChatActivity*` |
-| `messages.deleteParticipantReaction(s)`, `messages.addPollAnswer`, `messages.deletePollAnswer` | реакции/опросы участников |
+| `messages.getPollVotes` | `GET /api/{channels,groups}/{id}/messages/{mid}/poll-votes`, `GET /api/messages/{mid}/poll-votes?with=` — реальные голоса (`message_card_votes`) с профилями участников, пагинация по `offset`/`option` |
+| `messages.addPollAnswer`, `messages.deletePollAnswer` | `POST /api/message-cards/{scope}/{peer}/{mid}` — голос и отзыв голоса |
+| `messages.readPollVotes`, `messages.readReactions` | `messages.affectedHistory` без ошибки (счётчики непрочитанного WaysGram не ведёт) |
+| `messages.getUnreadPollVotes`, `messages.getUnreadReactions` | пустая выдача `messages.messagesSlice` (раздел «Реакции» открывается пустым, без ошибки) |
+| `messages.deleteParticipantReaction(s)` | `DELETE /api/{channels,groups}/{id}/messages/{mid}/reactions?user=` — снятие реакции участника админом (право «удалять сообщения») |
+| `messages.translateText` | `POST /api/translate` (нужен `OPENAI_API_KEY` на сервере) |
+| `messages.report` | `POST /api/reports` → таблица `message_reports` (scope, сообщение, автор жалобы, причина, текст) |
+| `channels.editCreator` | `PUT /api/channels/{id}/owner`, `PUT /api/groups/{id}/owner` — передача владения с полными правами новому владельцу, старое владение остаётся админом |
+| `channels.toggleForum` | `forum_enabled` в настройках канала и группы (сами топики у групп есть, у каналов нет) |
+| `messages.editChatParticipantRank` | `PUT /api/{channels,groups}/{id}/members/{tg}/rank` — колонка `rank` у участников |
+| `help.getCountriesList` | статический список стран в клиенте (номер можно вводить вручную) |
+| `messages.getBotCallbackAnswer` | если данные кнопки — URL, он открывается; иначе пустой ответ без ошибки |
+| `messages.getInlineBotResults` | пустая выдача «ничего не найдено» |
+| `messages.requestUrlAuth`, `acceptUrlAuth`, `checkUrlAuthMatchCode` | ссылка открывается как обычная (авторизацию на стороннем сайте WaysGram не подтверждает) |
+| `messages.searchGlobal` | пустая выдача: серверного индекса по всем чатам нет — честный «ничего не найдено» вместо ошибки |
 
-Тихого фолбэка нет: `BulletinFactory.errorDescription()` показывает строку для любого
-`METHOD_NOT_SUPPORTED:`. Чтобы убрать всплывашки, нужны либо серверные обработчики,
-либо явные заглушки в диспетчере.
+Что осталось честными заглушками (по ним нет серверной функциональности, ошибки больше не
+показываются): глобальный поиск, инлайн-боты, кнопки-боты без URL, счётчики непрочитанных
+реакций.
 
 ## Следующие заходы (если понадобятся)
 

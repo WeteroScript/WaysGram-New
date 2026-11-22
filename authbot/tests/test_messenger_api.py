@@ -9545,6 +9545,103 @@ def test_channel_settings_cover_signatures_slowmode_and_join_flags(api_env) -> N
     run(scenario())
 
 
+def test_channel_polls_reports_owner_and_rank(api_env) -> None:
+    path, _auth_store, _fake_bot, app = api_env
+    add_account(api_env, 89911, "extras_owner")
+    add_account(api_env, 89912, "extras_voter")
+    add_session(path, 89911, "extras-owner")
+    add_session(path, 89912, "extras-voter")
+
+    async def scenario() -> None:
+        owner = {"Authorization": "Bearer extras-owner"}
+        voter = {"Authorization": "Bearer extras-voter"}
+        async with await client_for(app) as client:
+            channel = await client.post("/api/channels", headers=owner,
+                                        json={"title": "Extras channel", "is_public": False})
+            channel_id = channel.json()["id"]
+            assert (await client.post("/api/channels/join", headers=voter,
+                                      json={"invite_link": channel.json()["invite_link"]})).status_code == 200
+            poll_card = {"kind": "poll", "title": "Какой вариант?", "multiple_choice": False,
+                         "items": [{"id": 1, "text": "Первый"}, {"id": 2, "text": "Второй"}]}
+            post = await client.post(f"/api/channels/{channel_id}/messages", headers=owner,
+                                     json={"body": "Голосуем", "card": poll_card})
+            assert post.status_code == 201, post.text
+            message_id = post.json()["id"]
+            assert (await client.post(f"/api/message-cards/channel/{channel_id}/{message_id}",
+                                      headers=voter, json={"votes": [2]})).status_code == 200
+
+            votes = await client.get(f"/api/channels/{channel_id}/messages/{message_id}/poll-votes",
+                                     headers=owner)
+            assert votes.status_code == 200, votes.text
+            body = votes.json()
+            assert body["count"] == 1 and body["votes"][0]["user_id"] == 89912
+            assert body["votes"][0]["option"] == 2 and body["next_offset"] == ""
+            filtered = await client.get(
+                f"/api/channels/{channel_id}/messages/{message_id}/poll-votes?option=1", headers=owner)
+            assert filtered.json()["count"] == 0
+            assert (await client.get(f"/api/channels/{channel_id}/messages/{message_id}/poll-votes",
+                                     headers={"Authorization": "Bearer missing"})).status_code == 401
+
+            # Жалоба на публикацию: пишется в отдельную таблицу, повтор допустим.
+            assert (await client.post("/api/reports", headers=voter, json={
+                "scope": "channel", "peer_id": channel_id, "message_ids": [message_id],
+                "option": "spam", "message": "реклама"})).status_code == 201
+            assert (await client.post("/api/reports", headers=voter, json={
+                "scope": "channel", "peer_id": channel_id, "message_ids": []})).status_code == 400
+
+            # Реакция участника снимается администратором, а не только самим автором.
+            assert (await client.put(f"/api/channels/{channel_id}/messages/{message_id}/reactions",
+                                     headers=voter, json={"reactions": ["👍"]})).status_code == 200
+            assert (await client.delete(
+                f"/api/channels/{channel_id}/messages/{message_id}/reactions?user=89912",
+                headers=voter)).status_code == 403
+            removed = await client.delete(
+                f"/api/channels/{channel_id}/messages/{message_id}/reactions?user=89912", headers=owner)
+            assert removed.status_code == 200 and removed.json()["removed"] == 1
+
+            # Форумный флаг канала хранится в настройках.
+            assert (await client.put(f"/api/channels/{channel_id}/settings", headers=owner,
+                                     json={"forum_enabled": True})).status_code == 200
+            assert (await client.get(f"/api/channels/{channel_id}", headers=owner)).json()["forum_enabled"] == 1
+
+            # Должность администратора и передача канала.
+            assert (await client.put(f"/api/channels/{channel_id}/members/89912/rank", headers=owner,
+                                     json={"rank": "Редактор"})).status_code == 200
+            assert (await client.put(f"/api/channels/{channel_id}/members/89912/rank", headers=voter,
+                                     json={"rank": "Самозванец"})).status_code == 403
+            assert (await client.put(f"/api/channels/{channel_id}/owner", headers=voter,
+                                     json={"telegram_id": 89911})).status_code == 403
+            assert (await client.put(f"/api/channels/{channel_id}/owner", headers=owner,
+                                     json={"telegram_id": 89912})).status_code == 200
+            assert (await client.get(f"/api/channels/{channel_id}", headers=owner)).json()["owner_telegram_id"] == 89912
+
+            # Группа: голоса опроса, должность и передача владения.
+            group = await client.post("/api/groups", headers=owner, json={"title": "Extras group"})
+            group_id = group.json()["id"]
+            assert (await client.post(f"/api/groups/{group_id}/members", headers=owner,
+                                      json={"telegram_id": 89912})).status_code == 201
+            group_post = await client.post(f"/api/groups/{group_id}/messages", headers=owner,
+                                           json={"body": "Опрос в группе", "card": poll_card})
+            assert group_post.status_code == 201, group_post.text
+            group_message = group_post.json()["id"]
+            assert (await client.post(f"/api/message-cards/group/{group_id}/{group_message}",
+                                      headers=voter, json={"votes": [1]})).status_code == 200
+            group_votes = await client.get(
+                f"/api/groups/{group_id}/messages/{group_message}/poll-votes", headers=owner)
+            assert group_votes.status_code == 200 and group_votes.json()["count"] == 1
+            assert (await client.put(f"/api/groups/{group_id}/settings", headers=owner,
+                                     json={"forum_enabled": True})).status_code == 200
+            assert (await client.get(f"/api/groups/{group_id}", headers=owner)).json()["forum_enabled"] is True
+            assert (await client.put(f"/api/groups/{group_id}/members/89912/rank", headers=owner,
+                                     json={"rank": "Помощник"})).status_code == 200
+            assert (await client.put(f"/api/groups/{group_id}/owner", headers=voter,
+                                     json={"telegram_id": 89911})).status_code == 403
+            assert (await client.put(f"/api/groups/{group_id}/owner", headers=owner,
+                                     json={"telegram_id": 89912})).status_code == 200
+
+    run(scenario())
+
+
 def test_channel_admin_log_lists_recent_admin_actions(api_env) -> None:
     path, _auth_store, _fake_bot, app = api_env
     add_account(api_env, 89801, "admin_log_owner")
