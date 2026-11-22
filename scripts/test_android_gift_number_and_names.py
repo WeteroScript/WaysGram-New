@@ -115,6 +115,41 @@ class PlushPepeChecks(unittest.TestCase):
         self.assertIn("MODEL_NAME = \"WaysGram\"", number)
         self.assertIn("WAYSGRAM_MODEL_DOCUMENT_ID", number)
 
+    def test_bundled_model_carries_alpha_and_fills_its_frame(self):
+        raw = self.archive.read(
+            "WaysGram-Android/TMessagesProj/src/main/res/raw/waysgram_model.webm")
+        self.assertEqual(raw[:4], b"\x1aE\xdf\xa3", "модель должна быть WebM, а не Lottie")
+        self.assertIn(b"ALPHA_MODE", raw[:4096],
+                      "у анимации модели должен быть альфа-канал, иначе вокруг пепе чёрный квадрат")
+        self.assertGreater(len(raw), 300_000, "авторская анимация не должна схлопнуться в один кадр")
+
+    def test_gift_cell_does_not_use_the_frame_cache(self):
+        sheet = self.archive.read(BASE + "ui/Gifts/GiftSheet.java").decode("utf-8")
+        start = sheet.index("private void setSticker(TLRPC.Document document, Object parentObject)")
+        block = sheet[start:start + 2400]
+        self.assertIn('"80_80_nolimit"', block,
+                      "ячейка «Мои подарки» должна рисовать кадр из файла модели")
+        self.assertNotIn("80_80_nolimit_pcache", block,
+                         "pcache оставлял ячейку с синтетическим артом пустой")
+
+    def test_model_square_in_the_card_is_bigger(self):
+        sheet = self.archive.read(BASE + "ui/Stars/StarGiftSheet.java").decode("utf-8")
+        self.assertRegex(sheet, r"MODEL_IMAGE_SIZE_DP = (2\d\d|\d{3});")
+        size = int(re.search(r"MODEL_IMAGE_SIZE_DP = (\d+);", sheet).group(1))
+        self.assertGreater(size, 160, "модель в карточке была слишком мелкой")
+        self.assertIn("createFrame(MODEL_IMAGE_SIZE_DP, MODEL_IMAGE_SIZE_DP", sheet,
+                      "квадрат модели в карточке должен использовать новый размер")
+
+    def test_inventory_always_prefers_the_bundled_model(self):
+        controller = self.archive.read(
+            BASE + "messenger/waysgram/WaysGramProfileGiftsController.java").decode("utf-8")
+        start = controller.index("TLRPC.TL_document modelDocument = WaysGramGiftAttributes.traitDocument(")
+        block = controller[start:start + 1400]
+        self.assertIn("WaysGramBundledArtwork.isBundledName(model)", block)
+        self.assertIn("WaysGramBundledArtwork.isBundled(modelDocument.id)", block,
+                      "серверный документ модели тоже заменяется встроенной анимацией")
+        self.assertIn("modelDocument = bundled;", block)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

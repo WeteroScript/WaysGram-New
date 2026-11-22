@@ -1,6 +1,6 @@
 {
   "gift_id": "5936013938331222567",
-  "source": "WaysGram original artwork, encoded from the model's raster frames as WebM with alpha (the app's Lottie renderer draws vector frames only)",
+  "source": "WaysGram original artwork, authored loop (breathing, sway, glow, hearts, sparkles) encoded as WebM with alpha - the app's Lottie renderer draws vector frames only",
   "commit": "",
   "models": [
     {
@@ -8,8 +8,8 @@
       "file": "waysgram.webm",
       "document_id": -5936013938331222567,
       "mime_type": "video/webm",
-      "sha256": "f36099b7bdf8704ab550a94343b4eace8b7b604195e2f5501438c8d40da521ba",
-      "bytes": 193921
+      "sha256": "6876131ee114b6d6b2de29a42e74f0edb1b288ab63a3551b6edd75cd6afcf545",
+      "bytes": 780418
     }
   ]
 }
