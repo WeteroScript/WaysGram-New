@@ -140,7 +140,23 @@ public class WaysGramCustomizationActivity extends BaseFragment {
         return scroll;
     }
 
-    private String getString(int id) { return LocaleController.getString(id); }
+    private String getString(int id) { return text(id); }
+
+    // Текст берём с защитой от Resources$NotFoundException: в релизной сборке (shrinkResources +
+    // R8 full mode) id ресурса может уже не указывать на строку, а голый TextView.setText(int)
+    // на таком id падает и роняет экран.
+    private String text(int id) {
+        Context context = getContext();
+        if (context != null) {
+            try {
+                return context.getString(id);
+            } catch (Throwable t) {
+                FileLog.e(t);
+            }
+        }
+        String value = LocaleController.getString(id);
+        return value == null || value.startsWith("LOC_ERR") ? "" : value;
+    }
 
     private void toggle(LinearLayout parent, String label, boolean value, Runnable action) {
         TextCheckCell cell = new TextCheckCell(getContext());
@@ -150,7 +166,7 @@ public class WaysGramCustomizationActivity extends BaseFragment {
         parent.addView(cell);
     }
 
-    private Button button(int text, Runnable click) {
+    private Button button(String text, Runnable click) {
         Button b = new Button(getContext(), null, android.R.attr.borderlessButtonStyle);
         b.setAllCaps(false);
         b.setText(text);
@@ -171,7 +187,7 @@ public class WaysGramCustomizationActivity extends BaseFragment {
         for (int i = 0; i < 2; i++) {
             final int layer = i;
             TextView label = new TextView(getContext());
-            label.setText(i == 0 ? R.string.WgCustomBackground : R.string.WgCustomIndicator);
+            label.setText(text(i == 0 ? R.string.WgCustomBackground : R.string.WgCustomIndicator));
             label.setTextColor(Theme.getColor(Theme.key_windowBackgroundWhiteBlackText));
             label.setPadding(AndroidUtilities.dp(16), AndroidUtilities.dp(16), 0, 0);
             LinearLayout section = new LinearLayout(getContext());
@@ -192,10 +208,10 @@ public class WaysGramCustomizationActivity extends BaseFragment {
             LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(AndroidUtilities.dp(i == 0 ? 155 : 70), AndroidUtilities.dp(44));
             lp.setMargins(AndroidUtilities.dp(16), AndroidUtilities.dp(8), AndroidUtilities.dp(8), AndroidUtilities.dp(8));
             row.addView(preview, lp);
-            row.addView(button(R.string.WgCustomUpload, () -> pick(layer)));
+            row.addView(button(text(R.string.WgCustomUpload), () -> pick(layer)));
             section.addView(row);
         }
-        content.addView(button(R.string.WgCustomSave, this::nameConfig));
+        content.addView(button(text(R.string.WgCustomSave), this::nameConfig));
         java.util.TreeMap<String, ?> sorted = new java.util.TreeMap<>(p.getAll());
         for (String key : sorted.keySet()) {
             if (!key.startsWith("config_")) continue;
@@ -288,7 +304,7 @@ public class WaysGramCustomizationActivity extends BaseFragment {
         EditText name = new EditText(getContext());
         name.setSingleLine();
         name.setFilters(new android.text.InputFilter[]{new android.text.InputFilter.LengthFilter(48)});
-        name.setHint(R.string.WgCustomName);
+        name.setHint(text(R.string.WgCustomName));
         AlertDialog dialog = new AlertDialog.Builder(getContext()).setTitle(LocaleController.getString(R.string.WgCustomName))
                 .setView(name).setNegativeButton(LocaleController.getString(R.string.Cancel), null).setPositiveButton(LocaleController.getString(R.string.WgCustomSave), null).create();
         showDialog(dialog);
