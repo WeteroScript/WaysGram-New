@@ -468,6 +468,16 @@ def test_admin_number_input_accepts_secret_and_prefixed_numbers(store: bot_modul
         )
     assert bot_module.normalize_admin_number("123") is None
     assert bot_module.normalize_admin_number("+12") is None
+    # Секретное пространство: префикс + цифры после него.
+    assert bot_module.normalize_admin_number("+0 000 0000") == "+00000000"
+    assert bot_module.normalize_admin_number("+0 0000000") == "+00000000"
+    assert bot_module.normalize_admin_number("+000000000") == "+000000000"
+    assert bot_module.normalize_admin_number("+111 111111") == "+111111111"
+    assert bot_module.normalize_admin_number("+999 0000") == "+9990000"
+    assert bot_module.normalize_admin_number("+222") is None
+    assert bot_module.is_secret_number("+00000000")
+    assert bot_module.is_secret_number("+999 0000".replace(" ", ""))
+    assert not bot_module.is_secret_number("+447700900123")
 
     created = []
     for value in ("+999", "+333", "+666", "+0", "+111", "111111111"):

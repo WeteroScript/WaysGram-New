@@ -9424,6 +9424,18 @@ def test_secret_numbers_support_admin_creation_and_otp_login(api_env):
             assert (await client.post('/api/auth/request-code', json={'phone': '+222'})).status_code == 400
             assert bot_module.normalize_admin_number('+222') is None
 
+            # Секретный номер с цифрами после префикса: «+0 000 0000» — это +00000000.
+            suffixed = bot_module.normalize_admin_number('+0 000 0000')
+            assert suffixed == '+00000000'
+            uid = await bot_module.admin_create_account(suffixed, 0, 0)
+            assert (await client.post('/api/auth/request-code', json={'phone': '+0 000 0000'})).status_code == 200
+            code, _ = await store.latest_code(suffixed)
+            logged_in = (await client.post('/api/auth/verify-code',
+                                           json={'phone': suffixed, 'code': code})).json()
+            assert logged_in['user']['id'] == uid and logged_in['user']['phone'] == suffixed
+            auth = {'Authorization': 'Bearer ' + logged_in['token']}
+            assert (await client.get('/api/me', headers=auth)).json()['phone'] == suffixed
+
     run(scenario())
 
 

@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Any, Literal, Callable
 
 import aiosqlite
-from virtual_numbers import is_virtual_number
+from virtual_numbers import is_virtual_number, normalize_number
 import gift_names
 import gift_model_fallbacks
 import db_split  # noqa: F401  # two-file database layout
@@ -5106,9 +5106,13 @@ def build_messenger_router(
 
     @router.post("/api/auth/request-code")
     async def request_login_code(payload: dict[str, Any], request: Request) -> dict[str, str]:
-        phone = str(payload.get("phone", payload.get("number", ""))).strip()
+        phone = normalize_number(payload.get("phone", payload.get("number", "")))
         if not is_virtual_number(phone):
-            raise HTTPException(status_code=400, detail="Номер должен быть в международном формате E.164: +код страны и номер")
+            raise HTTPException(
+                status_code=400,
+                detail="Номер должен быть в формате +код страны и 7–14 цифр, либо секретный номер: "
+                       "+0, +111, +333, +666, +999 (можно с цифрами после префикса, например +0 000 0000)",
+            )
         owner = await auth_store.resolve_number(phone)
         if not owner:
             raise HTTPException(status_code=404, detail="Номер не закреплён за аккаунтом")
@@ -5348,7 +5352,7 @@ def build_messenger_router(
 
     @router.post("/api/auth/verify-code")
     async def verify_login_code(payload: dict[str, Any]) -> dict[str, Any]:
-        phone = str(payload.get("phone", payload.get("number", ""))).strip()
+        phone = normalize_number(payload.get("phone", payload.get("number", "")))
         code = str(payload.get("code", "")).strip()
         if not is_virtual_number(phone) or not re.fullmatch(r"[0-9]{6}", code):
             raise HTTPException(status_code=400, detail="Проверьте виртуальный номер и шестизначный код")

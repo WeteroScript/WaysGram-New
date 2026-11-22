@@ -8,7 +8,7 @@ import os
 import random
 import re
 import secrets
-from virtual_numbers import SECRET_NUMBERS, is_virtual_number
+from virtual_numbers import SECRET_NUMBERS, is_secret_number, is_virtual_number
 import time
 from pathlib import Path
 from typing import Any
@@ -896,7 +896,7 @@ async def get_code_handler(message: Message) -> None:
     if not owned:
         await message.answer(tr(lang, "need_number"))
         return
-    if len(owned) > 1 or owned[0][0] in SECRET_NUMBERS:
+    if len(owned) > 1 or is_secret_number(owned[0][0]):
         rows = account_number_rows(owned, "code", lang)
         await message.answer(tr(lang, "my_accounts"), reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
         return
@@ -912,8 +912,8 @@ async def get_code_handler(message: Message) -> None:
 
 def account_number_rows(owned: list[tuple[str, int]], action: str, lang: str, *, secret: bool = False):
     rows = [[InlineKeyboardButton(text=number, callback_data=f"myacc:{action}:{number}")]
-            for number, _ in owned if (number in SECRET_NUMBERS) == secret]
-    if not secret and any(number in SECRET_NUMBERS for number, _ in owned):
+            for number, _ in owned if is_secret_number(number) == secret]
+    if not secret and any(is_secret_number(number) for number, _ in owned):
         rows.append([InlineKeyboardButton(text="Секрет" if lang == "ru" else "Secret", callback_data=f"myacc:secret:{action}")])
     return rows
 
@@ -2118,14 +2118,15 @@ def normalize_admin_number(value: str) -> str | None:
     if raw.startswith("+"):
         normalized = "+" + digits
         return normalized if is_virtual_number(normalized) else None
-    if "+" + digits in SECRET_NUMBERS:
+    if is_secret_number("+" + digits):
         return "+" + digits
     # Без плюса номер тоже принимаем, если он вообще может быть WaysGram-номером:
     # раньше всё, что не 10–11 цифр, отклонялось как «некорректный номер».
     normalized = "+" + digits
     if not is_virtual_number(normalized):
         return None
-    if len(digits) == 10:
+    # Секретное пространство «+0…» не превращаем в американский номер.
+    if len(digits) == 10 and not digits.startswith("0"):
         return "+1" + digits
     return normalized
 
@@ -3295,7 +3296,8 @@ async def admin_callback(callback: CallbackQuery) -> None:
         ADMIN_INPUT[actor_id] = ("newacct_number", None)
         await callback.message.answer(
             "Создание аккаунта. Введите номер: префикс и цифры (например, +44 7700 900123, +111 111111) "
-            "или секретный номер: +111, +999, +0, +333, +666.\n"
+            "или секретный номер: +111, +999, +0, +333, +666 — можно с цифрами после префикса "
+            "(например, +0 000 0000).\n"
             "Коды входа для этого номера будут приходить вам в этот чат."
         )
     elif action == "newuname":
@@ -3876,7 +3878,11 @@ async def admin_text_input(message: Message) -> None:
     elif kind == "newacct_number":
         number = normalize_admin_number(value)
         if not number:
-            await message.answer("Введите номер в международном формате: +код страны и 7–14 остальных цифр. Или выберите секретный номер: +111, +999, +0, +333, +666.")
+            await message.answer(
+                "Введите номер в международном формате: +код страны и 7–14 остальных цифр. "
+                "Или секретный номер: +111, +999, +0, +333, +666 — можно с цифрами после префикса "
+                "(например, +0 000 0000)."
+            )
             return
         async with aiosqlite.connect(DATABASE_PATH) as db:
             cur = await db.execute("SELECT 1 FROM numbers WHERE number=?", (number,))
