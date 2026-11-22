@@ -277,6 +277,8 @@ jobs:
           if [ -s "$file" ]; then
             {
               grep -E '(^e: |error:|Error:|FAILED|What went wrong|Caused by|OutOfMemory|Could not (resolve|create|find)|Unresolved)' "$file" | head -25 || true
+              # Groovy/Kotlin DSL failures point at the script that broke the configuration.
+              grep -E '\.gradle(\.kts)?' "$file" | grep -viE '^(Download|Downloading|Caching)' | head -15 || true
               if ! grep -qE '(^e: |error:|Error:|FAILED|What went wrong|Caused by)' "$file"; then
                 echo '--- tail of the build log ---'
                 tail -n 25 "$file" || true
