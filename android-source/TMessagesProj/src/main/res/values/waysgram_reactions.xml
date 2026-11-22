@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="WaysGramReactionSelected">Selected</string>
+    <string name="WaysGramReactionNotSelected">Not selected</string>
+    <string name="WaysGramReactionPending">A reaction update is in progress. Please wait.</string>
+    <string name="WaysGramReactionUnsupported">This message has reactions that WaysGram cannot edit.</string>
+    <string name="WaysGramReactionLimit">You can choose up to three reactions. Remove one first.</string>
+</resources>

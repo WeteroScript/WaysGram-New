@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="WaysGramAddressSearchError">Address search unavailable</string>
+    <string name="WaysGramAddressSearchUnavailable">The address provider is unavailable. Check your connection and try again.</string>
+    <string name="WaysGramAddressSearchTooLong">Enter an address of no more than 200 characters.</string>
+</resources>

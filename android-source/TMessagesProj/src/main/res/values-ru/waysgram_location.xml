@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="WaysGramAddressSearchError">Не удалось найти адрес</string>
+    <string name="WaysGramAddressSearchUnavailable">Сервис поиска адресов недоступен. Проверьте подключение и повторите попытку.</string>
+    <string name="WaysGramAddressSearchTooLong">Введите адрес длиной не более 200 символов.</string>
+</resources>

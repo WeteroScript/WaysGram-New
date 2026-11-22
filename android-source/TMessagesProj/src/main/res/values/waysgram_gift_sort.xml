@@ -1,0 +1,5 @@
+<resources>
+    <string name="WaysGramGiftSortPrice">Sort gifts by price</string>
+    <string name="WaysGramGiftSortDescending">Descending</string>
+    <string name="WaysGramGiftSortAscending">Ascending</string>
+</resources>

@@ -1,0 +1,943 @@
+package org.telegram.messenger.waysgram;
+
+import android.content.ContentResolver;
+import android.database.Cursor;
+import android.graphics.Bitmap;
+import android.graphics.BitmapFactory;
+import android.net.Uri;
+import android.os.Handler;
+import android.os.Looper;
+import android.provider.OpenableColumns;
+
+import org.telegram.messenger.ApplicationLoader;
+import org.telegram.ui.Components.AnimatedFileDrawable;
+
+import org.json.JSONObject;
+
+import java.io.ByteArrayOutputStream;
+import java.io.File;
+import java.io.FileOutputStream;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.OutputStream;
+import java.net.HttpURLConnection;
+import java.net.URL;
+import java.net.URLEncoder;
+import java.util.Locale;
+import java.nio.charset.StandardCharsets;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+
+/**
+ * Authenticated JSON client for WaysGram's own REST API.
+ * API sessions are read from Android Keystore-backed WaysGramSessionStore.
+ */
+public final class WaysGramApiClient implements AutoCloseable {
+    private static final int CONNECT_TIMEOUT_MS = 15000;
+    private static final int READ_TIMEOUT_MS = 30000;
+    private static final int MAX_RESPONSE_BYTES = 2 * 1024 * 1024;
+    private static final int MAX_IMAGE_BYTES = 10 * 1024 * 1024;
+    private static final int MAX_STICKER_BYTES = 20 * 1024 * 1024;
+    private static final int MAX_DOCUMENT_BYTES = 25 * 1024 * 1024;
+
+    public interface Callback {
+        void onSuccess(JSONObject response);
+        void onError(String message, int statusCode);
+    }
+
+    public interface ImageCallback {
+        void onSuccess(Bitmap bitmap);
+        void onError(String message, int statusCode);
+    }
+
+    public interface StickerBytesCallback {
+        void onSuccess(byte[] bytes, String mimeType);
+        void onError(String message, int statusCode);
+    }
+
+    public void uploadDocument(ContentResolver resolver, Uri uri, Callback callback) {
+        uploadDocument(resolver, uri, "", callback);
+    }
+
+    public void uploadDocument(
+            ContentResolver resolver,
+            Uri uri,
+            String mediaKind,
+            Callback callback
+    ) {
+        ioExecutor.execute(() -> {
+            try {
+                JSONObject response = performDocumentUpload(resolver, uri, mediaKind);
+                deliverSuccess(callback, response);
+            } catch (ApiException exception) {
+                deliverError(callback, exception.getMessage(), exception.statusCode);
+            } catch (Exception exception) {
+                deliverError(callback, "Не удалось загрузить документ", 0);
+            }
+        });
+    }
+
+    public void downloadDocumentToUri(ContentResolver resolver, Uri destination,
+                                      String mediaId, Callback callback) {
+        ioExecutor.execute(() -> {
+            try {
+                JSONObject response = performDocumentDownloadToUri(resolver, destination, mediaId);
+                deliverSuccess(callback, response);
+            } catch (ApiException exception) {
+                deliverError(callback, exception.getMessage(), exception.statusCode);
+            } catch (Exception exception) {
+                deliverError(callback, "Не удалось сохранить документ", 0);
+            }
+        });
+    }
+
+    private final WaysGramGiftCatalogClient.SessionProvider sessionStore;
+    private final ExecutorService ioExecutor;
+    private final ExecutorService longPollExecutor;
+    private final ExecutorService eventPollExecutor;
+    private final Handler mainHandler = new Handler(Looper.getMainLooper());
+
+    public WaysGramApiClient(WaysGramGiftCatalogClient.SessionProvider sessionStore) {
+        if (sessionStore == null) {
+            throw new IllegalArgumentException("WaysGramSessionStore is required");
+        }
+        this.sessionStore = sessionStore;
+        ioExecutor = Executors.newSingleThreadExecutor(runnable -> {
+            Thread thread = new Thread(runnable, "WaysGramApi");
+            thread.setDaemon(true);
+            return thread;
+        });
+        longPollExecutor = Executors.newSingleThreadExecutor(runnable -> {
+            Thread thread = new Thread(runnable, "WaysGramLongPoll");
+            thread.setDaemon(true);
+            return thread;
+        });
+        eventPollExecutor = Executors.newSingleThreadExecutor(runnable -> {
+            Thread thread = new Thread(runnable, "WaysGramEventPoll");
+            thread.setDaemon(true);
+            return thread;
+        });
+    }
+
+    public void get(String path, Callback callback) {
+        execute("GET", path, null, callback);
+    }
+
+    /**
+     * Runs a bounded long-poll request away from the normal API queue so sends,
+     * uploads and draft synchronization are not blocked while the server waits.
+     */
+    public void getLongPoll(String path, Callback callback) {
+        longPollExecutor.execute(() -> {
+            try {
+                JSONObject response = request("GET", path, null);
+                deliverSuccess(callback, response);
+            } catch (ApiException exception) {
+                deliverError(callback, exception.getMessage(), exception.statusCode);
+            } catch (Exception exception) {
+                deliverError(callback, "Не удалось получить обновления WaysGram", 0);
+            }
+        });
+    }
+
+    /**
+     * Keeps message-change events waiting independently from the message long poll.
+     */
+    public void getEventLongPoll(String path, Callback callback) {
+        eventPollExecutor.execute(() -> {
+            try {
+                JSONObject response = request("GET", path, null);
+                deliverSuccess(callback, response);
+            } catch (ApiException exception) {
+                deliverError(callback, exception.getMessage(), exception.statusCode);
+            } catch (Exception exception) {
+                deliverError(callback, "Не удалось получить события WaysGram", 0);
+            }
+        });
+    }
+
+    public void post(String path, JSONObject payload, Callback callback) {
+        execute("POST", path, payload == null ? new JSONObject() : payload, callback);
+    }
+
+    public void post(String path, JSONObject payload, String idempotencyKey, Callback callback) {
+        execute("POST", path, payload == null ? new JSONObject() : payload, callback, idempotencyKey);
+    }
+
+    public void put(String path, JSONObject payload, Callback callback) {
+        execute("PUT", path, payload == null ? new JSONObject() : payload, callback);
+    }
+
+    public void delete(String path, Callback callback) {
+        execute("DELETE", path, null, callback);
+    }
+
+    public void uploadImage(ContentResolver resolver, Uri uri, Callback callback) {
+        ioExecutor.execute(() -> {
+            try {
+                JSONObject response = performImageUpload(resolver, uri);
+                deliverSuccess(callback, response);
+            } catch (ApiException exception) {
+                deliverError(callback, exception.getMessage(), exception.statusCode);
+            } catch (Exception exception) {
+                deliverError(callback, "Не удалось загрузить изображение", 0);
+            }
+        });
+    }
+
+    public void downloadImage(String mediaId, ImageCallback callback) {
+        ioExecutor.execute(() -> {
+            try {
+                Bitmap bitmap = performImageDownload(mediaId);
+                mainHandler.post(() -> {
+                    if (callback != null) {
+                        callback.onSuccess(bitmap);
+                    }
+                });
+            } catch (ApiException exception) {
+                deliverImageError(callback, exception.getMessage(), exception.statusCode);
+            } catch (Exception exception) {
+                deliverImageError(callback, "Не удалось загрузить изображение", 0);
+            }
+        });
+    }
+
+    public void downloadTelegramGiftSticker(String giftId, ImageCallback callback) {
+        ioExecutor.execute(() -> {
+            try {
+                Bitmap bitmap = performTelegramGiftStickerDownload(giftId);
+                mainHandler.post(() -> {
+                    if (callback != null) {
+                        callback.onSuccess(bitmap);
+                    }
+                });
+            } catch (ApiException exception) {
+                deliverImageError(callback, exception.getMessage(), exception.statusCode);
+            } catch (Exception exception) {
+                deliverImageError(callback, "Не удалось загрузить изображение подарка", 0);
+            }
+        });
+    }
+
+    /**
+     * Downloads the original gift artwork so animated (TGS/WebM) gifts can be
+     * rendered without a separate still preview request.
+     */
+    public void downloadTelegramGiftStickerBytes(
+            String giftId,
+            boolean preferAnimation,
+            StickerBytesCallback callback
+    ) {
+        ioExecutor.execute(() -> {
+            StickerResponse response = null;
+            String errorMessage = "Не удалось загрузить изображение подарка";
+            int errorStatus = 0;
+            if (giftId != null && giftId.matches("[A-Za-z0-9_-]{1,120}")) {
+                try {
+                    response = requestTelegramGiftSticker(giftId, preferAnimation);
+                } catch (Exception exception) {
+                    errorMessage = exception.getMessage() == null
+                            ? errorMessage : exception.getMessage();
+                    if (exception instanceof ApiException) {
+                        errorStatus = ((ApiException) exception).statusCode;
+                    }
+                }
+                if (response == null) {
+                    try {
+                        response = requestTelegramGiftSticker(giftId, !preferAnimation);
+                    } catch (Exception exception) {
+                        errorMessage = exception.getMessage() == null
+                                ? errorMessage : exception.getMessage();
+                        if (exception instanceof ApiException) {
+                            errorStatus = ((ApiException) exception).statusCode;
+                        }
+                    }
+                }
+            }
+            final StickerResponse result = response;
+            final String message = errorMessage;
+            final int status = errorStatus;
+            mainHandler.post(() -> {
+                if (callback == null) {
+                    return;
+                }
+                if (result == null) {
+                    callback.onError(message, status);
+                } else {
+                    callback.onSuccess(result.bytes, result.mimeType);
+                }
+            });
+        });
+    }
+
+    private void execute(String method, String path, JSONObject payload, Callback callback) {
+        execute(method, path, payload, callback, null);
+    }
+
+    private void execute(
+            String method,
+            String path,
+            JSONObject payload,
+            Callback callback,
+            String idempotencyKey
+    ) {
+        ioExecutor.execute(() -> {
+            try {
+                JSONObject response = request(method, path, payload, idempotencyKey);
+                deliverSuccess(callback, response);
+            } catch (ApiException exception) {
+                deliverError(callback, exception.getMessage(), exception.statusCode);
+            } catch (Exception exception) {
+                deliverError(callback, "Не удалось связаться с сервером WaysGram", 0);
+            }
+        });
+    }
+
+    private JSONObject performImageUpload(ContentResolver resolver, Uri uri) throws IOException {
+        if (resolver == null || uri == null) {
+            throw new IOException("Не выбран файл изображения");
+        }
+        byte[] content;
+        try (InputStream input = resolver.openInputStream(uri)) {
+            if (input == null) {
+                throw new IOException("Не удалось открыть выбранное изображение");
+            }
+            content = readLimited(input, MAX_IMAGE_BYTES);
+        }
+        if (content.length == 0) {
+            throw new IOException("Файл изображения пуст");
+        }
+        String mimeType = detectImageMime(content);
+        String baseUrl = sessionStore.getApiBaseUrl();
+        String token = sessionStore.getWaysGramSessionToken();
+        if (baseUrl == null || token == null || token.length() == 0) {
+            throw new IOException("Нет активной сессии WaysGram");
+        }
+
+        HttpURLConnection connection = null;
+        try {
+            connection = (HttpURLConnection) new URL(baseUrl + "/api/media/images").openConnection();
+            connection.setRequestMethod("POST");
+            connection.setInstanceFollowRedirects(false);
+            connection.setConnectTimeout(CONNECT_TIMEOUT_MS);
+            connection.setReadTimeout(READ_TIMEOUT_MS);
+            connection.setDoOutput(true);
+            connection.setRequestProperty("Accept", "application/json");
+            connection.setRequestProperty("Authorization", "Bearer " + token);
+            connection.setRequestProperty("Content-Type", mimeType);
+            connection.setFixedLengthStreamingMode(content.length);
+            try (OutputStream output = connection.getOutputStream()) {
+                output.write(content);
+            }
+            int status = connection.getResponseCode();
+            InputStream stream = status >= 200 && status < 300
+                    ? connection.getInputStream()
+                    : connection.getErrorStream();
+            byte[] responseBytes = stream == null ? new byte[0] : readLimited(stream, MAX_RESPONSE_BYTES);
+            JSONObject response = parseJsonResponse(responseBytes);
+            if (status < 200 || status >= 300) {
+                throw new ApiException(status, safeApiMessage(response, status));
+            }
+            return response;
+        } finally {
+            if (connection != null) {
+                connection.disconnect();
+            }
+        }
+    }
+
+
+    private JSONObject performDocumentUpload(
+            ContentResolver resolver,
+            Uri uri,
+            String mediaKind
+    ) throws Exception {
+        if (resolver == null || uri == null) {
+            throw new IOException("Не выбран документ");
+        }
+        String filename = queryDisplayName(resolver, uri);
+        String lowerName = filename.toLowerCase(Locale.ROOT);
+        if ("video_note".equals(mediaKind)
+                && !lowerName.endsWith(".mp4")
+                && !lowerName.endsWith(".m4v")) {
+            filename = filename + ".mp4";
+            lowerName = filename.toLowerCase(Locale.ROOT);
+        }
+        String mimeType;
+        if (lowerName.endsWith(".jpg") || lowerName.endsWith(".jpeg")) {
+            mimeType = "image/jpeg";
+        } else if (lowerName.endsWith(".png")) {
+            mimeType = "image/png";
+        } else if (lowerName.endsWith(".webp")) {
+            mimeType = "image/webp";
+        } else if (lowerName.endsWith(".pdf")) {
+            mimeType = "application/pdf";
+        } else if (lowerName.endsWith(".txt")) {
+            mimeType = "text/plain";
+        } else if (lowerName.endsWith(".csv")) {
+            mimeType = "text/csv";
+        } else if (lowerName.endsWith(".zip")) {
+            mimeType = "application/zip";
+        } else if (lowerName.endsWith(".rar")) {
+            mimeType = "application/vnd.rar";
+        } else if (lowerName.endsWith(".7z")) {
+            mimeType = "application/x-7z-compressed";
+        } else if (lowerName.endsWith(".tar")) {
+            mimeType = "application/x-tar";
+        } else if (lowerName.endsWith(".gz") || lowerName.endsWith(".tgz")) {
+            mimeType = "application/gzip";
+        } else if (lowerName.endsWith(".bz2") || lowerName.endsWith(".tbz2")) {
+            mimeType = "application/x-bzip2";
+        } else if (lowerName.endsWith(".xz") || lowerName.endsWith(".txz")) {
+            mimeType = "application/x-xz";
+        } else if (lowerName.endsWith(".tar.gz")) {
+            mimeType = "application/gzip";
+        } else if (lowerName.endsWith(".tar.bz2")) {
+            mimeType = "application/x-bzip2";
+        } else if (lowerName.endsWith(".tar.xz")) {
+            mimeType = "application/x-xz";
+        } else if (lowerName.endsWith(".mp4") || lowerName.endsWith(".m4v")) {
+            mimeType = "video/mp4";
+        } else if (lowerName.endsWith(".mov")) {
+            mimeType = "video/quicktime";
+        } else if (lowerName.endsWith(".webm")) {
+            mimeType = "video/webm";
+        } else if (lowerName.endsWith(".mkv")) {
+            mimeType = "video/x-matroska";
+        } else if (lowerName.endsWith(".mp3")) {
+            mimeType = "audio/mpeg";
+        } else if (lowerName.endsWith(".m4a")) {
+            mimeType = "audio/mp4";
+        } else if (lowerName.endsWith(".ogg")) {
+            mimeType = "audio/ogg";
+        } else if (lowerName.endsWith(".wav")) {
+            mimeType = "audio/wav";
+        } else {
+            throw new IOException(
+                    "Поддерживаются JPEG, PNG, WebP, PDF, TXT, CSV, ZIP, RAR, 7Z, TAR, GZIP, BZIP2, XZ, MP4, WebM, MOV, MKV, MP3, M4A, OGG и WAV"
+            );
+        }
+
+        byte[] content;
+        try (InputStream input = resolver.openInputStream(uri)) {
+            if (input == null) {
+                throw new IOException("Не удалось открыть выбранный документ");
+            }
+            content = readLimited(input, MAX_DOCUMENT_BYTES);
+        }
+        if (content.length == 0) {
+            throw new IOException("Документ пуст");
+        }
+        String encodedName = URLEncoder.encode(filename, StandardCharsets.UTF_8.name())
+                .replace("+", "%20");
+        String baseUrl = sessionStore.getApiBaseUrl();
+        String token = sessionStore.getWaysGramSessionToken();
+        if (baseUrl == null || token == null || token.length() == 0) {
+            throw new IOException("Нет активной сессии WaysGram");
+        }
+
+        String requestedMediaKind = mediaKind == null ? "" : mediaKind.trim();
+        if ("video_note".equals(requestedMediaKind) && !"video/mp4".equals(mimeType)) {
+            throw new IOException("Видеосообщение должно быть файлом MP4");
+        }
+        if ("voice".equals(requestedMediaKind) && (mimeType == null || !mimeType.startsWith("audio/"))) {
+            throw new IOException("Голосовое сообщение должно быть аудиофайлом");
+        }
+        if (!requestedMediaKind.isEmpty()
+                && !"video_note".equals(requestedMediaKind)
+                && !"voice".equals(requestedMediaKind)) {
+            throw new IOException("Неизвестный тип медиафайла");
+        }
+
+        HttpURLConnection connection = null;
+        try {
+            connection = (HttpURLConnection) new URL(baseUrl + "/api/media/documents").openConnection();
+            connection.setRequestMethod("POST");
+            connection.setInstanceFollowRedirects(false);
+            connection.setConnectTimeout(CONNECT_TIMEOUT_MS);
+            connection.setReadTimeout(READ_TIMEOUT_MS);
+            connection.setDoOutput(true);
+            connection.setRequestProperty("Accept", "application/json");
+            connection.setRequestProperty("Authorization", "Bearer " + token);
+            connection.setRequestProperty("Content-Type", mimeType);
+            connection.setRequestProperty("X-Filename", encodedName);
+            if (!requestedMediaKind.isEmpty()) {
+                connection.setRequestProperty("X-Media-Kind", requestedMediaKind);
+            }
+            connection.setFixedLengthStreamingMode(content.length);
+            try (OutputStream output = connection.getOutputStream()) {
+                output.write(content);
+            }
+            int status = connection.getResponseCode();
+            InputStream stream = status >= 200 && status < 300
+                    ? connection.getInputStream()
+                    : connection.getErrorStream();
+            byte[] responseBytes = stream == null ? new byte[0] : readLimited(stream, MAX_RESPONSE_BYTES);
+            JSONObject response = parseJsonResponse(responseBytes);
+            if (status < 200 || status >= 300) {
+                throw new ApiException(status, safeApiMessage(response, status));
+            }
+            return response;
+        } finally {
+            if (connection != null) {
+                connection.disconnect();
+            }
+        }
+    }
+
+    private JSONObject performDocumentDownloadToUri(ContentResolver resolver, Uri destination,
+                                                      String mediaId) throws Exception {
+        if (resolver == null || destination == null
+                || mediaId == null || !mediaId.matches("[a-f0-9]{32}")) {
+            throw new IOException("Некорректный адрес сохранения документа");
+        }
+        String baseUrl = sessionStore.getApiBaseUrl();
+        String token = sessionStore.getWaysGramSessionToken();
+        if (baseUrl == null || token == null || token.length() == 0) {
+            throw new IOException("Нет активной сессии WaysGram");
+        }
+
+        HttpURLConnection connection = null;
+        try {
+            connection = (HttpURLConnection) new URL(baseUrl + "/api/media/" + mediaId).openConnection();
+            connection.setRequestMethod("GET");
+            connection.setInstanceFollowRedirects(false);
+            connection.setConnectTimeout(CONNECT_TIMEOUT_MS);
+            connection.setReadTimeout(READ_TIMEOUT_MS);
+            connection.setRequestProperty("Accept", "*/*");
+            connection.setRequestProperty("Authorization", "Bearer " + token);
+            int status = connection.getResponseCode();
+            if (status < 200 || status >= 300) {
+                InputStream error = connection.getErrorStream();
+                byte[] errorBytes = error == null ? new byte[0] : readLimited(error, MAX_RESPONSE_BYTES);
+                JSONObject errorJson = parseJsonResponse(errorBytes);
+                throw new ApiException(status, safeApiMessage(errorJson, status));
+            }
+            byte[] bytes = readLimited(connection.getInputStream(), MAX_DOCUMENT_BYTES);
+            try (OutputStream output = resolver.openOutputStream(destination, "w")) {
+                if (output == null) {
+                    throw new IOException("Не удалось открыть место сохранения документа");
+                }
+                output.write(bytes);
+                output.flush();
+            }
+            JSONObject result = new JSONObject();
+            result.put("saved_bytes", bytes.length);
+            return result;
+        } finally {
+            if (connection != null) {
+                connection.disconnect();
+            }
+        }
+    }
+
+    private static String queryDisplayName(ContentResolver resolver, Uri uri) {
+        if (resolver != null && uri != null) {
+            try (Cursor cursor = resolver.query(uri,
+                    new String[]{OpenableColumns.DISPLAY_NAME}, null, null, null)) {
+                if (cursor != null && cursor.moveToFirst()) {
+                    int index = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME);
+                    if (index >= 0) {
+                        String value = cursor.getString(index);
+                        if (value != null && value.trim().length() > 0) {
+                            return value.trim();
+                        }
+                    }
+                }
+            } catch (Exception ignored) {
+                // Fall back to the URI's last path segment.
+            }
+        }
+        String fallback = uri == null ? "document.pdf" : uri.getLastPathSegment();
+        return fallback == null || fallback.trim().length() == 0 ? "document.pdf" : fallback;
+    }
+
+    private Bitmap performImageDownload(String mediaId) throws IOException {
+        if (mediaId == null || !mediaId.matches("[a-f0-9]{32}")) {
+            throw new IOException("Некорректный идентификатор изображения");
+        }
+        String baseUrl = sessionStore.getApiBaseUrl();
+        String token = sessionStore.getWaysGramSessionToken();
+        if (baseUrl == null || token == null || token.length() == 0) {
+            throw new IOException("Нет активной сессии WaysGram");
+        }
+
+        HttpURLConnection connection = null;
+        try {
+            connection = (HttpURLConnection) new URL(baseUrl + "/api/media/" + mediaId).openConnection();
+            connection.setRequestMethod("GET");
+            connection.setInstanceFollowRedirects(false);
+            connection.setConnectTimeout(CONNECT_TIMEOUT_MS);
+            connection.setReadTimeout(READ_TIMEOUT_MS);
+            connection.setRequestProperty("Accept", "image/jpeg,image/png,image/webp");
+            connection.setRequestProperty("Authorization", "Bearer " + token);
+            int status = connection.getResponseCode();
+            if (status < 200 || status >= 300) {
+                InputStream error = connection.getErrorStream();
+                byte[] errorBytes = error == null ? new byte[0] : readLimited(error, MAX_RESPONSE_BYTES);
+                JSONObject errorJson = parseJsonResponse(errorBytes);
+                throw new ApiException(status, safeApiMessage(errorJson, status));
+            }
+            byte[] bytes = readLimited(connection.getInputStream(), MAX_IMAGE_BYTES);
+            BitmapFactory.Options bounds = new BitmapFactory.Options();
+            bounds.inJustDecodeBounds = true;
+            BitmapFactory.decodeByteArray(bytes, 0, bytes.length, bounds);
+            if (bounds.outWidth <= 0 || bounds.outHeight <= 0) {
+                throw new IOException("Сервер вернул некорректное изображение");
+            }
+            bounds.inSampleSize = 1;
+            while (bounds.outWidth / bounds.inSampleSize > 1600
+                    || bounds.outHeight / bounds.inSampleSize > 1600) {
+                bounds.inSampleSize *= 2;
+            }
+            bounds.inJustDecodeBounds = false;
+            Bitmap bitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.length, bounds);
+            if (bitmap == null) {
+                throw new IOException("Не удалось декодировать изображение");
+            }
+            return bitmap;
+        } finally {
+            if (connection != null) {
+                connection.disconnect();
+            }
+        }
+    }
+
+    private Bitmap performTelegramGiftStickerDownload(String giftId) throws IOException {
+        if (giftId == null || !giftId.matches("[A-Za-z0-9_-]{1,120}")) {
+            throw new IOException("Некорректный Telegram Gift ID");
+        }
+
+        IOException previewError = null;
+        try {
+            StickerResponse preview = requestTelegramGiftSticker(giftId, false);
+            Bitmap bitmap = decodeStaticSticker(preview.bytes);
+            if (bitmap != null) {
+                return bitmap;
+            }
+            bitmap = decodeAnimatedStickerPreview(giftId, preview.bytes, preview.mimeType);
+            if (bitmap != null) {
+                return bitmap;
+            }
+        } catch (IOException exception) {
+            previewError = exception;
+        }
+
+        // Some Telegram gifts, including video/animated collectibles, have no
+        // still thumbnail. Ask AuthBot for the original animation and extract
+        // a frame locally instead of treating the gift as image-less.
+        try {
+            StickerResponse animated = requestTelegramGiftSticker(giftId, true);
+            Bitmap bitmap = decodeStaticSticker(animated.bytes);
+            if (bitmap != null) {
+                return bitmap;
+            }
+            bitmap = decodeAnimatedStickerPreview(giftId, animated.bytes, animated.mimeType);
+            if (bitmap != null) {
+                return bitmap;
+            }
+        } catch (IOException exception) {
+            if (previewError == null) {
+                previewError = exception;
+            }
+        }
+
+        throw new IOException(
+                "Не удалось декодировать статичное изображение или кадр анимации подарка",
+                previewError
+        );
+    }
+
+    private StickerResponse requestTelegramGiftSticker(String giftId, boolean animated)
+            throws IOException {
+        String baseUrl = sessionStore.getApiBaseUrl();
+        String token = sessionStore.getWaysGramSessionToken();
+        if (baseUrl == null || token == null || token.length() == 0) {
+            throw new IOException("Нет активной сессии WaysGram");
+        }
+
+        HttpURLConnection connection = null;
+        try {
+            String path = "/api/telegram/gifts/" + Uri.encode(giftId) + "/sticker"
+                    + (animated ? "?animated=1" : "");
+            connection = (HttpURLConnection) new URL(baseUrl + path).openConnection();
+            connection.setRequestMethod("GET");
+            connection.setInstanceFollowRedirects(false);
+            connection.setConnectTimeout(CONNECT_TIMEOUT_MS);
+            connection.setReadTimeout(READ_TIMEOUT_MS);
+            connection.setRequestProperty("Accept", "image/*,video/webm,application/x-tgsticker,*/*");
+            connection.setRequestProperty("Authorization", "Bearer " + token);
+            int status = connection.getResponseCode();
+            if (status < 200 || status >= 300) {
+                InputStream error = connection.getErrorStream();
+                byte[] errorBytes = error == null ? new byte[0] : readLimited(error, MAX_RESPONSE_BYTES);
+                JSONObject errorJson = parseJsonResponse(errorBytes);
+                throw new ApiException(status, safeApiMessage(errorJson, status));
+            }
+            String mimeType = connection.getContentType();
+            byte[] bytes = readLimited(connection.getInputStream(), MAX_STICKER_BYTES);
+            if (bytes.length == 0) {
+                throw new IOException("Сервер вернул пустой стикер подарка");
+            }
+            return new StickerResponse(bytes, mimeType == null ? "" : mimeType.toLowerCase(Locale.ROOT));
+        } finally {
+            if (connection != null) {
+                connection.disconnect();
+            }
+        }
+    }
+
+    private static Bitmap decodeStaticSticker(byte[] bytes) {
+        if (bytes == null || bytes.length == 0) {
+            return null;
+        }
+        BitmapFactory.Options bounds = new BitmapFactory.Options();
+        bounds.inJustDecodeBounds = true;
+        BitmapFactory.decodeByteArray(bytes, 0, bytes.length, bounds);
+        if (bounds.outWidth <= 0 || bounds.outHeight <= 0) {
+            return null;
+        }
+        int sampleSize = 1;
+        while (Math.max(bounds.outWidth, bounds.outHeight) / sampleSize > 256) {
+            sampleSize *= 2;
+        }
+        BitmapFactory.Options decode = new BitmapFactory.Options();
+        decode.inSampleSize = sampleSize;
+        decode.inPreferredConfig = Bitmap.Config.ARGB_8888;
+        return BitmapFactory.decodeByteArray(bytes, 0, bytes.length, decode);
+    }
+
+    private Bitmap decodeAnimatedStickerPreview(String giftId, byte[] bytes, String mimeType) {
+        if (bytes == null || bytes.length == 0 || ApplicationLoader.applicationContext == null) {
+            return null;
+        }
+        File previewFile = null;
+        AnimatedFileDrawable drawable = null;
+        try {
+            boolean webm = (mimeType != null && (
+                    mimeType.startsWith("video/") || mimeType.contains("webm")
+            )) || (bytes.length >= 4
+                    && (bytes[0] & 0xff) == 0x1a
+                    && (bytes[1] & 0xff) == 0x45
+                    && (bytes[2] & 0xff) == 0xdf
+                    && (bytes[3] & 0xff) == 0xa3);
+            String extension = webm ? ".webm" : ".tgs";
+            previewFile = new File(
+                    ApplicationLoader.applicationContext.getCacheDir(),
+                    "waysgram_gift_preview_" + giftId + extension
+            );
+            try (FileOutputStream output = new FileOutputStream(previewFile)) {
+                output.write(bytes);
+                output.flush();
+            }
+            drawable = new AnimatedFileDrawable(
+                    previewFile, true, 0, 0, null, null, null, 0,
+                    sessionStore.getTelegramAccount(), true, 64, 64, null
+            );
+            Bitmap frame = drawable.getFirstFrame(null);
+            return frame == null || frame.isRecycled() ? null : frame;
+        } catch (Exception exception) {
+            return null;
+        } finally {
+            if (drawable != null) {
+                drawable.recycle();
+            }
+            if (previewFile != null && previewFile.exists()) {
+                // The bitmap returned by getFirstFrame is detached from this file.
+                previewFile.delete();
+            }
+        }
+    }
+
+    private static final class StickerResponse {
+        final byte[] bytes;
+        final String mimeType;
+
+        StickerResponse(byte[] bytes, String mimeType) {
+            this.bytes = bytes;
+            this.mimeType = mimeType == null ? "" : mimeType;
+        }
+    }
+
+    private static String detectImageMime(byte[] content) throws IOException {
+        if (content.length >= 3
+                && (content[0] & 0xff) == 0xff
+                && (content[1] & 0xff) == 0xd8
+                && (content[2] & 0xff) == 0xff) {
+            return "image/jpeg";
+        }
+        if (content.length >= 8
+                && content[0] == (byte) 0x89
+                && content[1] == 0x50
+                && content[2] == 0x4e
+                && content[3] == 0x47
+                && content[4] == 0x0d
+                && content[5] == 0x0a
+                && content[6] == 0x1a
+                && content[7] == 0x0a) {
+            return "image/png";
+        }
+        if (content.length >= 12
+                && content[0] == 'R' && content[1] == 'I'
+                && content[2] == 'F' && content[3] == 'F'
+                && content[8] == 'W' && content[9] == 'E'
+                && content[10] == 'B' && content[11] == 'P') {
+            return "image/webp";
+        }
+        throw new IOException("Поддерживаются только JPEG, PNG и WebP");
+    }
+
+    private static JSONObject parseJsonResponse(byte[] bytes) throws IOException {
+        try {
+            return bytes.length == 0
+                    ? new JSONObject()
+                    : new JSONObject(new String(bytes, StandardCharsets.UTF_8));
+        } catch (Exception exception) {
+            throw new IOException("WaysGram вернул некорректный JSON", exception);
+        }
+    }
+
+    private static String safeApiMessage(JSONObject response, int status) {
+        String message = response.optString("detail", "");
+        if (message.length() == 0 || message.length() > 240) {
+            return "Ошибка WaysGram API: HTTP " + status;
+        }
+        return message;
+    }
+
+    private void deliverImageError(ImageCallback callback, String message, int statusCode) {
+        if (callback != null) {
+            mainHandler.post(() -> callback.onError(message, statusCode));
+        }
+    }
+
+    private JSONObject request(String method, String path, JSONObject payload) throws IOException {
+        return request(method, path, payload, null);
+    }
+
+    private JSONObject request(
+            String method,
+            String path,
+            JSONObject payload,
+            String idempotencyKey
+    ) throws IOException {
+        String baseUrl = sessionStore.getApiBaseUrl();
+        String token = sessionStore.getWaysGramSessionToken();
+        if (baseUrl == null || token == null || token.length() == 0) {
+            throw new IOException("Нет активной сессии WaysGram");
+        }
+        if (path == null || !path.startsWith("/") || path.startsWith("//")
+                || path.contains("\\") || path.contains("\n") || path.contains("\r")) {
+            throw new IOException("Некорректный путь WaysGram API");
+        }
+
+        HttpURLConnection connection = null;
+        try {
+            connection = (HttpURLConnection) new URL(baseUrl + path).openConnection();
+            connection.setRequestMethod(method);
+            connection.setInstanceFollowRedirects(false);
+            connection.setConnectTimeout(CONNECT_TIMEOUT_MS);
+            connection.setReadTimeout(READ_TIMEOUT_MS);
+            connection.setRequestProperty("Accept", "application/json");
+            connection.setRequestProperty("Authorization", "Bearer " + token);
+            if (idempotencyKey != null && !idempotencyKey.trim().isEmpty()) {
+                connection.setRequestProperty("Idempotency-Key", idempotencyKey.trim());
+            }
+            if ("POST".equals(method) || "PUT".equals(method)) {
+                connection.setDoOutput(true);
+                connection.setRequestProperty("Content-Type", "application/json; charset=utf-8");
+                byte[] bytes = payload.toString().getBytes(StandardCharsets.UTF_8);
+                connection.setFixedLengthStreamingMode(bytes.length);
+                try (OutputStream output = connection.getOutputStream()) {
+                    output.write(bytes);
+                }
+            }
+
+            int status = connection.getResponseCode();
+            InputStream stream = status >= 200 && status < 300
+                    ? connection.getInputStream()
+                    : connection.getErrorStream();
+            byte[] bytes = stream == null ? new byte[0] : readLimited(stream);
+            JSONObject response;
+            try {
+                response = bytes.length == 0
+                        ? new JSONObject()
+                        : new JSONObject(new String(bytes, StandardCharsets.UTF_8));
+            } catch (Exception exception) {
+                throw new IOException("WaysGram вернул некорректный JSON", exception);
+            }
+            if (status < 200 || status >= 300) {
+                String message = response.optString("detail", "");
+                if (message.length() == 0 || message.length() > 240) {
+                    message = "Ошибка WaysGram API: HTTP " + status;
+                }
+                throw new ApiException(status, message);
+            }
+            return response;
+        } finally {
+            if (connection != null) {
+                connection.disconnect();
+            }
+        }
+    }
+
+    private static byte[] readLimited(InputStream input, int maximum) throws IOException {
+        try (InputStream stream = input; ByteArrayOutputStream output = new ByteArrayOutputStream()) {
+            byte[] buffer = new byte[8192];
+            int count;
+            int total = 0;
+            while ((count = stream.read(buffer)) != -1) {
+                total += count;
+                if (total > maximum) {
+                    throw new IOException("WaysGram media file exceeds the allowed size");
+                }
+                output.write(buffer, 0, count);
+            }
+            return output.toByteArray();
+        }
+    }
+
+    private static byte[] readLimited(InputStream input) throws IOException {
+        try (InputStream stream = input; ByteArrayOutputStream output = new ByteArrayOutputStream()) {
+            byte[] buffer = new byte[8192];
+            int count;
+            int total = 0;
+            while ((count = stream.read(buffer)) != -1) {
+                total += count;
+                if (total > MAX_RESPONSE_BYTES) {
+                    throw new IOException("WaysGram response is too large");
+                }
+                output.write(buffer, 0, count);
+            }
+            return output.toByteArray();
+        }
+    }
+
+    private void deliverSuccess(Callback callback, JSONObject response) {
+        if (callback != null) {
+            mainHandler.post(() -> callback.onSuccess(response));
+        }
+    }
+
+    private void deliverError(Callback callback, String message, int statusCode) {
+        if (callback != null) {
+            mainHandler.post(() -> callback.onError(message, statusCode));
+        }
+    }
+
+    @Override
+    public void close() {
+        ioExecutor.shutdown();
+        longPollExecutor.shutdown();
+        eventPollExecutor.shutdown();
+    }
+
+    private static final class ApiException extends IOException {
+        final int statusCode;
+
+        ApiException(int statusCode, String message) {
+            super(message);
+            this.statusCode = statusCode;
+        }
+    }
+}
