@@ -520,6 +520,7 @@
     <string name="WgCustomBackground">Подложка навигации</string>
     <string name="WgCustomIndicator">Индикатор активной вкладки</string>
     <string name="WgCustomHeader">Декор шапки профиля</string>
+    <string name="WgCustomPanels">Плашки и карточки</string>
     <string name="WgCustomEdge">Декор правого края</string>
     <string name="WgCustomUpload">Загрузить</string>
     <string name="WgCustomSave">Сохранить конфиг</string>

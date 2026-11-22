@@ -1580,6 +1580,10 @@ public class RecyclerListView extends RecyclerView implements IBlur3Capture {
         }
 
         if (top < bottom) {
+            if (color == Theme.getColor(Theme.key_windowBackgroundWhite)
+                    && org.telegram.ui.WaysGramCustomizationActivity.drawPanel(canvas, 0, top - topMargin, getWidth(), bottom + bottomMargin, 0, color)) {
+                return;
+            }
             if (backgroundPaint == null) {
                 backgroundPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
             }

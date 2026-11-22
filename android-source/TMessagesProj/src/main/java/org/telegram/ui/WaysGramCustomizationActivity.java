@@ -5,10 +5,16 @@ import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
 import android.graphics.*;
+import android.graphics.drawable.ColorDrawable;
+import android.graphics.drawable.Drawable;
+import android.graphics.drawable.ShapeDrawable;
+import android.graphics.drawable.shapes.RoundRectShape;
+import android.graphics.drawable.shapes.Shape;
 import android.net.Uri;
 import android.util.Base64;
 import android.view.*;
 import android.widget.*;
+import androidx.annotation.NonNull;
 import org.json.*;
 import org.telegram.messenger.*;
 import org.telegram.tgnet.WaysGramApi;
@@ -185,6 +191,145 @@ public class WaysGramCustomizationActivity extends BaseFragment {
         return color;
     }
 
+    /* ─────────────────────────  Плашки и карточки (слой 2)  ───────────────────────── */
+
+    private static final Paint PANEL_PAINT = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.FILTER_BITMAP_FLAG);
+    private static final Paint PANEL_SCRIM = new Paint(Paint.ANTI_ALIAS_FLAG);
+    private static final RectF PANEL_RECT = new RectF(), PANEL_DST = new RectF();
+    private static final Path PANEL_PATH = new Path();
+    /** Затемнение картинки штатным цветом панели: текст и иконки остаются читаемыми. */
+    private static final int PANEL_SCRIM_ALPHA = 0x96;
+
+    /** Обновление слоёв «тихо»: не падаем, если настройки ещё недоступны (старт приложения). */
+    private static void refreshQuiet(int account) {
+        try {
+            refreshLayers(account);
+        } catch (Throwable ignore) {
+        }
+    }
+
+    /** Есть ли картинка для плашек (слой «Панели и карточки»). */
+    public static boolean hasPanels() {
+        refreshQuiet(UserConfig.selectedAccount);
+        return layers[2] != null;
+    }
+
+    /** Тот ли это цвет панели (штатная поверхность карточек). */
+    private static boolean isPanelColor(int color) {
+        try {
+            return color == Theme.getColor(Theme.key_windowBackgroundWhite);
+        } catch (Throwable ignore) {
+            return false;
+        }
+    }
+
+    /**
+     * Рисует поверхность плашки: картинка слоя «Панели и карточки», обрезанная по скруглению,
+     * сверху — штатный цвет панели с прозрачностью, чтобы текст и кнопки не сливались.
+     * false — картинки нет, вызывающий рисует обычную заливку.
+     */
+    public static boolean drawPanel(Canvas canvas, float left, float top, float right, float bottom, float radius, int baseColor) {
+        refreshQuiet(UserConfig.selectedAccount);
+        Bitmap image = layers[2];
+        if (image == null || right <= left || bottom <= top) return false;
+        PANEL_RECT.set(left, top, right, bottom);
+        PANEL_PATH.rewind();
+        if (radius > 0) {
+            PANEL_PATH.addRoundRect(PANEL_RECT, radius, radius, Path.Direction.CW);
+        } else {
+            PANEL_PATH.addRect(PANEL_RECT, Path.Direction.CW);
+        }
+        int save = canvas.save();
+        canvas.clipPath(PANEL_PATH);
+        cover(PANEL_DST, PANEL_RECT, image);
+        canvas.drawBitmap(image, null, PANEL_DST, PANEL_PAINT);
+        PANEL_SCRIM.setColor(baseColor);
+        PANEL_SCRIM.setAlpha(PANEL_SCRIM_ALPHA);
+        canvas.drawRect(PANEL_RECT, PANEL_SCRIM);
+        canvas.restoreToCount(save);
+        return true;
+    }
+
+    /** Фон плашки как Drawable: картинка слоя «плашки» либо обычная заливка. */
+    public static Drawable panelBackground(int key, int color) {
+        if (key != Theme.key_windowBackgroundWhite || !hasPanels()) return new ColorDrawable(color);
+        return new PanelDrawable(color);
+    }
+
+    /** Прозрачный фон строки: картинку рисует сама секция целиком, без швов между строками. */
+    public static Drawable panelRowBackground(int key, int color) {
+        if (key == Theme.key_windowBackgroundWhite && hasPanels()) return new ColorDrawable(0);
+        return new ColorDrawable(color);
+    }
+
+    /** ShapeDrawable плашки со скруглением — для карточек, созданных вручную. */
+    public static ShapeDrawable panelShape(int radius, int color) {
+        if (!isPanelColor(color) || !hasPanels()) return null;
+        RoundRectShape shape = new RoundRectShape(new float[]{radius, radius, radius, radius, radius, radius, radius, radius}, null, null);
+        return new PanelShapeDrawable(shape, color);
+    }
+
+    /** Плашка как Drawable без скругления (фон строки/панели списка). */
+    public static class PanelDrawable extends Drawable {
+        private final int baseColor;
+        private final Paint fallback = new Paint(Paint.ANTI_ALIAS_FLAG);
+
+        PanelDrawable(int baseColor) {
+            this.baseColor = baseColor;
+        }
+
+        @Override public void draw(@NonNull Canvas canvas) {
+            Rect bounds = getBounds();
+            if (bounds.isEmpty()) return;
+            if (drawPanel(canvas, bounds.left, bounds.top, bounds.right, bounds.bottom, 0, baseColor)) return;
+            fallback.setColor(baseColor);
+            canvas.drawRect(bounds, fallback);
+        }
+
+        @Override public void setAlpha(int alpha) { }
+        @Override public void setColorFilter(ColorFilter colorFilter) { }
+        @Override public int getOpacity() { return PixelFormat.TRANSLUCENT; }
+    }
+
+    /** Плашка со скруглением: картинка под штатным цветом панели. */
+    private static class PanelShapeDrawable extends ShapeDrawable {
+        private final int baseColor;
+
+        PanelShapeDrawable(Shape shape, int baseColor) {
+            super(shape);
+            this.baseColor = baseColor;
+        }
+
+        @Override public void draw(@NonNull Canvas canvas) {
+            refreshQuiet(UserConfig.selectedAccount);
+            Bitmap image = layers[2];
+            Rect bounds = getBounds();
+            if (image == null || bounds.isEmpty()) {
+                super.draw(canvas);
+                return;
+            }
+            PANEL_RECT.set(bounds);
+            cover(PANEL_DST, PANEL_RECT, image);
+            Matrix matrix = new Matrix();
+            matrix.setScale(PANEL_DST.width() / image.getWidth(), PANEL_DST.height() / image.getHeight());
+            matrix.postTranslate(PANEL_DST.left, PANEL_DST.top);
+            BitmapShader shader = new BitmapShader(image, Shader.TileMode.CLAMP, Shader.TileMode.CLAMP);
+            shader.setLocalMatrix(matrix);
+            Paint paint = getPaint();
+            int color = paint.getColor();
+            int alpha = paint.getAlpha();
+            paint.setShader(shader);
+            paint.setAlpha(255);
+            super.draw(canvas);
+            paint.setShader(null);
+            paint.setColor(baseColor);
+            paint.setAlpha(PANEL_SCRIM_ALPHA);
+            super.draw(canvas);
+            paint.setColor(color);
+            paint.setAlpha(alpha);
+        }
+    }
+
     /** Картинка индикатора для любых вкладок; false — рисуйте штатный индикатор. */
     public static boolean drawIndicatorImage(Canvas canvas, RectF box, float radius, float opacity) {
         refreshLayers(UserConfig.selectedAccount);
@@ -256,11 +401,8 @@ public class WaysGramCustomizationActivity extends BaseFragment {
                 cover(dst, area, image);
                 canvas.drawBitmap(image, null, dst, paint);
             }
-            // Часть «шапка»: верхний правый угол экрана.
-            part.set(area.right - area.width() * .55f, area.top, area.right, area.top + area.height() * .30f);
-            drawPart(canvas, 2, part);
-            // Часть «правый край»: вертикальная полоса у правой границы.
-            part.set(area.right - Math.max(area.width() * .28f, Math.min(area.width(), AndroidUtilities.dp(160))), area.top, area.right, area.bottom);
+            // Часть «декор шапки»: верхняя зона экрана.
+            part.set(area.left, area.top, area.right, area.top + area.height() * .30f);
             drawPart(canvas, 3, part);
             if (Color.alpha(scrimColor) != 0) {
                 scrimPaint.setColor(scrimColor);
@@ -742,8 +884,8 @@ public class WaysGramCustomizationActivity extends BaseFragment {
     static int layerTitle(int layer) {
         switch (layer) {
             case 0: return R.string.WgCustomBackground;
-            case 2: return R.string.WgCustomHeader;
-            case 3: return R.string.WgCustomEdge;
+            case 2: return R.string.WgCustomPanels;
+            case 3: return R.string.WgCustomHeader;
             default: return R.string.WgCustomIndicator;
         }
     }

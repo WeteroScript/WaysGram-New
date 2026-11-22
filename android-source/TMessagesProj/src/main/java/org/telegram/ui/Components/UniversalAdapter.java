@@ -577,7 +577,7 @@ public class UniversalAdapter extends AdapterWithDiffUtils {
                 break;
         }
         if (shouldApplyBackground(viewType)) {
-            view.setBackgroundColor(getThemedColor(key_background));
+            view.setBackground(org.telegram.ui.WaysGramCustomizationActivity.panelRowBackground(key_background, getThemedColor(key_background)));
         }
         return new RecyclerListView.Holder(view);
     }
@@ -1094,7 +1094,7 @@ public class UniversalAdapter extends AdapterWithDiffUtils {
             ((Theme.Colorable) holder.itemView).updateColors();
             if (shouldApplyBackground(holder.getItemViewType())) {
                 final int key_background = dialog ? Theme.key_dialogBackground : Theme.key_windowBackgroundWhite;
-                holder.itemView.setBackgroundColor(getThemedColor(key_background));
+                holder.itemView.setBackground(org.telegram.ui.WaysGramCustomizationActivity.panelRowBackground(key_background, getThemedColor(key_background)));
             }
         }
     }
