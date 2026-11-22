@@ -23,3 +23,20 @@ The Android document picker accepts any filename and MIME type. Images must stil
 Copying a link explicitly publishes the configuration to the WaysGram API. The link `https://t.wg/custom/<token>` is readable by signed-in clients with the token, not an edit credential. The server allows up to 32 unique published configurations per account; re-sharing the same content returns its existing token. Import shows the name and image previews and requires Apply before saving and activating on the recipient's device.
 
 Open these links within WaysGram. The app does not associate `t.wg` with external browsers or other apps. Device behavior has not been verified.
+
+## Четыре заменяемых части
+
+Кастомизация состоит из четырёх картинок, каждая выбирается в своём слоте редактора
+(«Фон навигации», «Индикатор активной вкладки», «Декор шапки профиля», «Декор правого края»):
+
+| Слот | Ключ конфига | Где рисуется |
+| --- | --- | --- |
+| Подложка навигации | `image0` | фон всего приложения и обои чата |
+| Индикатор активной вкладки | `image1` | пилюля выбранной вкладки в табах и папках |
+| Декор шапки профиля | `image2` | верхняя правая область (55 % ширины, 30 % высоты экрана) |
+| Декор правого края | `image3` | вертикальная полоса у правой границы (28 % ширины, не уже 160 dp) |
+
+Декоративные части рисуются в том же `ImageBackdropDrawable`, что и подложка, поэтому видны на всех
+экранах, но под затемняющим скримом. Пропорции сохраняются (`cover`, без растягивания). Конфиг по
+ссылке принимает те же четыре поля; достаточно любой одной картинки. Ограничения на картинку
+прежние: PNG до 640 × 256 и 128 КиБ на слот, поэтому публикация четырёх частей — до ~512 КиБ JSON.

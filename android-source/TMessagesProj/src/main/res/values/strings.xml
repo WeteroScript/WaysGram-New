@@ -11883,6 +11883,8 @@
     <string name="WgCustomization">Customization</string>
     <string name="WgCustomBackground">Navigation background</string>
     <string name="WgCustomIndicator">Active tab indicator</string>
+    <string name="WgCustomHeader">Profile header decor</string>
+    <string name="WgCustomEdge">Right edge decor</string>
     <string name="WgCustomUpload">Upload</string>
     <string name="WgCustomSave">Save config</string>
     <string name="WgCustomName">Config name</string>

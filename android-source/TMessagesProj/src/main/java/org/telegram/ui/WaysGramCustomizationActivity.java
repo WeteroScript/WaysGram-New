@@ -20,7 +20,8 @@ import java.util.UUID;
 public class WaysGramCustomizationActivity extends BaseFragment {
     private static final int MAX_IMAGE = 131072, PICK = 8710;
     private static final Paint PAINT = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.FILTER_BITMAP_FLAG);
-    private static final Bitmap[] layers = new Bitmap[2];
+    private static final int LAYERS = 4;
+    private static final Bitmap[] layers = new Bitmap[LAYERS];
     private static int renderedAccount = -1;
     private static String renderedKey;
     /** 0 — кастомизация выключена; иначе альфа фонов окна (сквозь них виден фон). */
@@ -72,12 +73,20 @@ public class WaysGramCustomizationActivity extends BaseFragment {
         }
     }
 
-    private final String[] draft = {"", ""};
+    private final String[] draft = {"", "", "", ""};
     private LinearLayout content;
     private boolean busy;
 
     private static SharedPreferences prefs(int account) {
         return ApplicationLoader.applicationContext.getSharedPreferences("wg_customization_" + UserConfig.getInstance(account).getClientUserId(), Context.MODE_PRIVATE);
+    }
+
+    /** Есть ли в конфиге кастомизации хотя бы одна картинка. */
+    private static boolean hasAnyImage(JSONObject config) {
+        for (int layer = 0; layer < LAYERS; layer++) {
+            if (bitmap(config.optString("image" + layer)) != null) return true;
+        }
+        return false;
     }
 
     private static JSONObject object(String json) {
@@ -106,7 +115,7 @@ public class WaysGramCustomizationActivity extends BaseFragment {
         renderedAccount = account;
         renderedKey = key;
         JSONObject config = object(p.getString("config_" + id, ""));
-        for (int i = 0; i < 2; i++) layers[i] = bitmap(config.optString("image" + i));
+        for (int i = 0; i < LAYERS; i++) layers[i] = bitmap(config.optString("image" + i));
         backdropAlpha = enabled && layers[0] != null ? 214 : 0;
         accentColor = backdropAlpha == 0 ? 0 : layerAccent(layers[0]);
     }
@@ -221,7 +230,8 @@ public class WaysGramCustomizationActivity extends BaseFragment {
         private final int account, scrimColor;
         private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.FILTER_BITMAP_FLAG);
         private final Paint scrimPaint = new Paint();
-        private final RectF dst = new RectF();
+        private final Paint partPaint = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.FILTER_BITMAP_FLAG);
+        private final RectF dst = new RectF(), part = new RectF(), partDst = new RectF();
         private final Rect bounds = new Rect();
 
         public ImageBackdropDrawable(int account, int scrimColor) {
@@ -233,13 +243,29 @@ public class WaysGramCustomizationActivity extends BaseFragment {
             refreshLayers(account);
             Bitmap image = layers[0];
             Rect area = getBounds();
-            if (image == null || area.isEmpty()) return;
-            cover(dst, area, image);
-            canvas.drawBitmap(image, null, dst, paint);
+            if (area.isEmpty()) return;
+            if (image != null) {
+                cover(dst, area, image);
+                canvas.drawBitmap(image, null, dst, paint);
+            }
+            // Часть «шапка»: верхний правый угол экрана.
+            part.set(area.right - area.width() * .55f, area.top, area.right, area.top + area.height() * .30f);
+            drawPart(canvas, 2, part);
+            // Часть «правый край»: вертикальная полоса у правой границы.
+            part.set(area.right - Math.max(area.width() * .28f, Math.min(area.width(), AndroidUtilities.dp(160))), area.top, area.right, area.bottom);
+            drawPart(canvas, 3, part);
             if (Color.alpha(scrimColor) != 0) {
                 scrimPaint.setColor(scrimColor);
                 canvas.drawRect(area, scrimPaint);
             }
+        }
+
+        /** Дорисовывает декоративную часть 2/3 в указанный прямоугольник без искажения пропорций. */
+        private void drawPart(Canvas canvas, int layer, RectF bounds) {
+            Bitmap bitmap = layers[layer];
+            if (bitmap == null || bounds.isEmpty()) return;
+            cover(partDst, bounds, bitmap);
+            canvas.drawBitmap(bitmap, null, partDst, partPaint);
         }
 
         @Override public void setAlpha(int alpha) { paint.setAlpha(alpha); }
@@ -395,13 +421,14 @@ public class WaysGramCustomizationActivity extends BaseFragment {
         LayerChip chip = new LayerChip(context, draftBitmap(layer), layer == 0);
         row.addView(chip, new LinearLayout.LayoutParams(AndroidUtilities.dp(layer == 0 ? 62 : 40), AndroidUtilities.dp(30)));
 
+
         LinearLayout texts = new LinearLayout(context);
         texts.setOrientation(LinearLayout.VERTICAL);
         LinearLayout.LayoutParams textsParams = new LinearLayout.LayoutParams(0, -2, 1f);
         textsParams.leftMargin = AndroidUtilities.dp(14);
         textsParams.rightMargin = AndroidUtilities.dp(8);
         TextView title = new TextView(context);
-        title.setText(text(layer == 0 ? R.string.WgCustomBackground : R.string.WgCustomIndicator));
+        title.setText(text(layerTitle(layer)));
         title.setTextSize(16);
         title.setTextColor(Theme.getColor(Theme.key_windowBackgroundWhiteBlackText));
         title.setSingleLine(true);
@@ -564,16 +591,18 @@ public class WaysGramCustomizationActivity extends BaseFragment {
 
     /** Мини-превью панели навигации: подложка + «пилюля» активной вкладки. */
     private static class LayersPreview extends View {
-        private final Bitmap background, indicator;
+        private final Bitmap background, indicator, header, edge;
         private final Paint bitmapPaint = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.FILTER_BITMAP_FLAG);
         private final Paint shapePaint = new Paint(Paint.ANTI_ALIAS_FLAG);
-        private final RectF box = new RectF(), pill = new RectF();
+        private final RectF box = new RectF(), pill = new RectF(), partRect = new RectF();
         private final Path path = new Path();
 
-        LayersPreview(Context context, Bitmap background, Bitmap indicator) {
+        LayersPreview(Context context, Bitmap background, Bitmap indicator, Bitmap header, Bitmap edge) {
             super(context);
             this.background = background;
             this.indicator = indicator;
+            this.header = header;
+            this.edge = edge;
         }
 
         @Override protected void onDraw(Canvas canvas) {
@@ -586,6 +615,16 @@ public class WaysGramCustomizationActivity extends BaseFragment {
             shapePaint.setColor(Theme.getColor(Theme.key_windowBackgroundGray));
             canvas.drawRect(box, shapePaint);
             if (background != null) canvas.drawBitmap(background, null, box, bitmapPaint);
+            // Часть «шапка» — верхний правый угол.
+            if (header != null) {
+                partRect.set(box.right - box.width() * .55f, box.top, box.right, box.top + box.height() * .55f);
+                canvas.drawBitmap(header, null, partRect, bitmapPaint);
+            }
+            // Часть «правый край» — вертикальная полоса у правой границы.
+            if (edge != null) {
+                partRect.set(box.right - box.width() * .28f, box.top, box.right, box.bottom);
+                canvas.drawBitmap(edge, null, partRect, bitmapPaint);
+            }
 
             float pillWidth = box.width() * .3f, pillHeight = box.height() * .66f;
             float left = box.left + box.width() * .38f - pillWidth / 2f;
@@ -645,7 +684,7 @@ public class WaysGramCustomizationActivity extends BaseFragment {
         boolean enabled = p.getBoolean("enabled", false);
 
         LinearLayout hero = card(index++);
-        LayersPreview preview = new LayersPreview(getContext(), draftBitmap(0), draftBitmap(1));
+        LayersPreview preview = new LayersPreview(getContext(), draftBitmap(0), draftBitmap(1), draftBitmap(2), draftBitmap(3));
         LinearLayout.LayoutParams previewParams = new LinearLayout.LayoutParams(-1, AndroidUtilities.dp(58));
         previewParams.setMargins(AndroidUtilities.dp(14), AndroidUtilities.dp(14), AndroidUtilities.dp(14), 0);
         hero.addView(preview, previewParams);
@@ -656,12 +695,13 @@ public class WaysGramCustomizationActivity extends BaseFragment {
         content.addView(hero);
 
         LinearLayout layersCard = card(index++);
-        layersCard.addView(layerRow(0, index++));
-        layersCard.addView(divider());
-        layersCard.addView(layerRow(1, index++));
+        for (int layer = 0; layer < LAYERS; layer++) {
+            if (layer > 0) layersCard.addView(divider());
+            layersCard.addView(layerRow(layer, index++));
+        }
         content.addView(layersCard);
 
-        content.addView(primaryButton(R.string.WgCustomSave, !draft[0].isEmpty() || !draft[1].isEmpty(), this::nameConfig, index++));
+        content.addView(primaryButton(R.string.WgCustomSave, anyDraft(), this::nameConfig, index++));
 
         java.util.TreeMap<String, ?> sorted = new java.util.TreeMap<>(p.getAll());
         String activeId = p.getString("active", "");
@@ -690,13 +730,28 @@ public class WaysGramCustomizationActivity extends BaseFragment {
         rebuild();
     }
 
+    /** Подпись слоя в редакторе. */
+    static int layerTitle(int layer) {
+        switch (layer) {
+            case 0: return R.string.WgCustomBackground;
+            case 2: return R.string.WgCustomHeader;
+            case 3: return R.string.WgCustomEdge;
+            default: return R.string.WgCustomIndicator;
+        }
+    }
+
+    private boolean anyDraft() {
+        for (String value : draft) if (!value.isEmpty()) return true;
+        return false;
+    }
+
     private void pick(int layer) {
         Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT).setType("*/*").addCategory(Intent.CATEGORY_OPENABLE);
         startActivityForResult(intent, PICK + layer);
     }
 
     @Override public void onActivityResultFragment(int request, int result, Intent data) {
-        if ((request != PICK && request != PICK + 1) || result != Activity.RESULT_OK || data == null || data.getData() == null) return;
+        if (request < PICK || request >= PICK + LAYERS || result != Activity.RESULT_OK || data == null || data.getData() == null) return;
         Context context = ApplicationLoader.applicationContext;
         Uri uri = data.getData();
         Utilities.globalQueue.postRunnable(() -> {
@@ -736,7 +791,7 @@ public class WaysGramCustomizationActivity extends BaseFragment {
     }
 
     private void nameConfig() {
-        if (draft[0].isEmpty() && draft[1].isEmpty()) { error(); return; }
+        if (!anyDraft()) { error(); return; }
         EditText name = new EditText(getContext());
         name.setSingleLine();
         name.setFilters(new android.text.InputFilter[]{new android.text.InputFilter.LengthFilter(48)});
@@ -750,7 +805,8 @@ public class WaysGramCustomizationActivity extends BaseFragment {
             String title = name.getText().toString().trim();
             if (title.isEmpty()) { name.setError(getString(R.string.WgCustomName)); return; }
             try {
-                JSONObject config = new JSONObject().put("name", title).put("image0", draft[0]).put("image1", draft[1]);
+                JSONObject config = new JSONObject().put("name", title);
+                for (int layer = 0; layer < LAYERS; layer++) config.put("image" + layer, draft[layer]);
                 save(currentAccount, config);
                 dialog.dismiss();
                 changed();
@@ -799,21 +855,21 @@ public class WaysGramCustomizationActivity extends BaseFragment {
             final JSONObject loaded = config;
             AndroidUtilities.runOnUIThread(() -> {
                 if (activity.isFinishing() || UserConfig.selectedAccount != account || UserConfig.getInstance(account).getClientUserId() != userId) return;
-                if (loaded == null || (bitmap(loaded.optString("image0")) == null && bitmap(loaded.optString("image1")) == null)) {
+                if (loaded == null || !hasAnyImage(loaded)) {
                     new AlertDialog.Builder(activity).setMessage(LocaleController.getString(R.string.WgCustomError)).setPositiveButton(LocaleController.getString(R.string.OK), null).show();
                     return;
                 }
                 LinearLayout preview = new LinearLayout(activity);
                 preview.setOrientation(LinearLayout.VERTICAL);
                 preview.setGravity(Gravity.CENTER_HORIZONTAL);
-                for (int layer = 0; layer < 2; layer++) {
+                for (int layer = 0; layer < LAYERS; layer++) {
                     Bitmap image = bitmap(loaded.optString("image" + layer));
                     if (image == null) continue;
                     ImageView thumbnail = new ImageView(activity);
                     thumbnail.setImageBitmap(image);
                     thumbnail.setScaleType(ImageView.ScaleType.FIT_XY);
-                    thumbnail.setContentDescription(LocaleController.getString(layer == 0 ? R.string.WgCustomBackground : R.string.WgCustomIndicator));
-                    LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(AndroidUtilities.dp(layer == 0 ? 180 : 72), AndroidUtilities.dp(44));
+                    thumbnail.setContentDescription(LocaleController.getString(layerTitle(layer)));
+                    LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(AndroidUtilities.dp(layer == 0 ? 180 : layer == 1 ? 72 : 96), AndroidUtilities.dp(44));
                     lp.bottomMargin = AndroidUtilities.dp(8);
                     preview.addView(thumbnail, lp);
                 }
