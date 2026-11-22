@@ -1062,6 +1062,15 @@ async def init_messenger_storage(database_path: Path) -> None:
                 channel_id INTEGER NOT NULL,
                 post_id INTEGER NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS channel_post_discussions (
+                channel_id INTEGER NOT NULL,
+                post_id INTEGER NOT NULL,
+                group_id INTEGER NOT NULL,
+                root_message_id INTEGER NOT NULL,
+                PRIMARY KEY(channel_id, post_id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_channel_post_discussions_root
+                ON channel_post_discussions(group_id, root_message_id);
             CREATE INDEX IF NOT EXISTS idx_channel_post_comments_thread
                 ON channel_post_comments(channel_id,post_id,group_id,group_message_id);
             CREATE TABLE IF NOT EXISTS channel_subscription_offers (
@@ -11253,7 +11262,7 @@ def build_messenger_router(
                                   (SELECT mime_type FROM media_assets WHERE id=channel_messages.media_id) AS media_type,
                                   (SELECT original_name FROM media_assets WHERE id=channel_messages.media_id) AS media_name,
                                   (SELECT media_kind FROM media_assets WHERE id=channel_messages.media_id) AS media_kind,
-                                  (SELECT media_metadata FROM media_assets WHERE id=channel_messages.media_id) AS media_metadata
+                                  (SELECT media_metadata FROM media_assets WHERE id=channel_messages.media_id) AS media_metadata, (SELECT COUNT(*) FROM channel_post_comments p WHERE p.channel_id=channel_messages.channel_id AND p.post_id=channel_messages.id) AS comments_count, (SELECT MAX(p.group_message_id) FROM channel_post_comments p WHERE p.channel_id=channel_messages.channel_id AND p.post_id=channel_messages.id) AS last_comment_id, (SELECT d.group_id FROM channel_discussion_groups d WHERE d.channel_id=channel_messages.channel_id) AS discussion_group_id
                            FROM channel_messages WHERE channel_id=? AND id>?
                            ORDER BY id ASC LIMIT ?""",
                         (channel_id, after_id, limit),
@@ -11272,7 +11281,7 @@ def build_messenger_router(
                                   (SELECT mime_type FROM media_assets WHERE id=channel_messages.media_id) AS media_type,
                                   (SELECT original_name FROM media_assets WHERE id=channel_messages.media_id) AS media_name,
                                   (SELECT media_kind FROM media_assets WHERE id=channel_messages.media_id) AS media_kind,
-                                  (SELECT media_metadata FROM media_assets WHERE id=channel_messages.media_id) AS media_metadata
+                                  (SELECT media_metadata FROM media_assets WHERE id=channel_messages.media_id) AS media_metadata, (SELECT COUNT(*) FROM channel_post_comments p WHERE p.channel_id=channel_messages.channel_id AND p.post_id=channel_messages.id) AS comments_count, (SELECT MAX(p.group_message_id) FROM channel_post_comments p WHERE p.channel_id=channel_messages.channel_id AND p.post_id=channel_messages.id) AS last_comment_id, (SELECT d.group_id FROM channel_discussion_groups d WHERE d.channel_id=channel_messages.channel_id) AS discussion_group_id
                            FROM channel_messages WHERE channel_id=? AND (?=0 OR id<?)""" + id_filter + " ORDER BY id DESC LIMIT ?",
                         (channel_id, before_id, before_id) + tuple(selected_ids or ()) + (selected_limit,),
                     )
@@ -11402,7 +11411,7 @@ def build_messenger_router(
                             (SELECT mime_type FROM media_assets WHERE id=channel_messages.media_id) AS media_type,
                             (SELECT original_name FROM media_assets WHERE id=channel_messages.media_id) AS media_name,
                             (SELECT media_kind FROM media_assets WHERE id=channel_messages.media_id) AS media_kind,
-                            (SELECT media_metadata FROM media_assets WHERE id=channel_messages.media_id) AS media_metadata
+                            (SELECT media_metadata FROM media_assets WHERE id=channel_messages.media_id) AS media_metadata, (SELECT COUNT(*) FROM channel_post_comments p WHERE p.channel_id=channel_messages.channel_id AND p.post_id=channel_messages.id) AS comments_count, (SELECT MAX(p.group_message_id) FROM channel_post_comments p WHERE p.channel_id=channel_messages.channel_id AND p.post_id=channel_messages.id) AS last_comment_id, (SELECT d.group_id FROM channel_discussion_groups d WHERE d.channel_id=channel_messages.channel_id) AS discussion_group_id
                      FROM channel_messages
                      WHERE body LIKE ? COLLATE NOCASE
                        AND channel_id IN (SELECT id FROM channels c WHERE c.is_public=1
@@ -11443,7 +11452,7 @@ def build_messenger_router(
                                   (SELECT mime_type FROM media_assets WHERE id=channel_messages.media_id) AS media_type,
                           (SELECT original_name FROM media_assets WHERE id=channel_messages.media_id) AS media_name,
                                   (SELECT media_kind FROM media_assets WHERE id=channel_messages.media_id) AS media_kind,
-                                  (SELECT media_metadata FROM media_assets WHERE id=channel_messages.media_id) AS media_metadata
+                                  (SELECT media_metadata FROM media_assets WHERE id=channel_messages.media_id) AS media_metadata, (SELECT COUNT(*) FROM channel_post_comments p WHERE p.channel_id=channel_messages.channel_id AND p.post_id=channel_messages.id) AS comments_count, (SELECT MAX(p.group_message_id) FROM channel_post_comments p WHERE p.channel_id=channel_messages.channel_id AND p.post_id=channel_messages.id) AS last_comment_id, (SELECT d.group_id FROM channel_discussion_groups d WHERE d.channel_id=channel_messages.channel_id) AS discussion_group_id
                    FROM channel_messages
                    WHERE channel_id=? AND body LIKE ? COLLATE NOCASE
                    ORDER BY id DESC LIMIT 100""",
@@ -17989,6 +17998,112 @@ def build_messenger_router(
         await require_group_member(db, group, uid)
         return group
 
+    async def ensure_post_discussion(db: Any, channel_id: int, post_id: int) -> tuple[int, int]:
+        """Возвращает (group_id, root_message_id), один раз создавая пост-корень в группе обсуждений.
+
+        Telegram-клиент в режиме комментариев открывает не отдельный экран, а тред группы: у каждого
+        поста канала есть корневое сообщение в связанной группе. WaysGram раньше хранил только
+        комментарии без корня, поэтому штатная кнопка «комментарии» под постом не могла появиться.
+        """
+        cur = await db.execute("SELECT group_id FROM channel_discussion_groups WHERE channel_id=?", (channel_id,))
+        row = await cur.fetchone()
+        if row is None:
+            raise HTTPException(404, "DISCUSSION_NOT_AVAILABLE")
+        group_id = int(row[0])
+        cur = await db.execute(
+            "SELECT group_id,root_message_id FROM channel_post_discussions WHERE channel_id=? AND post_id=?",
+            (channel_id, post_id),
+        )
+        existing = await cur.fetchone()
+        if existing is not None:
+            return int(existing[0]), int(existing[1])
+        cur = await db.execute(
+            "SELECT author_telegram_id,body,media_id,created_at FROM channel_messages WHERE channel_id=? AND id=?",
+            (channel_id, post_id),
+        )
+        post = await cur.fetchone()
+        if post is None:
+            raise HTTPException(404, "Публикация не найдена")
+        author, body, media_id, created_at = int(post[0]), str(post[1] or ""), post[2], int(post[3])
+        # Корень показывается как сообщение от канала (send_as_id), а не от автора публикации.
+        cur = await db.execute(
+            """INSERT INTO group_messages(group_id,sender_telegram_id,body,media_id,reply_to_id,created_at,topic_id,send_as_id)
+               VALUES(?,?,?,?,NULL,?,NULL,?)""",
+            (group_id, author, body, media_id, created_at, channel_id),
+        )
+        root = int(cur.lastrowid)
+        await db.execute(
+            "INSERT OR REPLACE INTO channel_post_discussions(channel_id,post_id,group_id,root_message_id) VALUES(?,?,?,?)",
+            (channel_id, post_id, group_id, root),
+        )
+        return group_id, root
+
+    @router.get("/api/channels/{channel_id}/messages/{post_id}/discussion")
+    async def channel_post_discussion(channel_id: int, post_id: int,
+                                      authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        uid = int((await current_user(authorization))["telegram_id"])
+        async with aiosqlite.connect(db_path()) as db:
+            db.row_factory = aiosqlite.Row
+            await db.execute("BEGIN IMMEDIATE")
+            group = await channel_discussion_access(db, channel_id, post_id, uid)
+            group_id, root = await ensure_post_discussion(db, channel_id, post_id)
+            cur = await db.execute(
+                "SELECT COUNT(*),COALESCE(MAX(group_message_id),0) FROM channel_post_comments WHERE channel_id=? AND post_id=?",
+                (channel_id, post_id),
+            )
+            row = await cur.fetchone()
+            await db.commit()
+        return {
+            "channel_id": channel_id,
+            "post_id": post_id,
+            "group_id": group if group else group_id,
+            "root_message_id": root,
+            "comments_count": int(row[0]),
+            "last_comment_id": int(row[1]),
+        }
+
+    @router.get("/api/groups/{group_id}/threads/{root_message_id}/replies")
+    async def group_thread_replies(group_id: int, root_message_id: int,
+                                   offset_id: int = Query(default=0, ge=0),
+                                   add_offset: int = Query(default=0, ge=0),
+                                   limit: int = Query(default=100, ge=1, le=100),
+                                   authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        """Идентификаторы сообщений треда: корень поста плюс комментарии.
+
+        Полные сообщения клиент запрашивает штатным `/api/groups/{id}/messages?message_ids=`,
+        поэтому конвертация в TL остаётся в одном месте.
+        """
+        uid = int((await current_user(authorization))["telegram_id"])
+        async with aiosqlite.connect(db_path()) as db:
+            db.row_factory = aiosqlite.Row
+            await require_group_member(db, group_id, uid)
+            cur = await db.execute(
+                "SELECT channel_id,post_id FROM channel_post_discussions WHERE group_id=? AND root_message_id=?",
+                (group_id, root_message_id),
+            )
+            thread = await cur.fetchone()
+            if thread is None:
+                raise HTTPException(404, "DISCUSSION_NOT_AVAILABLE")
+            channel_id, post_id = int(thread[0]), int(thread[1])
+            await require_channel_access(channel_id, uid)
+            cur = await db.execute(
+                """SELECT group_message_id FROM channel_post_comments
+                   WHERE group_id=? AND channel_id=? AND post_id=? ORDER BY group_message_id ASC""",
+                (group_id, channel_id, post_id),
+            )
+            ids = [int(row[0]) for row in await cur.fetchall()]
+        ordered = [root_message_id] + ids
+        if offset_id > 0:
+            ordered = [mid for mid in ordered if mid < offset_id]
+        page = ordered[add_offset:add_offset + limit]
+        return {
+            "ids": page,
+            "count": len(ordered),
+            "root_message_id": root_message_id,
+            "batch_message_ids": True,
+            "has_more": add_offset + limit < len(ordered),
+        }
+
     @router.get("/api/channels/{channel_id}/messages/{post_id}/comments")
     async def list_channel_post_comments(channel_id: int, post_id: int,
                                          before_id: int = Query(default=0, ge=0), limit: int = Query(default=40, ge=1, le=100),
@@ -18021,13 +18136,19 @@ def build_messenger_router(
         if not isinstance(body, str) or not body.strip():
             raise HTTPException(400, "COMMENT_TEXT_REQUIRED")
         async with aiosqlite.connect(db_path()) as db:
+            await db.execute("BEGIN IMMEDIATE")
             group = await channel_discussion_access(db, channel_id, post_id, uid)
+            _group_id, root_message_id = await ensure_post_discussion(db, channel_id, post_id)
+            await db.commit()
         message = {"body": body}
+        reply_to_id = root_message_id
         if "reply_to_id" in payload:
             reply_to_id = payload["reply_to_id"]
             if type(reply_to_id) is not int or not 0 < reply_to_id <= 2**63 - 1:
                 raise HTTPException(400, "INVALID_COMMENT_REPLY")
-            message["reply_to_id"] = reply_to_id
+        # Комментарий первого уровня — ответ на корневое сообщение поста в группе,
+        # поэтому тред открывается штатным экраном обсуждения.
+        message["reply_to_id"] = reply_to_id
         return await store_group_message(group, message, authorization, idempotency_key, (channel_id, post_id))
 
     @router.post("/api/groups/{group_id}/messages/quote/v1", status_code=201)
@@ -18153,7 +18274,12 @@ def build_messenger_router(
                     WHERE p.group_message_id=? AND p.group_id=? AND p.channel_id=? AND p.post_id=?""",
                     (reply_to_id, group_id, *discussion))
                 if await cur.fetchone() is None:
-                    raise HTTPException(404, "COMMENT_REPLY_NOT_FOUND")
+                    # Ответ на корневое сообщение поста — тоже валидный первый комментарий.
+                    cur = await db.execute("""SELECT 1 FROM channel_post_discussions d
+                        WHERE d.channel_id=? AND d.post_id=? AND d.group_id=? AND d.root_message_id=?""",
+                        (*discussion, group_id, reply_to_id))
+                    if await cur.fetchone() is None:
+                        raise HTTPException(404, "COMMENT_REPLY_NOT_FOUND")
             if reply_to_id:
                 await require_reply_target(
                     db, "SELECT 1 FROM group_messages WHERE id=? AND group_id=? AND topic_id IS ?", (reply_to_id, group_id, topic_id)

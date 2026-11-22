@@ -9545,6 +9545,76 @@ def test_channel_settings_cover_signatures_slowmode_and_join_flags(api_env) -> N
     run(scenario())
 
 
+def test_channel_post_comments_open_native_discussion_thread(api_env) -> None:
+    path, _auth_store, _fake_bot, app = api_env
+    add_account(api_env, 89931, "thread_owner")
+    add_account(api_env, 89932, "thread_reader")
+    add_account(api_env, 89933, "thread_outsider")
+    add_session(path, 89931, "thread-owner")
+    add_session(path, 89932, "thread-reader")
+    add_session(path, 89933, "thread-outsider")
+
+    async def scenario() -> None:
+        owner = {"Authorization": "Bearer thread-owner"}
+        reader = {"Authorization": "Bearer thread-reader"}
+        async with await client_for(app) as client:
+            channel = await client.post("/api/channels", headers=owner,
+                                        json={"title": "Thread channel", "is_public": False})
+            channel_id = channel.json()["id"]
+            assert (await client.post("/api/channels/join", headers=reader,
+                                      json={"invite_link": channel.json()["invite_link"]})).status_code == 200
+            group = await client.post("/api/groups", headers=owner, json={"title": "Thread chat"})
+            group_id = group.json()["id"]
+            assert (await client.post(f"/api/groups/{group_id}/members", headers=owner,
+                                      json={"telegram_id": 89932})).status_code == 201
+            bound = await client.put(f"/api/channels/{channel_id}/discussion-group", headers=owner,
+                                     json={"group_id": group_id})
+            assert bound.status_code == 200, bound.text
+
+            post = await client.post(f"/api/channels/{channel_id}/messages", headers=owner,
+                                     json={"body": "Пост с комментариями"})
+            assert post.status_code == 201, post.text
+            post_id = post.json()["id"]
+
+            # Комментариев ещё нет, но группа обсуждений уже известна — кнопка комментариев должна быть.
+            listed = (await client.get(f"/api/channels/{channel_id}/messages", headers=owner)).json()["messages"]
+            row = next(item for item in listed if item["id"] == post_id)
+            assert row["comments_count"] == 0 and row["discussion_group_id"] == group_id
+
+            discussion = await client.get(f"/api/channels/{channel_id}/messages/{post_id}/discussion",
+                                          headers=owner)
+            assert discussion.status_code == 200, discussion.text
+            body = discussion.json()
+            root = body["root_message_id"]
+            assert root > 0 and body["group_id"] == group_id and body["comments_count"] == 0
+
+            # Первый комментарий цепляется к корню треда.
+            comment = await client.post(f"/api/channels/{channel_id}/messages/{post_id}/comments",
+                                        headers=reader, json={"body": "Первый"})
+            assert comment.status_code == 201, comment.text
+            comment_id = comment.json()["id"]
+
+            after = (await client.get(f"/api/channels/{channel_id}/messages", headers=owner)).json()["messages"]
+            row = next(item for item in after if item["id"] == post_id)
+            assert row["comments_count"] == 1 and row["last_comment_id"] == comment_id
+
+            thread = await client.get(f"/api/groups/{group_id}/threads/{root}/replies", headers=owner)
+            assert thread.status_code == 200, thread.text
+            assert thread.json()["ids"] == [root, comment_id]
+
+            # Ответ на корень — тоже валидный комментарий.
+            reply = await client.post(f"/api/channels/{channel_id}/messages/{post_id}/comments",
+                                      headers=owner, json={"body": "Ответ на корень", "reply_to_id": root})
+            assert reply.status_code == 201, reply.text
+
+            # Посторонний без членства в группе тред не откроет.
+            outsider = {"Authorization": "Bearer thread-outsider"}
+            denied = await client.get(f"/api/groups/{group_id}/threads/{root}/replies", headers=outsider)
+            assert denied.status_code in (403, 404)
+
+    run(scenario())
+
+
 def test_channel_polls_reports_owner_and_rank(api_env) -> None:
     path, _auth_store, _fake_bot, app = api_env
     add_account(api_env, 89911, "extras_owner")

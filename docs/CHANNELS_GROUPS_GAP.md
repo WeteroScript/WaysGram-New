@@ -173,6 +173,25 @@ Telegram-клиент уже умеет все эти экраны; менять
 показываются): глобальный поиск, инлайн-боты, кнопки-боты без URL, счётчики непрочитанных
 реакций.
 
+## Комментарии к постам — штатный экран Telegram
+
+Раньше комментарии открывались собственным диалогом из меню поста («Комментарии» →
+«Комментариев пока нет»). Этот пункт меню убран: комментарии теперь штатные.
+
+* Сервер заводит корневое сообщение треда в связанной группе обсуждений:
+  `channel_post_discussions(channel_id, post_id, group_id, root_message_id)`,
+  `GET /api/channels/{id}/messages/{post}/discussion`.
+* Комментарий первого уровня — ответ на корень (`reply_to_id = root`), поэтому тред собирается
+  штатно; ответ на корень тоже разрешён.
+* `GET /api/groups/{gid}/threads/{root}/replies` отдаёт id сообщений треда, полные сообщения
+  клиент берёт штатным `/api/groups/{gid}/messages?message_ids=`.
+* Выдача постов канала содержит `comments_count`, `last_comment_id`, `discussion_group_id` —
+  из них клиент строит `message.replies` (`comments = true`, `channel_id` группы, `max_id`),
+  и под постом появляется кнопка комментариев со счётчиком.
+* TL-методы `messages.getDiscussionMessage`, `messages.getReplies`, `messages.readDiscussion`
+  обслуживает `WaysGramThreads.handle()`; счётчик непрочитанных комментариев не ведётся
+  (`unread_count = 0`, `read_max_id = max_id`).
+
 ## Следующие заходы (если понадобятся)
 
 1. Форум-топики канала (`channels.toggleForum`) — сейчас заглушка, нужен серверный слой топиков.
