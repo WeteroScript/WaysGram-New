@@ -225,6 +225,14 @@ public class WaysGramCustomizationActivity extends BaseFragment {
         dst.set(centerX - width / 2f, centerY - height / 2f, centerX + width / 2f, centerY + height / 2f);
     }
 
+    /** То же выравнивание, но по прямоугольнику RectF — для декоративных частей. */
+    private static void cover(RectF dst, RectF bounds, Bitmap image) {
+        float scale = Math.max(bounds.width() / (float) image.getWidth(), bounds.height() / (float) image.getHeight());
+        float width = image.getWidth() * scale, height = image.getHeight() * scale;
+        float centerX = bounds.exactCenterX(), centerY = bounds.exactCenterY();
+        dst.set(centerX - width / 2f, centerY - height / 2f, centerX + width / 2f, centerY + height / 2f);
+    }
+
     /** Подложка, растянутая по площади с сохранением пропорций, плюс затемнение под текст. */
     public static class ImageBackdropDrawable extends android.graphics.drawable.Drawable {
         private final int account, scrimColor;

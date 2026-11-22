@@ -13,7 +13,7 @@ import org.telegram.ui.ActionBar.BaseFragment;
 
 import java.util.UUID;
 
-final class WaysGramPaidReactions {
+public final class WaysGramPaidReactions {
     private interface Work { JSONObject run() throws Exception; }
     private interface Result { void accept(JSONObject data); }
 

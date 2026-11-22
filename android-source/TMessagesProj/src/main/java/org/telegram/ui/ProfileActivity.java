@@ -2814,9 +2814,9 @@ public class ProfileActivity extends BaseFragment implements NotificationCenter.
                     if (org.telegram.tgnet.WaysGramTransport.ENABLED && chat != null) {
                         // WaysGram: серверная статистика канала/группы, вход как в Telegram — из «⋮» карточки.
                         if (chat.megagroup || !ChatObject.isChannel(chat)) {
-                            WaysGramPaidReactions.showGroupAnalytics(this, currentAccount, chat.id);
+                            WaysGramPaidReactions.showGroupAnalytics(ProfileActivity.this, currentAccount, chat.id);
                         } else {
-                            WaysGramPaidReactions.showAnalytics(this, currentAccount, chat.id);
+                            WaysGramPaidReactions.showAnalytics(ProfileActivity.this, currentAccount, chat.id);
                         }
                     } else {
                         presentFragment(StatisticActivity.create(chat, false));
