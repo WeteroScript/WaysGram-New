@@ -11377,6 +11377,73 @@ def build_messenger_router(
             "admins": admins,
         }
 
+    @router.get("/api/channels/{channel_id}/transfer")
+    async def channel_transfer_options(channel_id: int, authorization: str | None = Header(default=None)):
+        """Кому владелец может передать канал: только действующие администраторы.
+
+        Нативный экран Telegram требует SRP-подтверждение, которого в WaysGram нет,
+        поэтому клиент показывает свой список и при необходимости спрашивает пароль
+        облачного пароля WaysGram.
+        """
+        uid = int((await current_user(authorization))["telegram_id"])
+        channel = await channel_row(channel_id)
+        if int(channel["owner_telegram_id"]) != uid:
+            raise HTTPException(403, "CHANNEL_OWNER_REQUIRED")
+        async with aiosqlite.connect(db_path()) as db:
+            db.row_factory = aiosqlite.Row
+            cur = await db.execute(
+                """SELECT ca.telegram_id,a.username,a.display_name,a.avatar_media_id
+                   FROM channel_admins ca JOIN accounts a ON a.telegram_id=ca.telegram_id
+                   WHERE ca.channel_id=? AND ca.telegram_id<>? AND a.is_banned=0
+                   ORDER BY ca.created_at,ca.telegram_id""",
+                (channel_id, uid),
+            )
+            rows = await avatar_visible_rows(db, await cur.fetchall(), uid)
+            password_required = await cloud_password_row(db, uid) is not None
+        return {"channel_id": channel_id, "password_required": password_required,
+                "candidates": [dict(row) for row in rows]}
+
+    @router.post("/api/channels/{channel_id}/transfer")
+    async def transfer_channel(channel_id: int, payload: dict[str, Any],
+                               authorization: str | None = Header(default=None)):
+        """Передача владения каналом (channels.editCreator без SRP)."""
+        uid = int((await current_user(authorization))["telegram_id"])
+        new_owner = payload.get("new_owner_id")
+        if type(new_owner) is not int or new_owner <= 0 or new_owner == uid:
+            raise HTTPException(400, "NEW_OWNER_INVALID")
+        async with aiosqlite.connect(db_path()) as db:
+            await db.execute("BEGIN IMMEDIATE")
+            cur = await db.execute("SELECT owner_telegram_id FROM channels WHERE id=?", (channel_id,))
+            owner = await cur.fetchone()
+            if owner is None:
+                raise HTTPException(404, "CHANNEL_NOT_FOUND")
+            if int(owner[0]) != uid:
+                raise HTTPException(403, "CHANNEL_OWNER_REQUIRED")
+            cur = await db.execute("SELECT 1 FROM channel_admins WHERE channel_id=? AND telegram_id=?",
+                                   (channel_id, new_owner))
+            if not await cur.fetchone():
+                raise HTTPException(400, "NEW_OWNER_MUST_BE_ADMIN")
+            cur = await db.execute("SELECT 1 FROM accounts WHERE telegram_id=? AND is_banned=0", (new_owner,))
+            if not await cur.fetchone():
+                raise HTTPException(404, "ACCOUNT_NOT_FOUND")
+            password = await cloud_password_row(db, uid)
+            if password is not None:
+                candidate = payload.get("password")
+                if not valid_cloud_password(candidate):
+                    raise HTTPException(401, "PASSWORD_MISSING")
+                if not hmac.compare_digest(await cloud_verifier(candidate, password[0]), password[1]):
+                    raise HTTPException(403, "PASSWORD_HASH_INVALID")
+            await db.execute("UPDATE channels SET owner_telegram_id=? WHERE id=?", (new_owner, channel_id))
+            await db.execute("DELETE FROM channel_admins WHERE channel_id=? AND telegram_id=?",
+                             (channel_id, new_owner))
+            await db.execute("""INSERT INTO channel_admins(channel_id,telegram_id,rights,created_at)
+                VALUES(?,?,?,?) ON CONFLICT(channel_id,telegram_id) DO UPDATE SET rights=excluded.rights""",
+                             (channel_id, uid, 127, int(time.time())))
+            await log_channel_event(db, channel_id, uid, "transfer_owner",
+                                    {"from": uid, "to": new_owner})
+            await db.commit()
+        return {"channel_id": channel_id, "owner_telegram_id": new_owner}
+
     async def attach_my_reactions(items: list[dict[str, Any]], scope: str, chat_id: int, user_id: int) -> None:
         message_ids = [int(item["id"]) for item in items if item.get("id") is not None]
         if not message_ids:
