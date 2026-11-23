@@ -26,10 +26,53 @@ permissions:
   # dropped download leaves a truncated zip ("invalid stored block lengths").
   contents: write
   pull-requests: write
+  actions: read
 
 jobs:
+  publish-apk:
+    name: Publish APK from build 311
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Download built APK artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: WaysGram-New-APK-311
+          run-id: 45263591303
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          path: /tmp/waysgram-apk
+
+      - name: Publish release asset
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          cp /tmp/waysgram-apk/app.apk WaysGram.apk
+          ( cd /tmp/waysgram-apk && sha256sum app.apk ) > WaysGram.apk.sha256
+          SHA="$(cut -d' ' -f1 WaysGram.apk.sha256)"
+          SIZE="$(stat -c '%s' WaysGram.apk)"
+          TAG="apk-waysgram-bc5abc5d"
+          gh release delete "$TAG" --repo "$GITHUB_REPOSITORY" --yes --cleanup-tag || true
+          gh release create "$TAG" WaysGram.apk WaysGram.apk.sha256 \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "WaysGram APK — build 311" \
+            --prerelease \
+            --notes "APK of build 311 (branch arena/bc5abc5d-waysgram-new).
+
+          Size: $SIZE bytes
+          SHA-256: $SHA
+
+          Download: https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG/WaysGram.apk"
+
   build:
     name: Build Afat release APK
+    if: ${{ false }}
     runs-on: ubuntu-latest
     timeout-minutes: 240
 
