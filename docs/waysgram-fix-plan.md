@@ -40,12 +40,28 @@
 
 Тесты: `scripts/test_android_channel_monetization.py`, `authbot/tests/test_message_changes.py`.
 
-## Этап 3. Реакции и анимированные эмодзи
+## Этап 3. Реакции и анимированные эмодзи — сделано
 
-1. Одиночный эмодзи анимируется в момент отправки/появления в бабле.
-2. По нажатию проигрываются эффекты эмодзи (`effect_animation` / `around_animation`).
-3. Дозаполнить недостающие TGS, из-за которых в списке реакций пустые/обрезанные
-   текстуры.
+Причина пустых текстур: в APK лежал только набор **эффектов**
+(`ilyhalight/telegram-emoji-effects`). Эмодзи в нём нет — слой называется
+`Confetti`. Клиент же рисует иконку реакции последним кадром `center_icon`
+(`40_40_lastreactframe`), а большой эмодзи в бабле — тем же документом. Отсюда и
+«нет текстур», и конфетти вместо эмодзи.
+
+| Что | Как закрыто |
+| --- | --- |
+| Рисунок эмодзи | `scripts/waysgram_emoji_art.py` собирает TGS из Twemoji (`jdecked/twemoji`, плоский вектор): SVG → Lottie (`pip install lottie`) → масштаб в 512×512 с анимацией появления, 42 кадра при 60 fps. Последний кадр спокойный — его берёт чип реакции |
+| Отступ под чип реакции | клиент вырезает из кадра центральные 60% (`lastreactframe`), поэтому рядом с `art/` лежит вариант `react/` — тот же рисунок, вписанный в 58% кадра |
+| Слоты каталога реакций | иконки и превью (`static_icon`, `center_icon`, `appear/select_animation`) — рисунок; нажатие (`activate/effect/around_animation`) — эффект этого эмодзи |
+| Отдельные id документов | `0x6A52…` (эмодзи), `0x6A53…` (реакции), `0x6A54…` (эффекты): кэш одного набора больше не подменяет другой; `upload.getFile` обслуживает все три |
+| Эффект при появлении одиночного эмодзи | `WaysGramReactions.consumeEmojiEffect` — один раз на сообщение и только для свежих (60 с), затем штатная анимация `EmojiAnimationsOverlay` |
+| Нажатие на эмодзи | пак интеракций `emojicom` у WaysGram не загружается, поэтому `EmojiAnimationsOverlay.checkStickerPack` заполняет карту эффектами из APK (`WaysGramAnimatedEmoji.fillInteractions`); нажатие работает и в каналах, где `currentUser == null` |
+
+Ограничение: официальные TGS-анимации Telegram в песочнице недоступны (нет
+api.telegram.org и зеркала набора), поэтому рисунок — Twemoji с собственной
+анимацией появления, а эффекты — набор `telegram-emoji-effects`.
+
+Тесты: `scripts/test_android_reactions.py`, `scripts/test_android_animated_emoji.py`.
 
 ## Этап 4. Кастомизация без конфликтов
 
