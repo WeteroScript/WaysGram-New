@@ -24,16 +24,13 @@ class NativeMessagingSourceChecks(unittest.TestCase):
         return self.archive.read(BASE + path).decode('utf-8')
 
     def test_customization_targets_only_navigation_layers_and_requires_apply(self):
+        # Изолированная кастомизация: только фон под интерфейсом, шапка/таб-бар и
+        # индикатор штатные (подробности — test_android_customization_isolation.py).
         settings = self.source('ui/SettingsActivity.java')
         custom = self.source('ui/WaysGramCustomizationActivity.java')
-        layout = self.source('ui/MainTabsLayout.java')
-        tab = self.source('ui/Components/glass/GlassTabView.java')
         launch = self.source('ui/LaunchActivity.java')
         self.assertIn('presentFragment(new WaysGramCustomizationActivity())', settings)
-        self.assertIn('wrapBackground(currentAccount, tabsView, tabsViewBackground', self.source('ui/MainTabsActivity.java'))
-        self.assertIn('drawIndicator(this, canvas', layout)
-        self.assertIn('getParent() instanceof MainTabsLayout', tab)
-        self.assertLess(tab.index('drawIndicator('), tab.index('super.dispatchDraw(canvas)'))
+        self.assertIn('tabsView.setBackground(tabsViewBackground);', self.source('ui/MainTabsActivity.java'))
         self.assertIn('ACTION_OPEN_DOCUMENT', custom)
         self.assertIn('https://t.wg/custom/', custom)
         self.assertIn('WaysGramCustomizationActivity.isLink(data)', launch)

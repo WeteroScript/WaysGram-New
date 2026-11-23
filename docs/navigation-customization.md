@@ -1,42 +1,53 @@
-# Navigation customization
+# Кастомизация: только фон, без конфликтов с интерфейсом
 
-Settings → Customization drives the whole app appearance, not just the bottom bar:
+Решение пользователя (этап 4): кастомизация **не должна никоим образом
+конфликтовать с основным интерфейсом**. Выбран вариант «изолировать»: кастомным
+остаётся фон, всё остальное — штатное.
 
-* **Navigation background layer** — the image is drawn full-screen as the app backdrop (`LaunchActivity`), behind everything. Screen and card backgrounds become translucent (`Theme.windowColor`), so lists, settings and the navigation bar show the picture through them, dimmed by a scrim for readability. The same image replaces the chat wallpaper (`ChatActivity.updateBackground`).
-* **Buttons** — the dominant colour of the background image becomes the accent (`accentColor`): primary buttons, blue menu icons/links and the chat send button are tinted with it instead of the stock accent.
-* **Active tab indicator layer** — the image is used for the selected-tab pill everywhere tabs exist: the main tab bar, folder tabs (`FilterTabsView`) and pager tabs (`PagerSlidingTabStrip`), falling back to the stock pill when no indicator image is set.
+## Что кастомизируется
 
-Navigation hit targets and touch behaviour stay standard. Saved configurations and the active selection are local to the user on the device. Disabling customization restores the regular appearance without removing saved configurations.
+Одна картинка — фон приложения (слот `image0` в конфиге).
 
-The screen is built from rounded cards: a live preview of the navigation bar (background layer plus the active tab pill), a master switch, one compact row per layer with a thumbnail and upload action, a primary "Save config" button, and the list of saved configurations. Collected blocks fade and slide in with a short stagger, rows show a press ripple, and a deleted configuration animates out before the list is rebuilt. Each saved configuration row carries the active switch, a copy-link action and a delete action; deletion asks for confirmation, removes the stored configuration and, if it was active, clears the selection.
+| Где | Как |
+| --- | --- |
+| Фон приложения | `WaysGramCustomizationActivity.BackdropView` живёт под всем интерфейсом в `LaunchActivity` |
+| Окна и карточки | в `Theme.getColor` подменяются только `key_windowBackgroundWhite` и `key_windowBackgroundGray`: у них меняется альфа, поэтому фон виден сквозь списки, настройки и карточки |
+| Обои чата | `ChatActivity.updateBackground` берёт ту же картинку вместо обоев темы |
+| Таб-бар | фон штатный (родное стекло Telegram), картинка видна сквозь него — отдельной «плитки» нет |
 
-Settings → Customization drives the whole app appearance, not just the bottom bar:
+## Что не кастомизируется
 
-* **Navigation background layer** — the image is drawn full-screen as the app backdrop (`LaunchActivity`), behind everything. Screen and card backgrounds become translucent (`Theme.windowColor`), so lists, settings and the navigation bar show the picture through them, dimmed by a scrim for readability. The same image replaces the chat wallpaper (`ChatActivity.updateBackground`).
-* **Buttons** — the dominant colour of the background image becomes the accent (`accentColor`): primary buttons, blue menu icons/links and the chat send button are tinted with it instead of the stock accent.
-* **Active tab indicator layer** — the image is used for the selected-tab pill everywhere tabs exist: the main tab bar, folder tabs (`FilterTabsView`) and pager tabs (`PagerSlidingTabStrip`), falling back to the stock pill when no indicator image is set.
+* **Кнопки, ссылки, иконки, поле отправки** — всегда штатных цветов Telegram.
+  Акцент из картинки больше не извлекается (`accentColor`/`layerAccent` удалены):
+  раньше он перекрашивал `key_windowBackgroundWhiteBlueButton`,
+  `key_windowBackgroundWhiteBlueIcon`, `key_windowBackgroundWhiteBlueText*` и
+  `key_chat_messagePanelSend`, из-за чего кнопки в переписках и суммы
+  звёзд/граммов спорили с остальным интерфейсом.
+* **Индикатор выбранной вкладки** — штатная пилюля (`MainTabsLayout`,
+  `GlassTabView`, `FilterTabsView`, `PagerSlidingTabStrip`). Кастомной картинки
+  индикатора больше нет.
+* **Плашки и карточки** — штатная форма (`Theme.createRoundRectDrawable`).
+  Раньше картинка слоя «плашки» подменяла заливку только там, где подключены
+  хуки `Theme.createRoundRectDrawable` / `RecyclerListView.drawItemBackground` /
+  `UniversalAdapter`, то есть фактически в меню кастомизации, а не во всём
+  приложении. Теперь плашки одинаковы везде: они полупрозрачные и показывают фон.
+* **Декор шапки и правого края** — удалён: это были картинки поверх экрана,
+  которые читались как чужой блок поверх нативных элементов.
 
-Navigation hit targets and touch behaviour stay standard. Saved configurations and the active selection are local to the user on the device. Disabling customization restores the regular appearance without removing saved configurations.
+## Экран
 
-The Android document picker accepts any filename and MIME type. Images must still be decodable by Android's bitmap decoder; non-image files and unsupported formats are rejected. Images are static and normalized to bounded PNGs (640 × 256 and 128 KiB maximum per layer) before storage or sharing.
+`Settings → Кастомизация`: превью фона, мастер-переключатель, одна строка выбора
+картинки, кнопка сохранения и список сохранённых конфигов (активный конфиг,
+копирование ссылки, удаление с подтверждением).
 
-Copying a link explicitly publishes the configuration to the WaysGram API. The link `https://t.wg/custom/<token>` is readable by signed-in clients with the token, not an edit credential. The server allows up to 32 unique published configurations per account; re-sharing the same content returns its existing token. Import shows the name and image previews and requires Apply before saving and activating on the recipient's device.
+Старые конфиги с `image1…image3` продолжают открываться: читается только
+`image0`, остальные слоты игнорируются.
 
-Open these links within WaysGram. The app does not associate `t.wg` with external browsers or other apps. Device behavior has not been verified.
+## Ссылки
 
-## Четыре заменяемых части
+Копирование конфига публикует его в WaysGram API и кладёт в буфер
+`https://t.wg/custom/<token>`. Такую ссылку клиент открывает сам (внешние
+браузеры к `t.wg` не привязаны), показывает название и превью и применяет только
+после подтверждения. Ограничения картинки прежние: PNG до 640 × 256 и 128 КиБ.
 
-Кастомизация состоит из четырёх картинок, каждая выбирается в своём слоте редактора
-(«Фон навигации», «Индикатор активной вкладки», «Декор шапки профиля», «Декор правого края»):
-
-| Слот | Ключ конфига | Где рисуется |
-| --- | --- | --- |
-| Подложка навигации | `image0` | фон всего приложения и обои чата |
-| Индикатор активной вкладки | `image1` | пилюля выбранной вкладки в табах и папках |
-| Декор шапки профиля | `image2` | верхняя правая область (55 % ширины, 30 % высоты экрана) |
-| Декор правого края | `image3` | вертикальная полоса у правой границы (28 % ширины, не уже 160 dp) |
-
-Декоративные части рисуются в том же `ImageBackdropDrawable`, что и подложка, поэтому видны на всех
-экранах, но под затемняющим скримом. Пропорции сохраняются (`cover`, без растягивания). Конфиг по
-ссылке принимает те же четыре поля; достаточно любой одной картинки. Ограничения на картинку
-прежние: PNG до 640 × 256 и 128 КиБ на слот, поэтому публикация четырёх частей — до ~512 КиБ JSON.
+На устройстве поведение не проверялось.
