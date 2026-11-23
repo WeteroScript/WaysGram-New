@@ -40,6 +40,8 @@ SESSION_TTL = 60 * 60 * 24 * 30
 SESSION_REFRESH_GRACE = 60 * 60 * 24 * 7
 DM_MESSAGES_PER_MINUTE = 30
 CHANNEL_POSTS_PER_MINUTE = 20
+# Платное сообщение в канал, которое владелец так и не открыл, возвращает звёзды.
+CHANNEL_INBOX_REFUND_AFTER = 7 * 24 * 3600
 LOGIN_REQUESTS_PER_IP_PER_HOUR = 100
 MAX_MESSAGE_LENGTH = 4000
 MAX_IMAGE_UPLOAD_BYTES = 10 * 1024 * 1024
@@ -1898,6 +1900,11 @@ async def init_messenger_storage(database_path: Path) -> None:
             await db.execute("ALTER TABLE main.channel_inbox_messages ADD COLUMN scheduled_by INTEGER")
         if "reward_stars" not in inbox_columns:
             await db.execute("ALTER TABLE main.channel_inbox_messages ADD COLUMN reward_stars INTEGER NOT NULL DEFAULT 0")
+        if "delivered_at" not in inbox_columns:
+            await db.execute("ALTER TABLE main.channel_inbox_messages ADD COLUMN delivered_at INTEGER")
+        if "refunded" not in inbox_columns:
+            await db.execute("ALTER TABLE main.channel_inbox_messages ADD COLUMN refunded INTEGER NOT NULL DEFAULT 0")
+        await db.execute("CREATE INDEX IF NOT EXISTS main.idx_inbox_undelivered ON channel_inbox_messages(created_at) WHERE direction='incoming' AND refunded=0 AND delivered_at IS NULL")
         await db.execute("CREATE INDEX IF NOT EXISTS main.idx_inbox_scheduled ON channel_inbox_messages(scheduled_at) WHERE proposal_state='scheduled'")
         cur = await db.execute("PRAGMA table_info(channels)")
         channel_columns = {row[1] for row in await cur.fetchall()}
@@ -9895,9 +9902,60 @@ def build_messenger_router(
             raise HTTPException(404, "CHANNEL_THREAD_NOT_FOUND")
         return await channel_inbox_thread(channel_id, reader_id, uid, True, request.method == "POST", payload, key, before_id, limit)
 
+    async def refund_undelivered_inbox(db: Any, now: int) -> list[dict[str, Any]]:
+        """Возврат звёзд за платные сообщения, которые владелец канала так и не открыл.
+
+        Звёзды списываются в момент отправки, а не прочтения: иначе отправитель не
+        понимает, списались ли они. Если владелец не открыл диалог за
+        CHANNEL_INBOX_REFUND_AFTER, деньги возвращаются отдельной записью журнала,
+        поэтому в истории платежей видны и списание, и возврат.
+        """
+        cur = await db.execute("""SELECT m.id,m.channel_id,m.reader_id,m.fee_stars,c.owner_telegram_id
+            FROM channel_inbox_messages m JOIN channels c ON c.id=m.channel_id
+            WHERE m.direction='incoming' AND m.fee_stars>0 AND m.refunded=0 AND m.delivered_at IS NULL
+            AND m.created_at<=? ORDER BY m.id""", (now - CHANNEL_INBOX_REFUND_AFTER,))
+        rows = await cur.fetchall()
+        await cur.close()
+        refunds: list[dict[str, Any]] = []
+        for message_id, channel_id, reader, fee, owner in rows:
+            # При отправке звёзды ушли владельцу, поэтому возврат снимает их обратно:
+            # списываем сколько осталось, но отправителю возвращаем всю сумму.
+            cur = await db.execute("SELECT stars FROM accounts WHERE telegram_id=? AND is_banned=0", (owner,))
+            owner_row = await cur.fetchone()
+            await cur.close()
+            owner_stars = int(owner_row[0]) if owner_row else 0
+            if owner_stars > 0:
+                cur = await db.execute("UPDATE accounts SET stars=stars-? WHERE telegram_id=? RETURNING stars",
+                                       (min(fee, owner_stars), owner))
+                owner_balance = await cur.fetchone()
+                await cur.close()
+                if owner_balance is not None:
+                    await db.execute("""INSERT INTO economy_transactions
+                        (telegram_id,asset,amount,balance_after,reason,admin_id,created_at) VALUES(?,'stars',?,?,?,NULL,?)""",
+                        (owner, -min(fee, owner_stars), owner_balance[0],
+                         f"channel_inbox_refund:{channel_id}:{message_id}", now))
+            cur = await db.execute("""UPDATE accounts SET stars=stars+? WHERE telegram_id=? AND is_banned=0
+                AND stars+? BETWEEN 0 AND 9223372036854775807 RETURNING stars""", (fee, reader, fee))
+            balance = await cur.fetchone()
+            await cur.close()
+            if balance is None:
+                continue
+            await db.execute("""INSERT INTO economy_transactions
+                (telegram_id,asset,amount,balance_after,reason,admin_id,created_at) VALUES(?,'stars',?,?,?,NULL,?)""",
+                (reader, fee, balance[0], f"channel_inbox_refund:{channel_id}:{message_id}", now))
+            await db.execute("UPDATE channel_inbox_messages SET refunded=1 WHERE id=?", (message_id,))
+            refunds.append({"id": message_id, "channel_id": channel_id, "reader_id": reader, "stars": fee})
+        return refunds
+
     async def channel_inbox_thread(channel_id: int, reader: int, uid: int, as_owner: bool, write: bool,
                                    payload: dict[str, Any] | None, key: str | None, before_id: int, limit: int, sponsored: bool = False):
         direction = "reply" if as_owner else "incoming"
+        if not as_owner and not write:
+            # Читатель видит возвраты за недоставленные сообщения сразу, без фоновой задачи.
+            async with aiosqlite.connect(db_path()) as sweep:
+                await sweep.execute("BEGIN IMMEDIATE")
+                await refund_undelivered_inbox(sweep, int(time.time()))
+                await sweep.commit()
         async with aiosqlite.connect(db_path()) as db:
             await db.execute("BEGIN IMMEDIATE" if write else "BEGIN")
             db.row_factory = aiosqlite.Row
@@ -9917,6 +9975,12 @@ def build_messenger_router(
                 cur = await db.execute("SELECT 1 FROM channel_inbox_messages WHERE channel_id=? AND reader_id=? AND direction='incoming' LIMIT 1", (channel_id, reader))
                 if not await cur.fetchone():
                     raise HTTPException(404, "CHANNEL_THREAD_NOT_FOUND")
+                if not write:
+                    # Владелец открыл диалог: платные сообщения доставлены, возврат не нужен.
+                    await db.execute("""UPDATE channel_inbox_messages SET delivered_at=?
+                        WHERE channel_id=? AND reader_id=? AND direction='incoming' AND delivered_at IS NULL""",
+                        (int(time.time()), channel_id, reader))
+                    await db.commit()
             if not write:
                 cur = await db.execute(f"""SELECT {columns} FROM channel_inbox_messages WHERE channel_id=? AND reader_id=?
                     AND (?=0 OR id<?) ORDER BY id DESC LIMIT ?""", (channel_id, reader, before_id, before_id, limit + 1))
@@ -12665,6 +12729,70 @@ def build_messenger_router(
             await db.execute("""INSERT INTO economy_transactions
                 (telegram_id,asset,amount,balance_after,reason,admin_id,created_at) VALUES(?,'stars',?,?,?,NULL,?)""",
                 (uid, amount, row[0], f"message_fee:{message_id}", now))
+
+    PAID_MESSAGE_REASONS_SQL = ("reason LIKE 'message_fee:%' OR reason LIKE 'channel_inbox:%' "
+                                "OR reason LIKE 'channel_inbox_refund:%' OR reason LIKE 'channel_sponsored_post:%'")
+
+    @router.get("/api/me/paid-messages")
+    async def paid_messages_history(before_id: int = Query(default=0, ge=0),
+                                    limit: int = Query(default=40, ge=1, le=100),
+                                    authorization: str | None = Header(default=None)):
+        """История платных сообщений так, как её показывает Telegram.
+
+        Одна лента на все платные отправки: личные сообщения, сообщения в канал и
+        возвраты за недоставленные. Суммы берутся из журнала, поэтому повторный
+        запрос с тем же Idempotency-Key не добавляет вторую строку.
+        """
+        uid = int((await current_user(authorization))["telegram_id"])
+        async with aiosqlite.connect(db_path()) as db:
+            await db.execute("BEGIN IMMEDIATE")
+            # Возвраты считаются до выборки, чтобы история всегда сходилась с балансом.
+            await refund_undelivered_inbox(db, int(time.time()))
+            await db.commit()
+            db.row_factory = aiosqlite.Row
+            cur = await db.execute(f"""SELECT id,amount,balance_after,reason,created_at FROM economy_transactions
+                WHERE telegram_id=? AND (?=0 OR id<?) AND ({PAID_MESSAGE_REASONS_SQL})
+                ORDER BY id DESC LIMIT ?""", (uid, before_id, before_id, limit + 1))
+            rows = await cur.fetchall()
+            cur = await db.execute(f"""SELECT COALESCE(SUM(CASE WHEN amount<0 THEN -amount ELSE 0 END),0),
+                COALESCE(SUM(CASE WHEN amount>0 AND reason LIKE 'channel_inbox_refund:%' THEN amount ELSE 0 END),0),
+                COALESCE(SUM(CASE WHEN amount>0 AND reason NOT LIKE 'channel_inbox_refund:%' THEN amount ELSE 0 END),0),
+                COUNT(*) FROM economy_transactions WHERE telegram_id=? AND ({PAID_MESSAGE_REASONS_SQL})""", (uid,))
+            spent, refunded, earned, total = await cur.fetchone()
+            titles: dict[str, str] = {}
+            items = []
+            for row in rows[:limit]:
+                reason = row["reason"]
+                parts = reason.split(":")
+                kind = parts[0]
+                title = ""
+                if kind == "message_fee":
+                    if reason not in titles:
+                        cur = await db.execute("""SELECT a.display_name FROM messages m
+                            LEFT JOIN accounts a ON a.telegram_id=m.recipient_telegram_id WHERE m.id=?""",
+                            (int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 0,))
+                        name = await cur.fetchone()
+                        titles[reason] = (name[0] if name and name[0] else "")
+                    title = titles[reason]
+                elif len(parts) > 1 and parts[1].isdigit():
+                    if parts[1] not in titles:
+                        cur = await db.execute("SELECT title FROM channels WHERE id=?", (int(parts[1]),))
+                        channel = await cur.fetchone()
+                        titles[parts[1]] = (channel[0] if channel and channel[0] else "")
+                    title = titles[parts[1]]
+                items.append({
+                    "id": row["id"],
+                    "kind": {"message_fee": "direct", "channel_inbox": "channel",
+                             "channel_inbox_refund": "refund", "channel_sponsored_post": "sponsored"}.get(kind, kind),
+                    "title": title,
+                    "stars": -row["amount"] if row["amount"] < 0 else row["amount"],
+                    "refunded": kind == "channel_inbox_refund",
+                    "balance_after": row["balance_after"],
+                    "created_at": row["created_at"],
+                })
+        return {"transactions": items, "next_before_id": rows[limit - 1]["id"] if len(rows) > limit else 0,
+                "spent_stars": int(spent), "refunded_stars": int(refunded), "earned_stars": int(earned),
+                "total": int(total), "refund_after_seconds": CHANNEL_INBOX_REFUND_AFTER}
 
     @router.post("/api/messages/quote/v1", status_code=201)
     @router.post("/api/messages", status_code=201)
