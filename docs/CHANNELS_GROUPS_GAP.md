@@ -173,6 +173,42 @@ Telegram-клиент уже умеет все эти экраны; менять
 показываются): глобальный поиск, инлайн-боты, кнопки-боты без URL, счётчики непрочитанных
 реакций.
 
+## Навигация: `@null`, дубли строк и истории в группах
+
+* `Discussion @null`. `JSONObject.optString(key, "")` возвращает литерал `"null"`, если
+  сервер прислал `"username": null` (`JSONObject.NULL.toString()` — это `"null"`). Юзернеймы
+  каналов и групп теперь читаются через `WaysGramMapper.text()`, который считает такие
+  значения пустыми; при пустом юзернейме строка «Discussion» показывает название связанной
+  группы.
+* Дубли. Отдельные строки «Группа обсуждений» и «Настройки входящих канала» в карточке
+  канала убраны: первая повторяла штатную «Discussion», вторая живёт в меню чата
+  (`WaysGramChannelInbox`). Штатная «Discussion» при включённом транспорте открывает
+  `WaysGramDiscussions.settings()`, а не нативный `ChatLinkActivity`, который общается
+  только через `channels.editLinkedChat`.
+* Истории. `WaysGramStories` считал каналом только `channel_id > CHANNEL_OFFSET`, поэтому в
+  группе `stories.canSendStory`/`sendStory` проваливались в `METHOD_NOT_SUPPORTED` и кнопка
+  «Add Story» показывала тост. Теперь путь строится по типу чата:
+  `/api/channels/<id>/stories` или `/api/groups/<id>/stories` (сервер принимал оба).
+* `account.getChatThemes` (экран «Appearance» в чате) отвечает пустым `account.themes`
+  вместо ошибки с тостом; сами темы чатов — отдельная задача в хвосте плана
+  (`docs/waysgram-fix-plan.md`).
+
+## Платные реакции и платные сообщения в канал
+
+* `messages.sendPaidReaction` → `POST /api/channels/{id}/messages/{mid}/paid-reactions`.
+  Клиент получает свежие реакции поста и обновляет чип; в выдаче сообщений суммы лежат
+  полями `paid_stars` и `my_paid_stars`, клиент превращает их в `TL_reactionPaid`.
+* Звёзды платной реакции только списываются у отправителя (решение пользователя:
+  начисления владельцу и вывод пока не делаются). Аналитика канала считает покупки по
+  дебетам `economy_transactions`, а не по прежним начислениям.
+* `messages.getPaidReactionPrivacy` / `togglePaidReactionPrivacy` отвечают нейтрально:
+  анонимность платных реакций WaysGram не разделяет.
+* «Direct Messages» (платные сообщения подписчиков): `stars.updatePaidMessagesPrice` →
+  `PUT /api/channels/{id}/paid-messages` (`paid_messages_enabled`, `paid_messages_stars`).
+  Экран `PostSuggestionsEditActivity` без монофорума читает и пишет цену в самом канале.
+* Права администратора больше не додумываются: `admin_rights` по умолчанию 0, и отправка
+  в broadcast-канал проверяется до запроса (`CHAT_WRITE_FORBIDDEN`).
+
 ## Комментарии к постам — штатный экран Telegram
 
 Раньше комментарии открывались собственным диалогом из меню поста («Комментарии» →

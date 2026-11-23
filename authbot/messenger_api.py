@@ -1909,6 +1909,10 @@ async def init_messenger_storage(database_path: Path) -> None:
             await db.execute("ALTER TABLE channels ADD COLUMN reactions_limit INTEGER NOT NULL DEFAULT 11")
         if "available_reactions" not in channel_columns:
             await db.execute("ALTER TABLE channels ADD COLUMN available_reactions TEXT NOT NULL DEFAULT '[]'")
+        if "paid_messages_enabled" not in channel_columns:
+            await db.execute("ALTER TABLE channels ADD COLUMN paid_messages_enabled INTEGER NOT NULL DEFAULT 0")
+        if "paid_messages_stars" not in channel_columns:
+            await db.execute("ALTER TABLE channels ADD COLUMN paid_messages_stars INTEGER NOT NULL DEFAULT 0")
         if "avatar_media_id" not in channel_columns:
             await db.execute("ALTER TABLE channels ADD COLUMN avatar_media_id TEXT NOT NULL DEFAULT ''")
         for column in ("signatures_enabled", "signatures_profiles", "participants_hidden",
@@ -4854,6 +4858,8 @@ def build_messenger_router(
                           ch.participants_hidden,ch.pre_history_hidden,ch.join_to_send,ch.join_request,
                           ch.no_forwards,ch.color_id,ch.background_emoji_id,
                           ch.profile_color_id,ch.profile_background_emoji_id,ch.emoji_status_id,ch.antispam,
+                          COALESCE(ch.paid_messages_enabled,0) AS paid_messages_enabled,
+                          COALESCE(ch.paid_messages_stars,0) AS paid_messages_stars,
                           (SELECT d.group_id FROM channel_discussion_groups d WHERE d.channel_id=ch.id) AS discussion_group_id,
                           (SELECT COUNT(*) FROM active_channel_members m WHERE m.channel_id=ch.id) AS member_count,
                           owner.username AS owner_username
@@ -9643,6 +9649,9 @@ def build_messenger_router(
             except (TypeError, ValueError):
                 channel["available_reactions"] = []
             channel["forum_enabled"] = bool(reactions_row[4]) if len(reactions_row) > 4 else False
+        # «Direct Messages» в карточке канала: платные сообщения от подписчиков.
+        channel["paid_messages_enabled"] = bool(channel.get("paid_messages_enabled") or 0)
+        channel["send_paid_messages_stars"] = int(channel.get("paid_messages_stars") or 0)
         channel["labels"] = await entity_labels("channel", channel_id)
         return channel
 
@@ -10270,18 +10279,22 @@ def build_messenger_router(
                 FROM channel_member_departures WHERE channel_id=? AND occurred_at BETWEEN ? AND ?""", (channel_id, since, now))
             voluntary_leaves, moderated_removals = await cur.fetchone()
             # Count only settled credits, including those for posts that have since been deleted.
-            patterns = (f"channel_paid_reaction:{channel_id}:*", f"channel_paid_media:{channel_id}:*",
+            patterns = (f"channel_paid_media:{channel_id}:*",
                         f"channel_subscription:{channel_id}", f"channel_inbox:{channel_id}:*", f"channel_sponsored_post:{channel_id}:*")
             cur = await db.execute("""SELECT
-                    COUNT(CASE WHEN reason GLOB ? THEN 1 END),
-                    COALESCE(SUM(CASE WHEN reason GLOB ? THEN amount ELSE 0 END),0),
                     COALESCE(SUM(CASE WHEN reason GLOB ? THEN amount ELSE 0 END),0),
                     COALESCE(SUM(CASE WHEN reason=? THEN amount ELSE 0 END),0),
                     COALESCE(SUM(CASE WHEN reason GLOB ? THEN amount ELSE 0 END),0),
                     COALESCE(SUM(CASE WHEN reason GLOB ? THEN amount ELSE 0 END),0)
                 FROM economy_transactions WHERE telegram_id=? AND asset='stars' AND admin_id IS NULL
-                AND amount>0 AND created_at BETWEEN ? AND ?""", (patterns[0], *patterns, uid, since, now))
-            purchases, reaction_stars, media_stars, subscription_stars, inbox_stars, sponsorship_stars = await cur.fetchone()
+                AND amount>0 AND created_at BETWEEN ? AND ?""", (*patterns, uid, since, now))
+            media_stars, subscription_stars, inbox_stars, sponsorship_stars = await cur.fetchone()
+            # Платные реакции только списываются у отправителя, поэтому покупки считаем по дебетам:
+            # у владельца канала положительных проводок за них больше нет.
+            cur = await db.execute("""SELECT COUNT(*),COALESCE(SUM(-amount),0) FROM economy_transactions
+                WHERE asset='stars' AND admin_id IS NULL AND amount<0 AND reason GLOB ?
+                  AND created_at BETWEEN ? AND ?""", (f"channel_paid_reaction:{channel_id}:*", since, now))
+            purchases, reaction_stars = await cur.fetchone()
         return {"days": int(days), "since": since, "as_of": now, "members": members,
                 "current_members_joined": recent_members, "published_posts_remaining": posts,
                 "unique_post_views": post_views, "reached_accounts": reached_accounts,
@@ -10432,6 +10445,31 @@ def build_messenger_router(
             reactions = []
         return {"enabled": bool(row[0]), "limit": int(row[1]), "reactions": reactions}
 
+    @router.put("/api/channels/{channel_id}/paid-messages")
+    async def set_channel_paid_messages(channel_id: int, payload: dict[str, Any],
+                                        authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        """Цена «Direct Messages»: сколько звёзд платит подписчик за сообщение в канал."""
+        user = await current_user(authorization)
+        uid = int(user["telegram_id"])
+        enabled = payload.get("enabled")
+        stars = payload.get("stars", 0)
+        if type(enabled) is not bool or type(stars) is not int or not 0 <= stars <= 10000:
+            raise HTTPException(400, "INVALID_PAID_MESSAGES")
+        if enabled and stars <= 0:
+            raise HTTPException(400, "INVALID_PAID_MESSAGES")
+        channel = await channel_row(channel_id)
+        if int(channel["owner_telegram_id"]) != uid:
+            raise HTTPException(403, "ONLY_OWNER_CAN_SET_PAID_MESSAGES")
+        async with aiosqlite.connect(db_path()) as db:
+            await db.execute("UPDATE channels SET paid_messages_enabled=?,paid_messages_stars=? WHERE id=?",
+                             (1 if enabled else 0, stars if enabled else 0, channel_id))
+            await db.commit()
+        updated = await channel_row(channel_id)
+        return {
+            "paid_messages_enabled": bool(updated.get("paid_messages_enabled") or 0),
+            "send_paid_messages_stars": int(updated.get("paid_messages_stars") or 0),
+        }
+
     @router.get("/api/channels/{channel_id}/messages/{message_id}/paid-reactions")
     async def get_channel_paid_reactions(channel_id: int, message_id: int, authorization: str | None = Header(default=None)):
         uid = int((await current_user(authorization))["telegram_id"])
@@ -10462,7 +10500,9 @@ def build_messenger_router(
             if previous is not None:
                 if tuple(previous[:3]) != (channel_id, message_id, stars):
                     raise HTTPException(409, "IDEMPOTENCY_KEY_CONFLICT")
-                return {"stars": stars, "balance_after": previous[3]}
+                cur = await db.execute("SELECT COALESCE(SUM(stars),0) FROM channel_paid_reactions WHERE channel_id=? AND message_id=?",
+                                       (channel_id, message_id))
+                return {"stars": stars, "balance_after": previous[3], "total_stars": int((await cur.fetchone())[0])}
             await require_channel_access(channel_id, uid)
             cur = await db.execute("""SELECT c.owner_telegram_id,c.paid_reactions_enabled,a.is_banned
                 FROM channels c JOIN channel_messages m ON m.channel_id=c.id
@@ -10475,23 +10515,25 @@ def build_messenger_router(
                 raise HTTPException(403, "PAID_REACTIONS_UNAVAILABLE")
             now = int(time.time())
             reason = f"channel_paid_reaction:{channel_id}:{message_id}"
-            sender_balance = None
-            for account_id, amount in ((uid, -stars), (owner, stars)):
-                cur = await db.execute("UPDATE accounts SET stars=stars+? WHERE telegram_id=? AND is_banned=0 AND stars+? BETWEEN 0 AND 9223372036854775807 RETURNING stars",
-                                       (amount, account_id, amount))
-                balance = await cur.fetchone()
-                await cur.close()
-                if balance is None:
-                    raise HTTPException(409, "PAID_REACTION_TRANSFER_FAILED")
-                if account_id == uid:
-                    sender_balance = balance[0]
-                await db.execute("""INSERT INTO economy_transactions
-                    (telegram_id,asset,amount,balance_after,reason,admin_id,created_at) VALUES(?,'stars',?,?,?,NULL,?)""",
-                    (account_id, amount, balance[0], reason, now))
+            # Платная реакция только списывается с отправителя: вывод и начисления
+            # владельцу канала в этой версии не делаются.
+            cur = await db.execute("UPDATE accounts SET stars=stars+? WHERE telegram_id=? AND is_banned=0 AND stars+? BETWEEN 0 AND 9223372036854775807 RETURNING stars",
+                                   (-stars, uid, -stars))
+            balance = await cur.fetchone()
+            await cur.close()
+            if balance is None:
+                raise HTTPException(409, "PAID_REACTION_TRANSFER_FAILED")
+            sender_balance = balance[0]
+            await db.execute("""INSERT INTO economy_transactions
+                (telegram_id,asset,amount,balance_after,reason,admin_id,created_at) VALUES(?,'stars',?,?,?,NULL,?)""",
+                (uid, -stars, sender_balance, reason, now))
             await db.execute("INSERT INTO channel_paid_reactions VALUES(?,?,?,?,?,?)",
                              (uid, key, channel_id, message_id, stars, sender_balance))
+            cur = await db.execute("SELECT COALESCE(SUM(stars),0) FROM channel_paid_reactions WHERE channel_id=? AND message_id=?",
+                                   (channel_id, message_id))
+            total_stars = int((await cur.fetchone())[0])
             await db.commit()
-        return {"stars": stars, "balance_after": sender_balance}
+        return {"stars": stars, "balance_after": sender_balance, "total_stars": total_stars}
 
     @router.put("/api/channels/{channel_id}")
     @router.patch("/api/channels/{channel_id}")
@@ -11201,6 +11243,33 @@ def build_messenger_router(
             if contact:
                 item.update(zip(("contact_name", "contact_phone", "contact_email", "contact_first_name", "contact_last_name", "contact_vcard"), contact))
 
+    async def attach_paid_reactions(items: list[dict[str, Any]], channel_id: int, user_id: int) -> None:
+        """Сумма звёзд платных реакций у каждого поста канала.
+
+        Платная реакция живёт в отдельной таблице `channel_paid_reactions`, а не в
+        `message_reactions`: там считается число реакций, а здесь важна сумма звёзд.
+        Клиент рисует её отдельным чипом, поэтому в выдачу кладём `paid_stars` и
+        `my_paid_stars` (0 — пользователь ещё не платил за этот пост).
+        """
+        message_ids = [int(item["id"]) for item in items if item.get("id") is not None]
+        if not message_ids:
+            return
+        placeholders = ",".join("?" for _ in message_ids)
+        async with aiosqlite.connect(db_path()) as db:
+            cur = await db.execute(
+                "SELECT message_id,COALESCE(SUM(stars),0),"
+                "COALESCE(SUM(CASE WHEN sender_id=? THEN stars ELSE 0 END),0) "
+                f"FROM channel_paid_reactions WHERE channel_id=? AND message_id IN ({placeholders}) "
+                "GROUP BY message_id",
+                (user_id, channel_id, *message_ids),
+            )
+            totals = {int(row[0]): (int(row[1]), int(row[2])) for row in await cur.fetchall()}
+        for item in items:
+            total, mine = totals.get(int(item["id"]), (0, 0))
+            if total > 0:
+                item["paid_stars"] = total
+                item["my_paid_stars"] = mine
+
     def parse_history_ids(value: str | None, after_id: int, before_id: int, wait_seconds: int) -> list[int] | None:
         # Bounded point lookup uses exactly the same authorization and rendering
         # as history; it is not a second, less restrictive message endpoint.
@@ -11297,6 +11366,7 @@ def build_messenger_router(
         if not after_id:
             items.reverse()
         await attach_my_reactions(items, "channel", channel_id, int(user["telegram_id"]))
+        await attach_paid_reactions(items, channel_id, int(user["telegram_id"]))
         return {"messages": items}
 
     def parse_reply_id(payload: dict[str, Any]) -> int | None:
@@ -11466,6 +11536,7 @@ def build_messenger_router(
         items = [dict(row) for row in rows]
         items.reverse()
         await attach_my_reactions(items, "channel", channel_id, int(user["telegram_id"]))
+        await attach_paid_reactions(items, channel_id, int(user["telegram_id"]))
         return {"query": term, "messages": items, "count": len(items), "has_more": len(items) == 100}
 
     @router.post("/api/channels/{channel_id}/messages/quote/v1", status_code=201)

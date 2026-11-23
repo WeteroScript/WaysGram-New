@@ -1746,11 +1746,15 @@ def test_channel_paid_reactions_are_opt_in_atomic_and_idempotent(env):
             assert (await client.put(base + '/paid-reactions', headers=reader, json={'enabled': True})).status_code == 404
             assert (await client.put(base + '/paid-reactions', headers=owner, json={'enabled': True})).status_code == 200
             results = await asyncio.gather(*(client.post(url, headers=key, json={'stars': 5}) for _ in range(2)))
-            assert [r.json() for r in results] == [{'stars': 5, 'balance_after': 15}] * 2
+            assert [r.json() for r in results] == [{'stars': 5, 'balance_after': 15, 'total_stars': 5}] * 2
             assert (await client.post(url, headers=key, json={'stars': 6})).status_code == 409
             assert (await client.post(url, headers={**reader, 'Idempotency-Key': 'paid-reaction-0002'}, json={'stars': 16})).status_code == 409
             assert (await client.get(url, headers=owner)).json() == {'total_stars': 5, 'my_stars': 0}
             assert (await client.get(url, headers=reader)).json() == {'total_stars': 5, 'my_stars': 5}
+            posted = (await client.get(base + '/messages', headers=reader)).json()['messages'][-1]
+            assert (posted['paid_stars'], posted['my_paid_stars']) == (5, 5)
+            seen_by_owner = (await client.get(base + '/messages', headers=owner)).json()['messages'][-1]
+            assert (seen_by_owner['paid_stars'], seen_by_owner['my_paid_stars']) == (5, 0)
             assert (await client.get(base + '/analytics', headers=reader)).status_code == 404
             assert (await client.get(base + '/analytics?days=999', headers=owner)).status_code == 422
             analytics = (await client.get(base + '/analytics?days=7', headers=owner)).json()
@@ -1760,8 +1764,38 @@ def test_channel_paid_reactions_are_opt_in_atomic_and_idempotent(env):
             analytics = (await client.get(base + '/analytics?days=7', headers=owner)).json()
             assert (analytics['published_posts_remaining'], analytics['paid_reaction_stars']) == (0, 5)
         async with aiosqlite.connect(path) as db:
+            # Платная реакция только списывается с отправителя: владельцу канала ничего не начисляется.
             cur = await db.execute("SELECT telegram_id,amount FROM economy_transactions WHERE reason LIKE 'channel_paid_reaction:%' ORDER BY telegram_id")
-            assert await cur.fetchall() == [(101, 5), (102, -5)]
+            assert await cur.fetchall() == [(102, -5)]
+            cur = await db.execute('SELECT stars FROM accounts WHERE telegram_id=102')
+            assert (await cur.fetchone())[0] == 15
+
+    run(scenario())
+
+
+def test_channel_paid_direct_messages_price_is_owner_only(env):
+    _, app = env
+
+    async def scenario():
+        async with await client_for(app) as client:
+            owner, reader = headers(101), headers(102)
+            channel = await client.post('/api/channels', headers=owner,
+                                        json={'title': 'Paid DMs', 'username': 'paid_dm_news', 'is_public': True})
+            base = f"/api/channels/{channel.json()['id']}"
+            url = base + '/paid-messages'
+            assert (await client.put(url, headers=reader, json={'enabled': True, 'stars': 100})).status_code == 403
+            assert (await client.put(url, headers=owner, json={'enabled': True, 'stars': 0})).status_code == 400
+            assert (await client.put(url, headers=owner, json={'enabled': 'yes', 'stars': 10})).status_code == 400
+            assert (await client.put(url, headers=owner, json={'enabled': True, 'stars': 10001})).status_code == 400
+            saved = await client.put(url, headers=owner, json={'enabled': True, 'stars': 10000})
+            assert saved.status_code == 200
+            assert saved.json() == {'paid_messages_enabled': True, 'send_paid_messages_stars': 10000}
+            detail = (await client.get(base, headers=owner)).json()
+            assert (detail['paid_messages_enabled'], detail['send_paid_messages_stars']) == (True, 10000)
+            # Читатель видит цену, но менять её не может.
+            assert (await client.get(base, headers=reader)).json()['send_paid_messages_stars'] == 10000
+            off = await client.put(url, headers=owner, json={'enabled': False, 'stars': 10000})
+            assert off.json() == {'paid_messages_enabled': False, 'send_paid_messages_stars': 0}
 
     run(scenario())
 
