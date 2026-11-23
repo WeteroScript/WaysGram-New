@@ -94,6 +94,16 @@ class ContactNameChecks(unittest.TestCase):
         self.assertLess(block.index("WaysGramTransport.ENABLED"), block.index("PhoneFormat"),
                         "номер телефона должен оставаться последним вариантом — и не для WaysGram")
 
+    def test_chat_header_does_not_fall_back_to_phone_for_waysgram(self):
+        """Штатная ветка Telegram печатает номер, если пользователя нет в контактах."""
+        chat = self.source("ui/ChatActivity.java")
+        marker = "PhoneFormat.getInstance().format(\"+\" + currentUser.phone)"
+        self.assertIn(marker, chat)
+        condition = chat[chat.rindex("} else if (", 0, chat.index(marker)):]
+        condition = condition[:condition.index("{")]
+        self.assertIn("!org.telegram.tgnet.WaysGramTransport.ENABLED", condition,
+                      "для WaysGram шапка чата берёт имя, а не номер телефона")
+
 
 class PlushPepeChecks(unittest.TestCase):
     @classmethod
@@ -132,13 +142,20 @@ class PlushPepeChecks(unittest.TestCase):
         self.assertNotIn("80_80_nolimit_pcache", block,
                          "pcache оставлял ячейку с синтетическим артом пустой")
 
-    def test_model_square_in_the_card_is_bigger(self):
+    def test_model_square_and_caption_offset_use_one_constant(self):
+        """Подпись «Название #номер» начинается под квадратом модели.
+
+        Раньше квадрат увеличили до 208 dp, а отступ подписи в onSwitchPage остался
+        зашитым (160): подпись уезжала под модель, и «Plush Pepe» закрывали лапы.
+        """
         sheet = self.archive.read(BASE + "ui/Stars/StarGiftSheet.java").decode("utf-8")
-        self.assertRegex(sheet, r"MODEL_IMAGE_SIZE_DP = (2\d\d|\d{3});")
         size = int(re.search(r"MODEL_IMAGE_SIZE_DP = (\d+);", sheet).group(1))
-        self.assertGreater(size, 160, "модель в карточке была слишком мелкой")
-        self.assertIn("createFrame(MODEL_IMAGE_SIZE_DP, MODEL_IMAGE_SIZE_DP", sheet,
-                      "квадрат модели в карточке должен использовать новый размер")
+        self.assertEqual(size, 160, "квадрат модели — штатный размер Telegram")
+        self.assertIn("createFrame(MODEL_IMAGE_SIZE_DP, MODEL_IMAGE_SIZE_DP", sheet)
+        self.assertNotIn("dp(24 + 160)", sheet, "отступ подписи должен считаться от константы")
+        self.assertNotIn("dp(8 + 160 + 2)", sheet, "отступ подписи должен считаться от константы")
+        self.assertIn("layoutLayoutParams[i].topMargin = dp(24 + MODEL_IMAGE_SIZE_DP);", sheet)
+        self.assertIn("layoutLayoutParams[i].topMargin = dp(8 + MODEL_IMAGE_SIZE_DP + 2);", sheet)
 
     def test_inventory_always_prefers_the_bundled_model(self):
         controller = self.archive.read(
