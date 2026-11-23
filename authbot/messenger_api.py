@@ -18506,6 +18506,9 @@ def build_messenger_router(
         body = payload.get("body")
         if not isinstance(body, str) or not body.strip():
             raise HTTPException(400, "COMMENT_TEXT_REQUIRED")
+        if "send_as_id" in payload:
+            # В треде комментариев отправитель фиксирован: пост идёт от канала, ответы — от людей.
+            raise HTTPException(400, "INVALID_GROUP_SEND_IDENTITY")
         async with aiosqlite.connect(db_path()) as db:
             await db.execute("BEGIN IMMEDIATE")
             group = await channel_discussion_access(db, channel_id, post_id, uid)
@@ -18574,8 +18577,11 @@ def build_messenger_router(
             body = _message_body(body_value) if body_value.strip() or not media_id else ""
             entities = []
         identity = payload.get("send_as_id")
+        # Альтернативный отправитель разрешён и с вложением: колонка send_as_id живёт в той же
+        # строке group_messages, что и медиа/карточка/контакт/геометка. Запрещены только
+        # комментарии канала и топики — там отправитель фиксирован.
         if "send_as_id" in payload and (type(identity) is not int or not 0 <= identity < 2**63
-                or discussion is not None or topic_id is not None or media_id or card or contact_payload or location_payload):
+                or discussion is not None or topic_id is not None):
             raise HTTPException(400, "INVALID_GROUP_SEND_IDENTITY")
         now = int(time.time())
         scope = f"/api/groups/{group_id}/messages"
