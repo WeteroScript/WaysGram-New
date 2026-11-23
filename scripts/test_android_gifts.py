@@ -39,7 +39,10 @@ class AndroidGiftSourceChecks(unittest.TestCase):
     def test_profile_uses_actual_owner_and_supports_nested_scrolling(self):
         layout = self.source("ui/Components/SharedMediaLayout.java")
         self.assertIn('getArguments().getLong("user_id", 0)', layout)
-        self.assertIn('waysGramProfileOwner == profileActivity.getUserConfig().getClientUserId() ? "Мои подарки" : "Подарки"', layout)
+        # Подпись вкладки берётся из ресурсов (values/values-ru), а не из русского литерала:
+        # владельцу — «Мои подарки», остальным — «Подарки».
+        self.assertIn('waysGramProfileOwner == profileActivity.getUserConfig().getClientUserId()', layout)
+        self.assertIn('R.string.WaysGramMyGifts : R.string.WaysGramGifts', layout)
         self.assertIn('waysGramGiftsContainer.getCurrentListView()', layout)
         self.assertIn('waysGramGiftsContainer.setVisibleHeight(height)', layout)
         self.assertIn('waysGramGiftsContainer.canScroll(forward)', layout)

@@ -18282,7 +18282,7 @@ def build_messenger_router(
                                   (SELECT original_name FROM media_assets WHERE id=group_messages.media_id) AS media_name,
                                   (SELECT media_kind FROM media_assets WHERE id=group_messages.media_id) AS media_kind,
                                   (SELECT media_metadata FROM media_assets WHERE id=group_messages.media_id) AS media_metadata
-                           FROM group_messages WHERE group_id=? AND topic_id IS NULL AND id>? AND id>? ORDER BY id ASC LIMIT ?""",
+                           FROM group_messages WHERE group_id=? AND topic_id IS NULL AND id>? AND id>? AND NOT EXISTS (SELECT 1 FROM channel_post_discussions d WHERE d.group_id=group_messages.group_id AND d.root_message_id=group_messages.id) ORDER BY id ASC LIMIT ?""",
                         (group_id, after_id, history_floor, limit),
                     )
                 else:
@@ -18304,7 +18304,7 @@ def build_messenger_router(
                                   (SELECT original_name FROM media_assets WHERE id=group_messages.media_id) AS media_name,
                                   (SELECT media_kind FROM media_assets WHERE id=group_messages.media_id) AS media_kind,
                                   (SELECT media_metadata FROM media_assets WHERE id=group_messages.media_id) AS media_metadata
-                           FROM group_messages WHERE group_id=? AND topic_id IS NULL AND (?=0 OR id<?) AND id>?""" + id_filter + " ORDER BY id DESC LIMIT ?",
+                           FROM group_messages WHERE group_id=? AND topic_id IS NULL AND (?=0 OR id<?) AND id>? AND NOT EXISTS (SELECT 1 FROM channel_post_discussions d WHERE d.group_id=group_messages.group_id AND d.root_message_id=group_messages.id)""" + id_filter + " ORDER BY id DESC LIMIT ?",
                         (group_id, before_id, before_id, history_floor) + tuple(selected_ids or ()) + (selected_limit,),
                     )
                 rows = await cur.fetchall()

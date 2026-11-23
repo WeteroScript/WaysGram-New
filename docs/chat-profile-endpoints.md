@@ -60,27 +60,43 @@
 
 APK не собирался, проверка на устройстве не выполнялась.
 
-## Что осталось из статических проверок
+## Статические проверки закрыты
 
-`scripts/test_android_messaging.py` и `scripts/test_android_gifts.py` содержат 12 проверок,
-которые падают и на исходном архиве ветки (то есть архив отстаёт от тестов). Это и есть
-следующий список работ по каналам и группам:
+Раньше здесь висел список 12 падающих проверок `scripts/test_android_messaging.py` и
+`scripts/test_android_gifts.py`. В этом заходе закрыты все; полный прогон
+`pytest scripts/ -q` даёт **168 passed**. Что появилось в исходниках:
 
-1. `test_channel_analytics_is_owner_only_and_reads_real_revenue` — аналитика канала только
-   владельцу и с реальной выручкой.
-2. `test_channel_creation_and_subscriber_requests_use_waysgram_routes` — создание канала и
-   заявки подписчиков через роуты WaysGram.
-3. `test_channel_discussions_use_owned_groups_and_real_comment_threads` — обсуждения через
-   собственные группы и настоящие треды комментариев.
-4. `test_channel_inbox_uses_distinct_owner_and_reader_flows_and_confirms_fee` — «Входящие»
-   канала: отдельные сценарии владельца и читателя, подтверждение цены.
-5. `test_group_analytics_uses_group_endpoint_and_activity_metrics` — аналитика группы.
-6. `test_local_reaction_picker_and_bubble_fallback`,
-   `test_paid_channel_reactions_require_confirmation_and_reuse_pending_key`,
-   `test_paid_direct_text_confirms_exact_fee_and_preserves_retry` — реакции и платные действия.
-7. `test_secret_numbers_are_grouped_and_valid_at_login` — формат секретных номеров.
-8. `test_typing_bridge_is_scoped_serial_and_ephemeral` — индикатор набора.
-9. `test_waysgram_chat_refresh_does_not_request_telegram_boosts` — обновление чата без
-   запросов бустов Telegram.
-10. `test_profile_uses_actual_owner_and_supports_nested_scrolling` (подарки) — профиль и
-    вложенный скролл.
+* **Аналитика канала и группы.** В `ChatEditActivity` у владельца канала появились строки
+  «Платные реакции», «Статистика канала» и «Входящие канала», у владельца группы —
+  «Статистика группы». Канал вызывает `WaysGramPaidReactions.showAnalytics` (7/30/90 дней,
+  выручка по реакциям, платному медиа, подпискам и входящим), группа —
+  `showGroupAnalytics` (`GET /api/groups/{id}/analytics`: `messages_remaining`,
+  `unique_authors`).
+* **Входящие канала** открываются отдельной строкой настроек (`WaysGramChannelInbox.settings`),
+  сам экран — по-прежнему из меню чата.
+* **Обсуждения.** В контекстном меню поста канала появился пункт «Группа обсуждений»:
+  `WaysGramDiscussions.open(this, currentAccount, currentChat.id, post.getId())` открывает тред
+  комментариев. Также в меню появился пункт «Платные реакции» —
+  `WaysGramPaidReactions.showPost(...)`.
+* **Платные сообщения.** «Сообщения» в приватности при включённом транспорте открывают
+  редактор `WaysGramPaidDm.settings` (0–10000 Stars, список исключений), сохранение идёт через
+  `PUT /api/me/message-fee`.
+* **Бусты и звонки Telegram** скрыты, пока работает WaysGram-транспорт: гейты
+  `!WaysGramTransport.ENABLED && ChatObject.isBoostSupported(...)` в шапке чата и
+  `!WaysGramTransport.ENABLED && ChatObject.isChannelAndNotMegaGroup(...)` для строки
+  «Статистика и бусты» в настройках, `!waysGramBroadcast && ChatObject.canManageCalls(...)` в
+  профиле канала и группы.
+* **Реакции.** Локальное меню реакций доступно и без серверного списка
+  (`isReactionsAvailable = waysGramReactionMenu`), нативный просмотрщик реакций скрыт
+  (`isReactionsViewAvailable = !WaysGramTransport.ENABLED`), в палитру добавлена 😢.
+* **Индикатор набора** поддерживает обычные группы (`TL_inputPeerChat`), сервер уже принимает
+  `scope=group`.
+* **Секретные номера** проверяются `WaysGramMapper.isSecretNumberDigits(text)` на вводе логина.
+
+Заодно исправлен серверный баг, из-за которого корневое сообщение треда (копия поста канала в
+группе обсуждений) попадало в обычную историю группы: теперь `GET /api/groups/{id}/messages`
+его пропускает (`NOT EXISTS` по `channel_post_discussions`), а тред комментариев продолжает
+работать. Тест `test_channel_discussion_comments_use_group_permissions_and_moderation` зелёный.
+
+APK не собирался, на устройстве ничего не проверялось — только статические проверки исходников
+и серверные pytest.
