@@ -26,10 +26,56 @@ permissions:
   # dropped download leaves a truncated zip ("invalid stored block lengths").
   contents: write
   pull-requests: write
+  actions: read
 
 jobs:
+  fetch-apk:
+    name: Fetch already built APK artifact
+    if: hashFiles('.github/apk-fetch-mode') != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Read fetch parameters
+        id: params
+        shell: bash
+        run: |
+          echo "run_id=$(sed -n '1p' .github/apk-fetch-mode)" >> "$GITHUB_OUTPUT"
+          echo "artifact=$(sed -n '2p' .github/apk-fetch-mode)" >> "$GITHUB_OUTPUT"
+
+      - name: Download built APK artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ steps.params.outputs.artifact }}
+          run-id: ${{ steps.params.outputs.run_id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          path: /tmp/waysgram-apk
+
+      - name: Split and commit APK parts
+        shell: bash
+        run: |
+          set -euo pipefail
+          APK="/tmp/waysgram-apk/WaysGram.apk"
+          test -s "$APK"
+          test -s /tmp/waysgram-apk/WaysGram.apk.sha256
+          mkdir -p apk-parts
+          rm -f apk-parts/apk-part-* apk-parts/WaysGram.apk.sha256
+          split -b 40m "$APK" apk-parts/apk-part-
+          cp /tmp/waysgram-apk/WaysGram.apk.sha256 apk-parts/WaysGram.apk.sha256
+          ls -lh apk-parts
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add apk-parts
+          git commit -m "Fetch APK from run ${{ steps.params.outputs.run_id }}"
+          git push origin "HEAD:$GITHUB_REF_NAME"
+
   build:
     name: Build Afat release APK
+    if: hashFiles('.github/apk-fetch-mode') == ''
     runs-on: ubuntu-latest
     timeout-minutes: 240
 
