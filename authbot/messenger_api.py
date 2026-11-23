@@ -1963,6 +1963,11 @@ async def init_messenger_storage(database_path: Path) -> None:
             await db.execute("ALTER TABLE channels ADD COLUMN emoji_status_id INTEGER NOT NULL DEFAULT 0")
         if "antispam" not in channel_columns:
             await db.execute("ALTER TABLE channels ADD COLUMN antispam INTEGER NOT NULL DEFAULT 0")
+        for column, ddl in (("location_latitude", "REAL"), ("location_longitude", "REAL"),
+                            ("location_label", "TEXT NOT NULL DEFAULT ''"),
+                            ("location_address", "TEXT NOT NULL DEFAULT ''")):
+            if column not in channel_columns:
+                await db.execute(f"ALTER TABLE channels ADD COLUMN {column} {ddl}")
         await db.execute("""CREATE TABLE IF NOT EXISTS channel_admin_log (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             channel_id INTEGER NOT NULL,
@@ -1988,6 +1993,11 @@ async def init_messenger_storage(database_path: Path) -> None:
             await db.execute(f"ALTER TABLE {db_split.SCHEMA}.chat_groups ADD COLUMN members_hidden INTEGER NOT NULL DEFAULT 0")
         if "forum_enabled" not in chat_group_columns:
             await db.execute(f"ALTER TABLE {db_split.SCHEMA}.chat_groups ADD COLUMN forum_enabled INTEGER NOT NULL DEFAULT 0")
+        for column, ddl in (("location_latitude", "REAL"), ("location_longitude", "REAL"),
+                            ("location_label", "TEXT NOT NULL DEFAULT ''"),
+                            ("location_address", "TEXT NOT NULL DEFAULT ''")):
+            if column not in chat_group_columns:
+                await db.execute(f"ALTER TABLE {db_split.SCHEMA}.chat_groups ADD COLUMN {column} {ddl}")
         if "pre_history_hidden" not in chat_group_columns:
             await db.execute(f"ALTER TABLE {db_split.SCHEMA}.chat_groups ADD COLUMN pre_history_hidden INTEGER NOT NULL DEFAULT 0")
         if "join_request" not in chat_group_columns:
@@ -4872,6 +4882,27 @@ def build_messenger_router(
              json.dumps(response, ensure_ascii=False, separators=(",", ":")), now),
         )
 
+    def validated_location(payload: dict[str, Any] | None) -> dict[str, Any]:
+        if not isinstance(payload, dict):
+            raise HTTPException(400, "LOCATION_INVALID")
+        latitude, longitude = payload.get("latitude"), payload.get("longitude")
+        if (type(latitude) not in (int, float) or type(longitude) not in (int, float)
+                or not -90 <= float(latitude) <= 90 or not -180 <= float(longitude) <= 180):
+            raise HTTPException(400, "LOCATION_INVALID")
+        label = payload.get("label", "")
+        address = payload.get("address", "")
+        if (not isinstance(label, str) or len(label.strip()) > 64
+                or not isinstance(address, str) or len(address.strip()) > 128):
+            raise HTTPException(400, "LOCATION_INVALID")
+        return {"latitude": float(latitude), "longitude": float(longitude),
+                "label": label.strip(), "address": address.strip()}
+
+    def chat_location_payload(row: dict[str, Any]) -> dict[str, Any] | None:
+        if row.get("location_latitude") is None or row.get("location_longitude") is None:
+            return None
+        return {"latitude": row["location_latitude"], "longitude": row["location_longitude"],
+                "label": row.get("location_label") or "", "address": row.get("location_address") or ""}
+
     async def channel_row(channel_id: int) -> dict[str, Any]:
         async with aiosqlite.connect(db_path()) as db:
             db.row_factory = aiosqlite.Row
@@ -4883,6 +4914,7 @@ def build_messenger_router(
                           ch.participants_hidden,ch.pre_history_hidden,ch.join_to_send,ch.join_request,
                           ch.no_forwards,ch.color_id,ch.background_emoji_id,
                           ch.profile_color_id,ch.profile_background_emoji_id,ch.emoji_status_id,ch.antispam,
+                          ch.location_latitude,ch.location_longitude,ch.location_label,ch.location_address,
                           COALESCE(ch.paid_messages_enabled,0) AS paid_messages_enabled,
                           COALESCE(ch.paid_messages_stars,0) AS paid_messages_stars,
                           (SELECT d.group_id FROM channel_discussion_groups d WHERE d.channel_id=ch.id) AS discussion_group_id,
@@ -9678,7 +9710,40 @@ def build_messenger_router(
         channel["paid_messages_enabled"] = bool(channel.get("paid_messages_enabled") or 0)
         channel["send_paid_messages_stars"] = int(channel.get("paid_messages_stars") or 0)
         channel["labels"] = await entity_labels("channel", channel_id)
+        channel["location"] = chat_location_payload(channel)
+        channel["can_set_location"] = channel.get("owner_telegram_id") == int(user["telegram_id"]) \
+            or (int(channel.get("admin_rights") or 0) & 64) == 64
         return channel
+
+    @router.put("/api/channels/{channel_id}/location")
+    @router.delete("/api/channels/{channel_id}/location")
+    async def set_channel_location(channel_id: int, request: Request, payload: dict[str, Any] | None = None,
+                                   authorization: str | None = Header(default=None)):
+        """Геолокация канала: точка на карте плюс подпись и адрес (см. channels.editLocation)."""
+        uid = int((await current_user(authorization))["telegram_id"])
+        clear = request.method == "DELETE"
+        values = {} if clear else validated_location(payload)
+        async with aiosqlite.connect(db_path()) as db:
+            await db.execute("BEGIN IMMEDIATE")
+            cur = await db.execute("SELECT owner_telegram_id FROM channels WHERE id=?", (channel_id,))
+            row = await cur.fetchone()
+            if row is None:
+                raise HTTPException(404, "CHANNEL_NOT_FOUND")
+            cur = await db.execute("SELECT rights FROM channel_admins WHERE channel_id=? AND telegram_id=?",
+                                   (channel_id, uid))
+            rights = await cur.fetchone()
+            if row[0] != uid and (rights is None or (int(rights[0]) & 64) != 64):
+                raise HTTPException(403, "CHANNEL_ADMIN_REQUIRED")
+            if clear:
+                await db.execute("UPDATE channels SET location_latitude=NULL,location_longitude=NULL,"
+                                 "location_label='',location_address='' WHERE id=?", (channel_id,))
+            else:
+                await db.execute("UPDATE channels SET location_latitude=?,location_longitude=?,"
+                                 "location_label=?,location_address=? WHERE id=?",
+                                 (values["latitude"], values["longitude"], values["label"],
+                                  values["address"], channel_id))
+            await db.commit()
+        return {"id": channel_id, "location": None if clear else values}
 
     async def require_channel_inbox_owner(db: Any, channel_id: int, uid: int) -> None:
         cur = await db.execute("SELECT 1 FROM channels WHERE id=? AND owner_telegram_id=?", (channel_id, uid))
@@ -16989,6 +17054,7 @@ def build_messenger_router(
                           g.avatar_media_id,g.no_forwards,
                           g.slow_mode_seconds,g.members_hidden,g.default_send_restrictions,g.anti_spam_enabled,
                           g.pre_history_hidden,g.join_request,COALESCE(g.forum_enabled,0) AS forum_enabled,
+                          g.location_latitude,g.location_longitude,g.location_label,g.location_address,
                           (SELECT COUNT(*) FROM group_members m WHERE m.group_id=g.id) AS member_count
                    FROM chat_groups g WHERE g.id=?""",
                 (group_id,),
@@ -17024,6 +17090,8 @@ def build_messenger_router(
         result["labels"] = await entity_labels("group", group_id)
         result["my_role"] = membership["role"]
         result["admin_rights"] = membership["admin_rights"] if membership["role"] in ("owner", "admin") else 0
+        result["location"] = chat_location_payload(result)
+        result["can_set_location"] = group_has_right(membership, 1)
         result["my_telegram_id"] = uid
         result["requests_pending"] = pending
         result["recent_requesters"] = recent_requesters
@@ -17033,6 +17101,31 @@ def build_messenger_router(
             item["labels"] = await entity_labels("account", int(item["telegram_id"]))
             result["members"].append(item)
         return result
+
+    @router.put("/api/groups/{group_id}/location")
+    @router.delete("/api/groups/{group_id}/location")
+    async def set_group_location(group_id: int, request: Request, payload: dict[str, Any] | None = None,
+                                 authorization: str | None = Header(default=None)):
+        """Геолокация группы: то же, что channels.editLocation для мегагруппы."""
+        uid = int((await current_user(authorization))["telegram_id"])
+        clear = request.method == "DELETE"
+        values = {} if clear else validated_location(payload)
+        async with aiosqlite.connect(db_path()) as db:
+            await db.execute("BEGIN IMMEDIATE")
+            membership = await require_group_member(db, group_id, uid)
+            if not group_has_right(membership, 1):
+                raise HTTPException(403, "GROUP_ADMIN_REQUIRED")
+            table = f"{db_split.SCHEMA}.chat_groups"
+            if clear:
+                await db.execute(f"UPDATE {table} SET location_latitude=NULL,location_longitude=NULL,"
+                                 "location_label='',location_address='' WHERE id=?", (group_id,))
+            else:
+                await db.execute(f"UPDATE {table} SET location_latitude=?,location_longitude=?,"
+                                 "location_label=?,location_address=? WHERE id=?",
+                                 (values["latitude"], values["longitude"], values["label"],
+                                  values["address"], group_id))
+            await db.commit()
+        return {"id": group_id, "location": None if clear else values}
 
     def group_topic_title(value: Any) -> str:
         if not isinstance(value, str) or not 1 <= len(value.strip()) <= 80 or any(ord(ch) < 32 for ch in value):
