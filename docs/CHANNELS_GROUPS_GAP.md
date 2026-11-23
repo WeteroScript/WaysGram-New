@@ -288,3 +288,14 @@ Telegram-клиент уже умеет все эти экраны; менять
 3. Геолокация канала (`channels.editLocation`), передача владения (`channels.editCreator`) и цвет
    профиля группы (`channels.updateColor`).
 4. Проверка миграции на устройстве: ветка собрана без компилятора, нужен прогон сборки APK.
+
+## Профиль чата: закрыто в последнем заходе
+
+`messages.getOnlines`, `getCommonChats`, `getPeerSettings`, `reportSpam` и
+`getAdminsWithInvites` больше не дают «не поддерживается»: у них есть серверные ответы и
+разбор в транспорте. Подробности и пути эндпоинтов — `docs/chat-profile-endpoints.md`.
+
+Остаток по каналам и группам теперь измеряется статическими проверками: 12 тестов
+`scripts/test_android_messaging.py` и `scripts/test_android_gifts.py` падают и на исходном
+архиве ветки (архив отстаёт от тестов). Их список с расшифровкой — в конце
+`docs/chat-profile-endpoints.md`.

@@ -11252,6 +11252,26 @@ def build_messenger_router(
             await db.commit()
         return {"banned": banned, "until_date": until_date}
 
+    @router.get("/api/channels/{channel_id}/admins-with-invites")
+    async def channel_admins_with_invites(channel_id: int,
+                                          authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        uid = int((await current_user(authorization))["telegram_id"])
+        if not await can_manage_channel(channel_id, uid):
+            raise HTTPException(403, "CHAT_ADMIN_REQUIRED")
+        async with aiosqlite.connect(db_path()) as db:
+            db.row_factory = aiosqlite.Row
+            cur = await db.execute("""SELECT x.telegram_id,a.username,a.display_name,a.avatar_media_id,
+                       (SELECT COUNT(*) FROM channel_invites i WHERE i.channel_id=? AND i.created_by=x.telegram_id
+                          AND i.revoked_at IS NULL) AS invites_count,
+                       (SELECT COUNT(*) FROM channel_invites i WHERE i.channel_id=? AND i.created_by=x.telegram_id
+                          AND i.revoked_at IS NOT NULL) AS revoked_invites_count
+                FROM (SELECT owner_telegram_id AS telegram_id FROM channels WHERE id=?
+                      UNION SELECT telegram_id FROM channel_admins WHERE channel_id=?) x
+                LEFT JOIN accounts a ON a.telegram_id=x.telegram_id
+                ORDER BY x.telegram_id""", (channel_id, channel_id, channel_id, channel_id))
+            rows = await cur.fetchall()
+        return {"admins": [dict(row) for row in rows]}
+
     @router.get("/api/channels/{channel_id}/admins")
     async def list_channel_admins(
         channel_id: int,
@@ -12431,6 +12451,31 @@ def build_messenger_router(
                 raise HTTPException(404, "Опрос не найден")
             return await _poll_votes_page(db, "dm", message_id, _poll_option_bytes(option), offset, limit)
 
+    @router.get("/api/users/{target_id}/common-chats")
+    async def common_chats(target_id: int, limit: int = 100,
+                           authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        uid = int((await current_user(authorization))["telegram_id"])
+        if target_id == uid:
+            return {"count": 0, "chats": []}
+        async with aiosqlite.connect(db_path()) as db:
+            db.row_factory = aiosqlite.Row
+            cur = await db.execute("""SELECT g.id,g.title,g.owner_telegram_id,g.avatar_media_id,
+                       (SELECT COUNT(*) FROM group_members x WHERE x.group_id=g.id) AS member_count,
+                       gm.role AS my_role,gm.admin_rights AS admin_rights
+                FROM chat_groups g
+                JOIN group_members gm ON gm.group_id=g.id AND gm.telegram_id=?
+                JOIN group_members other ON other.group_id=g.id AND other.telegram_id=?
+                ORDER BY g.title,g.id LIMIT ?""",
+                (uid, target_id, max(1, min(200, limit))))
+            rows = await cur.fetchall()
+        chats = []
+        for row in rows:
+            item = dict(row)
+            item["my_role"] = item["my_role"] or "member"
+            item.setdefault("created_at", 0)
+            chats.append(item)
+        return {"count": len(chats), "chats": chats}
+
     @router.post("/api/reports", status_code=201)
     async def report_content(payload: dict[str, Any],
                              authorization: str | None = Header(default=None)) -> dict[str, Any]:
@@ -12441,7 +12486,8 @@ def build_messenger_router(
         option = payload.get("option") or ""
         text = payload.get("message") or ""
         if (scope not in ("dm", "group", "channel") or type(peer_id) is not int or not 0 < peer_id < 2**63
-                or not isinstance(message_ids, list) or not message_ids or len(message_ids) > 100
+                or not isinstance(message_ids, list) or len(message_ids) > 100
+                or (not message_ids and not option)
                 or any(type(item) is not int or not 0 < item < 2**63 for item in message_ids)
                 or not isinstance(option, str) or len(option) > 64
                 or not isinstance(text, str) or len(text) > 500):
@@ -12451,10 +12497,10 @@ def build_messenger_router(
             await db.executemany(
                 """INSERT INTO message_reports(scope,peer_id,message_id,reporter_telegram_id,option,text,created_at)
                    VALUES(?,?,?,?,?,?,?)""",
-                [(scope, peer_id, message_id, uid, option, text, now) for message_id in message_ids],
+                [(scope, peer_id, message_id, uid, option, text, now) for message_id in (message_ids or [0])],
             )
             await db.commit()
-        return {"reported": len(message_ids)}
+        return {"reported": len(message_ids) or 1}
 
     @router.delete("/api/channels/{channel_id}/messages/{message_id}/reactions")
     async def channel_remove_participant_reactions(
@@ -17560,6 +17606,38 @@ def build_messenger_router(
                     VALUES(?,?,?,?,?,1)""", (hashlib.sha256(token.encode()).hexdigest(), group_id, uid, created_at, token))
             await db.commit()
         return {"invite_link": _invite_share_origin(request) + f"/api/groups/invites/{token}", "created_at": created_at}
+
+    @router.get("/api/groups/{group_id}/admins-with-invites")
+    async def group_admins_with_invites(group_id: int,
+                                        authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        uid = int((await current_user(authorization))["telegram_id"])
+        async with aiosqlite.connect(db_path()) as db:
+            db.row_factory = aiosqlite.Row
+            membership = await require_group_member(db, group_id, uid)
+            if not group_has_right(membership, 2):
+                raise HTTPException(403, "GROUP_INVITE_USERS_REQUIRED")
+            cur = await db.execute("""SELECT x.telegram_id,a.username,a.display_name,a.avatar_media_id,
+                       (SELECT COUNT(*) FROM group_invites i WHERE i.group_id=? AND i.created_by=x.telegram_id
+                          AND i.revoked_at IS NULL) AS invites_count,
+                       (SELECT COUNT(*) FROM group_invites i WHERE i.group_id=? AND i.created_by=x.telegram_id
+                          AND i.revoked_at IS NOT NULL) AS revoked_invites_count
+                FROM (SELECT owner_telegram_id AS telegram_id FROM chat_groups WHERE id=?
+                      UNION SELECT telegram_id FROM group_members WHERE group_id=? AND role='admin') x
+                LEFT JOIN accounts a ON a.telegram_id=x.telegram_id
+                ORDER BY x.telegram_id""", (group_id, group_id, group_id, group_id))
+            rows = await cur.fetchall()
+        return {"admins": [dict(row) for row in rows]}
+
+    @router.get("/api/groups/{group_id}/onlines")
+    async def group_onlines(group_id: int, authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        uid = int((await current_user(authorization))["telegram_id"])
+        async with aiosqlite.connect(db_path()) as db:
+            await require_group_member(db, group_id, uid)
+            cur = await db.execute("""SELECT COUNT(*) FROM group_members m
+                JOIN api_user_presence p ON p.telegram_id=m.telegram_id
+                WHERE m.group_id=? AND p.last_seen_at>=?""", (group_id, int(time.time()) - 300))
+            onlines = int((await cur.fetchone())[0])
+        return {"onlines": onlines}
 
     @router.get("/api/groups/{group_id}/invites")
     async def list_group_invites(group_id: int, request: Request, admin_id: int | None = None,
