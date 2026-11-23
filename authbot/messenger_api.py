@@ -1531,6 +1531,23 @@ async def init_messenger_storage(database_path: Path) -> None:
             );
             CREATE UNIQUE INDEX IF NOT EXISTS idx_group_topics_title
                 ON group_topics(group_id,title) WHERE deleted_at IS NULL;
+            CREATE TABLE IF NOT EXISTS channel_topics (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                channel_id INTEGER NOT NULL,
+                title TEXT NOT NULL COLLATE NOCASE,
+                closed INTEGER NOT NULL DEFAULT 0 CHECK(closed IN (0,1)),
+                created_at INTEGER NOT NULL,
+                deleted_at INTEGER,
+                pinned_message_id INTEGER
+            );
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_channel_topics_title
+                ON channel_topics(channel_id,title) WHERE deleted_at IS NULL;
+            CREATE TABLE IF NOT EXISTS channel_topic_followers (
+                channel_id INTEGER NOT NULL,
+                topic_id INTEGER NOT NULL,
+                telegram_id INTEGER NOT NULL,
+                PRIMARY KEY(channel_id,topic_id,telegram_id)
+            );
             CREATE TABLE IF NOT EXISTS group_mutes (
                 group_id INTEGER NOT NULL, telegram_id INTEGER NOT NULL, until_date INTEGER NOT NULL,
                 PRIMARY KEY(group_id,telegram_id)
@@ -1910,8 +1927,20 @@ async def init_messenger_storage(database_path: Path) -> None:
         if "sponsor_stars" not in inbox_columns:
             await db.execute("ALTER TABLE main.channel_inbox_messages ADD COLUMN sponsor_stars INTEGER NOT NULL DEFAULT 0")
         cur = await db.execute(f"PRAGMA {db_split.SCHEMA}.table_info(channel_messages)")
-        if "sponsored" not in {row[1] for row in await cur.fetchall()}:
+        channel_message_columns = {row[1] for row in await cur.fetchall()}
+        if "sponsored" not in channel_message_columns:
             await db.execute(f"ALTER TABLE {db_split.SCHEMA}.channel_messages ADD COLUMN sponsored INTEGER NOT NULL DEFAULT 0")
+        # Темы канала (форум-режим): пост живёт в своей ветке, главная лента его не показывает.
+        if "topic_id" not in channel_message_columns:
+            await db.execute(f"ALTER TABLE {db_split.SCHEMA}.channel_messages ADD COLUMN topic_id INTEGER")
+        await db.execute(
+            f"CREATE INDEX IF NOT EXISTS {db_split.SCHEMA}.idx_channel_topic_messages "
+            "ON channel_messages(channel_id,topic_id,id DESC)"
+        )
+        cur = await db.execute(f"PRAGMA {db_split.SCHEMA}.table_info(channel_topics)")
+        channel_topic_columns = {row[1] for row in await cur.fetchall()}
+        if channel_topic_columns and "pinned_message_id" not in channel_topic_columns:
+            await db.execute(f"ALTER TABLE {db_split.SCHEMA}.channel_topics ADD COLUMN pinned_message_id INTEGER")
         if "scheduled_at" not in inbox_columns:
             await db.execute("ALTER TABLE main.channel_inbox_messages ADD COLUMN scheduled_at INTEGER")
         if "scheduled_by" not in inbox_columns:
@@ -9717,6 +9746,9 @@ def build_messenger_router(
         channel["location"] = chat_location_payload(channel)
         channel["can_set_location"] = channel.get("owner_telegram_id") == int(user["telegram_id"]) \
             or (int(channel.get("admin_rights") or 0) & 64) == 64
+        channel["can_manage_topics"] = channel["can_set_location"]
+        channel["can_post"] = channel.get("owner_telegram_id") == int(user["telegram_id"]) \
+            or (int(channel.get("admin_rights") or 0) & 1) == 1
         return channel
 
     @router.put("/api/channels/{channel_id}/location")
@@ -11610,7 +11642,7 @@ def build_messenger_router(
                                   (SELECT original_name FROM media_assets WHERE id=channel_messages.media_id) AS media_name,
                                   (SELECT media_kind FROM media_assets WHERE id=channel_messages.media_id) AS media_kind,
                                   (SELECT media_metadata FROM media_assets WHERE id=channel_messages.media_id) AS media_metadata, (SELECT COUNT(*) FROM channel_post_comments p WHERE p.channel_id=channel_messages.channel_id AND p.post_id=channel_messages.id) AS comments_count, (SELECT MAX(p.group_message_id) FROM channel_post_comments p WHERE p.channel_id=channel_messages.channel_id AND p.post_id=channel_messages.id) AS last_comment_id, (SELECT d.group_id FROM channel_discussion_groups d WHERE d.channel_id=channel_messages.channel_id) AS discussion_group_id
-                           FROM channel_messages WHERE channel_id=? AND id>?
+                           FROM channel_messages WHERE channel_id=? AND topic_id IS NULL AND id>?
                            ORDER BY id ASC LIMIT ?""",
                         (channel_id, after_id, limit),
                     )
@@ -11629,7 +11661,7 @@ def build_messenger_router(
                                   (SELECT original_name FROM media_assets WHERE id=channel_messages.media_id) AS media_name,
                                   (SELECT media_kind FROM media_assets WHERE id=channel_messages.media_id) AS media_kind,
                                   (SELECT media_metadata FROM media_assets WHERE id=channel_messages.media_id) AS media_metadata, (SELECT COUNT(*) FROM channel_post_comments p WHERE p.channel_id=channel_messages.channel_id AND p.post_id=channel_messages.id) AS comments_count, (SELECT MAX(p.group_message_id) FROM channel_post_comments p WHERE p.channel_id=channel_messages.channel_id AND p.post_id=channel_messages.id) AS last_comment_id, (SELECT d.group_id FROM channel_discussion_groups d WHERE d.channel_id=channel_messages.channel_id) AS discussion_group_id
-                           FROM channel_messages WHERE channel_id=? AND (?=0 OR id<?)""" + id_filter + " ORDER BY id DESC LIMIT ?",
+                           FROM channel_messages WHERE channel_id=? AND topic_id IS NULL AND (?=0 OR id<?)""" + id_filter + " ORDER BY id DESC LIMIT ?",
                         (channel_id, before_id, before_id) + tuple(selected_ids or ()) + (selected_limit,),
                     )
                 rows = await cur.fetchall()
@@ -12211,6 +12243,8 @@ def build_messenger_router(
             await db.execute("DELETE FROM channel_subscriptions WHERE channel_id=?", (channel_id,))
             await db.execute("DELETE FROM channel_discussion_groups WHERE channel_id=?", (channel_id,))
             await db.execute("DELETE FROM channel_post_comments WHERE channel_id=?", (channel_id,))
+            await db.execute("DELETE FROM channel_topic_followers WHERE channel_id=?", (channel_id,))
+            await db.execute("DELETE FROM channel_topics WHERE channel_id=?", (channel_id,))
             await db.execute("DELETE FROM channel_inbox_settings WHERE channel_id=?", (channel_id,))
             await db.execute("DELETE FROM channel_inbox_messages WHERE channel_id=?", (channel_id,))
             await db.execute("DELETE FROM community_boosts WHERE scope='channel' AND chat_id=?", (channel_id,))
@@ -17389,6 +17423,257 @@ def build_messenger_router(
         if media is not None:
             clean["media_id"] = media
         return await store_group_message(group_id, clean, authorization, idempotency_key, topic_id=topic_id)
+
+    # ------------------------------------------------------------ channel topics (forum)
+    def channel_topic_title(value: Any) -> str:
+        if not isinstance(value, str) or not 1 <= len(value.strip()) <= 80 or any(ord(ch) < 32 for ch in value):
+            raise HTTPException(400, "INVALID_TOPIC_TITLE")
+        return value.strip()
+
+    async def channel_forum_enabled(db: Any, channel_id: int) -> bool:
+        cur = await db.execute("SELECT COALESCE(forum_enabled,0) FROM channels WHERE id=?", (channel_id,))
+        row = await cur.fetchone()
+        return bool(row[0]) if row else False
+
+    async def get_channel_topic_row(db: Any, channel_id: int, topic_id: int) -> dict[str, Any]:
+        cur = await db.execute(
+            """SELECT t.id,t.title,t.closed,t.created_at,
+                      (SELECT COUNT(*) FROM channel_messages m WHERE m.channel_id=t.channel_id AND m.topic_id=t.id),
+                      COALESCE((SELECT MAX(m.id) FROM channel_messages m WHERE m.channel_id=t.channel_id AND m.topic_id=t.id),0),
+                      COALESCE((SELECT MAX(m.created_at) FROM channel_messages m WHERE m.channel_id=t.channel_id AND m.topic_id=t.id),0),
+                      t.pinned_message_id
+               FROM channel_topics t WHERE t.id=? AND t.channel_id=? AND t.deleted_at IS NULL""",
+            (topic_id, channel_id),
+        )
+        row = await cur.fetchone()
+        if row is None:
+            raise HTTPException(404, "CHANNEL_TOPIC_NOT_FOUND")
+        pin = None
+        if row[7] is not None:
+            cur = await db.execute(
+                "SELECT body,media_id FROM channel_messages WHERE id=? AND channel_id=? AND topic_id=?",
+                (row[7], channel_id, topic_id),
+            )
+            pinned = await cur.fetchone()
+            if pinned is not None:
+                pin = {"id": int(row[7]), "body": pinned[0], "has_media": pinned[1] is not None}
+        return {"id": row[0], "title": row[1], "closed": bool(row[2]), "created_at": row[3],
+                "message_count": int(row[4]), "last_message_id": int(row[5]),
+                "last_message_at": int(row[6]), "pin": pin}
+
+    @router.get("/api/channels/{channel_id}/topics")
+    async def list_channel_topics(channel_id: int, authorization: str | None = Header(default=None)):
+        """Темы канала: аналог групповых топиков для канала-форума (channels.getForumTopics)."""
+        uid = int((await current_user(authorization))["telegram_id"])
+        await require_channel_access(channel_id, uid)
+        async with aiosqlite.connect(db_path()) as db:
+            db.row_factory = aiosqlite.Row
+            await db.execute("BEGIN")
+            forum = await channel_forum_enabled(db, channel_id)
+            manage = await channel_has_right(db, channel_id, uid, 64)
+            can_post = await channel_has_right(db, channel_id, uid, 1)
+            cur = await db.execute(
+                """SELECT t.id,t.title,t.closed,t.created_at,
+                          (SELECT COUNT(*) FROM channel_messages m WHERE m.channel_id=t.channel_id AND m.topic_id=t.id),
+                          COALESCE((SELECT MAX(m.id) FROM channel_messages m WHERE m.channel_id=t.channel_id AND m.topic_id=t.id),0),
+                          COALESCE((SELECT MAX(m.created_at) FROM channel_messages m WHERE m.channel_id=t.channel_id AND m.topic_id=t.id),0)
+                   FROM channel_topics t WHERE t.channel_id=? AND t.deleted_at IS NULL
+                   ORDER BY t.id DESC LIMIT 100""",
+                (channel_id,),
+            )
+            rows = await cur.fetchall()
+        return {"channel_id": channel_id, "forum_enabled": forum, "can_manage": manage, "can_post": can_post,
+                "topics": [{"id": row[0], "title": row[1], "closed": bool(row[2]), "created_at": row[3],
+                            "message_count": int(row[4]), "last_message_id": int(row[5]),
+                            "last_message_at": int(row[6])} for row in rows]}
+
+    @router.post("/api/channels/{channel_id}/topics", status_code=201)
+    async def create_channel_topic(channel_id: int, payload: dict[str, Any] | None = None,
+                                   authorization: str | None = Header(default=None)):
+        uid = int((await current_user(authorization))["telegram_id"])
+        title = channel_topic_title((payload or {}).get("title"))
+        async with aiosqlite.connect(db_path()) as db:
+            await db.execute("BEGIN IMMEDIATE")
+            if not await channel_has_right(db, channel_id, uid, 64):
+                raise HTTPException(403, "CHANNEL_TOPIC_MANAGE_REQUIRED")
+            if not await channel_forum_enabled(db, channel_id):
+                raise HTTPException(409, "CHANNEL_FORUM_DISABLED")
+            cur = await db.execute("SELECT COUNT(*) FROM channel_topics WHERE channel_id=? AND deleted_at IS NULL",
+                                   (channel_id,))
+            if (await cur.fetchone())[0] >= 100:
+                raise HTTPException(409, "CHANNEL_TOPIC_LIMIT")
+            try:
+                cur = await db.execute("INSERT INTO channel_topics(channel_id,title,created_at) VALUES(?,?,?)",
+                                       (channel_id, title, int(time.time())))
+            except aiosqlite.IntegrityError as exc:
+                raise HTTPException(409, "CHANNEL_TOPIC_TITLE_EXISTS") from exc
+            topic = await get_channel_topic_row(db, channel_id, int(cur.lastrowid))
+            await db.commit()
+        return topic
+
+    @router.patch("/api/channels/{channel_id}/topics/{topic_id}")
+    @router.delete("/api/channels/{channel_id}/topics/{topic_id}")
+    async def update_channel_topic(channel_id: int, topic_id: int, request: Request,
+                                   payload: dict[str, Any] | None = None,
+                                   authorization: str | None = Header(default=None)):
+        uid = int((await current_user(authorization))["telegram_id"])
+        async with aiosqlite.connect(db_path()) as db:
+            await db.execute("BEGIN IMMEDIATE")
+            if not await channel_has_right(db, channel_id, uid, 64):
+                raise HTTPException(403, "CHANNEL_TOPIC_MANAGE_REQUIRED")
+            topic = await get_channel_topic_row(db, channel_id, topic_id)
+            if request.method == "DELETE":
+                await db.execute("UPDATE channel_topics SET deleted_at=?,closed=1 WHERE id=? AND channel_id=?",
+                                 (int(time.time()), topic_id, channel_id))
+                await db.execute("DELETE FROM channel_topic_followers WHERE channel_id=? AND topic_id=?",
+                                 (channel_id, topic_id))
+                await db.commit()
+                return {"deleted": True}
+            payload = payload or {}
+            if not payload or set(payload) - {"title", "closed"} \
+                    or "closed" in payload and type(payload["closed"]) is not bool:
+                raise HTTPException(400, "INVALID_TOPIC_SETTINGS")
+            title = channel_topic_title(payload["title"]) if "title" in payload else topic["title"]
+            closed = payload.get("closed", topic["closed"])
+            try:
+                await db.execute("UPDATE channel_topics SET title=?,closed=? WHERE id=? AND channel_id=?",
+                                 (title, int(closed), topic_id, channel_id))
+            except aiosqlite.IntegrityError as exc:
+                raise HTTPException(409, "CHANNEL_TOPIC_TITLE_EXISTS") from exc
+            result = await get_channel_topic_row(db, channel_id, topic_id)
+            await db.commit()
+        return result
+
+    @router.put("/api/channels/{channel_id}/topics/{topic_id}/notifications")
+    async def set_channel_topic_notifications(channel_id: int, topic_id: int, payload: dict[str, Any],
+                                              authorization: str | None = Header(default=None)):
+        uid = int((await current_user(authorization))["telegram_id"])
+        enabled = payload.get("enabled")
+        if type(enabled) is not bool:
+            raise HTTPException(400, "INVALID_TOPIC_NOTIFICATIONS")
+        await require_channel_access(channel_id, uid)
+        async with aiosqlite.connect(db_path()) as db:
+            await db.execute("BEGIN IMMEDIATE")
+            await get_channel_topic_row(db, channel_id, topic_id)
+            if enabled:
+                await db.execute("INSERT OR IGNORE INTO channel_topic_followers VALUES(?,?,?)",
+                                 (channel_id, topic_id, uid))
+            else:
+                await db.execute("DELETE FROM channel_topic_followers WHERE channel_id=? AND topic_id=? AND telegram_id=?",
+                                 (channel_id, topic_id, uid))
+            await db.commit()
+        return {"notifications_enabled": enabled}
+
+    @router.put("/api/channels/{channel_id}/topics/{topic_id}/pin")
+    async def set_channel_topic_pin(channel_id: int, topic_id: int, payload: dict[str, Any],
+                                    authorization: str | None = Header(default=None)):
+        uid = int((await current_user(authorization))["telegram_id"])
+        message = payload.get("message_id")
+        if type(message) is not int or not 0 <= message < 2**63:
+            raise HTTPException(400, "INVALID_TOPIC_PIN")
+        async with aiosqlite.connect(db_path()) as db:
+            await db.execute("BEGIN IMMEDIATE")
+            if not await channel_has_right(db, channel_id, uid, 8):
+                raise HTTPException(403, "CHANNEL_TOPIC_PIN_REQUIRED")
+            await get_channel_topic_row(db, channel_id, topic_id)
+            if message:
+                cur = await db.execute(
+                    "SELECT 1 FROM channel_messages WHERE id=? AND channel_id=? AND topic_id=?",
+                    (message, channel_id, topic_id),
+                )
+                if not await cur.fetchone():
+                    raise HTTPException(404, "CHANNEL_TOPIC_MESSAGE_NOT_FOUND")
+            await db.execute("UPDATE channel_topics SET pinned_message_id=? WHERE id=? AND channel_id=?",
+                             (message or None, topic_id, channel_id))
+            result = await get_channel_topic_row(db, channel_id, topic_id)
+            await db.commit()
+        return result
+
+    @router.get("/api/channels/{channel_id}/topics/{topic_id}/messages")
+    async def list_channel_topic_messages(channel_id: int, topic_id: int,
+                                          before_id: int = Query(default=0, ge=0),
+                                          limit: int = Query(default=25, ge=1, le=100),
+                                          authorization: str | None = Header(default=None)):
+        uid = int((await current_user(authorization))["telegram_id"])
+        await require_channel_access(channel_id, uid)
+        async with aiosqlite.connect(db_path()) as db:
+            db.row_factory = aiosqlite.Row
+            await db.execute("BEGIN")
+            topic = await get_channel_topic_row(db, channel_id, topic_id)
+            cur = await db.execute(
+                """SELECT m.id,m.body,m.created_at,m.author_telegram_id AS sender_id,c.title AS sender_name,
+                          m.media_id,asset.mime_type AS media_type,asset.original_name AS media_name,
+                          asset.media_kind,asset.media_metadata
+                   FROM channel_messages m JOIN channels c ON c.id=m.channel_id
+                   LEFT JOIN media_assets asset ON asset.id=m.media_id
+                   WHERE m.channel_id=? AND m.topic_id=? AND (?=0 OR m.id<?)
+                   ORDER BY m.id DESC LIMIT ?""",
+                (channel_id, topic_id, before_id, before_id, limit + 1),
+            )
+            rows = await cur.fetchall()
+            cur = await db.execute(
+                "SELECT 1 FROM channel_topic_followers WHERE channel_id=? AND topic_id=? AND telegram_id=?",
+                (channel_id, topic_id, uid),
+            )
+            following = await cur.fetchone() is not None
+            manage = await channel_has_right(db, channel_id, uid, 64)
+            can_pin = await channel_has_right(db, channel_id, uid, 8)
+            can_post = await channel_has_right(db, channel_id, uid, 1)
+        return {"topic": topic, "can_manage": manage, "can_pin": can_pin,
+                "can_post": can_post and not topic["closed"], "notifications_enabled": following,
+                "messages": [dict(row) for row in reversed(rows[:limit])],
+                "next_before_id": rows[limit - 1]["id"] if len(rows) > limit else 0}
+
+    @router.post("/api/channels/{channel_id}/topics/{topic_id}/messages", status_code=201)
+    async def send_channel_topic_message(channel_id: int, topic_id: int, payload: dict[str, Any],
+                                         authorization: str | None = Header(default=None),
+                                         idempotency_key: str | None = Header(default=None, alias="Idempotency-Key")):
+        """Публикация в тему канала: тот же формат поста, что в ленте, но с topic_id."""
+        uid = int((await current_user(authorization))["telegram_id"])
+        body_value = payload.get("body", "")
+        raw_media = payload.get("media_id")
+        if not isinstance(body_value, str) \
+                or raw_media is not None and (not isinstance(raw_media, str) or not raw_media.strip()) \
+                or not (body_value.strip() or raw_media):
+            raise HTTPException(400, "CHANNEL_TOPIC_MESSAGE_REQUIRED")
+        now = int(time.time())
+        scope = f"/api/channels/{channel_id}/topics/{topic_id}/messages"
+        descriptor = idempotency_descriptor(scope, {"body": body_value, "media_id": raw_media}, idempotency_key)
+        async with aiosqlite.connect(db_path()) as db:
+            await db.execute("BEGIN IMMEDIATE")
+            if not await channel_has_right(db, channel_id, uid, 1):
+                raise HTTPException(403, "CHANNEL_TOPIC_POST_REQUIRED")
+            topic = await get_channel_topic_row(db, channel_id, topic_id)
+            if topic["closed"]:
+                raise HTTPException(409, "CHANNEL_TOPIC_CLOSED")
+            previous = await idempotency_lookup(db, uid, scope, descriptor, now)
+            if previous is not None:
+                await db.rollback()
+                return previous
+            media_id = await require_owned_media(db, str(raw_media or "").strip() or None, uid)
+            body = _message_body(body_value) if body_value.strip() or not media_id else ""
+            if not body:
+                body = _message_body(await default_media_message_body(db, media_id))
+            media_fields = await media_message_fields(db, media_id)
+            cur = await db.execute(
+                "SELECT COUNT(*) FROM channel_messages WHERE author_telegram_id=? AND created_at>?",
+                (uid, now - 60),
+            )
+            if int((await cur.fetchone())[0]) >= CHANNEL_POSTS_PER_MINUTE:
+                await db.rollback()
+                raise HTTPException(429, "CHANNEL_POST_RATE_LIMIT")
+            cur = await db.execute(
+                """INSERT INTO channel_messages(channel_id,author_telegram_id,body,media_id,created_at,topic_id)
+                   VALUES(?,?,?,?,?,?)""",
+                (channel_id, uid, body, media_id, now, topic_id),
+            )
+            message_id = int(cur.lastrowid)
+            await record_event(db, "channel", message_id, "new_message", uid, chat_id=channel_id)
+            result = {"id": message_id, "status": "published", "channel_id": channel_id, "author_id": uid,
+                      "topic_id": topic_id, "body": body, "media_id": media_id, **media_fields, "created_at": now}
+            await idempotency_store(db, uid, scope, descriptor, result, now)
+            await db.commit()
+        return result
 
     @router.get("/api/groups/{group_id}/analytics")
     async def get_group_analytics(group_id: int, days: Literal["7", "30", "90"] = "30",
