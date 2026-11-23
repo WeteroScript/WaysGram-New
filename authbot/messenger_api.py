@@ -1155,6 +1155,24 @@ async def init_messenger_storage(database_path: Path) -> None:
                 stars INTEGER NOT NULL,
                 PRIMARY KEY(message_id,buyer_id)
             );
+            CREATE TABLE IF NOT EXISTS chat_themes (
+                chat_id INTEGER NOT NULL PRIMARY KEY,
+                emoticon TEXT NOT NULL,
+                updated_at INTEGER NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS chat_stars (
+                chat_id INTEGER NOT NULL PRIMARY KEY,
+                stars INTEGER NOT NULL DEFAULT 0 CHECK(stars >= 0)
+            );
+            CREATE TABLE IF NOT EXISTS chat_star_transactions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                chat_id INTEGER NOT NULL,
+                amount INTEGER NOT NULL,
+                balance_after INTEGER NOT NULL,
+                reason TEXT NOT NULL,
+                created_at INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_chat_stars_reason ON chat_star_transactions(chat_id,reason);
             CREATE TABLE IF NOT EXISTS channel_paid_reactions (
                 sender_id INTEGER NOT NULL,
                 operation_key TEXT NOT NULL,
@@ -9859,6 +9877,46 @@ def build_messenger_router(
             enabled, fee = await cur.fetchone() or (0, 0)
         return {"enabled": bool(enabled), "fee_stars": fee}
 
+    @router.get("/api/chats/{chat_id}/theme")
+    @router.put("/api/chats/{chat_id}/theme")
+    async def chat_theme(chat_id: int, request: Request, payload: dict[str, Any] | None = None,
+                         authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        """Тема чата канала или группы.
+
+        Каталог тем клиент собирает сам (`account.getChatThemes`), сервер хранит
+        только выбор, чтобы он не терялся между установками. Тема перекрывает
+        кастомизацию фона: в чате с темой фон задаёт тема.
+        """
+        uid = int((await current_user(authorization))["telegram_id"])
+        write = request.method == "PUT"
+        async with aiosqlite.connect(db_path()) as db:
+            await db.execute("BEGIN IMMEDIATE" if write else "BEGIN")
+            if write:
+                emoticon = (payload or {}).get("emoticon")
+                if emoticon is not None and (not isinstance(emoticon, str) or not 1 <= len(emoticon) <= 32):
+                    raise HTTPException(400, "INVALID_CHAT_THEME")
+                cur = await db.execute("SELECT 1 FROM channels WHERE id=?", (chat_id,))
+                is_channel = await cur.fetchone() is not None
+                if is_channel:
+                    if not await can_manage_channel(chat_id, uid):
+                        raise HTTPException(403, "CHAT_THEME_FORBIDDEN")
+                else:
+                    cur = await db.execute("SELECT 1 FROM chat_groups WHERE id=?", (chat_id,))
+                    if await cur.fetchone() is None:
+                        raise HTTPException(404, "CHAT_NOT_FOUND")
+                    await require_group_member(db, chat_id, uid)
+                if emoticon is None:
+                    await db.execute("DELETE FROM chat_themes WHERE chat_id=?", (chat_id,))
+                else:
+                    await db.execute("""INSERT INTO chat_themes(chat_id,emoticon,updated_at) VALUES(?,?,?)
+                        ON CONFLICT(chat_id) DO UPDATE SET emoticon=excluded.emoticon,updated_at=excluded.updated_at""",
+                        (chat_id, emoticon, int(time.time())))
+                await db.commit()
+                return {"chat_id": chat_id, "emoticon": emoticon}
+            cur = await db.execute("SELECT emoticon FROM chat_themes WHERE chat_id=?", (chat_id,))
+            row = await cur.fetchone()
+        return {"chat_id": chat_id, "emoticon": row[0] if row else None}
+
     @router.get("/api/channels/{channel_id}/inbox")
     async def list_channel_inbox(channel_id: int, before_id: int = Query(default=0, ge=0),
                                  limit: int = Query(default=40, ge=1, le=100),
@@ -9918,22 +9976,9 @@ def build_messenger_router(
         await cur.close()
         refunds: list[dict[str, Any]] = []
         for message_id, channel_id, reader, fee, owner in rows:
-            # При отправке звёзды ушли владельцу, поэтому возврат снимает их обратно:
-            # списываем сколько осталось, но отправителю возвращаем всю сумму.
-            cur = await db.execute("SELECT stars FROM accounts WHERE telegram_id=? AND is_banned=0", (owner,))
-            owner_row = await cur.fetchone()
-            await cur.close()
-            owner_stars = int(owner_row[0]) if owner_row else 0
-            if owner_stars > 0:
-                cur = await db.execute("UPDATE accounts SET stars=stars-? WHERE telegram_id=? RETURNING stars",
-                                       (min(fee, owner_stars), owner))
-                owner_balance = await cur.fetchone()
-                await cur.close()
-                if owner_balance is not None:
-                    await db.execute("""INSERT INTO economy_transactions
-                        (telegram_id,asset,amount,balance_after,reason,admin_id,created_at) VALUES(?,'stars',?,?,?,NULL,?)""",
-                        (owner, -min(fee, owner_stars), owner_balance[0],
-                         f"channel_inbox_refund:{channel_id}:{message_id}", now))
+            # При отправке звёзды ушли на баланс канала, поэтому возврат снимает их
+            # оттуда; отправителю возвращается вся сумма.
+            await debit_chat_stars(db, channel_id, fee, f"channel_inbox_refund:{channel_id}:{message_id}", now)
             cur = await db.execute("""UPDATE accounts SET stars=stars+? WHERE telegram_id=? AND is_banned=0
                 AND stars+? BETWEEN 0 AND 9223372036854775807 RETURNING stars""", (fee, reader, fee))
             balance = await cur.fetchone()
@@ -10025,16 +10070,18 @@ def build_messenger_router(
                                    (channel_id, reader, direction, body, fee, now, key, proposal_state, sponsor))
             message_id = int(cur.lastrowid)
             if fee:
-                for account, amount in ((reader, -fee), (owner, fee)):
-                    cur = await db.execute("""UPDATE accounts SET stars=stars+? WHERE telegram_id=? AND is_banned=0
-                        AND stars+? BETWEEN 0 AND 9223372036854775807 RETURNING stars""", (amount, account, amount))
-                    balance = await cur.fetchone()
-                    await cur.close()
-                    if balance is None:
-                        raise HTTPException(409, "CHANNEL_INBOX_TRANSFER_FAILED")
-                    await db.execute("""INSERT INTO economy_transactions
-                        (telegram_id,asset,amount,balance_after,reason,admin_id,created_at) VALUES(?,'stars',?,?,?,NULL,?)""",
-                        (account, amount, balance[0], f"channel_inbox:{channel_id}:{message_id}", now))
+                # Списываем у отправителя, звёзды кладём на баланс канала: личный кошелёк
+                # владельца за платные сообщения больше не растёт и в интерфейсе не виден.
+                cur = await db.execute("""UPDATE accounts SET stars=stars-? WHERE telegram_id=? AND is_banned=0
+                    AND stars-? BETWEEN 0 AND 9223372036854775807 RETURNING stars""", (fee, reader, fee))
+                balance = await cur.fetchone()
+                await cur.close()
+                if balance is None:
+                    raise HTTPException(409, "CHANNEL_INBOX_TRANSFER_FAILED")
+                await db.execute("""INSERT INTO economy_transactions
+                    (telegram_id,asset,amount,balance_after,reason,admin_id,created_at) VALUES(?,'stars',?,?,?,NULL,?)""",
+                    (reader, -fee, balance[0], f"channel_inbox:{channel_id}:{message_id}", now))
+                await credit_chat_stars(db, channel_id, fee, f"channel_inbox:{channel_id}:{message_id}", now)
             await db.commit()
         return {"id": message_id, "direction": direction, "body": body, "fee_stars": fee, "created_at": now,
                 "proposal_state": proposal_state, "published_post_id": None, "scheduled_at": None, "reward_stars": 0, "sponsor_stars": sponsor}
@@ -10048,8 +10095,12 @@ def build_messenger_router(
                                (channel_id, owner, ("Реклама / Sponsored\n\n" + body) if sponsor else body, now, int(bool(sponsor))))
         post_id = int(cur.lastrowid)
         if reward or sponsor:
-            payer, recipient, price, reason = (reader, owner, sponsor, "channel_sponsored_post") if sponsor else (owner, reader, reward, "channel_proposal_reward")
-            for account, amount in ((payer, -price), (recipient, price)):
+            reason = "channel_sponsored_post" if sponsor else "channel_proposal_reward"
+            price = sponsor if sponsor else reward
+            # Реклама оплачивается каналу (баланс звёзд чата), награда за пост — перевод
+            # владельца автору из личного кошелька.
+            transfers = [(reader, -price)] if sponsor else [(owner, -price), (reader, price)]
+            for account, amount in transfers:
                 cur = await db.execute("""UPDATE accounts SET stars=stars+? WHERE telegram_id=? AND is_banned=0
                     AND stars+? BETWEEN 0 AND 9223372036854775807 RETURNING stars""", (amount, account, amount))
                 balance = await cur.fetchone()
@@ -10059,6 +10110,8 @@ def build_messenger_router(
                 await db.execute("""INSERT INTO economy_transactions
                     (telegram_id,asset,amount,balance_after,reason,admin_id,created_at) VALUES(?,'stars',?,?,?,NULL,?)""",
                     (account, amount, balance[0], f"{reason}:{channel_id}:{proposal_id}", now))
+            if sponsor:
+                await credit_chat_stars(db, channel_id, price, f"{reason}:{channel_id}:{proposal_id}", now)
         await db.execute("UPDATE channel_inbox_messages SET proposal_state='published',published_post_id=?,reward_stars=?,scheduled_at=NULL,scheduled_by=NULL WHERE id=?",
                          (post_id, reward, proposal_id))
         await record_event(db, "channel", post_id, "new_message", owner, chat_id=channel_id)
@@ -10273,16 +10326,16 @@ def build_messenger_router(
             if type(approved) is not int or approved != price:
                 raise HTTPException(402, {"code": "SUBSCRIPTION_PRICE_REQUIRED", "stars": price})
             until = now + 30 * 86400
-            for account, amount in ((uid, -price), (owner, price)):
-                cur = await db.execute("""UPDATE accounts SET stars=stars+? WHERE telegram_id=? AND is_banned=0
-                    AND stars+? BETWEEN 0 AND 9223372036854775807 RETURNING stars""", (amount, account, amount))
-                balance = await cur.fetchone()
-                await cur.close()
-                if balance is None:
-                    raise HTTPException(409, "SUBSCRIPTION_TRANSFER_FAILED")
-                await db.execute("""INSERT INTO economy_transactions
-                    (telegram_id,asset,amount,balance_after,reason,admin_id,created_at) VALUES(?,'stars',?,?,?,NULL,?)""",
-                    (account, amount, balance[0], f"channel_subscription:{channel}", now))
+            cur = await db.execute("""UPDATE accounts SET stars=stars-? WHERE telegram_id=? AND is_banned=0
+                AND stars-? BETWEEN 0 AND 9223372036854775807 RETURNING stars""", (price, uid, price))
+            balance = await cur.fetchone()
+            await cur.close()
+            if balance is None:
+                raise HTTPException(409, "SUBSCRIPTION_TRANSFER_FAILED")
+            await db.execute("""INSERT INTO economy_transactions
+                (telegram_id,asset,amount,balance_after,reason,admin_id,created_at) VALUES(?,'stars',?,?,?,NULL,?)""",
+                (uid, -price, balance[0], f"channel_subscription:{channel}", now))
+            await credit_chat_stars(db, channel, price, f"channel_subscription:{channel}", now)
             await db.execute("""INSERT INTO channel_subscriptions VALUES(?,?,?,?)
                 ON CONFLICT(channel_id,telegram_id) DO UPDATE SET joined_at=excluded.joined_at,expires_at=excluded.expires_at""",
                 (channel, uid, now, until))
@@ -10342,7 +10395,8 @@ def build_messenger_router(
                 COALESCE(SUM(CASE WHEN voluntary=0 THEN departures ELSE 0 END),0)
                 FROM channel_member_departures WHERE channel_id=? AND occurred_at BETWEEN ? AND ?""", (channel_id, since, now))
             voluntary_leaves, moderated_removals = await cur.fetchone()
-            # Count only settled credits, including those for posts that have since been deleted.
+            # Доход канала лежит на его собственном балансе звёзд, поэтому считаем по
+            # журналу чата, а не по личным начислениям владельца.
             patterns = (f"channel_paid_media:{channel_id}:*",
                         f"channel_subscription:{channel_id}", f"channel_inbox:{channel_id}:*", f"channel_sponsored_post:{channel_id}:*")
             cur = await db.execute("""SELECT
@@ -10350,8 +10404,8 @@ def build_messenger_router(
                     COALESCE(SUM(CASE WHEN reason=? THEN amount ELSE 0 END),0),
                     COALESCE(SUM(CASE WHEN reason GLOB ? THEN amount ELSE 0 END),0),
                     COALESCE(SUM(CASE WHEN reason GLOB ? THEN amount ELSE 0 END),0)
-                FROM economy_transactions WHERE telegram_id=? AND asset='stars' AND admin_id IS NULL
-                AND amount>0 AND created_at BETWEEN ? AND ?""", (*patterns, uid, since, now))
+                FROM chat_star_transactions WHERE chat_id=?
+                AND amount>0 AND created_at BETWEEN ? AND ?""", (*patterns, channel_id, since, now))
             media_stars, subscription_stars, inbox_stars, sponsorship_stars = await cur.fetchone()
             # Платные реакции только списываются у отправителя, поэтому покупки считаем по дебетам:
             # у владельца канала положительных проводок за них больше нет.
@@ -10425,16 +10479,16 @@ def build_messenger_router(
                 if not await asyncio.to_thread((media_storage_dir() / storage_name).is_file):
                     raise HTTPException(404, "PAID_MEDIA_NOT_FOUND")
                 now = int(time.time())
-                for account, amount in ((uid, -price), (owner, price)):
-                    cur = await db.execute("""UPDATE accounts SET stars=stars+? WHERE telegram_id=? AND is_banned=0
-                        AND stars+? BETWEEN 0 AND 9223372036854775807 RETURNING stars""", (amount, account, amount))
-                    balance = await cur.fetchone()
-                    await cur.close()
-                    if balance is None:
-                        raise HTTPException(409, "PAID_MEDIA_TRANSFER_FAILED")
-                    await db.execute("""INSERT INTO economy_transactions
-                        (telegram_id,asset,amount,balance_after,reason,admin_id,created_at) VALUES(?,'stars',?,?,?,NULL,?)""",
-                        (account, amount, balance[0], f"channel_paid_media:{channel_id}:{message_id}", now))
+                cur = await db.execute("""UPDATE accounts SET stars=stars-? WHERE telegram_id=? AND is_banned=0
+                    AND stars-? BETWEEN 0 AND 9223372036854775807 RETURNING stars""", (price, uid, price))
+                balance = await cur.fetchone()
+                await cur.close()
+                if balance is None:
+                    raise HTTPException(409, "PAID_MEDIA_TRANSFER_FAILED")
+                await db.execute("""INSERT INTO economy_transactions
+                    (telegram_id,asset,amount,balance_after,reason,admin_id,created_at) VALUES(?,'stars',?,?,?,NULL,?)""",
+                    (uid, -price, balance[0], f"channel_paid_media:{channel_id}:{message_id}", now))
+                await credit_chat_stars(db, channel_id, price, f"channel_paid_media:{channel_id}:{message_id}", now)
                 await db.execute("INSERT INTO channel_paid_media_purchases VALUES(?,?,?)", (message_id, uid, price))
                 await db.commit()
                 unlocked = True
@@ -12717,6 +12771,42 @@ def build_messenger_router(
         stars = await dm_message_fee(db, sender, recipient)
         if stars:
             raise HTTPException(402, {"code": "MESSAGE_FEE_UNSUPPORTED_FOR_SEND_TYPE", "stars": stars})
+
+    async def credit_chat_stars(db: Any, chat_id: int, amount: int, reason: str, now: int) -> int:
+        """Звёзды, которые уходят каналу или группе, лежат на их собственном балансе.
+
+        Это внутренний счёт чата (в будущем — счёт fragment): звёзды списываются у
+        отправителя, но владельцу в личный кошелёк не начисляются и нигде в
+        интерфейсе не показываются.
+        """
+        if amount <= 0:
+            return 0
+        await db.execute("""INSERT INTO chat_stars(chat_id,stars) VALUES(?,?)
+            ON CONFLICT(chat_id) DO UPDATE SET stars=stars+excluded.stars""", (chat_id, amount))
+        cur = await db.execute("SELECT stars FROM chat_stars WHERE chat_id=?", (chat_id,))
+        balance = int((await cur.fetchone())[0])
+        await cur.close()
+        await db.execute("""INSERT INTO chat_star_transactions(chat_id,amount,balance_after,reason,created_at)
+            VALUES(?,?,?,?,?)""", (chat_id, amount, balance, reason, now))
+        return balance
+
+    async def debit_chat_stars(db: Any, chat_id: int, amount: int, reason: str, now: int) -> int:
+        """Обратная операция для возвратов: списывает не больше, чем есть на балансе чата."""
+        if amount <= 0:
+            return 0
+        cur = await db.execute("SELECT stars FROM chat_stars WHERE chat_id=?", (chat_id,))
+        row = await cur.fetchone()
+        await cur.close()
+        amount = min(amount, int(row[0]) if row else 0)
+        if amount <= 0:
+            return 0
+        cur = await db.execute("UPDATE chat_stars SET stars=stars-? WHERE chat_id=? RETURNING stars",
+                               (amount, chat_id))
+        balance = int((await cur.fetchone())[0])
+        await cur.close()
+        await db.execute("""INSERT INTO chat_star_transactions(chat_id,amount,balance_after,reason,created_at)
+            VALUES(?,?,?,?,?)""", (chat_id, -amount, balance, reason, now))
+        return amount
 
     async def charge_dm_fee(db: Any, sender: int, recipient: int, stars: int, message_id: int, now: int) -> None:
         for uid, amount in ((sender, -stars), (recipient, stars)):

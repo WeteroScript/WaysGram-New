@@ -89,6 +89,52 @@ def test_paid_channel_message_is_history_and_refund_on_undelivered(env) -> None:
     run(scenario())
 
 
+def test_chat_theme_is_stored_and_channel_stars_stay_invisible(env) -> None:
+    path, app = env
+
+    async def scenario() -> None:
+        async with aiosqlite.connect(path) as db:
+            await db.execute("UPDATE accounts SET stars=50 WHERE telegram_id=102")
+            await db.commit()
+        async with await client_for(app) as client:
+            owner, reader = headers(101), headers(102)
+            channel = await client.post("/api/channels", headers=owner,
+                                        json={"title": "Themed", "username": "themed_chat", "is_public": True})
+            channel_id = channel.json()["id"]
+
+            # Тему канала ставит владелец; подписчик её не меняет.
+            empty = await client.get(f"/api/chats/{channel_id}/theme", headers=owner)
+            assert empty.status_code == 200 and empty.json()["emoticon"] is None
+            assert (await client.put(f"/api/chats/{channel_id}/theme", headers=reader,
+                                     json={"emoticon": "🌊"})).status_code == 403
+            saved = await client.put(f"/api/chats/{channel_id}/theme", headers=owner, json={"emoticon": "🌊"})
+            assert saved.status_code == 200 and saved.json()["emoticon"] == "🌊"
+            assert (await client.get(f"/api/chats/{channel_id}/theme", headers=reader)).json()["emoticon"] == "🌊"
+            assert (await client.put(f"/api/chats/{channel_id}/theme", headers=owner,
+                                     json={"emoticon": "x" * 33})).status_code == 400
+            assert (await client.put(f"/api/chats/{channel_id}/theme", headers=owner, json={})).status_code == 200
+            assert (await client.get(f"/api/chats/{channel_id}/theme", headers=owner)).json()["emoticon"] is None
+
+            # Баланс звёзд канала копится, но нигде в ответах не показывается.
+            inbox = f"/api/channels/{channel_id}/inbox"
+            owner_before = (await client.get("/api/me", headers=owner)).json()["stars"]
+            assert (await client.put(inbox + "/settings", headers=owner,
+                                     json={"enabled": True, "fee_stars": 6})).status_code == 200
+            assert (await client.post(inbox + "/me", headers={**reader, "Idempotency-Key": "theme-paid-inbox-0001"},
+                                      json={"body": "Paid", "approved_fee_stars": 6})).status_code == 200
+            payload = (await client.get(f"/api/channels/{channel_id}", headers=owner)).json()
+            assert "chat_stars" not in payload and "stars_balance" not in payload
+            assert "chat_stars" not in (await client.get("/api/channels", headers=owner)).json()
+        async with aiosqlite.connect(path) as db:
+            cur = await db.execute("SELECT stars FROM chat_stars WHERE chat_id=?", (channel_id,))
+            assert (await cur.fetchone())[0] == 6
+            # В личный кошелёк владельца ничего не начислено.
+            cur = await db.execute("SELECT stars FROM accounts WHERE telegram_id=101")
+            assert (await cur.fetchone())[0] == owner_before
+
+    run(scenario())
+
+
 def test_paid_direct_message_history_and_pagination(env) -> None:
     path, app = env
 
