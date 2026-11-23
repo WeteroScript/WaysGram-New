@@ -34,4 +34,4 @@
 * `scripts/test_android_group_profile_color.py` — 2 статические проверки: маршрутизация по
   диапазону id и маппинг `TL_peerColor` в `applyChannelFlags`.
 
-APK не собирался, на устройстве не проверялось.
+Сборка: ветка собирается workflow-ом «Build Android APK» (run 310, commit 8496dba; артефакт `WaysGram-New-APK-310`, sha256 APK лежит рядом с ним). На устройстве не проверялось.
