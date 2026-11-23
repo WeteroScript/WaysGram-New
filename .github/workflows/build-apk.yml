@@ -58,13 +58,13 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          APK="/tmp/waysgram-apk/WaysGram.apk"
+          APK="/tmp/waysgram-apk/app.apk"
           test -s "$APK"
-          test -s /tmp/waysgram-apk/WaysGram.apk.sha256
+          test -s /tmp/waysgram-apk/app.apk.sha256
           mkdir -p apk-parts
           rm -f apk-parts/apk-part-* apk-parts/WaysGram.apk.sha256
           split -b 40m "$APK" apk-parts/apk-part-
-          cp /tmp/waysgram-apk/WaysGram.apk.sha256 apk-parts/WaysGram.apk.sha256
+          cp /tmp/waysgram-apk/app.apk.sha256 apk-parts/WaysGram.apk.sha256
           ls -lh apk-parts
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
