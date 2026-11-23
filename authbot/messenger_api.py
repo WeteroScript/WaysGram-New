@@ -1993,7 +1993,11 @@ async def init_messenger_storage(database_path: Path) -> None:
             await db.execute(f"ALTER TABLE {db_split.SCHEMA}.chat_groups ADD COLUMN members_hidden INTEGER NOT NULL DEFAULT 0")
         if "forum_enabled" not in chat_group_columns:
             await db.execute(f"ALTER TABLE {db_split.SCHEMA}.chat_groups ADD COLUMN forum_enabled INTEGER NOT NULL DEFAULT 0")
-        for column, ddl in (("location_latitude", "REAL"), ("location_longitude", "REAL"),
+        for column, ddl in (("color_id", "INTEGER NOT NULL DEFAULT 0"),
+                            ("background_emoji_id", "INTEGER NOT NULL DEFAULT 0"),
+                            ("profile_color_id", "INTEGER NOT NULL DEFAULT 0"),
+                            ("profile_background_emoji_id", "INTEGER NOT NULL DEFAULT 0"),
+                            ("location_latitude", "REAL"), ("location_longitude", "REAL"),
                             ("location_label", "TEXT NOT NULL DEFAULT ''"),
                             ("location_address", "TEXT NOT NULL DEFAULT ''")):
             if column not in chat_group_columns:
@@ -17055,6 +17059,7 @@ def build_messenger_router(
                           g.slow_mode_seconds,g.members_hidden,g.default_send_restrictions,g.anti_spam_enabled,
                           g.pre_history_hidden,g.join_request,COALESCE(g.forum_enabled,0) AS forum_enabled,
                           g.location_latitude,g.location_longitude,g.location_label,g.location_address,
+                          g.color_id,g.background_emoji_id,g.profile_color_id,g.profile_background_emoji_id,
                           (SELECT COUNT(*) FROM group_members m WHERE m.group_id=g.id) AS member_count
                    FROM chat_groups g WHERE g.id=?""",
                 (group_id,),
@@ -17415,6 +17420,18 @@ def build_messenger_router(
             if type(payload["forum_enabled"]) is not bool:
                 raise HTTPException(400, "INVALID_FORUM_FLAG")
             fields["forum_enabled"] = int(payload["forum_enabled"])
+        for key in ("color_id", "profile_color_id"):
+            if key in payload:
+                value = payload[key]
+                if type(value) is not int or not 0 <= value <= 7:
+                    raise HTTPException(400, "INVALID_PEER_COLOR")
+                fields[key] = value
+        for key in ("background_emoji_id", "profile_background_emoji_id"):
+            if key in payload:
+                value = payload[key]
+                if type(value) is not int or value < 0:
+                    raise HTTPException(400, "INVALID_PEER_COLOR")
+                fields[key] = value
         if not fields:
             raise HTTPException(400, "Нет полей для изменения")
         async with aiosqlite.connect(db_path()) as db:
