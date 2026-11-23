@@ -81,10 +81,16 @@ public class WaysGramChats {
         return peer;
     }
 
-    private static final HashMap<Long, TLRPC.Chat> chatCache = new HashMap<>();
+    private static final HashMap<String, TLRPC.Chat> chatCache = new HashMap<>();
 
-    public static synchronized TLRPC.Chat cachedChat(long tgId) {
-        return chatCache.get(tgId);
+    private static String cacheKey(int account, long tgId) {
+        return account + ":" + tgId;
+    }
+
+    /** Chat rights belong to one WaysGram account; a static id-only cache leaked the owner's
+     * creator flag into other sessions on the same device. */
+    public static synchronized TLRPC.Chat cachedChat(int account, long tgId) {
+        return chatCache.get(cacheKey(account, tgId));
     }
 
     // ---------------------------------------------------------------- joined channels (device-side)
@@ -128,7 +134,7 @@ public class WaysGramChats {
 
     // ---------------------------------------------------------------- builders
 
-    public static TLRPC.TL_chat toChat(JSONObject g, long selfId) {
+    public static TLRPC.TL_chat toChat(int account, JSONObject g, long selfId) {
         TLRPC.TL_chat chat = new TLRPC.TL_chat();
         chat.id = g.optLong("id");
         chat.title = g.optString("title", "");
@@ -151,7 +157,7 @@ public class WaysGramChats {
             chat.flags |= TLObject.FLAG_14;
         }
         synchronized (WaysGramChats.class) {
-            chatCache.put(chat.id, chat);
+            chatCache.put(cacheKey(account, chat.id), chat);
         }
         return chat;
     }
@@ -193,11 +199,11 @@ public class WaysGramChats {
         }
         TLRPC.TL_updates updates = new TLRPC.TL_updates();
         updates.date = (int) (System.currentTimeMillis() / 1000);
-        updates.chats.add(toChannel(WaysGramApi.get(account, path), selfId, true));
+        updates.chats.add(toChannel(account, WaysGramApi.get(account, path), selfId, true));
         return updates;
     }
 
-    public static TLRPC.TL_channel toChannel(JSONObject c, long selfId, boolean member) {
+    public static TLRPC.TL_channel toChannel(int account, JSONObject c, long selfId, boolean member) {
         TLRPC.TL_channel channel = new TLRPC.TL_channel();
         channel.id = channelTg(c.optLong("id"));
         channel.access_hash = channel.id;
@@ -225,7 +231,7 @@ public class WaysGramChats {
         }
         channel.left = !member && !channel.creator;
         synchronized (WaysGramChats.class) {
-            chatCache.put(channel.id, channel);
+            chatCache.put(cacheKey(account, channel.id), channel);
         }
         return channel;
     }
@@ -303,7 +309,7 @@ public class WaysGramChats {
     }
 
     /** A group rendered as a megagroup: supergroup screens (slow mode, hidden members, history) become available. */
-    public static TLRPC.TL_channel toMegagroup(JSONObject g, long selfId) {
+    public static TLRPC.TL_channel toMegagroup(int account, JSONObject g, long selfId) {
         TLRPC.TL_channel chat = new TLRPC.TL_channel();
         chat.id = g.optLong("id");
         chat.access_hash = chat.id;
@@ -328,7 +334,7 @@ public class WaysGramChats {
         }
         applyChannelFlags(chat, g);
         synchronized (WaysGramChats.class) {
-            chatCache.put(chat.id, chat);
+            chatCache.put(cacheKey(account, chat.id), chat);
         }
         return chat;
     }
@@ -426,7 +432,7 @@ public class WaysGramChats {
                 long id = g.optLong("id");
                 JSONObject last = g.optInt("message_count") > 0
                         ? lastOf(WaysGramApi.get(account, "/api/groups/" + id + "/messages?limit=1")) : null;
-                out.chats.add(toMegagroup(g, selfId));
+                out.chats.add(toMegagroup(account, g, selfId));
                 try {
                     out.addUsers(WaysGramApi.get(account, "/api/groups/" + id).optJSONArray("members"));
                 } catch (WaysGramApi.ApiException ignore) {
@@ -457,7 +463,7 @@ public class WaysGramChats {
                 }
                 JSONObject last = lastOf(WaysGramApi.get(account, "/api/channels/" + serverId + "/messages?limit=1"));
                 long tg = channelTg(serverId);
-                out.chats.add(toChannel(c, selfId, true));
+                out.chats.add(toChannel(account, c, selfId, true));
                 TLRPC.TL_peerChannel peer = new TLRPC.TL_peerChannel();
                 peer.channel_id = tg;
                 int top = last == null ? 0 : last.optInt("id");
@@ -488,7 +494,7 @@ public class WaysGramChats {
         if (isGroup(req.peer)) {
             long id = groupPeerId(req.peer);
             JSONObject group = WaysGramApi.get(account, "/api/groups/" + id);
-            out.chats.add(toMegagroup(group, selfId));
+            out.chats.add(toMegagroup(account, group, selfId));
             Snapshot users = new Snapshot();
             users.addUsers(group.optJSONArray("members"));
             out.users.addAll(users.users);
@@ -505,7 +511,7 @@ public class WaysGramChats {
             long tg = req.peer.channel_id;
             long serverId = channelServer(tg);
             JSONObject channel = WaysGramApi.get(account, "/api/channels/" + serverId);
-            out.chats.add(toChannel(channel, selfId, joinedChannels(account).contains(serverId)));
+            out.chats.add(toChannel(account, channel, selfId, joinedChannels(account).contains(serverId)));
             JSONArray items = WaysGramApi.get(account, "/api/channels/" + serverId + "/messages" + paging).optJSONArray("messages");
             if (items != null) {
                 for (int i = 0; i < items.length(); i++) {
@@ -547,11 +553,11 @@ public class WaysGramChats {
      * оптимистичный пузырь, и до ответа сервера выглядит так, будто «писать может кто угодно».
      * Группы проверяются своими правами на сервере — здесь их не трогаем.</p>
      */
-    public static void requireChannelPostRight(long channelTgId) throws WaysGramApi.ApiException {
+    public static void requireChannelPostRight(int account, long channelTgId) throws WaysGramApi.ApiException {
         if (isGroupChannel(channelTgId)) {
             return;
         }
-        TLRPC.Chat chat = cachedChat(channelTgId);
+        TLRPC.Chat chat = cachedChat(account, channelTgId);
         if (!(chat instanceof TLRPC.TL_channel) || chat.megagroup || !chat.broadcast) {
             return;
         }
@@ -628,14 +634,14 @@ public class WaysGramChats {
             nm.pts = globalPts;
             nm.pts_count = 1;
             updates.updates.add(nm);
-            TLRPC.Chat chat = cachedChat(id);
+            TLRPC.Chat chat = cachedChat(account, id);
             if (chat != null) {
                 updates.chats.add(chat);
             }
             return updates;
         } else if (peer instanceof TLRPC.TL_inputPeerChannel) {
             long tg = peer.channel_id;
-            requireChannelPostRight(tg);
+            requireChannelPostRight(account, tg);
             long serverId = channelServer(tg);
             String key = "wg-ch-" + Long.toHexString(randomId) + "-" + Long.toHexString(randomId * 31 + 7);
             JSONObject res = WaysGramApi.postIdempotent(account, "/api/channels/" + serverId + "/messages" + (quote != null ? "/quote/v1" : ""), body, key);
@@ -648,7 +654,7 @@ public class WaysGramChats {
             nm.pts = nextChannelPts(account, serverId);
             nm.pts_count = 1;
             updates.updates.add(nm);
-            TLRPC.Chat chat = cachedChat(tg);
+            TLRPC.Chat chat = cachedChat(account, tg);
             if (chat != null) {
                 updates.chats.add(chat);
             }
@@ -668,7 +674,7 @@ public class WaysGramChats {
     private static TLRPC.TL_updates updatesWithChat(JSONObject group, long selfId) {
         TLRPC.TL_updates updates = new TLRPC.TL_updates();
         updates.date = (int) (System.currentTimeMillis() / 1000);
-        updates.chats.add(toMegagroup(group, selfId));
+        updates.chats.add(toMegagroup(account, group, selfId));
         updates.users.addAll(membersOf(group).users);
         return updates;
     }
@@ -681,9 +687,9 @@ public class WaysGramChats {
         JSONObject data = WaysGramApi.get(account, "/api/groups/" + groupTgId + "/send-identities");
         TLRPC.TL_channels_sendAsPeers result = new TLRPC.TL_channels_sendAsPeers();
         if (data.optBoolean("anonymous_allowed")) {
-            TLRPC.Chat group = cachedChat(groupTgId);
+            TLRPC.Chat group = cachedChat(account, groupTgId);
             if (group == null) {
-                group = toMegagroup(WaysGramApi.get(account, "/api/groups/" + groupTgId), selfId);
+                group = toMegagroup(account, WaysGramApi.get(account, "/api/groups/" + groupTgId), selfId);
             }
             TLRPC.TL_sendAsPeer peer = new TLRPC.TL_sendAsPeer();
             TLRPC.TL_peerChat chatPeer = new TLRPC.TL_peerChat();
@@ -696,7 +702,7 @@ public class WaysGramChats {
         for (int i = 0; channels != null && i < channels.length(); i++) {
             JSONObject item = channels.optJSONObject(i);
             if (item == null) continue;
-            TLRPC.TL_channel channel = toChannel(item, selfId, true);
+            TLRPC.TL_channel channel = toChannel(account, item, selfId, true);
             TLRPC.TL_sendAsPeer peer = new TLRPC.TL_sendAsPeer();
             TLRPC.TL_peerChannel channelPeer = new TLRPC.TL_peerChannel();
             channelPeer.channel_id = channel.id;
@@ -720,7 +726,7 @@ public class WaysGramChats {
         String path = "/api/channels/" + channelServer(channelId);
         WaysGramApi.post(account, path + "/members", body);
         TLRPC.TL_updates updates = new TLRPC.TL_updates();
-        updates.chats.add(toChannel(WaysGramApi.get(account, path), selfId, true));
+        updates.chats.add(toChannel(account, WaysGramApi.get(account, path), selfId, true));
         TLRPC.TL_messages_invitedUsers response = new TLRPC.TL_messages_invitedUsers();
         response.updates = updates;
         return response;
@@ -767,11 +773,6 @@ public class WaysGramChats {
             channel.noforwards = true;
             channel.flags |= TLObject.FLAG_27;
         }
-        // Платные «Direct Messages»: цена сообщения подписчика в канал.
-        if (flag(c, "paid_messages_enabled")) {
-            channel.broadcast_messages_allowed = true;
-            channel.flags2 |= TLObject.FLAG_16;
-        }
         long paidMessagesStars = c.optLong("send_paid_messages_stars", c.optLong("paid_messages_stars", 0));
         if (paidMessagesStars > 0) {
             channel.send_paid_messages_stars = paidMessagesStars;
@@ -785,10 +786,19 @@ public class WaysGramChats {
             channel.join_request = true;
             channel.flags |= TLObject.FLAG_29;
         }
-        long linkedMonoforum = c.optLong("linked_monoforum_id");
+        // The backend calls the linked discussion group discussion_group_id; older snapshots
+        // used linked_monoforum_id. Both mean the same "Comments" button in a channel.
+        long linkedMonoforum = c.optLong("linked_monoforum_id", c.optLong("discussion_group_id", 0));
         if (linkedMonoforum != 0) {
             channel.linked_monoforum_id = linkedMonoforum;
             channel.flags2 |= TLObject.FLAG_18;
+            // A linked group is exactly when Telegram shows "Suggest a post"/Comments.
+            channel.broadcast_messages_allowed = true;
+            channel.flags2 |= TLObject.FLAG_16;
+        }
+        if (flag(c, "broadcast_messages_allowed")) {
+            channel.broadcast_messages_allowed = true;
+            channel.flags2 |= TLObject.FLAG_16;
         }
         int colorId = c.optInt("color_id");
         long colorEmoji = c.optLong("background_emoji_id");
@@ -919,7 +929,7 @@ public class WaysGramChats {
             if (chat == null || chat.optLong("id") <= 0) {
                 continue;
             }
-            out.chats.add(toMegagroup(chat, selfId));
+            out.chats.add(toMegagroup(account, chat, selfId));
         }
         out.count = out.chats.size();
         return out;
@@ -971,7 +981,7 @@ public class WaysGramChats {
             if (group == null) continue;
             String role = group.optString("role", "member");
             if (!"owner".equals(role) && !"admin".equals(role)) continue;
-            out.chats.add(toMegagroup(group, selfId));
+            out.chats.add(toMegagroup(account, group, selfId));
         }
         out.count = out.chats.size();
         return out;
@@ -1234,7 +1244,7 @@ public class WaysGramChats {
             if (user != null) out.users.add(WaysGramMapper.toUser(user));
         }
         synchronized (WaysGramChats.class) {
-            TLRPC.Chat cached = chatCache.get(channelTg(channelTgId));
+            TLRPC.Chat cached = chatCache.get(cacheKey(account, channelTg(channelTgId)));
             if (cached != null) out.chats.add(cached);
         }
         return out;
@@ -1378,7 +1388,7 @@ public class WaysGramChats {
         WaysGramApi.put(account, path + "/members/" + req.participant.user_id + "/ban", body);
         TLRPC.TL_updates result = new TLRPC.TL_updates();
         result.date = (int) (System.currentTimeMillis() / 1000);
-        result.chats.add(toChannel(WaysGramApi.get(account, path), selfId, true));
+        result.chats.add(toChannel(account, WaysGramApi.get(account, path), selfId, true));
         return result;
     }
 
@@ -1424,7 +1434,7 @@ public class WaysGramChats {
         WaysGramApi.put(account, "/api/channels/" + channelId + "/reactions-settings", body);
         TLRPC.TL_updates updates = new TLRPC.TL_updates();
         updates.date = (int) (System.currentTimeMillis() / 1000);
-        updates.chats.add(toChannel(WaysGramApi.get(account, "/api/channels/" + channelId), selfId,
+        updates.chats.add(toChannel(account, WaysGramApi.get(account, "/api/channels/" + channelId), selfId,
                 joinedChannels(account).contains(channelId)));
         return updates;
     }
@@ -1533,7 +1543,7 @@ public class WaysGramChats {
         full.chat_photo = WaysGramMapper.photo(channel.optString("avatar_media_id", ""));
         TLRPC.TL_messages_chatFull result = new TLRPC.TL_messages_chatFull();
         result.full_chat = full;
-        result.chats.add(toChannel(channel, selfId, joinedChannels(account).contains(channelServer(channelId))));
+        result.chats.add(toChannel(account, channel, selfId, joinedChannels(account).contains(channelServer(channelId))));
         return result;
     }
 
@@ -1650,7 +1660,7 @@ public class WaysGramChats {
 
         TLRPC.TL_messages_chatFull out = new TLRPC.TL_messages_chatFull();
         out.full_chat = full;
-        out.chats.add(toMegagroup(group, selfId));
+        out.chats.add(toMegagroup(account, group, selfId));
         out.users.addAll(users.users);
         return out;
     }
@@ -1730,7 +1740,7 @@ public class WaysGramChats {
             for (int i = 0; i < channels.length(); i++) {
                 JSONObject c = channels.optJSONObject(i);
                 if (c != null && username.equalsIgnoreCase(c.optString("username"))) {
-                    return toChannel(c, selfId, listedChannelMember(c, joined));
+                    return toChannel(account, c, selfId, listedChannelMember(c, joined));
                 }
             }
         }
@@ -1755,7 +1765,7 @@ public class WaysGramChats {
             String username = c.optString("username").toLowerCase();
             String title = c.optString("title").toLowerCase();
             if (username.contains(needle) || title.contains(needle)) {
-                TLRPC.TL_channel channel = toChannel(c, selfId, listedChannelMember(c, joined));
+                TLRPC.TL_channel channel = toChannel(account, c, selfId, listedChannelMember(c, joined));
                 found.chats.add(channel);
                 TLRPC.TL_peerChannel peer = new TLRPC.TL_peerChannel();
                 peer.channel_id = channel.id;
@@ -1881,7 +1891,7 @@ public class WaysGramChats {
         }
         TLRPC.TL_updates result = new TLRPC.TL_updates();
         result.date = (int) (System.currentTimeMillis() / 1000);
-        result.chats.add(toMegagroup(WaysGramApi.get(account, "/api/groups/" + groupId), selfId));
+        result.chats.add(toMegagroup(account, WaysGramApi.get(account, "/api/groups/" + groupId), selfId));
         return result;
     }
 
@@ -1913,7 +1923,7 @@ public class WaysGramChats {
         }
         TLRPC.TL_updates updates = new TLRPC.TL_updates();
         updates.date = (int) (System.currentTimeMillis() / 1000);
-        updates.chats.add(toMegagroup(WaysGramApi.get(account, "/api/groups/" + groupId), selfId));
+        updates.chats.add(toMegagroup(account, WaysGramApi.get(account, "/api/groups/" + groupId), selfId));
         return updates;
     }
 
@@ -2015,7 +2025,7 @@ public class WaysGramChats {
             out.messages.add(WaysGramMedia.attach(account, groupMessage(m, groupId, selfId, account), m));
         }
         JSONObject group = WaysGramApi.get(account, "/api/groups/" + groupId);
-        out.chats.add(toMegagroup(group, selfId));
+        out.chats.add(toMegagroup(account, group, selfId));
         out.users.addAll(membersOf(group).users);
         return out;
     }
@@ -2095,13 +2105,13 @@ public class WaysGramChats {
         TLRPC.TL_messages_chats result = new TLRPC.TL_messages_chats();
         for (TLRPC.InputChannel input : req.id) {
             if (isGroupChannel(input.channel_id)) {
-                result.chats.add(toMegagroup(WaysGramApi.get(account, "/api/groups/" + input.channel_id), selfId));
+                result.chats.add(toMegagroup(account, WaysGramApi.get(account, "/api/groups/" + input.channel_id), selfId));
                 continue;
             }
             long id = channelServer(input.channel_id);
             if (id <= 0) continue;
             JSONObject data = WaysGramApi.get(account, "/api/channels/" + id);
-            result.chats.add(toChannel(data, selfId, data.optBoolean("joined") || joinedChannels(account).contains(id)));
+            result.chats.add(toChannel(account, data, selfId, data.optBoolean("joined") || joinedChannels(account).contains(id)));
         }
         return result;
     }
@@ -2119,7 +2129,7 @@ public class WaysGramChats {
         }
         TLRPC.TL_updates updates = new TLRPC.TL_updates();
         updates.date = (int) (System.currentTimeMillis() / 1000);
-        updates.chats.add(toChannel(json, selfId, join));
+        updates.chats.add(toChannel(account, json, selfId, join));
         return updates;
     }
 }

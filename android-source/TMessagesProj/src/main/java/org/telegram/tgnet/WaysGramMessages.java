@@ -7,6 +7,8 @@ import org.json.JSONObject;
 import org.telegram.tgnet.tl.TL_update;
 
 import java.util.ArrayList;
+import java.util.Collections;
+import java.util.HashSet;
 
 /** Editing and deleting messages, read marks. Used for requests from the app and for changes made by other people. */
 public class WaysGramMessages {
@@ -76,11 +78,104 @@ public class WaysGramMessages {
         return null;
     }
 
+    // ---------------------------------------------------------------- messages by id
+
+    /**
+     * channels.getMessages: the exact posts of one channel by their ids.
+     *
+     * <p>Replies, pinned posts, forwarded originals and album children are requested this way;
+     * before, every such lookup ended with "функция не поддерживается WaysGram". One bounded
+     * request is used instead of one request per id (the server accepts up to 100 ids).</p>
+     */
+    public static TLRPC.TL_messages_messages channelMessagesByIds(
+            int account, long channelTgId, ArrayList<Integer> ids, long selfId
+    ) throws WaysGramApi.ApiException {
+        TLRPC.TL_messages_messages out = new TLRPC.TL_messages_messages();
+        if (ids == null || ids.isEmpty()) {
+            return out;
+        }
+        final long serverId = WaysGramChats.channelServer(channelTgId);
+        final ArrayList<TLRPC.Message> list = new ArrayList<>();
+        ArrayList<Integer> batch = new ArrayList<>();
+        for (Integer id : ids) {
+            if (id == null || id <= 0) continue;
+            batch.add(id);
+            if (batch.size() == 100) {
+                fetchChannelBatch(account, serverId, channelTgId, batch, selfId, list);
+                batch = new ArrayList<>();
+            }
+        }
+        fetchChannelBatch(account, serverId, channelTgId, batch, selfId, list);
+        if (!list.isEmpty()) {
+            out.chats.add(WaysGramChats.toChannel(account, WaysGramApi.get(account, "/api/channels/" + serverId), selfId,
+                    WaysGramChats.joinedChannels(account).contains(serverId)));
+        }
+        // The native client expects the newest message first.
+        Collections.sort(list, (a, b) -> Integer.compare(b.id, a.id));
+        out.messages.addAll(list);
+        return out;
+    }
+
+    /** Public channel posts matching a query: the source of hashtag and news search. */
+    public static TLObject searchPosts(int account, TLRPC.TL_channels_searchPosts req, long selfId) throws WaysGramApi.ApiException {
+        String query = req.query == null ? "" : android.net.Uri.encode(req.query);
+        int limit = Math.max(1, Math.min(50, req.limit <= 0 ? 30 : req.limit));
+        JSONObject data = WaysGramApi.get(account, "/api/channels/posts/search?q=" + query
+                + "&limit=" + limit + "&offset_id=" + Math.max(0, req.offset_id));
+        TLRPC.TL_messages_channelMessages out = new TLRPC.TL_messages_channelMessages();
+        out.count = data.optInt("count");
+        out.pts = 1;
+        HashSet<Long> chats = new HashSet<>();
+        JSONArray items = data.optJSONArray("messages");
+        for (int i = 0; items != null && i < items.length(); i++) {
+            JSONObject m = items.optJSONObject(i);
+            if (m == null) continue;
+            long channelServerId = m.optLong("channel_id");
+            if (channelServerId <= 0) continue;
+            long channelTgId = WaysGramChats.channelTg(channelServerId);
+            out.messages.add(WaysGramMedia.attach(account,
+                    WaysGramChats.channelMessage(m, channelTgId, selfId), m));
+            if (chats.add(channelTgId)) {
+                try {
+                    out.chats.add(WaysGramChats.toChannel(account,
+                            WaysGramApi.get(account, "/api/channels/" + channelServerId), selfId,
+                            WaysGramChats.joinedChannels(account).contains(channelServerId)));
+                } catch (WaysGramApi.ApiException ignore) {
+                    // A channel that disappeared mid-search simply stays out of the result.
+                }
+            }
+        }
+        return out;
+    }
+
+    private static void fetchChannelBatch(
+            int account, long channelServerId, long channelTgId, ArrayList<Integer> ids,
+            long selfId, ArrayList<TLRPC.Message> into
+    ) throws WaysGramApi.ApiException {
+        if (ids == null || ids.isEmpty()) {
+            return;
+        }
+        StringBuilder csv = new StringBuilder();
+        for (Integer id : ids) {
+            if (csv.length() > 0) csv.append(',');
+            csv.append(id);
+        }
+        JSONObject data = WaysGramApi.get(account,
+                "/api/channels/" + channelServerId + "/messages?message_ids=" + csv);
+        JSONArray items = data.optJSONArray("messages");
+        for (int i = 0; items != null && i < items.length(); i++) {
+            JSONObject m = items.optJSONObject(i);
+            if (m == null) continue;
+            into.add(WaysGramMedia.attach(account,
+                    WaysGramChats.channelMessage(m, channelTgId, selfId), m));
+        }
+    }
+
     private static TLRPC.Peer reactionPeer(TLRPC.InputPeer peer, long selfId) throws WaysGramApi.ApiException {
         if (peer instanceof TLRPC.TL_inputPeerSelf) return WaysGramMapper.peerUser(selfId);
         if (peer instanceof TLRPC.TL_inputPeerUser && peer.user_id > 0) return WaysGramMapper.peerUser(peer.user_id);
-        if (peer instanceof TLRPC.TL_inputPeerChat && peer.chat_id > 0) {
-            TLRPC.TL_peerChat result = new TLRPC.TL_peerChat(); result.chat_id = peer.chat_id; return result;
+        if (WaysGramChats.isGroup(peer) && WaysGramChats.groupPeerId(peer) > 0) {
+            return WaysGramChats.groupPeer(WaysGramChats.groupPeerId(peer));
         }
         if (peer instanceof TLRPC.TL_inputPeerChannel && WaysGramChats.channelServer(peer.channel_id) > 0) {
             TLRPC.TL_peerChannel result = new TLRPC.TL_peerChannel(); result.channel_id = peer.channel_id; return result;
@@ -89,7 +184,7 @@ public class WaysGramMessages {
     }
 
     private static int reactionServerId(TLRPC.InputPeer peer, int id) throws WaysGramApi.ApiException {
-        int result = peer instanceof TLRPC.TL_inputPeerChat ? WaysGramChats.serverGroupId(id) : id;
+        int result = WaysGramChats.isGroup(peer) ? WaysGramChats.serverGroupId(id) : id;
         if (result <= 0) throw new WaysGramApi.ApiException(400, "MESSAGE_ID_INVALID");
         return result;
     }
@@ -124,8 +219,8 @@ public class WaysGramMessages {
             if (req.peer instanceof TLRPC.TL_inputPeerSelf || req.peer instanceof TLRPC.TL_inputPeerUser) {
                 body.put("peer_id", peer.user_id);
                 path = "/api/messages/" + serverId + "/reactions";
-            } else if (req.peer instanceof TLRPC.TL_inputPeerChat) {
-                path = "/api/groups/" + req.peer.chat_id + "/messages/" + serverId + "/reactions";
+            } else if (WaysGramChats.isGroup(req.peer)) {
+                path = "/api/groups/" + WaysGramChats.groupPeerId(req.peer) + "/messages/" + serverId + "/reactions";
             } else {
                 path = "/api/channels/" + WaysGramChats.channelServer(req.peer.channel_id) + "/messages/" + serverId + "/reactions";
             }
@@ -136,6 +231,63 @@ public class WaysGramMessages {
         TLRPC.TL_updates result = new TLRPC.TL_updates();
         result.date = (int) (System.currentTimeMillis() / 1000);
         result.updates.add(reactionUpdate(peer, req.msg_id, WaysGramMapper.readReactions(response)));
+        return result;
+    }
+
+    /**
+     * Платная реакция: `messages.sendPaidReaction` переводится в серверный маршрут поста.
+     *
+     * <p>Раньше метод нигде не обрабатывался, поэтому ⭐ в шторке реакций заканчивалась тостом
+     * «Это действие пока не поддерживается», и звезда не появлялась у сообщения. Звёзды только
+     * списываются с отправителя — владельцу канала в этой версии ничего не начисляется.</p>
+     */
+    public static TLObject sendPaidReaction(int account, TLRPC.TL_messages_sendPaidReaction req, long selfId, String token) throws WaysGramApi.ApiException {
+        if (!(req.peer instanceof TLRPC.TL_inputPeerChannel) || WaysGramChats.isGroupChannel(req.peer.channel_id)) {
+            throw new WaysGramApi.ApiException(400, "PAID_REACTIONS_UNAVAILABLE");
+        }
+        if (req.count <= 0 || req.count > 10000) {
+            throw new WaysGramApi.ApiException(400, "PAID_REACTION_INVALID");
+        }
+        long tg = req.peer.channel_id;
+        long serverId = WaysGramChats.channelServer(tg);
+        int messageId = req.msg_id;
+        if (messageId <= 0) {
+            throw new WaysGramApi.ApiException(400, "MESSAGE_ID_INVALID");
+        }
+        JSONObject body = new JSONObject();
+        try {
+            body.put("stars", req.count);
+        } catch (Exception e) {
+            throw new WaysGramApi.ApiException(400, "PAID_REACTION_INVALID");
+        }
+        // random_id повторяется при повторе запроса, поэтому ключ идемпотентности стабилен.
+        String key = "wg-paid-" + Long.toHexString(req.random_id) + "-" + Long.toHexString(req.random_id * 31 + 7);
+        WaysGramApi.request("POST",
+                "/api/channels/" + serverId + "/messages/" + messageId + "/paid-reactions",
+                body, token, 30000, key);
+        // Свежие реакции поста: сервер считает сумму звёзд сам, клиенту остаётся её нарисовать.
+        JSONObject page = WaysGramApi.request("GET",
+                "/api/channels/" + serverId + "/messages?message_ids=" + messageId, null, token, 30000);
+        if (!TextUtils.equals(token, WaysGramApi.getToken(account))) {
+            throw new WaysGramApi.ApiException(401, "AUTH_KEY_UNREGISTERED");
+        }
+        JSONArray messages = page == null ? null : page.optJSONArray("messages");
+        if (messages == null) {
+            throw new WaysGramApi.ApiException(502, "REACTION_RESPONSE_INVALID");
+        }
+        TLRPC.TL_peerChannel peer = new TLRPC.TL_peerChannel();
+        peer.channel_id = tg;
+        TLRPC.TL_messageReactions reactions = new TLRPC.TL_messageReactions();
+        for (int i = 0; i < messages.length(); i++) {
+            JSONObject message = messages.optJSONObject(i);
+            if (message != null && message.optInt("id", 0) == messageId) {
+                reactions = WaysGramMapper.readReactions(message);
+                break;
+            }
+        }
+        TLRPC.TL_updates result = new TLRPC.TL_updates();
+        result.date = (int) (System.currentTimeMillis() / 1000);
+        result.updates.add(reactionUpdate(peer, messageId, reactions));
         return result;
     }
 
@@ -151,8 +303,8 @@ public class WaysGramMessages {
         String base;
         if (req.peer instanceof TLRPC.TL_inputPeerSelf || req.peer instanceof TLRPC.TL_inputPeerUser)
             base = "/api/messages?with=" + peer.user_id + "&message_ids=";
-        else if (req.peer instanceof TLRPC.TL_inputPeerChat)
-            base = "/api/groups/" + req.peer.chat_id + "/messages?message_ids=";
+        else if (WaysGramChats.isGroup(req.peer))
+            base = "/api/groups/" + WaysGramChats.groupPeerId(req.peer) + "/messages?message_ids=";
         else base = "/api/channels/" + WaysGramChats.channelServer(req.peer.channel_id) + "/messages?message_ids=";
         for (int start = 0; start < serverIds.size(); start += 100) {
             StringBuilder values = new StringBuilder();
@@ -179,7 +331,7 @@ public class WaysGramMessages {
 
     private static String forwardScope(TLRPC.InputPeer peer) throws WaysGramApi.ApiException {
         if (peer instanceof TLRPC.TL_inputPeerUser || peer instanceof TLRPC.TL_inputPeerSelf) return "dm";
-        if (peer instanceof TLRPC.TL_inputPeerChat) return "group";
+        if (WaysGramChats.isGroup(peer)) return "group";
         if (peer instanceof TLRPC.TL_inputPeerChannel) return "channel";
         throw new WaysGramApi.ApiException(400, "PEER_ID_INVALID");
     }
@@ -187,7 +339,7 @@ public class WaysGramMessages {
     private static long forwardPeerId(TLRPC.InputPeer peer, long selfId) throws WaysGramApi.ApiException {
         if (peer instanceof TLRPC.TL_inputPeerSelf) return selfId;
         if (peer instanceof TLRPC.TL_inputPeerUser) return peer.user_id;
-        if (peer instanceof TLRPC.TL_inputPeerChat) return peer.chat_id;
+        if (WaysGramChats.isGroup(peer)) return WaysGramChats.groupPeerId(peer);
         if (peer instanceof TLRPC.TL_inputPeerChannel) return WaysGramChats.channelServer(peer.channel_id);
         throw new WaysGramApi.ApiException(400, "PEER_ID_INVALID");
     }
@@ -239,7 +391,7 @@ public class WaysGramMessages {
         TLRPC.TL_updates updates = new TLRPC.TL_updates();
         updates.date = (int) (System.currentTimeMillis() / 1000);
         long targetTgId = targetScope.equals("channel") ? WaysGramChats.channelTg(targetPeer) : targetPeer;
-        TLRPC.Chat chat = targetScope.equals("dm") ? null : WaysGramChats.cachedChat(targetTgId);
+        TLRPC.Chat chat = targetScope.equals("dm") ? null : WaysGramChats.cachedChat(account, targetTgId);
         if (chat != null) updates.chats.add(chat);
         for (int i = 0; i < sent.length(); i++) {
             JSONObject item = sent.optJSONObject(i);
@@ -321,6 +473,9 @@ public class WaysGramMessages {
             }
         } catch (WaysGramApi.ApiException e) { throw e; }
           catch (Exception e) { throw new WaysGramApi.ApiException(400, "ALBUM_INVALID"); }
+        if (scope.equals("channel")) {
+            WaysGramChats.requireChannelPostRight(account, WaysGramChats.channelTg(peerId));
+        }
         String path = scope.equals("dm") ? "/api/messages/album"
                 : scope.equals("group") ? "/api/groups/" + peerId + "/messages/album"
                 : "/api/channels/" + peerId + "/messages/album";
@@ -333,7 +488,7 @@ public class WaysGramMessages {
         TLRPC.TL_updates updates = new TLRPC.TL_updates();
         updates.date = (int) (System.currentTimeMillis() / 1000);
         long targetTgId = scope.equals("channel") ? WaysGramChats.channelTg(peerId) : peerId;
-        TLRPC.Chat chat = scope.equals("dm") ? null : WaysGramChats.cachedChat(targetTgId);
+        TLRPC.Chat chat = scope.equals("dm") ? null : WaysGramChats.cachedChat(account, targetTgId);
         if (chat != null) updates.chats.add(chat);
         for (int i = 0; i < sent.length(); i++) {
             JSONObject item = sent.optJSONObject(i);
@@ -434,10 +589,11 @@ public class WaysGramMessages {
                 u.pts_count = 1;
                 updates.updates.add(u);
             }
-        } else if (req.peer instanceof TLRPC.TL_inputPeerChat) {
+        } else if (WaysGramChats.isGroup(req.peer)) {
+            long groupId = WaysGramChats.groupPeerId(req.peer);
             int serverId = WaysGramChats.serverGroupId(req.id);
-            WaysGramApi.put(account, "/api/groups/" + req.peer.chat_id + "/messages/" + serverId + (replacingMedia ? "/media/v2" : ""), body);
-            TLRPC.Message message = fetchGroup(account, req.peer.chat_id, serverId, selfId);
+            WaysGramApi.put(account, "/api/groups/" + groupId + "/messages/" + serverId + (replacingMedia ? "/media/v2" : ""), body);
+            TLRPC.Message message = fetchGroup(account, groupId, serverId, selfId);
             if (message != null) {
                 TL_update.TL_updateEditMessage u = new TL_update.TL_updateEditMessage();
                 u.message = message;
@@ -540,8 +696,8 @@ public class WaysGramMessages {
     }
 
     public static TLObject getReadParticipants(int account, TLRPC.TL_messages_getMessageReadParticipants req) throws WaysGramApi.ApiException {
-        if (!(req.peer instanceof TLRPC.TL_inputPeerChat)) throw new WaysGramApi.ApiException(400, "PEER_ID_INVALID");
-        JSONArray readers = readReceipts(account, "group", req.peer.chat_id, WaysGramChats.serverGroupId(req.msg_id));
+        if (!WaysGramChats.isGroup(req.peer)) throw new WaysGramApi.ApiException(400, "PEER_ID_INVALID");
+        JSONArray readers = readReceipts(account, "group", WaysGramChats.groupPeerId(req.peer), WaysGramChats.serverGroupId(req.msg_id));
         Vector<TLRPC.TL_readParticipantDate> result = new Vector<>(TLRPC.TL_readParticipantDate::TLdeserialize);
         for (int i = 0; i < readers.length(); i++) {
             JSONObject row = readers.optJSONObject(i);
@@ -577,13 +733,17 @@ public class WaysGramMessages {
     public static TLObject readHistory(int account, TLRPC.TL_messages_readHistory req, int currentPts) throws WaysGramApi.ApiException {
         if (req.peer instanceof TLRPC.TL_inputPeerUser && !WaysGramBotFather.is(req.peer.user_id)) {
             putRead(account, "dm", req.peer.user_id, req.max_id);
-        } else if (req.peer instanceof TLRPC.TL_inputPeerChat) {
-            putRead(account, "group", req.peer.chat_id, WaysGramChats.serverGroupId(req.max_id));
+        } else if (WaysGramChats.isGroup(req.peer)) {
+            putRead(account, "group", WaysGramChats.groupPeerId(req.peer), WaysGramChats.serverGroupId(req.max_id));
         }
         TLRPC.TL_messages_affectedMessages affected = new TLRPC.TL_messages_affectedMessages();
         affected.pts = currentPts;
         affected.pts_count = 0;
         return affected;
+    }
+
+    public static void readGroup(int account, long groupId, int maxId) throws WaysGramApi.ApiException {
+        putRead(account, "group", groupId, WaysGramChats.serverGroupId(maxId));
     }
 
     public static TLObject readChannel(int account, TLRPC.TL_channels_readHistory req) throws WaysGramApi.ApiException {

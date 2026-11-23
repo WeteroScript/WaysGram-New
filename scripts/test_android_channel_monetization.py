@@ -47,10 +47,10 @@ class ChannelMonetizationChecks(unittest.TestCase):
     def test_posting_in_a_broadcast_channel_is_checked_before_sending(self):
         chats = self.source("tgnet/WaysGramChats.java")
         messages = self.source("tgnet/WaysGramMessages.java")
-        self.assertIn("public static void requireChannelPostRight(long channelTgId)", chats)
+        self.assertIn("public static void requireChannelPostRight(int account, long channelTgId)", chats)
         self.assertIn('throw new WaysGramApi.ApiException(403, "CHAT_WRITE_FORBIDDEN");', chats)
-        self.assertIn("requireChannelPostRight(tg);", chats)
-        self.assertIn("WaysGramChats.requireChannelPostRight(WaysGramChats.channelTg(peerId));", messages)
+        self.assertIn("requireChannelPostRight(account, tg);", chats)
+        self.assertIn("WaysGramChats.requireChannelPostRight(account, WaysGramChats.channelTg(peerId));", messages)
         # Группы проверяет сервер своими правами — их клиент не блокирует.
         self.assertIn("if (isGroupChannel(channelTgId)) {", chats)
 
@@ -97,7 +97,7 @@ class ChannelMonetizationChecks(unittest.TestCase):
         self.assertIn("ADD COLUMN paid_messages_enabled", api)
         self.assertIn("ADD COLUMN paid_messages_stars", api)
         self.assertIn('channel["send_paid_messages_stars"] = int(channel.get("paid_messages_stars") or 0)', api)
-        self.assertIn('flag(c, "paid_messages_enabled")', chats)
+        self.assertIn('c.optLong("send_paid_messages_stars"', chats)
         self.assertIn("private static TLObject paidMessagesPrice(", transport)
         self.assertIn('"/paid-messages"', transport)
         # Без монофорума цена живёт в самом канале, иначе экран показывал бы значение по умолчанию.

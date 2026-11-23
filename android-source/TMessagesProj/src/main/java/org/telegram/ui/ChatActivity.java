@@ -28261,7 +28261,7 @@ public class ChatActivity extends BaseFragment implements
                             bottomOverlayChatText.setText(LocaleController.getString(ChatObject.isChannelAndNotMegaGroup(currentChat) ? R.string.ChannelJoinNoCaps : R.string.GroupJoinNoCaps));
                             bottomOverlayChatText.setEnabled(true);
                             showGiftButton = chatInfo != null && chatInfo.stargifts_available;
-                            showSuggestButton = currentChat.broadcast_messages_allowed && currentChat.linked_monoforum_id != 0;
+                            showSuggestButton = currentChat.linked_monoforum_id != 0;
                             accentTextButton = true;
                         }
                         showBottomOverlayProgress(false, false);
@@ -28281,7 +28281,7 @@ public class ChatActivity extends BaseFragment implements
                     }
                     showBottomOverlayProgress(false, bottomOverlayProgress.getTag() != null);
                     showGiftButton = chatInfo != null && chatInfo.stargifts_available;
-                    showSuggestButton = currentChat.broadcast_messages_allowed && currentChat.linked_monoforum_id != 0;
+                    showSuggestButton = currentChat.linked_monoforum_id != 0;
                 } else if (forumTopic != null && forumTopic.closed) {
                     if (!ChatObject.canManageTopic(currentAccount, currentChat, forumTopic)) {
                         Drawable lock = getContext().getResources().getDrawable(R.drawable.msg_mini_lock2).mutate();

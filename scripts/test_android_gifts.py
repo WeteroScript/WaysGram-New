@@ -23,18 +23,22 @@ class AndroidGiftSourceChecks(unittest.TestCase):
     def source(self, name):
         return self.archive.read(BASE + name).decode("utf-8")
 
-    def test_waysgram_incoming_gift_settings_use_live_server_preferences(self):
+    def test_incoming_gifts_uses_only_the_stock_privacy_row(self):
         settings = self.source("ui/PrivacySettingsActivity.java")
         controls = self.source("ui/PrivacyControlActivity.java")
-        self.assertIn('"/api/me/gift-receive"', settings)
-        self.assertIn('WaysGramApi.request("GET", WAYS_GRAM_GIFT_RECEIVE_PATH', settings)
-        self.assertIn('WaysGramApi.request("PUT", WAYS_GRAM_GIFT_RECEIVE_PATH', settings)
-        self.assertIn('new JSONObject().put("allowed_types", types)', settings)
-        self.assertIn('choices[selected] = "✓ " + choices[selected]', settings)
-        for resource in ('values', 'values-ru'):
-            strings = self.archive.read(f'WaysGram-Android/TMessagesProj/src/main/res/{resource}/strings.xml')
-            self.assertEqual(strings.count(b'name="WaysGramGiftReceiveTitle"'), 1)
-        self.assertIn('android.text.TextUtils.isEmpty(WaysGramApi.getToken(currentAccount))) {\n            giftTypesHeaderRow', controls)
+        for removed in (
+            '"/api/me/gift-receive"',
+            'WaysGramApi.request("GET", WAYS_GRAM_GIFT_RECEIVE_PATH',
+            'WaysGramApi.request("PUT", WAYS_GRAM_GIFT_RECEIVE_PATH',
+            'choices[selected] = "✓ " + choices[selected]',
+        ):
+            self.assertNotIn(removed, settings, removed)
+        self.assertNotIn('waysGramGiftReceiveRow', settings)
+        self.assertIn('position == giftsRow', settings)
+        self.assertIn('R.string.PrivacyGifts', settings)
+        # The stock Gifts privacy screen is still reachable.
+        self.assertIn('new PrivacyControlActivity(ContactsController.PRIVACY_RULES_TYPE_GIFTS)', settings)
+        self.assertIn('PRIVACY_RULES_TYPE_GIFTS', controls)
 
     def test_profile_uses_actual_owner_and_supports_nested_scrolling(self):
         layout = self.source("ui/Components/SharedMediaLayout.java")

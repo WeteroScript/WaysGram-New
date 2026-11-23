@@ -159,7 +159,11 @@ public class WaysGramTransport {
 
     public static void execute(final int account, final TLObject request, final RequestDelegate delegate) {
         boolean reactionRequest = request instanceof TLRPC.TL_messages_sendReaction
-                || request instanceof TLRPC.TL_messages_getMessagesReactions;
+                || request instanceof TLRPC.TL_messages_getMessagesReactions
+                // A paid reaction is also a reaction: capture and re-check the token for it.
+                // Without this it reached WaysGramMessages.sendPaidReaction with a null token,
+                // the server saw no Authorization header and the request died as 401.
+                || request instanceof TLRPC.TL_messages_sendPaidReaction;
         boolean typingRequest = request instanceof TLRPC.TL_messages_setTyping;
         boolean pinRequest = request instanceof TLRPC.TL_messages_updatePinnedMessage
                 || request instanceof TLRPC.TL_messages_unpinAllMessages;
@@ -266,7 +270,7 @@ public class WaysGramTransport {
                 JSONArray entities = WaysGramMapper.writeTextEntities(send.entities);
                 long self = UserConfig.getInstance(account).getClientUserId();
                 result = sendTo(account, send.peer, send.message, send.random_id, null, send.reply_to,
-                        self, null, null, send.silent, entities, null, token, fee);
+                        self, null, null, send.silent, entities, null, token, fee, -1L);
                 paidTextPrefs().edit().remove(slot).remove(slot + ":since").apply();
                 if (send.clear_draft) clearSentDraft(account, send.peer, send.reply_to, self, send.message, entities, token);
             } catch (WaysGramApi.ApiException e) {
@@ -286,6 +290,40 @@ public class WaysGramTransport {
         }), () -> WaysGramApi.NETWORK.execute(() -> {
             if (delegate != null) delegate.run(null, error(400, "MESSAGE_FEE_NOT_CONFIRMED"));
         }));
+    }
+
+    /**
+     * «Direct Messages» в карточке канала — цена платного сообщения подписчика.
+     *
+     * <p>Нативный экран отправляет `stars.updatePaidMessagesPrice`; метода не было в
+     * обработчиках, поэтому сохранение цены заканчивалось тостом «не поддерживается».
+     * Цена хранится на сервере, а в ответ уходит обновлённый канал, чтобы экран сразу
+     * показал новое состояние.</p>
+     */
+    private static TLObject paidMessagesPrice(int account, TL_stars.updatePaidMessagesPrice price, long selfId)
+            throws WaysGramApi.ApiException {
+        if (!(price.channel instanceof TLRPC.TL_inputChannel)) {
+            throw new WaysGramApi.ApiException(400, "PEER_ID_INVALID");
+        }
+        long tg = ((TLRPC.TL_inputChannel) price.channel).channel_id;
+        if (WaysGramChats.isGroupChannel(tg)) {
+            throw new WaysGramApi.ApiException(400, "PAID_MESSAGES_NOT_SUPPORTED");
+        }
+        long serverId = WaysGramChats.channelServer(tg);
+        long stars = Math.max(0, Math.min(10000, price.send_paid_messages_stars));
+        boolean enabled = price.suggestions_allowed && stars > 0;
+        JSONObject body = new JSONObject();
+        try {
+            body.put("enabled", enabled);
+            body.put("stars", enabled ? stars : 0);
+        } catch (Exception e) {
+            throw new WaysGramApi.ApiException(400, "PAID_MESSAGES_INVALID");
+        }
+        WaysGramApi.put(account, "/api/channels/" + serverId + "/paid-messages", body);
+        TLRPC.TL_updates updates = new TLRPC.TL_updates();
+        updates.date = (int) (System.currentTimeMillis() / 1000);
+        updates.chats.add(WaysGramChats.toChannel(account, WaysGramApi.get(account, "/api/channels/" + serverId), selfId, true));
+        return updates;
     }
 
     private static TLRPC.TL_error unsupportedRequest(TLObject request) {
@@ -324,11 +362,34 @@ public class WaysGramTransport {
         final long selfId = UserConfig.getInstance(account).getClientUserId();
         TLObject stories = WaysGramStories.handle(account, request, selfId);
         if (stories != null) return stories;
+        TLObject megagroup = WaysGramMegagroups.handle(account, request, selfId);
+        if (megagroup != null) return megagroup;
+
+        TLObject thread = WaysGramThreads.handle(account, request, selfId, expectedToken);
+        if (thread != null) return thread;
+
+        TLObject extra = WaysGramExtras.handle(account, request, selfId, expectedToken);
+        if (extra != null) return extra;
+
+        TLObject chatThemes = WaysGramChatThemes.handle(account, request);
+        if (chatThemes != null) return chatThemes;
+
+        TLObject forum = WaysGramChannelTopics.handle(account, request, expectedToken);
+        if (forum != null) return forum;
+
+        if (WaysGramReactions.handles(request)) {
+            TLObject reactions = WaysGramReactions.handle(request);
+            if (reactions != null) return reactions;
+        }
 
         if (request instanceof TLRPC.TL_messages_saveDraft) {
             return WaysGramDrafts.save((TLRPC.TL_messages_saveDraft) request, selfId, expectedToken);
         } else if (request instanceof TLRPC.TL_messages_getAllDrafts) {
             return WaysGramDrafts.load(account, selfId, expectedToken);
+        }
+
+        if (request instanceof TL_stars.updatePaidMessagesPrice) {
+            return paidMessagesPrice(account, (TL_stars.updatePaidMessagesPrice) request, selfId);
         }
 
         // ---- update state (the server is polled, there is no push channel) ----
@@ -454,7 +515,7 @@ public class WaysGramTransport {
                 long id = WaysGramChats.channelServer(input.channel_id);
                 if (id <= 0) continue;
                 JSONObject data = WaysGramApi.get(account, "/api/channels/" + id);
-                result.chats.add(WaysGramChats.toChannel(data, selfId, data.optBoolean("joined") || WaysGramChats.joinedChannels(account).contains(id)));
+                result.chats.add(WaysGramChats.toChannel(account, data, selfId, data.optBoolean("joined") || WaysGramChats.joinedChannels(account).contains(id)));
             }
             return result;
         } else if (request instanceof TLRPC.TL_channels_exportMessageLink) {
@@ -575,6 +636,14 @@ public class WaysGramTransport {
             return WaysGramProfile.setPersonalChannel(account, ((TL_account.updatePersonalChannel) request).channel);
         } else if (request instanceof TLRPC.TL_channels_getAdminedPublicChannels) {
             return WaysGramProfile.publicChannels(account, selfId, ((TLRPC.TL_channels_getAdminedPublicChannels) request).for_personal);
+        } else if (request instanceof TLRPC.TL_channels_getSendAs) {
+            // Отправители для группы: сама группа (анонимный админ) и публичные каналы пользователя.
+            TLRPC.TL_channels_getSendAs req = (TLRPC.TL_channels_getSendAs) request;
+            long group = WaysGramChats.groupPeerId(req.peer);
+            if (req.for_live_stories || group <= 0 || !WaysGramChats.isGroup(req.peer)) {
+                return new TLRPC.TL_channels_sendAsPeers();
+            }
+            return WaysGramChats.sendAsPeers(account, group, selfId);
         } else if (request instanceof TL_account.getPrivacy && WaysGramProfile.privacySetting(((TL_account.getPrivacy) request).key) != null) {
             TL_account.getPrivacy privacy = (TL_account.getPrivacy) request;
             return WaysGramProfile.privacy(account, selfId, WaysGramProfile.privacySetting(privacy.key), null);
@@ -589,6 +658,25 @@ public class WaysGramTransport {
             return WaysGramProfile.updateUsername(account, ((TL_account.updateUsername) request).username);
         } else if (request instanceof TL_account.checkUsername) {
             return WaysGramProfile.checkUsername(account, ((TL_account.checkUsername) request).username, selfId, false);
+        } else if (request instanceof TLRPC.TL_channels_getMessages) {
+            // Посты канала по id: ответы, закреплённые сообщения, альбомы.
+            TLRPC.TL_channels_getMessages req = (TLRPC.TL_channels_getMessages) request;
+            return WaysGramMessages.channelMessagesByIds(account, req.channel.channel_id, req.id, selfId);
+        } else if (request instanceof TLRPC.TL_messages_getMessages) {
+            // Список без пира (кэш ссылок на файлы): пустой ответ вместо ошибки, иначе
+            // каждое открытие чата показывало «функция не поддерживается».
+            return new TLRPC.TL_messages_messages();
+        } else if (request instanceof TLRPC.TL_channels_readMessageContents) {
+            return new TLRPC.TL_boolTrue();
+        } else if (request instanceof TLRPC.TL_messages_readMessageContents) {
+            TLRPC.TL_messages_affectedMessages read = new TLRPC.TL_messages_affectedMessages();
+            read.pts = nextPts(account);
+            read.pts_count = 1;
+            return read;
+        } else if (request instanceof TLRPC.TL_channels_getInactiveChannels) {
+            return new TLRPC.TL_messages_inactiveChats();
+        } else if (request instanceof TLRPC.TL_channels_reportSpam) {
+            return new TLRPC.TL_boolTrue();
         } else if (request instanceof TLRPC.TL_channels_getFullChannel) {
             return WaysGramChats.fullChannel(account, ((TLRPC.TL_channels_getFullChannel) request).channel.channel_id, selfId);
         } else if (request instanceof TLRPC.TL_channels_createChannel) {
@@ -600,6 +688,126 @@ public class WaysGramTransport {
         } else if (request instanceof TLRPC.TL_channels_editTitle) {
             TLRPC.TL_channels_editTitle edit = (TLRPC.TL_channels_editTitle) request;
             return WaysGramProfile.editChannelTitle(account, edit.channel.channel_id, edit.title);
+        } else if (request instanceof TLRPC.TL_channels_editPhoto) {
+            TLRPC.TL_channels_editPhoto edit = (TLRPC.TL_channels_editPhoto) request;
+            return WaysGramChats.editChannelPhoto(account, edit.channel.channel_id, edit.photo);
+        } else if (request instanceof TLRPC.TL_channels_toggleSignatures) {
+            TLRPC.TL_channels_toggleSignatures toggle = (TLRPC.TL_channels_toggleSignatures) request;
+            return WaysGramChats.updateChannelSettings(account, toggle.channel.channel_id,
+                    WaysGramChats.settings("signatures_enabled", toggle.signatures_enabled,
+                            "signatures_profiles", toggle.profiles_enabled));
+        } else if (request instanceof TLRPC.TL_channels_toggleSlowMode) {
+            TLRPC.TL_channels_toggleSlowMode toggle = (TLRPC.TL_channels_toggleSlowMode) request;
+            return WaysGramChats.updateChannelSettings(account, toggle.channel.channel_id,
+                    WaysGramChats.settings("slow_mode_seconds", toggle.seconds));
+        } else if (request instanceof TLRPC.TL_channels_toggleParticipantsHidden) {
+            TLRPC.TL_channels_toggleParticipantsHidden toggle = (TLRPC.TL_channels_toggleParticipantsHidden) request;
+            return WaysGramChats.updateChannelSettings(account, toggle.channel.channel_id,
+                    WaysGramChats.settings("participants_hidden", toggle.enabled));
+        } else if (request instanceof TLRPC.TL_channels_togglePreHistoryHidden) {
+            TLRPC.TL_channels_togglePreHistoryHidden toggle = (TLRPC.TL_channels_togglePreHistoryHidden) request;
+            return WaysGramChats.updateChannelSettings(account, toggle.channel.channel_id,
+                    WaysGramChats.settings("pre_history_hidden", toggle.enabled));
+        } else if (request instanceof TLRPC.TL_channels_toggleJoinToSend) {
+            TLRPC.TL_channels_toggleJoinToSend toggle = (TLRPC.TL_channels_toggleJoinToSend) request;
+            return WaysGramChats.updateChannelSettings(account, toggle.channel.channel_id,
+                    WaysGramChats.settings("join_to_send", toggle.enabled));
+        } else if (request instanceof TLRPC.TL_channels_toggleJoinRequest) {
+            TLRPC.TL_channels_toggleJoinRequest toggle = (TLRPC.TL_channels_toggleJoinRequest) request;
+            return WaysGramChats.updateChannelSettings(account, toggle.channel.channel_id,
+                    WaysGramChats.settings("join_request", toggle.enabled));
+        } else if (request instanceof TLRPC.TL_channels_updateColor) {
+            TLRPC.TL_channels_updateColor update = (TLRPC.TL_channels_updateColor) request;
+            int colorValue = (update.flags & TLObject.FLAG_2) != 0 ? update.color : 0;
+            long emojiValue = (update.flags & TLObject.FLAG_0) != 0 ? update.background_emoji_id : 0;
+            JSONObject body = WaysGramChats.settings(
+                    update.for_profile ? "profile_color_id" : "color_id", colorValue,
+                    update.for_profile ? "profile_background_emoji_id" : "background_emoji_id", emojiValue);
+            // Мегагруппа живёт в групповом API: у неё и настройки, и цвет профиля свои.
+            if (WaysGramChats.isGroupChannel(update.channel.channel_id)) {
+                return WaysGramChats.updateGroupSettings(account, update.channel.channel_id, body);
+            }
+            return WaysGramChats.updateChannelSettings(account, update.channel.channel_id, body);
+        } else if (request instanceof TLRPC.TL_channels_updateEmojiStatus) {
+            TLRPC.TL_channels_updateEmojiStatus update = (TLRPC.TL_channels_updateEmojiStatus) request;
+            long documentId = 0;
+            if (update.emoji_status instanceof TLRPC.TL_emojiStatus) {
+                documentId = ((TLRPC.TL_emojiStatus) update.emoji_status).document_id;
+            } else if (update.emoji_status instanceof TLRPC.TL_emojiStatusCollectible) {
+                documentId = ((TLRPC.TL_emojiStatusCollectible) update.emoji_status).document_id;
+            }
+            return WaysGramChats.updateChannelSettings(account, update.channel.channel_id,
+                    WaysGramChats.settings("emoji_status_id", documentId));
+        } else if (request instanceof TLRPC.TL_channels_deleteHistory) {
+            TLRPC.TL_channels_deleteHistory clear = (TLRPC.TL_channels_deleteHistory) request;
+            return WaysGramChats.clearChannelHistory(account, clear.channel.channel_id, clear.for_everyone);
+        } else if (request instanceof TLRPC.TL_channels_deleteParticipantHistory) {
+            TLRPC.TL_channels_deleteParticipantHistory clear = (TLRPC.TL_channels_deleteParticipantHistory) request;
+            long target = 0;
+            if (clear.participant instanceof TLRPC.TL_inputPeerUser) {
+                target = ((TLRPC.TL_inputPeerUser) clear.participant).user_id;
+            } else if (clear.participant instanceof TLRPC.TL_inputPeerChannel) {
+                target = ((TLRPC.TL_inputPeerChannel) clear.participant).channel_id;
+            } else if (clear.participant instanceof TLRPC.TL_inputPeerChat) {
+                target = ((TLRPC.TL_inputPeerChat) clear.participant).chat_id;
+            }
+            return WaysGramChats.clearChannelMemberHistory(account, clear.channel.channel_id, target);
+        } else if (request instanceof TLRPC.TL_channels_checkSearchPostsFlood) {
+            TLRPC.SearchPostsFlood flood = new TLRPC.SearchPostsFlood();
+            flood.query_is_free = true;
+            return flood;
+        } else if (request instanceof TLRPC.TL_channels_toggleAntiSpam) {
+            TLRPC.TL_channels_toggleAntiSpam toggle = (TLRPC.TL_channels_toggleAntiSpam) request;
+            return WaysGramChats.updateChannelSettings(account, toggle.channel.channel_id,
+                    WaysGramChats.settings("antispam", toggle.enabled));
+        } else if (request instanceof TLRPC.TL_channels_toggleAutotranslation) {
+            // WaysGram does not translate messages itself; the toggle is a no-op rather than an error.
+            return new TLRPC.TL_updates();
+        } else if (request instanceof TLRPC.TL_channels_restrictSponsoredMessages) {
+            return new TLRPC.TL_updates();
+        } else if (request instanceof TLRPC.TL_channels_editCreator) {
+            // Штатный флоу требует SRP-пароль, которого в WaysGram нет: передача идёт
+            // через настройки канала («Передать канал»).
+            throw new WaysGramApi.ApiException(400, "Передача канала доступна в настройках канала WaysGram");
+        } else if (request instanceof TLRPC.TL_channels_editLocation) {
+            // Геолокация канала и мегагруппы: точка + подпись. Возвращаем bool, как и Telegram.
+            TLRPC.TL_channels_editLocation edit = (TLRPC.TL_channels_editLocation) request;
+            if (edit.channel == null || edit.geo_point == null) {
+                throw new WaysGramApi.ApiException(400, "LOCATION_INVALID");
+            }
+            return WaysGramChats.updateLocation(account, edit.channel.channel_id,
+                    edit.geo_point.lat, edit.geo_point._long, edit.address);
+        } else if (request instanceof TLRPC.TL_channels_reorderUsernames
+                || request instanceof TLRPC.TL_channels_setStickers
+                || request instanceof TLRPC.TL_channels_setEmojiStickers
+                || request instanceof TLRPC.TL_channels_setMainProfileTab) {
+            return new TLRPC.TL_boolTrue();
+        } else if (request instanceof TLRPC.TL_channels_getChannelRecommendations) {
+            return new TLRPC.TL_messages_chats();
+        } else if (request instanceof TLRPC.TL_channels_getFutureCreatorAfterLeave
+                || request instanceof TLRPC.TL_channels_getMessageAuthor) {
+            return new TLRPC.TL_userEmpty();
+        } else if (request instanceof TLRPC.TL_channels_toggleViewForumAsMessages
+                || request instanceof TLRPC.TL_channels_setBoostsToUnblockRestrictions) {
+            return new TLRPC.TL_updates();
+        } else if (request instanceof TLRPC.TL_channels_reportAntiSpamFalsePositive) {
+            return new TLRPC.TL_boolTrue();
+        } else if (request instanceof TLRPC.TL_channels_toggleUsername) {
+            TLRPC.TL_channels_toggleUsername toggle = (TLRPC.TL_channels_toggleUsername) request;
+            return WaysGramChats.toggleChannelUsername(account, toggle.channel.channel_id, toggle.username, toggle.active);
+        } else if (request instanceof TLRPC.TL_channels_deactivateAllUsernames) {
+            return WaysGramChats.deactivateChannelUsernames(account,
+                    ((TLRPC.TL_channels_deactivateAllUsernames) request).channel.channel_id);
+        } else if (request instanceof TLRPC.TL_channels_searchPosts) {
+            return WaysGramMessages.searchPosts(account, (TLRPC.TL_channels_searchPosts) request, selfId);
+        } else if (request instanceof TLRPC.TL_channels_getAdminLog) {
+            return WaysGramChats.adminLog(account, (TLRPC.TL_channels_getAdminLog) request, selfId);
+        } else if (request instanceof TLRPC.TL_channels_getGroupsForDiscussion) {
+            return WaysGramChats.discussionGroups(account, selfId);
+        } else if (request instanceof TLRPC.TL_channels_setDiscussionGroup) {
+            TLRPC.TL_channels_setDiscussionGroup link = (TLRPC.TL_channels_setDiscussionGroup) request;
+            long groupId = link.group instanceof TLRPC.TL_inputChannel ? link.group.channel_id : 0;
+            return WaysGramChats.setDiscussionGroup(account, link.broadcast.channel_id, groupId);
         }
 
         // ---- the START button of a bot chat ----
@@ -609,6 +817,61 @@ public class WaysGramTransport {
                 return WaysGramBotFather.start(account, start.random_id, selfId, nextPts(account));
             }
             return null;
+        }
+
+        if (request instanceof TLRPC.TL_messages_editChatDefaultBannedRights) {
+            TLRPC.TL_messages_editChatDefaultBannedRights edit = (TLRPC.TL_messages_editChatDefaultBannedRights) request;
+            if (WaysGramChats.isGroup(edit.peer)) {
+                return WaysGramChats.setGroupDefaultRights(account,
+                        WaysGramChats.groupPeerId(edit.peer), edit.banned_rights);
+            }
+            return new TLRPC.TL_updates();
+        }
+        if (request instanceof TLRPC.TL_messages_toggleNoForwards) {
+            TLRPC.TL_messages_toggleNoForwards toggle = (TLRPC.TL_messages_toggleNoForwards) request;
+            if (WaysGramChats.isGroup(toggle.peer)) {
+                return WaysGramChats.updateGroupSettings(account,
+                        WaysGramChats.groupPeerId(toggle.peer),
+                        WaysGramChats.settings("no_forwards", toggle.enabled));
+            }
+            if (toggle.peer instanceof TLRPC.TL_inputPeerChannel) {
+                return WaysGramChats.updateChannelSettings(account,
+                        ((TLRPC.TL_inputPeerChannel) toggle.peer).channel_id,
+                        WaysGramChats.settings("no_forwards", toggle.enabled));
+            }
+            return new TLRPC.TL_updates();
+        }
+        if (request instanceof TLRPC.TL_messages_getOnlines) {
+            TLRPC.TL_messages_getOnlines onlines = (TLRPC.TL_messages_getOnlines) request;
+            long onlinesChat = WaysGramChats.groupPeerId(onlines.peer);
+            if (onlinesChat <= 0 || !WaysGramChats.isGroup(onlines.peer)) {
+                return new TLRPC.TL_chatOnlines();
+            }
+            return WaysGramChats.onlines(account, onlinesChat);
+        }
+        if (request instanceof TLRPC.TL_messages_getCommonChats) {
+            TLRPC.TL_messages_getCommonChats common = (TLRPC.TL_messages_getCommonChats) request;
+            long target = 0;
+            if (common.user_id instanceof TLRPC.TL_inputUser) {
+                target = ((TLRPC.TL_inputUser) common.user_id).user_id;
+            } else if (common.user_id instanceof TLRPC.TL_inputUserSelf) {
+                target = selfId;
+            }
+            return WaysGramChats.commonChats(account, target, selfId);
+        }
+        if (request instanceof TLRPC.TL_messages_getPeerSettings) {
+            return WaysGramChats.peerSettings();
+        }
+        if (request instanceof TLRPC.TL_messages_reportSpam) {
+            return WaysGramChats.reportPeer(account, ((TLRPC.TL_messages_reportSpam) request).peer, selfId);
+        }
+        if (request instanceof TLRPC.TL_messages_getAdminsWithInvites) {
+            return WaysGramInvites.adminsWithInvites(account,
+                    ((TLRPC.TL_messages_getAdminsWithInvites) request).peer);
+        }
+        if (request instanceof TLRPC.TL_messages_setChatTheme) {
+            // WaysGram keeps one chat appearance per dialog on the device.
+            return new TLRPC.TL_updates();
         }
 
         // ---- group management ----
@@ -621,14 +884,17 @@ public class WaysGramTransport {
         } else if (request instanceof TLRPC.TL_messages_editChatTitle) {
             TLRPC.TL_messages_editChatTitle edit = (TLRPC.TL_messages_editChatTitle) request;
             return WaysGramChats.editGroup(account, edit.chat_id, "title", edit.title, selfId);
+        } else if (request instanceof TLRPC.TL_messages_editChatPhoto) {
+            TLRPC.TL_messages_editChatPhoto edit = (TLRPC.TL_messages_editChatPhoto) request;
+            return WaysGramChats.editGroupPhoto(account, edit.chat_id, edit.photo);
         } else if (request instanceof TLRPC.TL_messages_editChatAbout) {
             TLRPC.TL_messages_editChatAbout edit = (TLRPC.TL_messages_editChatAbout) request;
+            if (WaysGramChats.isGroup(edit.peer)) {
+                WaysGramChats.editGroup(account, WaysGramChats.groupPeerId(edit.peer), "description", edit.about, selfId);
+                return new TLRPC.TL_boolTrue();
+            }
             if (edit.peer instanceof TLRPC.TL_inputPeerChannel) {
                 return WaysGramProfile.editChannelAbout(account, edit.peer.channel_id, edit.about);
-            }
-            if (edit.peer instanceof TLRPC.TL_inputPeerChat) {
-                WaysGramChats.editGroup(account, edit.peer.chat_id, "description", edit.about, selfId);
-                return new TLRPC.TL_boolTrue();
             }
         } else if (request instanceof TLRPC.TL_messages_editChatAdmin) {
             TLRPC.TL_messages_editChatAdmin edit = (TLRPC.TL_messages_editChatAdmin) request;
@@ -675,6 +941,13 @@ public class WaysGramTransport {
             return WaysGramMessages.setReactions(account, (TLRPC.TL_messages_sendReaction) request, selfId, expectedToken);
         } else if (request instanceof TLRPC.TL_messages_getMessagesReactions) {
             return WaysGramMessages.refreshReactions(account, (TLRPC.TL_messages_getMessagesReactions) request, selfId, expectedToken);
+        } else if (request instanceof TLRPC.TL_messages_sendPaidReaction) {
+            return WaysGramMessages.sendPaidReaction(account, (TLRPC.TL_messages_sendPaidReaction) request, selfId, expectedToken);
+        } else if (request instanceof TLRPC.TL_messages_getPaidReactionPrivacy) {
+            // Анонимность платной реакции WaysGram не разделяет: звёзды списываются, автор виден.
+            return new TL_stars.paidReactionPrivacyDefault();
+        } else if (request instanceof TLRPC.TL_messages_togglePaidReactionPrivacy) {
+            return new TLRPC.TL_boolTrue();
         } else if (request instanceof WaysGramScheduled.RescheduleRequest) {
             return WaysGramScheduled.reschedule(account, (WaysGramScheduled.RescheduleRequest) request, selfId, expectedToken);
         } else if (request instanceof TLRPC.TL_messages_getScheduledHistory) {
@@ -720,7 +993,7 @@ public class WaysGramTransport {
             JSONArray entities = WaysGramMapper.writeTextEntities(send.entities);
             String token = WaysGramApi.getToken(account);
             TLObject sent = sendTo(account, send.peer, send.message, send.random_id, null, send.reply_to, selfId,
-                    null, null, send.silent, entities, null, expectedToken, null);
+                    null, null, send.silent, entities, null, expectedToken, null, sendAsIdentity(send.send_as, send.peer));
             if (send.clear_draft) clearSentDraft(account, send.peer, send.reply_to, selfId, send.message, entities, token);
             return sent;
 
@@ -769,7 +1042,7 @@ public class WaysGramTransport {
                     throw new WaysGramApi.ApiException(400, "CONTACT_INVALID");
                 }
                 return sendTo(account, send.peer, send.message, send.random_id, null,
-                        send.reply_to, selfId, null, contact, send.silent);
+                        send.reply_to, selfId, null, contact, send.silent, sendAsIdentity(send.send_as, send.peer));
             }
             if (send.media instanceof TLRPC.TL_inputMediaGeoPoint || send.media instanceof TLRPC.TL_inputMediaVenue) {
                 if (!(send.peer instanceof TLRPC.TL_inputPeerUser || send.peer instanceof TLRPC.TL_inputPeerSelf
@@ -819,7 +1092,7 @@ public class WaysGramTransport {
                 throw new WaysGramApi.ApiException(400, "MEDIA_NOT_SUPPORTED");
             }
             String token = WaysGramApi.getToken(account);
-            TLObject sent = sendTo(account, send.peer, send.message, send.random_id, mediaId, send.reply_to, selfId, null, null, send.silent, captionEntities);
+            TLObject sent = sendTo(account, send.peer, send.message, send.random_id, mediaId, send.reply_to, selfId, null, null, send.silent, captionEntities, sendAsIdentity(send.send_as, send.peer));
             if (send.clear_draft) clearSentDraft(account, send.peer, send.reply_to, selfId, send.message, captionEntities, token);
             return sent;
         } else if (request instanceof TLRPC.TL_messages_uploadMedia) {
@@ -1122,8 +1395,8 @@ public class WaysGramTransport {
                     wanted.add(selfId);
                 } else if (inputPeer instanceof TLRPC.TL_inputPeerUser) {
                     wanted.add(inputPeer.user_id);
-                } else if (inputPeer instanceof TLRPC.TL_inputPeerChat) {
-                    wantedChats.add(inputPeer.chat_id);
+                } else if (WaysGramChats.isGroup(inputPeer)) {
+                    wantedChats.add(WaysGramChats.groupPeerId(inputPeer));
                 } else if (inputPeer instanceof TLRPC.TL_inputPeerChannel) {
                     wantedChannels.add(inputPeer.channel_id);
                 }
@@ -1141,14 +1414,20 @@ public class WaysGramTransport {
             WaysGramChats.Snapshot chats = WaysGramChats.collect(account, selfId);
             for (TLRPC.Dialog d : chats.dialogs) {
                 if ((d.peer instanceof TLRPC.TL_peerChat && wantedChats.contains(d.peer.chat_id))
-                        || (d.peer instanceof TLRPC.TL_peerChannel && wantedChannels.contains(d.peer.channel_id))) {
+                        || (d.peer instanceof TLRPC.TL_peerChannel
+                            && (wantedChannels.contains(d.peer.channel_id)
+                                || (WaysGramChats.isGroupChannel(d.peer.channel_id)
+                                    && wantedChats.contains(d.peer.channel_id))))) {
                     out.dialogs.add(d);
 
                 }
             }
             for (TLRPC.Message message : chats.messages) {
                 if ((message.peer_id instanceof TLRPC.TL_peerChat && wantedChats.contains(message.peer_id.chat_id))
-                        || (message.peer_id instanceof TLRPC.TL_peerChannel && wantedChannels.contains(message.peer_id.channel_id))) {
+                        || (message.peer_id instanceof TLRPC.TL_peerChannel
+                            && (wantedChannels.contains(message.peer_id.channel_id)
+                                || (WaysGramChats.isGroupChannel(message.peer_id.channel_id)
+                                    && wantedChats.contains(message.peer_id.channel_id))))) {
                     out.messages.add(message);
                 }
             }
@@ -1259,8 +1538,8 @@ public class WaysGramTransport {
                                        String action, JSONArray values, JSONArray undo) throws WaysGramApi.ApiException {
         String scope;
         long target;
-        if (peer instanceof TLRPC.TL_inputPeerChat) {
-            scope = "group"; target = peer.chat_id; id = WaysGramChats.serverGroupId(id);
+        if (WaysGramChats.isGroup(peer)) {
+            scope = "group"; target = WaysGramChats.groupPeerId(peer); id = WaysGramChats.serverGroupId(id);
         } else if (peer instanceof TLRPC.TL_inputPeerChannel) {
             scope = "channel"; target = WaysGramChats.channelServer(peer.channel_id);
         } else if (peer instanceof TLRPC.TL_inputPeerUser || peer instanceof TLRPC.TL_inputPeerSelf) {
@@ -1286,6 +1565,27 @@ public class WaysGramTransport {
         return result;
     }
 
+    /**
+     * Кто фактически отправляет сообщение в группу.
+     * -1 — обычный аккаунт, 0 — сама группа (анонимный админ), &gt; 0 — серверный id канала.
+     * Локации и опросы по-прежнему требуют обычного отправителя — см. usesDefaultLocationSender.
+     */
+    private static long sendAsIdentity(TLRPC.InputPeer sendAs, TLRPC.InputPeer target) {
+        if (sendAs == null || sendAs instanceof TLRPC.TL_inputPeerSelf || sendAs instanceof TLRPC.TL_inputPeerUser) {
+            return -1;
+        }
+        if (sendAs instanceof TLRPC.TL_inputPeerChat) {
+            return target instanceof TLRPC.TL_inputPeerChat && sendAs.chat_id == target.chat_id ? 0 : -1;
+        }
+        if (sendAs instanceof TLRPC.TL_inputPeerChannel) {
+            if (target instanceof TLRPC.TL_inputPeerChannel && sendAs.channel_id == target.channel_id) {
+                return 0;
+            }
+            return WaysGramChats.channelServer(sendAs.channel_id);
+        }
+        return -1;
+    }
+
     // The native composer fills send_as even when no alternate sender is selected.
     private static boolean usesDefaultLocationSender(TLRPC.InputPeer sender, TLRPC.InputPeer target, long selfId) {
         return sender == null || sender instanceof TLRPC.TL_inputPeerSelf
@@ -1295,29 +1595,41 @@ public class WaysGramTransport {
     }
 
     private static TLObject sendTo(int account, TLRPC.InputPeer peer, String text, long randomId, String mediaId, TLRPC.InputReplyTo reply, long selfId, JSONObject location, boolean silent) throws WaysGramApi.ApiException {
-        return sendTo(account, peer, text, randomId, mediaId, reply, selfId, location, null, silent, null);
+        return sendTo(account, peer, text, randomId, mediaId, reply, selfId, location, null, silent, null, null, null, null, -1L);
     }
 
     private static TLObject sendTo(int account, TLRPC.InputPeer peer, String text, long randomId, String mediaId, TLRPC.InputReplyTo reply, long selfId, JSONObject location, JSONObject contact, boolean silent) throws WaysGramApi.ApiException {
-        return sendTo(account, peer, text, randomId, mediaId, reply, selfId, location, contact, silent, null);
+        return sendTo(account, peer, text, randomId, mediaId, reply, selfId, location, contact, silent, null, null, null, null, -1L);
     }
 
     private static TLObject sendTo(int account, TLRPC.InputPeer peer, String text, long randomId, String mediaId, TLRPC.InputReplyTo reply, long selfId, JSONObject location, JSONObject contact, boolean silent, JSONArray entities) throws WaysGramApi.ApiException {
-        return sendTo(account, peer, text, randomId, mediaId, reply, selfId, location, contact, silent, entities, null);
+        return sendTo(account, peer, text, randomId, mediaId, reply, selfId, location, contact, silent, entities, null, null, null, -1L);
     }
 
     private static TLObject sendTo(int account, TLRPC.InputPeer peer, String text, long randomId, String mediaId, TLRPC.InputReplyTo reply, long selfId, JSONObject location, JSONObject contact, boolean silent, JSONArray entities, JSONObject card) throws WaysGramApi.ApiException {
-        return sendTo(account, peer, text, randomId, mediaId, reply, selfId, location, contact, silent, entities, card, null, null);
+        return sendTo(account, peer, text, randomId, mediaId, reply, selfId, location, contact, silent, entities, card, null, null, -1L);
+    }
+
+    private static TLObject sendTo(int account, TLRPC.InputPeer peer, String text, long randomId, String mediaId, TLRPC.InputReplyTo reply, long selfId, JSONObject location, JSONObject contact, boolean silent, JSONArray entities, long identity) throws WaysGramApi.ApiException {
+        return sendTo(account, peer, text, randomId, mediaId, reply, selfId, location, contact, silent, entities, null, null, null, identity);
+    }
+
+    private static TLObject sendTo(int account, TLRPC.InputPeer peer, String text, long randomId, String mediaId, TLRPC.InputReplyTo reply, long selfId, JSONObject location, JSONObject contact, boolean silent, long identity) throws WaysGramApi.ApiException {
+        return sendTo(account, peer, text, randomId, mediaId, reply, selfId, location, contact, silent, null, null, null, null, identity);
     }
 
     private static TLObject sendTo(int account, TLRPC.InputPeer peer, String text, long randomId, String mediaId,
                                    TLRPC.InputReplyTo reply, long selfId, JSONObject location, JSONObject contact,
-                                   boolean silent, JSONArray entities, JSONObject card, String expectedToken, Integer approvedFee) throws WaysGramApi.ApiException {
+                                   boolean silent, JSONArray entities, JSONObject card, String expectedToken, Integer approvedFee, long identity) throws WaysGramApi.ApiException {
         int replyTo = replyIdOf(reply);
         JSONObject quote = WaysGramMapper.quoteFor(reply);
         if (peer instanceof TLRPC.TL_inputPeerChat || peer instanceof TLRPC.TL_inputPeerChannel) {
-            if (card == null) return WaysGramChats.send(account, peer, text, randomId, mediaId, replyTo, selfId, nextPts(account), silent, location, contact, entities, quote);
-            return WaysGramChats.send(account, peer, text, randomId, mediaId, replyTo, selfId, nextPts(account), silent, location, contact, entities, quote, card);
+            if (card == null) {
+                return identity < 0
+                        ? WaysGramChats.send(account, peer, text, randomId, mediaId, replyTo, selfId, nextPts(account), silent, location, contact, entities, quote)
+                        : WaysGramChats.send(account, peer, text, randomId, mediaId, replyTo, selfId, nextPts(account), silent, location, contact, entities, quote, null, identity);
+            }
+            return WaysGramChats.send(account, peer, text, randomId, mediaId, replyTo, selfId, nextPts(account), silent, location, contact, entities, quote, card, identity);
         }
         // WaysGram saved messages: the recipient is the account itself.
         if (!(peer instanceof TLRPC.TL_inputPeerUser) && !(peer instanceof TLRPC.TL_inputPeerSelf)) {
@@ -1425,7 +1737,9 @@ public class WaysGramTransport {
             return error(400, "PHONE_CODE_INVALID");
         }
         if (e.status == 400) {
-            return error(400, "PHONE_NUMBER_INVALID");
+            // Сервер объясняет, что именно не так с номером («+код страны и номер»,
+            // «номер не закреплён за аккаунтом»): показываем это вместо общего текста.
+            return error(400, TextUtils.isEmpty(e.detail) ? "PHONE_NUMBER_INVALID" : e.detail);
         }
         if (e.status >= 500) {
             return error(400, "Сервер WaysGram недоступен (" + e.status + ")");

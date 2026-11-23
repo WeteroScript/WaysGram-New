@@ -51,9 +51,9 @@ public final class WaysGramInvites {
         updates.date = (int) (System.currentTimeMillis() / 1000);
         if (channel) {
             WaysGramChats.setJoined(account, id, true);
-            updates.chats.add(WaysGramChats.toChannel(chat, selfId, true));
+            updates.chats.add(WaysGramChats.toChannel(account, chat, selfId, true));
         } else {
-            updates.chats.add(WaysGramChats.toChat(chat, selfId));
+            updates.chats.add(WaysGramChats.toMegagroup(account, chat, selfId));
         }
         TLRPC.TL_chatInviteJoinResultOk result = new TLRPC.TL_chatInviteJoinResultOk();
         result.updates = updates;
@@ -61,16 +61,16 @@ public final class WaysGramInvites {
     }
 
     private static String inviteBase(TLRPC.InputPeer peer) throws WaysGramApi.ApiException {
-        if (peer instanceof TLRPC.TL_inputPeerChat) return "/api/groups/" + peer.chat_id + "/invites";
+        if (WaysGramChats.isGroup(peer)) return "/api/groups/" + WaysGramChats.groupPeerId(peer) + "/invites";
         if (peer instanceof TLRPC.TL_inputPeerChannel) return "/api/channels/" + WaysGramChats.channelServer(peer.channel_id) + "/invites";
         throw new WaysGramApi.ApiException(400, "METHOD_NOT_SUPPORTED");
     }
 
     static TLObject exportGroup(int account, TLRPC.TL_messages_exportChatInvite request, long selfId) throws WaysGramApi.ApiException {
-        if (request.peer instanceof TLRPC.TL_inputPeerChat && request.legacy_revoke_permanent
+        if (WaysGramChats.isGroup(request.peer) && request.legacy_revoke_permanent
                 && request.expire_date == 0 && request.usage_limit == 0 && !request.request_needed
                 && request.title == null && request.subscription_pricing == null) {
-            return groupPermanentInvite(account, request.peer.chat_id, selfId, true);
+            return groupPermanentInvite(account, WaysGramChats.groupPeerId(request.peer), selfId, true);
         }
         if (request.peer instanceof TLRPC.TL_inputPeerChannel && request.legacy_revoke_permanent
                 && request.expire_date == 0 && request.usage_limit == 0 && !request.request_needed
@@ -125,7 +125,7 @@ public final class WaysGramInvites {
         if (request.revoked && (request.flags & ~TLObject.FLAG_2) != 0) throw new WaysGramApi.ApiException(400, "METHOD_NOT_SUPPORTED");
         android.net.Uri uri = android.net.Uri.parse(request.link == null ? "" : request.link);
         String path = uri.getPath();
-        String scope = request.peer instanceof TLRPC.TL_inputPeerChannel ? "channels" : "groups";
+        String scope = WaysGramChats.isGroup(request.peer) ? "groups" : "channels";
         if (path == null || !path.matches("/api/" + scope + "/invites/[A-Za-z0-9_-]{20,128}")) {
             throw new WaysGramApi.ApiException(400, "INVITE_HASH_INVALID");
         }
@@ -147,6 +147,28 @@ public final class WaysGramInvites {
         TLRPC.TL_messages_exportedChatInvite result = new TLRPC.TL_messages_exportedChatInvite();
         result.invite = invite;
         return result;
+    }
+
+    /** Сколько ссылок создал каждый администратор: список для экрана «Приглашения». */
+    static TLRPC.TL_messages_chatAdminsWithInvites adminsWithInvites(int account, TLRPC.InputPeer peer)
+            throws WaysGramApi.ApiException {
+        String base = inviteBase(peer);
+        JSONObject data = WaysGramApi.get(account, base + "/admins-with-invites");
+        TLRPC.TL_messages_chatAdminsWithInvites out = new TLRPC.TL_messages_chatAdminsWithInvites();
+        JSONArray admins = data.optJSONArray("admins");
+        for (int i = 0; admins != null && i < admins.length(); i++) {
+            JSONObject row = admins.optJSONObject(i);
+            if (row == null || row.optLong("telegram_id") <= 0) {
+                continue;
+            }
+            TLRPC.TL_chatAdminWithInvites item = new TLRPC.TL_chatAdminWithInvites();
+            item.admin_id = row.optLong("telegram_id");
+            item.invites_count = row.optInt("invites_count");
+            item.revoked_invites_count = row.optInt("revoked_invites_count");
+            out.admins.add(item);
+            out.users.add(WaysGramMapper.toUser(row));
+        }
+        return out;
     }
 
     private static void applyLabel(TLRPC.TL_chatInviteExported invite, JSONObject data) {
@@ -172,7 +194,7 @@ public final class WaysGramInvites {
     }
 
     static TLObject deleteRevoked(int account, TLRPC.InputPeer peer, String link, TLRPC.InputUser admin, long selfId) throws WaysGramApi.ApiException {
-        String scope = peer instanceof TLRPC.TL_inputPeerChannel ? "channels" : "groups";
+        String scope = WaysGramChats.isGroup(peer) ? "groups" : "channels";
         String base = inviteBase(peer);
         String endpoint = base.substring(0, base.lastIndexOf('/')) + "/revoked-invites";
         if (link != null) {
@@ -212,7 +234,7 @@ public final class WaysGramInvites {
         }
         long offsetUser = request.offset_user == null ? 0 : request.offset_user.user_id;
         String base = inviteBase(request.peer);
-        String scope = request.peer instanceof TLRPC.TL_inputPeerChannel ? "channels" : "groups";
+        String scope = WaysGramChats.isGroup(request.peer) ? "groups" : "channels";
         String endpoint = base.substring(0, base.lastIndexOf('/')) + "/join-requests?after_date=" + request.offset_date
                 + "&after_user=" + offsetUser + "&limit=" + request.limit;
         if (request.q != null) endpoint += "&q=" + android.net.Uri.encode(request.q);
@@ -251,10 +273,10 @@ public final class WaysGramInvites {
         TLRPC.TL_updates result = new TLRPC.TL_updates();
         result.date = (int) (System.currentTimeMillis() / 1000);
         JSONObject chat = WaysGramApi.get(account, path);
-        if (request.peer instanceof TLRPC.TL_inputPeerChannel) {
-            result.chats.add(WaysGramChats.toChannel(chat, selfId, true));
+        if (WaysGramChats.isGroup(request.peer)) {
+            result.chats.add(WaysGramChats.toMegagroup(account, chat, selfId));
         } else {
-            result.chats.add(WaysGramChats.toChat(chat, selfId));
+            result.chats.add(WaysGramChats.toChannel(account, chat, selfId, true));
         }
         return result;
     }

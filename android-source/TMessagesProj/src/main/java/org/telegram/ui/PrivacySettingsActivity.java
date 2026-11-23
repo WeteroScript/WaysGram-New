@@ -108,8 +108,6 @@ public class PrivacySettingsActivity extends BaseFragment implements Notificatio
     private int musicRow;
     @Keep
     private int giftsRow;
-    private int waysGramGiftReceiveRow;
-    private boolean waysGramGiftReceiveBusy;
     @Keep
     private int birthdayRow;
     @Keep
@@ -189,14 +187,6 @@ public class PrivacySettingsActivity extends BaseFragment implements Notificatio
     public boolean onFragmentCreate() {
         super.onFragmentCreate();
 
-        if (WaysGramTransport.ENABLED) {
-            // Сводка «Подарки» показывает режим, сохранённый в WaysGram, а не ключ Telegram.
-            WaysGramGiftPrivacy.load(currentAccount, mode -> {
-                if (listAdapter != null) {
-                    listAdapter.notifyDataSetChanged();
-                }
-            });
-        }
         getContactsController().loadPrivacySettings();
         getMessagesController().getBlockedPeers(true);
         currentSync = newSync = getUserConfig().syncContacts;
@@ -444,8 +434,6 @@ public class PrivacySettingsActivity extends BaseFragment implements Notificatio
                 presentFragment(new PrivacyControlActivity(ContactsController.PRIVACY_RULES_TYPE_MUSIC));
             } else if (position == birthdayRow) {
                 presentFragment(new PrivacyControlActivity(ContactsController.PRIVACY_RULES_TYPE_BIRTHDAY));
-            } else if (position == waysGramGiftReceiveRow) {
-                loadWaysGramGiftReceive();
             } else if (position == giftsRow) {
                 presentFragment(new PrivacyControlActivity(ContactsController.PRIVACY_RULES_TYPE_GIFTS));
             } else if (position == forwardsRow) {
@@ -453,6 +441,10 @@ public class PrivacySettingsActivity extends BaseFragment implements Notificatio
             } else if (position == voicesRow) {
                 presentFragment(new PrivacyControlActivity(ContactsController.PRIVACY_RULES_TYPE_VOICE_MESSAGES));
             } else if (position == noncontactsRow) {
+                if (WaysGramTransport.ENABLED) {
+                    WaysGramPaidDm.settings(this, currentAccount);
+                    return;
+                }
                 presentFragment(new PrivacyControlActivity(ContactsController.PRIVACY_RULES_TYPE_MESSAGES));
             } else if (position == emailLoginRow) {
                 if (currentPassword == null || currentPassword.login_email_pattern == null) {
@@ -761,7 +753,7 @@ public class PrivacySettingsActivity extends BaseFragment implements Notificatio
                 if (isFinished || !TextUtils.equals(token, WaysGramApi.getToken(currentAccount))) return;
                 if (loaded != null) waysGramInactivityDays = loaded.optInt("days", -1);
                 if (listAdapter != null) listAdapter.notifyItemChanged(deleteAccountRow);
-                if (!show || !canShowWaysGramGiftReceive(token)) return;
+                if (!show || !canShowWaysGramScreen(token)) return;
                 if (loaded == null || waysGramInactivityDays < 0) {
                     showWaysGramInactivityMessage(R.string.ErrorOccurred);
                 } else if (!loaded.optBoolean("available") && waysGramInactivityDays == 0) {
@@ -788,7 +780,7 @@ public class PrivacySettingsActivity extends BaseFragment implements Notificatio
                         saveWaysGramInactivity(token, 0, false);
                     } else {
                         AndroidUtilities.runOnUIThread(() -> {
-                            if (!canShowWaysGramGiftReceive(token)) return;
+                            if (!canShowWaysGramScreen(token)) return;
                             showDialog(new AlertDialog.Builder(getParentActivity(), getResourceProvider())
                                     .setTitle(getString(R.string.DeleteAccountTitle))
                                     .setMessage(LocaleController.formatString("WaysGramInactivityConfirm", R.string.WaysGramInactivityConfirm, formatPluralString("Days", days)))
@@ -800,7 +792,7 @@ public class PrivacySettingsActivity extends BaseFragment implements Notificatio
     }
 
     private void saveWaysGramInactivity(String token, int days, boolean confirmed) {
-        if (waysGramInactivityBusy || !canShowWaysGramGiftReceive(token)) return;
+        if (waysGramInactivityBusy || !canShowWaysGramScreen(token)) return;
         waysGramInactivityBusy = true;
         WaysGramApi.NETWORK.execute(() -> {
             int saved = -1;
@@ -817,7 +809,7 @@ public class PrivacySettingsActivity extends BaseFragment implements Notificatio
                 if (result >= 0) {
                     waysGramInactivityDays = result;
                     if (listAdapter != null) listAdapter.notifyItemChanged(deleteAccountRow);
-                } else if (canShowWaysGramGiftReceive(token)) {
+                } else if (canShowWaysGramScreen(token)) {
                     showWaysGramInactivityMessage(R.string.ErrorOccurred);
                 }
             });
@@ -847,7 +839,7 @@ public class PrivacySettingsActivity extends BaseFragment implements Notificatio
             final Boolean enabled = state;
             AndroidUtilities.runOnUIThread(() -> {
                 waysGramCloudBusy = false;
-                if (!canShowWaysGramGiftReceive(token)) return;
+                if (!canShowWaysGramScreen(token)) return;
                 if (enabled == null) { showWaysGramCloudError(R.string.ErrorOccurred); return; }
                 updateWaysGramCloudState(enabled);
                 CharSequence[] choices = enabled
@@ -863,7 +855,7 @@ public class PrivacySettingsActivity extends BaseFragment implements Notificatio
     }
 
     private void requestWaysGramCloudCode(String token, boolean enabled, boolean disable) {
-        if (waysGramCloudBusy || !canShowWaysGramGiftReceive(token)) return;
+        if (waysGramCloudBusy || !canShowWaysGramScreen(token)) return;
         waysGramCloudBusy = true;
         WaysGramApi.NETWORK.execute(() -> {
             boolean sent = false;
@@ -876,7 +868,7 @@ public class PrivacySettingsActivity extends BaseFragment implements Notificatio
             final boolean ok = sent;
             AndroidUtilities.runOnUIThread(() -> {
                 waysGramCloudBusy = false;
-                if (!canShowWaysGramGiftReceive(token)) return;
+                if (!canShowWaysGramScreen(token)) return;
                 if (ok) showWaysGramCloudForm(token, enabled, disable);
                 else showWaysGramCloudError(R.string.ErrorOccurred);
             });
@@ -915,7 +907,7 @@ public class PrivacySettingsActivity extends BaseFragment implements Notificatio
         });
         if (!dialog.isShowing()) return;
         dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(v -> {
-            if (waysGramCloudBusy || !canShowWaysGramGiftReceive(token)) return;
+            if (waysGramCloudBusy || !canShowWaysGramScreen(token)) return;
             String otp = code.getText().toString().trim();
             String old = current == null ? null : current.getText().toString();
             String password = next == null ? null : next.getText().toString();
@@ -944,7 +936,7 @@ public class PrivacySettingsActivity extends BaseFragment implements Notificatio
                 final int error = message;
                 AndroidUtilities.runOnUIThread(() -> {
                     waysGramCloudBusy = false;
-                    if (!canShowWaysGramGiftReceive(token)) return;
+                    if (!canShowWaysGramScreen(token)) return;
                     if (saved == null) showWaysGramCloudError(error);
                     else updateWaysGramCloudState(saved);
                 });
@@ -960,84 +952,6 @@ public class PrivacySettingsActivity extends BaseFragment implements Notificatio
     private void showWaysGramCloudError(int message) {
         showDialog(new AlertDialog.Builder(getParentActivity(), getResourceProvider())
                 .setTitle(getString(R.string.TwoStepVerification)).setMessage(getString(message))
-                .setPositiveButton(getString(R.string.OK), null).create());
-    }
-
-    private static final String WAYS_GRAM_GIFT_RECEIVE_PATH = "/api/me/gift-receive";
-
-    private void loadWaysGramGiftReceive() {
-        final String token = WaysGramApi.getToken(currentAccount);
-        if (waysGramGiftReceiveBusy || TextUtils.isEmpty(token)) return;
-        waysGramGiftReceiveBusy = true;
-        WaysGramApi.NETWORK.execute(() -> {
-            int mask = -1;
-            try {
-                JSONArray types = WaysGramApi.request("GET", WAYS_GRAM_GIFT_RECEIVE_PATH, null, token, 30000)
-                        .getJSONArray("allowed_types");
-                mask = 0;
-                for (int i = 0; i < types.length(); i++) {
-                    if ("regular".equals(types.optString(i))) mask |= 1;
-                    if ("collectible".equals(types.optString(i))) mask |= 2;
-                }
-            } catch (Exception e) {
-                FileLog.e(e);
-            }
-            final int selected = mask;
-            AndroidUtilities.runOnUIThread(() -> {
-                waysGramGiftReceiveBusy = false;
-                if (!canShowWaysGramGiftReceive(token)) return;
-                if (selected < 0) {
-                    showWaysGramGiftReceiveError();
-                    return;
-                }
-                CharSequence[] choices = {
-                        getString(R.string.WaysGramGiftReceiveNone), getString(R.string.WaysGramGiftReceiveRegular),
-                        getString(R.string.WaysGramGiftReceiveCollectible), getString(R.string.WaysGramGiftReceiveBoth)
-                };
-                choices[selected] = "✓ " + choices[selected];
-                showDialog(new AlertDialog.Builder(getParentActivity(), getResourceProvider())
-                        .setTitle(getString(R.string.WaysGramGiftReceiveTitle))
-                        .setItems(choices, (dialog, which) -> {
-                            if (which != selected) saveWaysGramGiftReceive(token, which);
-                        })
-                        .setNegativeButton(getString(R.string.Cancel), null)
-                        .create());
-            });
-        });
-    }
-
-    private boolean canShowWaysGramGiftReceive(String token) {
-        return !isFinished && !isPaused() && getParentActivity() != null
-                && TextUtils.equals(token, WaysGramApi.getToken(currentAccount));
-    }
-
-    private void saveWaysGramGiftReceive(String token, int mask) {
-        if (waysGramGiftReceiveBusy || !canShowWaysGramGiftReceive(token)) return;
-        waysGramGiftReceiveBusy = true;
-        WaysGramApi.NETWORK.execute(() -> {
-            boolean saved = false;
-            try {
-                JSONArray types = new JSONArray();
-                if ((mask & 1) != 0) types.put("regular");
-                if ((mask & 2) != 0) types.put("collectible");
-                WaysGramApi.request("PUT", WAYS_GRAM_GIFT_RECEIVE_PATH,
-                        new JSONObject().put("allowed_types", types), token, 30000);
-                saved = true;
-            } catch (Exception e) {
-                FileLog.e(e);
-            }
-            final boolean success = saved;
-            AndroidUtilities.runOnUIThread(() -> {
-                waysGramGiftReceiveBusy = false;
-                if (!success && canShowWaysGramGiftReceive(token)) showWaysGramGiftReceiveError();
-            });
-        });
-    }
-
-    private void showWaysGramGiftReceiveError() {
-        showDialog(new AlertDialog.Builder(getParentActivity(), getResourceProvider())
-                .setTitle(getString(R.string.WaysGramGiftReceiveTitle))
-                .setMessage(getString(R.string.ErrorOccurred))
                 .setPositiveButton(getString(R.string.OK), null).create());
     }
 
@@ -1088,7 +1002,6 @@ public class PrivacySettingsActivity extends BaseFragment implements Notificatio
         }
         birthdayRow = rowCount++;
         giftsRow = rowCount++;
-        waysGramGiftReceiveRow = TextUtils.isEmpty(WaysGramApi.getToken(currentAccount)) ? -1 : rowCount++;
         bioRow = rowCount++;
         musicRow = rowCount++;
         groupsRow = rowCount++;
@@ -1381,7 +1294,6 @@ public class PrivacySettingsActivity extends BaseFragment implements Notificatio
                     position == bioRow && !getContactsController().getLoadingPrivacyInfo(ContactsController.PRIVACY_RULES_TYPE_BIO) ||
                     position == musicRow && !getContactsController().getLoadingPrivacyInfo(ContactsController.PRIVACY_RULES_TYPE_MUSIC) ||
                     position == birthdayRow && !getContactsController().getLoadingPrivacyInfo(ContactsController.PRIVACY_RULES_TYPE_BIRTHDAY) ||
-                    position == waysGramGiftReceiveRow ||
                     position == giftsRow && !getContactsController().getLoadingPrivacyInfo(ContactsController.PRIVACY_RULES_TYPE_GIFTS) ||
                     position == forwardsRow && !getContactsController().getLoadingPrivacyInfo(ContactsController.PRIVACY_RULES_TYPE_FORWARDS) ||
                     position == phoneNumberRow && !getContactsController().getLoadingPrivacyInfo(ContactsController.PRIVACY_RULES_TYPE_PHONE) ||
@@ -1503,8 +1415,6 @@ public class PrivacySettingsActivity extends BaseFragment implements Notificatio
                             value = formatRulesString(getAccountInstance(), ContactsController.PRIVACY_RULES_TYPE_BIRTHDAY);
                         }
                         textCell.setTextAndValue(getString(R.string.PrivacyBirthday), value, true);
-                    } else if (position == waysGramGiftReceiveRow) {
-                        textCell.setTextAndValue(getString(R.string.WaysGramGiftReceiveTitle), "", true);
                     } else if (position == giftsRow) {
                         if (WaysGramTransport.ENABLED) {
                             final int giftsType = WaysGramGiftPrivacy.rulesType(currentAccount);

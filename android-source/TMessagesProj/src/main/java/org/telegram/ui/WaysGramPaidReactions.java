@@ -202,7 +202,7 @@ public final class WaysGramPaidReactions {
                 .setPositiveButton(LocaleController.getString(R.string.WaysGramSubscriptionOpen), (d, w) ->
                         request(fragment, account, session, () -> WaysGramApi.request("GET", "/api/channels/" + channel, null, session, 10000), raw -> {
                             long self = org.telegram.messenger.UserConfig.getInstance(account).getClientUserId();
-                            org.telegram.tgnet.TLRPC.Chat chat = org.telegram.tgnet.WaysGramChats.toChannel(raw, self, true);
+                            org.telegram.tgnet.TLRPC.Chat chat = org.telegram.tgnet.WaysGramChats.toChannel(account, raw, self, true);
                             org.telegram.tgnet.WaysGramChats.setJoined(account, channel, true);
                             org.telegram.messenger.MessagesController.getInstance(account).putChat(chat, false);
                             java.util.ArrayList<org.telegram.tgnet.TLRPC.Chat> chats = new java.util.ArrayList<>();

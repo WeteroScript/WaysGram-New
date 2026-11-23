@@ -42,7 +42,7 @@ class ChatProfileSourceChecks(unittest.TestCase):
         self.assertIn('request instanceof TLRPC.TL_messages_getCommonChats', transport)
         self.assertIn('WaysGramChats.commonChats(', transport)
         self.assertIn('"/api/users/" + targetId + "/common-chats"', chats)
-        self.assertIn('out.chats.add(toMegagroup(chat, selfId));', chats)
+        self.assertIn('out.chats.add(toMegagroup(account, chat, selfId));', chats)
 
     def test_peer_settings_do_not_fail(self):
         transport = self.source('tgnet/WaysGramTransport.java')

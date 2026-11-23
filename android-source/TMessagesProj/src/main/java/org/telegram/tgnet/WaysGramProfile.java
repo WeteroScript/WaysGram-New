@@ -326,7 +326,7 @@ public class WaysGramProfile {
         }
         JSONObject personal = json.optJSONObject("personal_channel");
         if (personal != null && personal.optLong("id") > 0) {
-            TLRPC.Chat chat = WaysGramChats.toChannel(personal, selfId, userId == selfId);
+            TLRPC.Chat chat = WaysGramChats.toChannel(account, personal, selfId, userId == selfId);
             full.personal_channel_id = chat.id;
             full.flags2 |= TLObject.FLAG_6;
             out.chats.add(chat);
@@ -345,7 +345,7 @@ public class WaysGramProfile {
             if (channel == null || channel.optString("username").isEmpty()) continue;
             boolean owner = channel.optLong("owner_telegram_id") == selfId;
             if (owner || !ownerOnly && (channel.optInt("is_admin") != 0 || channel.optBoolean("is_admin"))) {
-                out.chats.add(WaysGramChats.toChannel(channel, selfId, true));
+                out.chats.add(WaysGramChats.toChannel(account, channel, selfId, true));
             }
         }
         return out;
@@ -465,7 +465,7 @@ public class WaysGramProfile {
         WaysGramChats.setJoined(account, created.optLong("id"), true);
         TLRPC.TL_updates updates = new TLRPC.TL_updates();
         updates.date = (int) (System.currentTimeMillis() / 1000);
-        updates.chats.add(WaysGramChats.toChannel(created, selfId, true));
+        updates.chats.add(WaysGramChats.toChannel(account, created, selfId, true));
         return updates;
     }
 

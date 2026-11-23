@@ -1420,31 +1420,13 @@ public class PrivacyControlActivity extends BaseFragment implements Notification
             return;
         }
         if (rulesType == PRIVACY_RULES_TYPE_MESSAGES && org.telegram.tgnet.WaysGramTransport.ENABLED) {
+            // Open the ordinary "Who can send me messages" screen first. The WaysGram fee is a
+            // separate opt-in below; applying a cached fee here made the screen start in the paid mode.
             currentMinus = new ArrayList<>();
             currentPlus = new ArrayList<>();
             initialPlus.clear();
-            if (WaysGramPaidDm.hasCachedFee(currentAccount)) {
-                applyWaysGramFeeValues(WaysGramPaidDm.cachedFeeStars(currentAccount), WaysGramPaidDm.cachedFeeUsers(currentAccount));
-            } else {
-                initialStars = currentStars = 10;
-                initialRulesType = currentType = TYPE_CONTACTS;
-            }
-            WaysGramPaidDm.loadFee(currentAccount, (feeStars, feeUsers) -> {
-                if (listAdapter == null || getParentActivity() == null || hasChanges()) {
-                    return;
-                }
-                ArrayList<Long> fresh = new ArrayList<>(feeUsers);
-                ArrayList<Long> known = new ArrayList<>(initialPlus);
-                Collections.sort(fresh);
-                Collections.sort(known);
-                if (feeStars == initialStars && fresh.equals(known)) {
-                    return;
-                }
-                applyWaysGramFeeValues(feeStars, feeUsers);
-                updateRows(true);
-                listAdapter.notifyDataSetChanged();
-                updateDoneButton();
-            });
+            initialStars = currentStars = 10;
+            initialRulesType = currentType = TYPE_EVERYBODY;
             return;
         }
         if (rulesType == PRIVACY_RULES_TYPE_MESSAGES) {
