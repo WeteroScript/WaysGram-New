@@ -26,63 +26,10 @@ permissions:
   # dropped download leaves a truncated zip ("invalid stored block lengths").
   contents: write
   pull-requests: write
-  actions: read
 
 jobs:
-  fetch-apk:
-    name: Fetch already built APK artifact
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 1
-
-      - name: Read fetch parameters
-        id: params
-        shell: bash
-        run: |
-          echo "run_id=$(sed -n '1p' .github/apk-fetch-mode)" >> "$GITHUB_OUTPUT"
-          echo "artifact=$(sed -n '2p' .github/apk-fetch-mode)" >> "$GITHUB_OUTPUT"
-
-      - name: Download built APK artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: ${{ steps.params.outputs.artifact }}
-          run-id: ${{ steps.params.outputs.run_id }}
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          path: /tmp/waysgram-apk
-
-      - name: Split and commit APK parts
-        shell: bash
-        run: |
-          set -euo pipefail
-          APK="/tmp/waysgram-apk/app.apk"
-          test -s "$APK"
-          test -s /tmp/waysgram-apk/app.apk.sha256
-          mkdir -p apk-parts
-          rm -f apk-parts/apk-part-* apk-parts/WaysGram.apk.sha256
-          split -b 40m "$APK" apk-parts/apk-part-
-          cp /tmp/waysgram-apk/app.apk.sha256 apk-parts/WaysGram.apk.sha256
-          ls -lh apk-parts
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add apk-parts || { echo "::error::git add failed"; exit 1; }
-          git commit -m "Fetch APK from run ${{ steps.params.outputs.run_id }}" 2>&1 | tee /tmp/apk-commit.log || true
-          if ! grep -q '\[' /tmp/apk-commit.log 2>/dev/null; then
-            echo "::error::nothing was committed: $(cat /tmp/apk-commit.log | tail -3 | tr '\n' ' ')"
-          fi
-          git push origin "HEAD:$GITHUB_REF_NAME" 2>&1 | tee /tmp/apk-push.log
-          status=${PIPESTATUS[0]}
-          if [ "$status" -ne 0 ]; then
-            tail -30 /tmp/apk-push.log | while IFS= read -r line; do printf '::error::%s\n' "${line//%/%25}"; done
-            exit "$status"
-          fi
-
   build:
     name: Build Afat release APK
-    if: ${{ false }}
     runs-on: ubuntu-latest
     timeout-minutes: 240
 
@@ -398,26 +345,6 @@ jobs:
             TMessagesProj_App/build/outputs/apk/afat/release/app.apk.sha256
           if-no-files-found: error
           retention-days: 14
-
-      # A workflow-dispatch build runs on a feature branch, where the release step below is
-      # intentionally skipped. Commit the APK to that same branch so it can be fetched with
-      # an ordinary `git pull` even when artifact blob storage is unreachable from the worker.
-      - name: Commit APK to the dispatched branch
-        if: github.event_name == 'workflow_dispatch'
-        shell: bash
-        run: |
-          set -euo pipefail
-          APK="TMessagesProj_App/build/outputs/apk/afat/release/app.apk"
-          mkdir -p apk-output
-          cp "$APK" apk-output/WaysGram.apk
-          ( cd apk-output && sha256sum WaysGram.apk > WaysGram.apk.sha256 )
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add apk-output/WaysGram.apk apk-output/WaysGram.apk.sha256
-          if ! git diff --cached --quiet; then
-            git commit -m "Build APK $GITHUB_RUN_NUMBER ($GITHUB_SHA)"
-            git push origin "HEAD:$GITHUB_REF_NAME"
-          fi
 
       # A release asset is served with range requests, so a dropped download can be resumed,
       # and the size and sha256 sit next to the APK. That is the link users should install from.
