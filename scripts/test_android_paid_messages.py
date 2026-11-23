@@ -48,8 +48,7 @@ class PaidMessagesChecks(unittest.TestCase):
         self.assertIn("R.string.WaysGramInboxHistory", inbox)
         self.assertIn("WaysGramPaidHistory.show(fragment, account)", inbox)
         chat = self.source("ui/ChatActivity.java")
-        self.assertIn("waysgram_paid_history", chat)
-        self.assertIn("WaysGramPaidHistory.show(ChatActivity.this, currentAccount)", chat)
+        self.assertNotIn("headerItem.lazilyAddSubItem(waysgram_paid_history", chat)
 
     def test_deduction_requires_confirmation(self):
         inbox = self.source("ui/WaysGramChannelInbox.java")

@@ -231,8 +231,7 @@ public class ChatCustomReactionsEditActivity extends BaseFragment implements Not
         enableReactionsCell.setTypeface(AndroidUtilities.bold());
         enableReactionsCell.setColors(Theme.key_windowBackgroundCheckText, Theme.key_switchTrackBlue, Theme.key_switchTrackBlueChecked, Theme.key_switchTrackBlueThumb, Theme.key_switchTrackBlueThumbChecked);
         enableReactionsCell.setOnClickListener(v -> {
-            if (enableReactionsCell.isChecked() && paidCheckCell != null && paidCheckCell.isChecked()
-                    && !org.telegram.tgnet.WaysGramTransport.ENABLED) {
+            if (enableReactionsCell.isChecked() && paidCheckCell != null && paidCheckCell.isChecked()) {
                 toggleStarsEnabled();
             }
             setCheckedEnableReactionCell(enableReactionsCell.isChecked() ? SELECT_TYPE_NONE : SELECT_TYPE_SOME, enableReactionsCell.isChecked() ? false : paid, true);
@@ -331,38 +330,6 @@ public class ChatCustomReactionsEditActivity extends BaseFragment implements Not
                 Browser.openUrl(getContext(), LocaleController.getString(R.string.ChannelEnablePaidReactionsInfoLink));
             }));
             switchLayout.addView(infoCell, LayoutHelper.createLinear(LayoutHelper.MATCH_PARENT, LayoutHelper.WRAP_CONTENT));
-        } else if (org.telegram.tgnet.WaysGramTransport.ENABLED && currentChat != null && currentChat.creator
-                && org.telegram.messenger.ChatObject.isChannelAndNotMegaGroup(currentChat)) {
-            // WaysGram: бэкенд не отдаёт paid_media_allowed, поэтому рисуем тот же штатный
-            // тумблер, что и в Telegram, но состояние берём из нашего API.
-            paidCheckCell = new TextCheckCell(context);
-            paidCheckCell.setTextAndCheck(LocaleController.getString(R.string.ChannelEnablePaidReactions), false, false);
-            switchLayout.addView(paidCheckCell, LayoutHelper.createLinear(LayoutHelper.MATCH_PARENT, LayoutHelper.WRAP_CONTENT));
-
-            infoCell = new TextInfoPrivacyCell(context, 12, resourceProvider);
-            infoCell.setTextColor(Theme.getColor(Theme.key_windowBackgroundWhiteGrayText4));
-            infoCell.setTopPadding(12);
-            infoCell.setBottomPadding(70);
-            infoCell.setText(AndroidUtilities.withLearnMore(LocaleController.getString(R.string.ChannelEnablePaidReactionsInfo), () -> {
-                Browser.openUrl(getContext(), LocaleController.getString(R.string.ChannelEnablePaidReactionsInfoLink));
-            }));
-            switchLayout.addView(infoCell, LayoutHelper.createLinear(LayoutHelper.MATCH_PARENT, LayoutHelper.WRAP_CONTENT));
-
-            org.telegram.ui.WaysGramPaidReactions.loadChannelPaidReactions(currentAccount, chatId, enabled -> {
-                if (paidCheckCell != null) {
-                    paidCheckCell.setChecked(enabled);
-                }
-            });
-            paidCheckCell.setOnClickListener(v -> {
-                final boolean enabled = !paidCheckCell.isChecked();
-                paidCheckCell.setChecked(enabled);
-                org.telegram.ui.WaysGramPaidReactions.saveChannelPaidReactions(currentAccount, chatId, enabled, null, () -> {
-                    if (paidCheckCell != null) {
-                        paidCheckCell.setChecked(!enabled);
-                    }
-                    BulletinFactory.of(this).createSimpleBulletin(R.raw.error, LocaleController.getString(R.string.WaysGramPaidError)).show();
-                });
-            });
         } else {
             infoCell3.setBottomPadding(70);
         }
@@ -588,7 +555,7 @@ public class ChatCustomReactionsEditActivity extends BaseFragment implements Not
                     selectedEmojisMap.remove(span.documentId);
                     selectedEmojisIds.remove(span.documentId);
                     selectAnimatedEmojiDialog.unselect(span.documentId);
-                    if (span.documentId == -1 && paidCheckCell != null && !org.telegram.tgnet.WaysGramTransport.ENABLED) {
+                    if (span.documentId == -1 && paidCheckCell != null) {
                         paidCheckCell.setChecked(false);
                         editText.setMaxLength(maxReactionsCount);
                     }

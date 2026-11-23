@@ -56,6 +56,7 @@
 | Отдельные id документов | `0x6A52…` (эмодзи), `0x6A53…` (реакции), `0x6A54…` (эффекты): кэш одного набора больше не подменяет другой; `upload.getFile` обслуживает все три |
 | Эффект при появлении одиночного эмодзи | `WaysGramReactions.consumeEmojiEffect` — один раз на сообщение и только для свежих (60 с), затем штатная анимация `EmojiAnimationsOverlay` |
 | Нажатие на эмодзи | пак интеракций `emojicom` у WaysGram не загружается, поэтому `EmojiAnimationsOverlay.checkStickerPack` заполняет карту эффектами из APK (`WaysGramAnimatedEmoji.fillInteractions`); нажатие работает и в каналах, где `currentUser == null` |
+| Краш после нажатия на эмодзи в канале | `EmojiAnimationsOverlay.onTapItem` возвращает результат до блока подсказки, если `currentUser == null`: эффект проигрывается, а обращение к `currentUser.id` и `currentUser.first_name` остаётся только для личных чатов |
 
 Ограничение: официальные TGS-анимации Telegram в песочнице недоступны (нет
 api.telegram.org и зеркала набора), поэтому рисунок — Twemoji с собственной
@@ -92,6 +93,47 @@ api.telegram.org и зеркала набора), поэтому рисунок 
 
 Тесты: `scripts/test_android_paid_messages.py`,
 `authbot/tests/test_paid_messages_history.py`.
+
+## Каналы и группы: стоковые кнопки — сделано
+
+По просьбе пользователя все добавленные WaysGram-входы в интерфейсе каналов и групп удалены,
+а стоковые кнопки вернуты на свои места. Интерфейс за пределами каналов и групп не изменён.
+
+| Что сделано | Где |
+| --- | --- |
+| Удалены пункты «Розыгрыши», входящие канала, темы канала, история платежей, бусты, истории группы, «Отправить от имени…», темы группы | `ui/ChatActivity.java` — больше нет `headerItem.lazilyAddSubItem(waysgram_…)` |
+| Удалены пункты «Платные реакции» и «Группа обсуждений» из меню поста | `ui/ChatActivity.java` |
+| Вернуты стоковые «Бусты», просмотр списка реакций и изменение времени отложенного поста | `ui/ChatActivity.java` — убраны гейты WaysGram-транспорта |
+| В карточке вернуты «Начать звонок/трансляцию» и стоковая статистика; удалён «Медленный режим» | `ui/ProfileActivity.java` |
+| Из «Изменить» удалены все WaysGram-строки; вернуты Welcome Message, «Статистика и бусты», стоковая привязка группы и геолокация только для мегагрупп | `ui/ChatEditActivity.java` |
+| Вернут стоковый тумблер платных реакций внутри «Реакций» | `ui/Components/Reactions/ChatCustomReactionsEditActivity.java`, `tgnet/WaysGramChats.java` (`paid_media_allowed`) |
+
+Маппер теперь заполняет стоковые поля `paid_media_allowed`, `stargifts_available`, `can_view_stats`
+и `linked_monoforum_id`, чтобы кнопки появлялись по тем же условиям, что и в Telegram.
+Сборка APK не запускалась. Тесты: `scripts/test_android_stock_channel_group_buttons.py`.
+
+## Реакции каналов и групп — сделано
+
+| Проблема | Как исправлено |
+| --- | --- |
+| Платная реакция-звезда открывала окно Stars только по долгому нажатию | `ChatActivity.selectReaction()` теперь открывает `StarsReactionsSheet` и по одиночному тапу — до вызова `toggleWaysGramReaction()` обрабатывается `visibleReaction.isStar` |
+| «Это действие пока не поддерживается WaysGram.» показывалось после почти каждого действия | `BulletinFactory` больше не показывает bulletin для ошибок `METHOD_NOT_SUPPORTED:*`: `makeForError`, оба `showForError` и `showError` выходят раньше показа |
+| В каналах и группах не было стоковых реакций и их анимаций | `waysGramReactionMenu` теперь включает компактную WaysGram-палитру только в личных чатах (`currentChat == null`); в каналах/группах вызывается стоковый `reactionsLayout.setMessage(...)`, поэтому используются анимации `TL_availableReaction` |
+
+APK не собирался. Тесты: `scripts/test_android_reaction_regressions.py`.
+
+## Модель WaysGram (Plush Pepe) — перерисована
+
+| Проблема | Как исправлено |
+| --- | --- |
+| Потерялся чёрный наружный контур модели | Кадры исходного стикера рендерятся через `rlottie`, поверх силуэта добавляется чёрный контур по альфа-маске; новый `preview.png` и WebM пересобраны |
+| Анимация была выдуманной (свечение, сердечки, искры) | Движение берётся из исходного TGS подарка Plush Pepe покадрово: 60 fps, 3 с, те же ключи и кривые, что у стоковых моделей |
+| Серверная и APK-копии модели могли разойтись | Один и тот же WebM (571878 байт, sha256 `2a0b81d9c2f2c2eb99a15eeddfd6a5992340d96ead9935cb1aa27d1fa36abb4c`) записан в `authbot/assets/gift_models/5936013938331222567/` и в `res/raw/waysgram_model.webm` внутри архива; `manifest.json` обновлён |
+
+Скрипт `scripts/build_waysgram_gift_model_webm.py` теперь собирает модель из
+`authbot/assets/gifts/5936013938331222567.tgs`, перекрашивает сердце в красное, рисует
+логотип `WaysGram` по исходной трансформации слоя `heart` и кодирует VP9 WebM с
+альфой детерминированно. APK не собирался. Тесты: `scripts/test_waysgram_model_animation.py`.
 
 ## Хвост: незакрытые функции
 

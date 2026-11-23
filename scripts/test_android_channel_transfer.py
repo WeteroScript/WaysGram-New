@@ -49,13 +49,10 @@ class ChannelTransferSourceChecks(unittest.TestCase):
         self.assertIn('R.string.WaysGramTransferDone', helper)
         self.assertIn('loadFullChat(channel, 0, true)', helper)
 
-    def test_settings_expose_the_transfer_row(self):
+    def test_settings_do_not_expose_the_waysgram_transfer_row(self):
         editor = self.source('ui/ChatEditActivity.java')
-        self.assertIn('transferCell.setOnClickListener(v -> WaysGramChannelTransfer.open(this, currentAccount, chatId));',
-                      editor)
-        self.assertIn('getString(R.string.WaysGramTransferChannel)', editor)
-        block = editor.split('TextCell transferCell = new TextCell(context);', 1)[1].split('}', 1)[0]
-        self.assertIn('waysGramChannelCells.add(transferCell);', block)
+        self.assertNotIn('WaysGramChannelTransfer.open(', editor)
+        self.assertNotIn('R.string.WaysGramTransferChannel', editor)
 
     def test_transfer_strings_are_localized(self):
         for language in ('values', 'values-ru'):

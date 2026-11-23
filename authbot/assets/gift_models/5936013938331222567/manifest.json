@@ -1,6 +1,6 @@
 {
   "gift_id": "5936013938331222567",
-  "source": "WaysGram original artwork, authored loop (breathing, sway, glow, hearts, sparkles) encoded as WebM with alpha - the app's Lottie renderer draws vector frames only",
+  "source": "Original Plush Pepe TGS motion (60 fps, 3 s, original bezier easing) rendered with rlottie; red WaysGram heart with its wordmark and a restored black contour; encoded as WebM with alpha",
   "commit": "",
   "models": [
     {
@@ -8,8 +8,8 @@
       "file": "waysgram.webm",
       "document_id": -5936013938331222567,
       "mime_type": "video/webm",
-      "sha256": "6876131ee114b6d6b2de29a42e74f0edb1b288ab63a3551b6edd75cd6afcf545",
-      "bytes": 780418
+      "sha256": "2a0b81d9c2f2c2eb99a15eeddfd6a5992340d96ead9935cb1aa27d1fa36abb4c",
+      "bytes": 571878
     }
   ]
 }

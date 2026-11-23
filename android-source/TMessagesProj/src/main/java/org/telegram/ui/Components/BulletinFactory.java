@@ -88,15 +88,22 @@ public final class BulletinFactory {
         return BulletinFactory.of(baseFragment);
     }
 
+    private static boolean unsupportedWaysGramOperation(String code) {
+        return org.telegram.tgnet.WaysGramTransport.ENABLED
+                && code != null && code.startsWith("METHOD_NOT_SUPPORTED:");
+    }
+
     private static String errorDescription(String code) {
-        if (org.telegram.tgnet.WaysGramTransport.ENABLED && code != null && code.startsWith("METHOD_NOT_SUPPORTED:")) {
+        if (unsupportedWaysGramOperation(code)) {
             return LocaleController.getString(R.string.WaysGramUnsupportedOperation);
         }
         return LocaleController.formatString(R.string.UnknownErrorCode, code);
     }
 
     public Bulletin makeForError(TLRPC.TL_error error) {
-        if (!LaunchActivity.isActive) return new Bulletin.EmptyBulletin();
+        if (!LaunchActivity.isActive || error != null && unsupportedWaysGramOperation(error.text)) {
+            return new Bulletin.EmptyBulletin();
+        }
         if (error == null) {
             return createErrorBulletin(LocaleController.formatString(R.string.UnknownError));
         } else {
@@ -108,7 +115,7 @@ public final class BulletinFactory {
         showForError(error, false);
     }
     public void showForError(TLRPC.TL_error error, boolean top) {
-        if (!LaunchActivity.isActive) return;
+        if (!LaunchActivity.isActive || error != null && unsupportedWaysGramOperation(error.text)) return;
         if (error == null) {
             Bulletin b = createErrorBulletin(LocaleController.formatString(R.string.UnknownError));
             b.hideAfterBottomSheet = false;
@@ -123,7 +130,7 @@ public final class BulletinFactory {
         showForError(errorCode, false);
     }
     public void showForError(String errorCode, boolean top) {
-        if (!LaunchActivity.isActive) return;
+        if (!LaunchActivity.isActive || unsupportedWaysGramOperation(errorCode)) return;
         if (TextUtils.isEmpty(errorCode)) {
             Bulletin b = createErrorBulletin(LocaleController.formatString(R.string.UnknownError));
             b.hideAfterBottomSheet = false;
@@ -164,7 +171,7 @@ public final class BulletinFactory {
 
     public static void showError(TLRPC.TL_error error) {
         if (!LaunchActivity.isActive) return;
-        if (error != null && error.code == 406) return;
+        if (error != null && (error.code == 406 || unsupportedWaysGramOperation(error.text))) return;
         global().createErrorBulletin(errorDescription(error.text)).show();
     }
 

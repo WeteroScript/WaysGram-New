@@ -49,13 +49,11 @@ class GroupChannelNavigationChecks(unittest.TestCase):
         self.assertNotIn('String username = c.optString("username", "");', chats)
         self.assertNotIn('String username = g.optString("username", "");', chats)
 
-    def test_discussion_row_does_not_duplicate_and_opens_waysgram_linking(self):
+    def test_discussion_row_uses_the_stock_linking_screen(self):
         edit = self.source("ui/ChatEditActivity.java")
         self.assertNotIn("TextCell discussionCell = new TextCell(context);", edit)
         self.assertNotIn("TextCell inboxCell = new TextCell(context);", edit)
-        self.assertIn("WaysGramDiscussions.settings(this, currentAccount, chatId);", edit)
-        self.assertIn("if (org.telegram.tgnet.WaysGramTransport.ENABLED) {", edit)
-        # Нативный экран привязки остаётся доступен для сборок без WaysGram-транспорта.
+        self.assertNotIn("WaysGramDiscussions.settings(this, currentAccount, chatId);", edit)
         self.assertIn("ChatLinkActivity fragment = new ChatLinkActivity(chatId);", edit)
 
     def test_username_value_falls_back_to_chat_title(self):

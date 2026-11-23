@@ -93,14 +93,12 @@ class ChannelTopicsAndroidChecks(unittest.TestCase):
         self.assertIn('root.substring(0, root.length() - "/topics".length())', topics)
         self.assertIn('forum.channel', topics)  # открытие вложения пишет peer канала, а не группы
 
-    def test_entry_points_are_wired(self):
+    def test_waysgram_topics_have_no_extra_ui_entry_points(self):
         chat = self.source('ui/ChatActivity.java')
-        self.assertIn('private static final int waysgram_channel_topics = 82;', chat)
-        self.assertIn('id == waysgram_channel_topics', chat)
-        self.assertIn('WaysGramGroupTopics.openChannel(ChatActivity.this, currentAccount, currentChat.id)', chat)
-        self.assertIn('headerItem.lazilyAddSubItem(waysgram_channel_topics, R.drawable.msg_topics', chat)
+        self.assertNotIn('headerItem.lazilyAddSubItem(waysgram_channel_topics', chat)
+        self.assertNotIn('headerItem.lazilyAddSubItem(waysgram_group_topics', chat)
         edit = self.source('ui/ChatEditActivity.java')
-        self.assertIn('channelTopicsCell.setOnClickListener(v -> WaysGramGroupTopics.openChannel(this, currentAccount, chatId))', edit)
+        self.assertNotIn('R.string.WaysGramChannelTopics', edit)
 
     def test_native_forum_rpc_is_mapped(self):
         mapper = self.source('tgnet/WaysGramChannelTopics.java')

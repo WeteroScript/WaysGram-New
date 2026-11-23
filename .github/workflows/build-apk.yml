@@ -346,6 +346,26 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+      # A workflow-dispatch build runs on a feature branch, where the release step below is
+      # intentionally skipped. Commit the APK to that same branch so it can be fetched with
+      # an ordinary `git pull` even when artifact blob storage is unreachable from the worker.
+      - name: Commit APK to the dispatched branch
+        if: github.event_name == 'workflow_dispatch'
+        shell: bash
+        run: |
+          set -euo pipefail
+          APK="TMessagesProj_App/build/outputs/apk/afat/release/app.apk"
+          mkdir -p apk-output
+          cp "$APK" apk-output/WaysGram.apk
+          ( cd apk-output && sha256sum WaysGram.apk > WaysGram.apk.sha256 )
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add apk-output/WaysGram.apk apk-output/WaysGram.apk.sha256
+          if ! git diff --cached --quiet; then
+            git commit -m "Build APK $GITHUB_RUN_NUMBER ($GITHUB_SHA)"
+            git push origin "HEAD:$GITHUB_REF_NAME"
+          fi
+
       # A release asset is served with range requests, so a dropped download can be resumed,
       # and the size and sha256 sit next to the APK. That is the link users should install from.
       - name: Publish APK as a release asset

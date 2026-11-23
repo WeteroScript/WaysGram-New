@@ -184,6 +184,11 @@ public class EmojiAnimationsOverlay implements NotificationCenter.NotificationCe
             }
             inited = true;
         }
+        if (set == null && org.telegram.tgnet.WaysGramTransport.ENABLED) {
+            // Пака интеракций emojicom у WaysGram нет — эффекты эмодзи лежат в APK.
+            org.telegram.tgnet.WaysGramAnimatedEmoji.fillInteractions(supportedEmoji, emojiInteractionsStickersMap);
+            inited = true;
+        }
     }
 
 
@@ -427,7 +432,8 @@ public class EmojiAnimationsOverlay implements NotificationCenter.NotificationCe
         if (chatActivity.isSecretChat() || view.getMessageObject() == null || view.getMessageObject().getId() < 0) {
             return false;
         }
-        if (!view.getMessageObject().isPremiumSticker() && chatActivity.currentUser == null) {
+        if (!view.getMessageObject().isPremiumSticker() && chatActivity.currentUser == null
+                && !org.telegram.tgnet.WaysGramReactions.hasEmojiEffect(view.getMessageObject())) {
             return false;
         }
         boolean show = showAnimationForCell(view, -1, userTapped, false);
@@ -443,6 +449,7 @@ public class EmojiAnimationsOverlay implements NotificationCenter.NotificationCe
             chatActivity.getMessagesStorage().updateMessageCustomParams(dialogId, view.getMessageObject().messageOwner);
             return show;
         }
+        if (chatActivity.currentUser == null) return show;
         Integer printingType = MessagesController.getInstance(currentAccount).getPrintingStringType(dialogId, threadMsgId);
         boolean canShowHint = true;
         if (printingType != null && printingType == 5) {
@@ -973,7 +980,6 @@ public class EmojiAnimationsOverlay implements NotificationCenter.NotificationCe
         }
         MessageObject messageObject = null;
 
-
         float imageH = widgetView.getMeasuredHeight();
         float imageW = widgetView.getMeasuredWidth();
         View parent = (View) widgetView.getParent();
@@ -988,7 +994,7 @@ public class EmojiAnimationsOverlay implements NotificationCenter.NotificationCe
 
         int viewId = widgetView.hashCode();
         TLRPC.Document viewDocument = null;
-        boolean isOutOwner = widgetView.getTranslationX() > contentLayout.getMeasuredWidth() / 2f;//view.getMessageObject().isOutOwner();
+        boolean isOutOwner = widgetView.getTranslationX() > contentLayout.getMeasuredWidth() / 2f;
         if (visibleReaction.emojicon != null && createDrawingObject(emoji, viewId, viewDocument, messageObject, -1, false, false, imageW, imageH, isOutOwner)) {
             if (!drawingObjects.isEmpty()) {
                 DrawingObject drawingObject = drawingObjects.get(drawingObjects.size() - 1);

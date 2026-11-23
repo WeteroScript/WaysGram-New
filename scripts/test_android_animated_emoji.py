@@ -73,6 +73,20 @@ class AnimatedEmojiBehaviourChecks(unittest.TestCase):
         self.assertIn("EFFECT_FRESH_SECONDS", reactions)
         self.assertIn("PLAYED_EFFECTS", reactions)
 
+    def test_tapping_emoji_in_channel_does_not_dereference_current_user(self):
+        # В канале currentUser == null, но эффект по нажатию всё равно должен играть.
+        # Подсказку про интерактивный эмодзи показываем только в личном чате.
+        overlay = self.source("ui/EmojiAnimationsOverlay.java")
+        start = overlay.index("public boolean onTapItem(")
+        end = overlay.index("\n    public void cancelHintRunnable()", start)
+        body = overlay[start:end]
+        guard = "if (chatActivity.currentUser == null) return show;"
+        self.assertIn(guard + "\n        Integer printingType", body)
+        self.assertLess(body.index("showAnimationForCell("), body.index(guard))
+        hint = body.index("chatActivity.currentUser.id")
+        self.assertLess(body.index(guard), hint)
+        self.assertIn("chatActivity.currentUser.first_name", body[body.index(guard):])
+
     def test_effects_are_registered_for_taps_even_without_the_pack(self):
         overlay = self.source("ui/EmojiAnimationsOverlay.java")
         self.assertIn(
