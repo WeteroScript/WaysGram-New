@@ -99,6 +99,18 @@ class WaysGramModelAnimationTests(unittest.TestCase):
         for invented in ("glow", "sparkle", "drift"):
             self.assertNotIn(invented, source)
 
+    def test_hands_are_rendered_over_the_wordmark(self) -> None:
+        renderer = (ROOT / "scripts" / "build_waysgram_gift_model_webm.py").read_text(encoding="utf-8")
+        self.assertIn("HAND_INDICES = {1, 2, 15}", renderer)
+        self.assertIn("def subset_shapes(data: dict[str, Any], *, keep_hands: bool)", renderer)
+        self.assertIn("hands_animation = LottieAnimation.from_tgs", renderer)
+        self.assertLess(renderer.index("frame = Image.alpha_composite(frame, layer)"),
+                        renderer.index("frame = Image.alpha_composite(frame, hands)"),
+                        "кисти должны рисоваться поверх логотипа")
+        # Timer is inherited from the original TGS: no invented speed-up or drift.
+        self.assertIn("fps = int(round(animation.lottie_animation_get_framerate()))", renderer)
+        self.assertIn("count = int(animation.lottie_animation_get_totalframe())", renderer)
+
     def test_preview_has_a_black_contour(self) -> None:
         width, height, pixels = read_rgba_png(PREVIEW)
         self.assertEqual((width, height), (512, 512))

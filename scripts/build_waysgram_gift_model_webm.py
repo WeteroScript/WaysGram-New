@@ -27,6 +27,7 @@ Requires Pillow and ``rlottie-python``.
 from __future__ import annotations
 
 import argparse
+import copy
 import gzip
 import hashlib
 import json
@@ -105,6 +106,25 @@ def redraw_heart(data: dict[str, Any]) -> dict[str, Any]:
 
     patch(heart)
     return data
+
+
+# The three hands in the original Plush Pepe TGS. They must be drawn *after* the
+# WaysGram wordmark: in the original art the arms cross in front of the heart.
+HAND_INDICES = {1, 2, 15}
+
+
+def subset_shapes(data: dict[str, Any], *, keep_hands: bool) -> dict[str, Any]:
+    """Keeps every layer transform but hides the shapes of the other layer group.
+
+    Emptying ``shapes`` (instead of deleting layers) preserves parenting, so the
+    hands stay exactly where the original animation puts them in both renders.
+    """
+    result = copy.deepcopy(data)
+    for layer in result["layers"]:
+        wanted = layer.get("ind") in HAND_INDICES
+        if wanted != keep_hands:
+            layer["shapes"] = []
+    return result
 
 
 def bezier(progress: float, x1: float, y1: float, x2: float, y2: float) -> float:
@@ -209,32 +229,46 @@ def render_frames(data: dict[str, Any], tgs: pathlib.Path, folder: pathlib.Path,
     from PIL import Image, ImageFilter
     from rlottie_python import LottieAnimation
 
-    patched = folder / "plush_pepe_red.tgs"
-    patched.write_bytes(gzip.compress(
-        json.dumps(data, separators=(",", ":")).encode("utf-8"), mtime=0))
-    animation = LottieAnimation.from_tgs(str(patched))
+    base_tgs = folder / "plush_pepe_base.tgs"
+    hands_tgs = folder / "plush_pepe_hands.tgs"
+    for target, payload in (
+        (base_tgs, subset_shapes(data, keep_hands=False)),
+        (hands_tgs, subset_shapes(data, keep_hands=True)),
+    ):
+        target.write_bytes(gzip.compress(
+            json.dumps(payload, separators=(",", ":")).encode("utf-8"), mtime=0))
+    animation = LottieAnimation.from_tgs(str(base_tgs))
+    hands_animation = LottieAnimation.from_tgs(str(hands_tgs))
 
     width, height = animation.lottie_animation_get_size()
     fps = int(round(animation.lottie_animation_get_framerate()))
     count = int(animation.lottie_animation_get_totalframe())
+    if hands_animation.lottie_animation_get_totalframe() != count:
+        raise SystemExit("hand and body animations have different lengths")
     offset = int(data.get("ip", 0))
     logo = wordmark()
 
     for index in range(count):
-        frame = animation.render_pillow_frame(index).convert("RGBA")
-        # The old artwork had a pale stroke; give the whole silhouette a real black contour.
-        solid = frame.getchannel("A").point(lambda value: 255 if value > 18 else 0)
+        body = animation.render_pillow_frame(index).convert("RGBA")
+        hands = hands_animation.render_pillow_frame(index).convert("RGBA")
+        # The contour follows the complete silhouette, including the hands.
+        solid = Image.alpha_composite(body, hands).getchannel("A").point(
+            lambda value: 255 if value > 18 else 0)
         contour_mask = solid.filter(ImageFilter.MaxFilter(9)).filter(ImageFilter.GaussianBlur(0.7))
-        contour = Image.new("RGBA", frame.size, (0, 0, 0, 0))
+        contour = Image.new("RGBA", body.size, (0, 0, 0, 0))
         contour.paste((6, 10, 5, 255), (0, 0), contour_mask)
-        frame = Image.alpha_composite(contour, frame)
+        frame = Image.alpha_composite(contour, body)
 
         cx, cy, rotation, scale = heart_transform(data, index, offset)
         text = logo.rotate(rotation - 8.0, resample=Image.BICUBIC, expand=True)
         layer = Image.new("RGBA", frame.size, (0, 0, 0, 0))
-        layer.paste(text, (round(cx + 6 * scale - text.width / 2),
-                           round(cy - 12 * scale - text.height / 2)), text)
+        # The wordmark sits on the upper-left of the heart; the original hands
+        # still cross in front of its lower edge.
+        layer.paste(text, (round(cx - 30 * scale - text.width / 2),
+                           round(cy - 40 * scale - text.height / 2)), text)
         frame = Image.alpha_composite(frame, layer)
+        # Hands go on top of the wordmark, exactly like the original Plush Pepe.
+        frame = Image.alpha_composite(frame, hands)
 
         frame.save(folder / f"frame_{index:04d}.png", optimize=False)
         if want_preview is not None and index == 0:
