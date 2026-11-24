@@ -30,41 +30,56 @@ permissions:
 
 jobs:
   publish-apk:
-    name: Publish APK from build 319
+    name: Publish APK release
+    # Runs only after a successful build and publishes the APK of *this* run.
+    # Workflow artifacts need a GitHub login to download; a release asset does not,
+    # can be resumed and has the checksum next to it.
+    needs: build
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 20
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 1
-
-      - name: Download built APK artifact
+      - name: Download APK built in this run
         uses: actions/download-artifact@v4
         with:
-          name: WaysGram-New-APK-319
-          run-id: 45304814549
-          github-token: ${{ secrets.GITHUB_TOKEN }}
+          name: WaysGram-New-APK-${{ github.run_number }}
           path: /tmp/waysgram-apk
 
       - name: Publish release asset
         shell: bash
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
         run: |
-          set -euo pipefail
-          test -s /tmp/waysgram-apk/app.apk
-          cp /tmp/waysgram-apk/app.apk WaysGram.apk
+          set -uo pipefail
+          APK=/tmp/waysgram-apk/app.apk
+          if [ ! -s "$APK" ]; then
+            echo "::error::artifact has no app.apk"
+            ls -la /tmp/waysgram-apk || true
+            exit 1
+          fi
+          cp "$APK" WaysGram.apk
           sha256sum WaysGram.apk > WaysGram.apk.sha256
           SHA="$(cut -d' ' -f1 WaysGram.apk.sha256)"
           SIZE="$(stat -c '%s' WaysGram.apk)"
-          TAG="apk-waysgram-bc5abc5d"
-          gh release delete "$TAG" --repo "$GITHUB_REPOSITORY" --yes --cleanup-tag || true
-          gh release create "$TAG" WaysGram.apk WaysGram.apk.sha256 \\
-            --repo "$GITHUB_REPOSITORY" \\
-            --title "WaysGram APK — build 319" \\
-            --prerelease \\
-            --notes "APK of build 319 (branch arena/bc5abc5d-waysgram-new). Size: $SIZE bytes. SHA-256: $SHA. Download: https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG/WaysGram.apk"
+          TAG="apk-waysgram-${GITHUB_RUN_NUMBER}"
+          gh release delete "$TAG" --repo "$GITHUB_REPOSITORY" --yes --cleanup-tag >/dev/null 2>&1 || true
+          NOTES="APK of build ${GITHUB_RUN_NUMBER} (commit ${GITHUB_SHA:0:7}, branch ${GITHUB_REF_NAME}).
+
+          Size: ${SIZE} bytes
+          SHA-256: ${SHA}
+
+          Download: https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/WaysGram.apk"
+          if ! OUT="$(gh release create "$TAG" WaysGram.apk WaysGram.apk.sha256 \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "WaysGram APK - build ${GITHUB_RUN_NUMBER}" \
+              --prerelease \
+              --notes "$NOTES" 2>&1)"; then
+            # Logs are not reachable from the sandbox, annotations are.
+            printf '%s\n' "$OUT" | while IFS= read -r line; do
+              printf '::error::%s\n' "${line//%/%25}"
+            done
+            exit 1
+          fi
+          echo "Published https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/WaysGram.apk (${SIZE} bytes, ${SHA})"
 
   build:
     name: Build Afat release APK
