@@ -157,32 +157,49 @@ public final class WaysGramGiftNumber {
         startTicker();
     }
 
+    /**
+     * Сколько кадров цикл ещё живёт после последнего {@link #bindShimmer(View)} без единого
+     * прикреплённого вида. Вьюху могут привязать до того, как она попала в окно, поэтому
+     * цикл нельзя останавливать в тот же кадр.
+     */
+    private static final int IDLE_FRAMES_BEFORE_STOP = 4;
+
     private static void startTicker() {
         if (ticking) {
             return;
         }
         ticking = true;
         Choreographer.getInstance().postFrameCallback(new Choreographer.FrameCallback() {
+            private int idleFrames;
+
             @Override
             public void doFrame(long frameTimeNanos) {
                 phase = (frameTimeNanos / 1_000_000L % CYCLE_MS) / (float) CYCLE_MS;
-                boolean pending = false;
+                boolean alive = false;
                 for (Iterator<WeakReference<View>> iterator = targets.iterator(); iterator.hasNext(); ) {
                     View view = iterator.next().get();
                     if (view == null) {
                         iterator.remove();
                         continue;
                     }
-                    // Вид может быть ещё не прикреплён в момент bind: цикл не должен
-                    // останавливаться, иначе перелив замирает до повторного открытия карточки.
-                    pending = true;
                     if (view.isAttachedToWindow() && view.getVisibility() == View.VISIBLE) {
+                        alive = true;
                         view.postInvalidateOnAnimation();
                     }
                 }
-                if (pending) {
+                // Раньше цикл считался живым, пока существует хоть один объект View. Список
+                // подарков переиспользует ячейки, поэтому в targets копились отсоединённые
+                // вьюхи, и перерисовка шла 60 раз в секунду даже когда «#???» на экране нет:
+                // прокрутка на слабом устройстве из-за этого дёргалась.
+                if (!alive) {
+                    idleFrames++;
+                } else {
+                    idleFrames = 0;
+                }
+                if (!targets.isEmpty() && idleFrames < IDLE_FRAMES_BEFORE_STOP) {
                     Choreographer.getInstance().postFrameCallback(this);
                 } else {
+                    targets.clear();
                     ticking = false;
                 }
             }

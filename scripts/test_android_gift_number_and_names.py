@@ -52,6 +52,19 @@ class ShimmerLoopChecks(unittest.TestCase):
         self.assertIn("% CYCLE_MS) / (float) CYCLE_MS", number)
         self.assertNotIn("2000L", number, "старый цикл в 2 с остался")
 
+    def test_shimmer_ticker_stops_when_nothing_is_on_screen(self):
+        """Цикл перерисовки не должен жить, пока на экране нет ни одного «#???».
+
+        Раньше он считался живым при любом непустом списке целей: прокрутка списка
+        подарков оставляла отсоединённые вьюхи, и перерисовка шла 60 раз в секунду.
+        """
+        number = self.source("ui/Stars/WaysGramGiftNumber.java")
+        self.assertNotIn("pending = true;", number)
+        self.assertIn("IDLE_FRAMES_BEFORE_STOP", number)
+        self.assertIn("if (!alive) {", number)
+        self.assertIn("targets.clear();", number)
+        self.assertIn("view.isAttachedToWindow() && view.getVisibility() == View.VISIBLE", number)
+
     def test_palette_stays_readable_on_the_dark_gift_card(self):
         """«#???» рисуется на тёмной карточке (Theme.key_dialogGiftsBackground).
 
