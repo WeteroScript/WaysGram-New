@@ -57,18 +57,35 @@ jobs:
             exit 1
           fi
           cp "$APK" WaysGram.apk
+          # The artifact has travelled through the artifact store: check the zip CRCs of
+          # the copy that will be published, so a corrupted upload fails here instead of
+          # on a phone with "Bad file CRC value".
+          unzip -tq WaysGram.apk || { echo "::error::APK zip CRC check failed"; exit 1; }
+          python3 -c 'import sys, zipfile; bad = zipfile.ZipFile("WaysGram.apk").testzip(); bad and sys.exit("corrupt entry: " + bad)' \
+            || { echo "::error::APK zip CRC check failed (python)"; exit 1; }
           sha256sum WaysGram.apk > WaysGram.apk.sha256
           SHA="$(cut -d' ' -f1 WaysGram.apk.sha256)"
           SIZE="$(stat -c '%s' WaysGram.apk)"
+          echo "::notice::APK ${SIZE} bytes sha256 ${SHA}"
           TAG="apk-waysgram-${GITHUB_RUN_NUMBER}"
+          # If the link keeps dropping, the same bytes are also published in 24 MB parts:
+          # cat WaysGram.apk.part* > WaysGram.apk
+          rm -f WaysGram.apk.part* && split -b 24M -d -a 2 WaysGram.apk WaysGram.apk.part
           gh release delete "$TAG" --repo "$GITHUB_REPOSITORY" --yes --cleanup-tag >/dev/null 2>&1 || true
           NOTES="APK of build ${GITHUB_RUN_NUMBER} (commit ${GITHUB_SHA:0:7}, branch ${GITHUB_REF_NAME}).
 
           Size: ${SIZE} bytes
           SHA-256: ${SHA}
 
-          Download: https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/WaysGram.apk"
-          if ! OUT="$(gh release create "$TAG" WaysGram.apk WaysGram.apk.sha256 \
+          Download: https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/WaysGram.apk
+
+          If the download keeps breaking (install fails with \"Bad file CRC value\"), the same
+          file is attached in parts:
+
+            gh release download ${TAG} -p 'WaysGram.apk.part*' -D parts
+            cat parts/WaysGram.apk.part* > WaysGram.apk
+            sha256sum WaysGram.apk   # must equal the SHA-256 above"
+          if ! OUT="$(gh release create "$TAG" WaysGram.apk WaysGram.apk.sha256 WaysGram.apk.part* \
               --repo "$GITHUB_REPOSITORY" \
               --title "WaysGram APK - build ${GITHUB_RUN_NUMBER}" \
               --prerelease \
@@ -79,6 +96,18 @@ jobs:
             done
             exit 1
           fi
+          # Download the published asset back and compare it byte for byte with what was
+          # built: this is the file users install, so it must be verified end to end.
+          rm -rf /tmp/verify && mkdir -p /tmp/verify
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --pattern WaysGram.apk --dir /tmp/verify
+          GOT="$(sha256sum /tmp/verify/WaysGram.apk | cut -d' ' -f1)"
+          GOT_SIZE="$(stat -c '%s' /tmp/verify/WaysGram.apk)"
+          if [ "$GOT" != "$SHA" ] || [ "$GOT_SIZE" != "$SIZE" ]; then
+            echo "::error::published asset differs: expected $SIZE bytes/$SHA, got $GOT_SIZE bytes/$GOT"
+            exit 1
+          fi
+          unzip -tq /tmp/verify/WaysGram.apk
+          echo "::notice::verified asset ${SIZE} bytes sha256 ${SHA}"
           echo "Published https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/WaysGram.apk (${SIZE} bytes, ${SHA})"
 
   build:
