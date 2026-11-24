@@ -765,6 +765,16 @@ public class PrivacySettingsActivity extends BaseFragment implements Notificatio
         });
     }
 
+    /**
+     * Guards every asynchronous WaysGram privacy callback. The old helper was removed
+     * together with the incoming-gifts row while its call sites were renamed, which
+     * left the screen uncompilable.
+     */
+    private boolean canShowWaysGramScreen(String token) {
+        return !isFinished && !isPaused() && getParentActivity() != null
+                && TextUtils.equals(token, WaysGramApi.getToken(currentAccount));
+    }
+
     private void showWaysGramInactivityChoices(String token, boolean available) {
         CharSequence[] choices = new CharSequence[available ? INACTIVITY_DAYS.length : 1];
         for (int i = 0; i < choices.length; i++) {

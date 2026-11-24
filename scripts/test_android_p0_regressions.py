@@ -66,6 +66,10 @@ class P0RegressionChecks(unittest.TestCase):
             self.assertNotIn(removed, settings, removed)
         self.assertIn("position == giftsRow", settings)
         self.assertIn("R.string.PrivacyGifts", settings)
+        # Every renamed callback must have a matching guard; without it javac fails.
+        self.assertEqual(settings.count("canShowWaysGramScreen(token)"), 9)
+        self.assertIn("    private boolean canShowWaysGramScreen(String token) {", settings)
+        self.assertIn("TextUtils.equals(token, WaysGramApi.getToken(currentAccount))", settings)
 
     def test_messages_privacy_opens_stock_rules(self):
         control = self.source("ui/PrivacyControlActivity.java")
