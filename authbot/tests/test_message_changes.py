@@ -1988,7 +1988,10 @@ def test_channel_discussion_comments_use_group_permissions_and_moderation(env):
             assert (await client.get(link, headers=owner)).json()['title'] == 'News discussion'
             assert (await client.get(url, headers=member)).status_code == 404  # group membership alone does not grant post access
             assert (await client.post(base + '/members', headers=owner, json={'user_ids': [102, ADMIN]})).status_code == 201
-            assert (await client.get(url, headers=outsider)).status_code == 403  # channel membership alone is not enough
+            # Подписчик канала теперь автоматически попадает в группу обсуждений:
+            # иначе «Discuss» и комментарии не открывались ни у кого, кроме админов.
+            assert (await client.get(url, headers=outsider)).status_code == 200
+            assert (await client.get(group_api + '/messages', headers=outsider)).status_code == 200
             key = {**member, 'Idempotency-Key': 'channel-comment-0001'}
             first = await client.post(url, headers=key, json={'body': 'Comment'})
             assert first.status_code == 201

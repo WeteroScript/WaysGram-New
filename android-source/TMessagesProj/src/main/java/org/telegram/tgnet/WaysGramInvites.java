@@ -5,23 +5,64 @@ import org.json.JSONArray;
 import org.json.JSONException;
 
 public final class WaysGramInvites {
+    /** Код приглашения без известного типа: {@code wg/invites/<code>} из ссылки t.wg/<code>. */
+    private static final java.util.regex.Pattern UNKNOWN_KIND = java.util.regex.Pattern.compile(
+            "wg/invites/([A-Za-z0-9_-]{20,128})");
+
     private static String path(String hash) throws WaysGramApi.ApiException {
         if (hash != null && hash.matches("wg/(groups|channels)/[A-Za-z0-9_-]{20,128}")) {
             String[] parts = hash.split("/");
             return "/api/" + parts[1] + "/invites/" + parts[2];
         }
+        java.util.regex.Matcher unified = UNKNOWN_KIND.matcher(hash == null ? "" : hash);
+        if (unified.matches()) {
+            // Тип приглашения клиенту неизвестен: короткая ссылка t.wg/<код> не говорит,
+            // группа это или канал. Сервер отвечает по двум отдельным путям, поэтому
+            // оба варианта пробуются по очереди.
+            return "/api/invites/" + unified.group(1);
+        }
         throw new WaysGramApi.ApiException(400, "INVITE_HASH_INVALID");
+    }
+
+    private static boolean unknownKind(String path) {
+        return path.startsWith("/api/invites/");
+    }
+
+    /** Приглашение по неизвестному типу: сначала группа, потом канал. */
+    private static JSONObject resolveUnknown(int account, String path, boolean join) throws WaysGramApi.ApiException {
+        String token = path.substring(path.lastIndexOf('/') + 1);
+        WaysGramApi.ApiException first = null;
+        for (String scope : new String[]{"groups", "channels"}) {
+            try {
+                if (join) {
+                    JSONObject body = new JSONObject();
+                    try { body.put("invite_token", token); }
+                    catch (JSONException e) { throw new WaysGramApi.ApiException(400, "INVITE_HASH_INVALID"); }
+                    JSONObject joined = WaysGramApi.post(account, "/api/" + scope + "/join", body);
+                    joined.put("__scope", scope);
+                    return joined;
+                }
+                JSONObject preview = WaysGramApi.get(account, "/api/" + scope + "/invites/" + token);
+                preview.put("__scope", scope);
+                return preview;
+            } catch (WaysGramApi.ApiException e) {
+                if (first == null) first = e;
+            }
+        }
+        throw first == null ? new WaysGramApi.ApiException(400, "INVITE_HASH_INVALID") : first;
     }
 
     static TLObject preview(int account, String hash) throws WaysGramApi.ApiException {
         String path = path(hash);
+        boolean unknown = unknownKind(path);
         JSONObject json;
         try {
-            json = WaysGramApi.get(account, path);
+            json = unknown ? resolveUnknown(account, path, false) : WaysGramApi.get(account, path);
         } catch (WaysGramApi.ApiException e) {
             if (e.status == 404 || e.status == 410) throw new WaysGramApi.ApiException(400, "INVITE_HASH_EXPIRED");
             throw e;
         }
+        if (unknown) path = "/api/" + json.optString("__scope", "groups") + "/invites/";
         TLRPC.TL_chatInvite invite = new TLRPC.TL_chatInvite();
         invite.title = json.optString("title");
         invite.participants_count = json.optInt("member_count");
@@ -33,14 +74,22 @@ public final class WaysGramInvites {
 
     static TLObject join(int account, String hash, long selfId) throws WaysGramApi.ApiException {
         String path = path(hash);
-        boolean channel = path.startsWith("/api/channels/");
+        boolean unknown = unknownKind(path);
+        boolean channel = !unknown && path.startsWith("/api/channels/");
         String base = channel ? "/api/channels" : "/api/groups";
-        JSONObject body = new JSONObject();
-        try { body.put("invite_token", path.substring(path.lastIndexOf('/') + 1)); }
-        catch (JSONException e) { throw new WaysGramApi.ApiException(400, "INVITE_HASH_INVALID"); }
         JSONObject joined;
-        try { joined = WaysGramApi.post(account, base + "/join", body); }
-        catch (WaysGramApi.ApiException e) {
+        try {
+            if (unknown) {
+                joined = resolveUnknown(account, path, true);
+                channel = "channels".equals(joined.optString("__scope"));
+                base = channel ? "/api/channels" : "/api/groups";
+            } else {
+                JSONObject body = new JSONObject();
+                try { body.put("invite_token", path.substring(path.lastIndexOf('/') + 1)); }
+                catch (JSONException e) { throw new WaysGramApi.ApiException(400, "INVITE_HASH_INVALID"); }
+                joined = WaysGramApi.post(account, base + "/join", body);
+            }
+        } catch (WaysGramApi.ApiException e) {
             if (e.status == 404 || e.status == 410) throw new WaysGramApi.ApiException(400, "INVITE_HASH_EXPIRED");
             throw e;
         }

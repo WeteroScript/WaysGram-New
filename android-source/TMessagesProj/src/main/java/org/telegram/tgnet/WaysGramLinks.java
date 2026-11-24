@@ -1,6 +1,8 @@
 package org.telegram.tgnet;
 
 import android.net.Uri;
+
+import androidx.annotation.Nullable;
 import org.telegram.messenger.BuildVars;
 
 /** Public link branding is separate from the API transport origin. */
@@ -13,6 +15,20 @@ public final class WaysGramLinks {
 
     private static boolean isApiHost(String host) {
         return host != null && host.equalsIgnoreCase(Uri.parse(BuildVars.WAYSGRAM_API_BASE_URL).getHost());
+    }
+
+    /**
+     * Короткий код-приглашение в первой части пути: {@code https://t.wg/<code>}.
+     *
+     * <p>Имя пользователя в WaysGram — только строчные буквы, цифры и «_», не длиннее
+     * 32 знаков. Код приглашения — 20+ знаков URL-safe base64, то есть почти всегда с
+     * заглавными буквами, «-» или «_». Раньше такой код уходил в resolveUsername, и
+     * приложение писало «нет аккаунта с таким username» (скриншот 24.11).
+     */
+    public static boolean isInviteCode(@Nullable String segment) {
+        if (segment == null || segment.isEmpty()) return false;
+        if (!segment.matches("[A-Za-z0-9_-]{20,128}")) return false;
+        return !segment.matches("[a-z][a-z0-9_]{0,31}");
     }
 
     public static boolean isShareRoute(Uri uri) {

@@ -2011,6 +2011,16 @@ public class LaunchActivity extends BasePermissionsActivity implements INavigati
                                         group = "wg/" + parts[2] + "/" + parts[4];
                                         break;
                                     }
+                                    if (org.telegram.tgnet.WaysGramTransport.ENABLED
+                                            && org.telegram.tgnet.WaysGramLinks.isHost(host) && invitePath != null) {
+                                        String segment = invitePath.startsWith("/") ? invitePath.substring(1) : invitePath;
+                                        if (org.telegram.tgnet.WaysGramLinks.isInviteCode(segment)) {
+                                            // Тип ссылки (группа или канал) знает только сервер:
+                                            // wg/invites/... пробует оба списка приглашений.
+                                            group = "wg/invites/" + segment;
+                                            break;
+                                        }
+                                    }
                                     Matcher prefixMatcher = PREFIX_T_ME_PATTERN.matcher(host);
                                     boolean isPrefix = prefixMatcher.find();
                                     if (host.equals("telegram.me") || host.equals("t.me") || host.equals("telegram.dog") || (org.telegram.tgnet.WaysGramTransport.ENABLED && org.telegram.tgnet.WaysGramLinks.isHost(host)) || isPrefix) {

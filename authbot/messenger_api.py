@@ -10386,6 +10386,9 @@ def build_messenger_router(
             cur = await db.execute("""SELECT g.id,g.title FROM channel_discussion_groups d JOIN chat_groups g ON g.id=d.group_id
                                        WHERE d.channel_id=?""", (channel_id,))
             group = await cur.fetchone()
+            if group is not None:
+                await join_discussion_group_for_channel(db, channel_id, uid)
+                await db.commit()
         return {"group_id": group[0], "title": group[1]} if group else {"group_id": None}
 
     @router.get("/api/channels/{channel_id}/subscription-offer")
@@ -18892,6 +18895,32 @@ def build_messenger_router(
         await attach_my_reactions(items, "group", group_id, int(user["telegram_id"]))
         return {"query": term, "messages": items, "count": len(items), "has_more": len(items) == 100}
 
+    async def join_discussion_group_for_channel(db: Any, channel_id: int, uid: int) -> int | None:
+        """Пускает в группу обсуждений того, кому доступен сам канал.
+
+        Раньше кнопка «Discuss» и комментарии требовали членства в связанной группе,
+        поэтому у обычных подписчиков канал открывался, а обсуждение — нет: в группу
+        их никто не добавлял. Теперь подписка на канал (или публичный канал) даёт
+        членство в его группе обсуждений.
+        """
+        cur = await db.execute(
+            "SELECT d.group_id FROM channel_discussion_groups d JOIN channels c ON c.id=d.channel_id "
+            "WHERE c.id=? AND " + STORY_CHANNEL_ACCESS,
+            (channel_id, uid, uid, uid, uid),
+        )
+        row = await cur.fetchone()
+        if row is None:
+            return None
+        group_id = int(row[0])
+        cur = await db.execute("SELECT 1 FROM group_members WHERE group_id=? AND telegram_id=?", (group_id, uid))
+        if await cur.fetchone() is None:
+            await db.execute(
+                "INSERT INTO group_members(group_id,telegram_id,role,joined_at) VALUES(?,?,'member',?) "
+                "ON CONFLICT(group_id,telegram_id) DO NOTHING",
+                (group_id, uid, int(time.time())),
+            )
+        return group_id
+
     async def channel_discussion_access(db: Any, channel_id: int, post_id: int, uid: int) -> int:
         cur = await db.execute("""SELECT d.group_id FROM channel_discussion_groups d
               JOIN channels c ON c.id=d.channel_id JOIN channel_messages m ON m.channel_id=c.id
@@ -18901,7 +18930,10 @@ def build_messenger_router(
         if row is None:
             raise HTTPException(404, "DISCUSSION_NOT_AVAILABLE")
         group = int(row[0])
-        await require_group_member(db, group, uid)
+        await join_discussion_group_for_channel(db, channel_id, uid)
+        # Раньше row_factory ставил require_group_member(); обработчики на него
+        # рассчитывают, поэтому выставляем здесь.
+        db.row_factory = aiosqlite.Row
         return group
 
     async def ensure_post_discussion(db: Any, channel_id: int, post_id: int) -> tuple[int, int]:
@@ -19030,6 +19062,8 @@ def build_messenger_router(
                 WHERE p.channel_id=? AND p.post_id=? AND p.group_id=? AND (?=0 OR p.group_message_id<?)
                 ORDER BY p.group_message_id DESC LIMIT ?""", (channel_id, post_id, group, before_id, before_id, limit + 1))
             rows = await cur.fetchall()
+            # Подписчик канала мог быть только что добавлен в группу обсуждений.
+            await db.commit()
         return {"group_id": group, "comments": [dict(row) for row in reversed(rows[:limit])],
                 "next_before_id": rows[limit - 1]["id"] if len(rows) > limit else 0}
 
