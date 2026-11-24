@@ -148,3 +148,13 @@ APK по этому списку не собирается до отдельно
   механизмом и перекрывает кастомизацию фона. См. `docs/chat-themes.md`.
 * Прочие `METHOD_NOT_SUPPORTED`, которые сейчас отвечают пустым успехом вместо реальной
   функциональности, — перечисляются и закрываются по одному.
+## Краши с устройства (24.11)
+
+| Что | Причина | Как закрыто |
+| --- | --- | --- |
+| `ClassCastException: TL_messages_affectedMessages → TLRPC$Updates` в `MessagesController.lambda$deleteDialog$145` при «Очистить историю» в группе | группы показываются клиенту мегагруппами, запрос уходит как `channels.deleteHistory`, а `WaysGramChats.groupClearHistory` возвращал `messages.affectedMessages`, тогда как штатный обработчик приводит ответ к `Updates` | `groupClearHistory` возвращает `new TLRPC.TL_updates()` |
+| Такой же дефект у «Удалить историю» участника: `channels.deleteParticipantHistory` ждёт `messages.affectedHistory` | `groupClearMemberHistory` возвращал `messages.affectedMessages` | возвращает `TL_messages_affectedHistory` (`pts`, `pts_count`, `offset`), как канальный вариант `clearChannelMemberHistory` |
+| Любое исключение в колбэке запроса валило приложение (`WaysGramTransport.lambda$execute$6` в стеке) | `delegate.run(...)` вызывался вне `try/catch` прямо в рабочем потоке | ответы идут через `WaysGramTransport.deliver()`: исключение колбэка пишется в `FileLog`, запросы продолжают работать |
+| Падение после тапа по анимированному эмодзи в канале | в канале `chatActivity.currentUser == null`, а подсказка обращалась к `currentUser.id` / `currentUser.first_name` | `EmojiAnimationsOverlay.onTapItem` возвращает результат до блока подсказки, если `currentUser == null`; эффект при этом проигрывается |
+
+Тесты: `scripts/test_android_group_history_crash.py`, `scripts/test_android_animated_emoji.py`.

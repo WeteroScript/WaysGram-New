@@ -1992,6 +1992,12 @@ public class WaysGramChats {
         return affected;
     }
 
+    /**
+     * «Очистить историю» группы. Сервер удаляет переписку, а клиенту нужен
+     * {@link TLRPC.TL_updates}: штатный обработчик {@code channels.deleteHistory} приводит ответ
+     * ровно к этому типу ({@code MessagesController.deleteDialog}). Возврат
+     * {@code TL_messages_affectedMessages} ронял приложение с ClassCastException (24.11).
+     */
     static TLObject groupClearHistory(int account, long groupId) throws WaysGramApi.ApiException {
         try {
             WaysGramApi.delete(account, "/api/groups/" + groupId + "/messages");
@@ -1999,12 +2005,14 @@ public class WaysGramChats {
             if (e.status == 403) throw new WaysGramApi.ApiException(400, "CHAT_ADMIN_REQUIRED");
             throw e;
         }
-        TLRPC.TL_messages_affectedMessages affected = new TLRPC.TL_messages_affectedMessages();
-        affected.pts = 0;
-        affected.pts_count = 0;
-        return affected;
+        return new TLRPC.TL_updates();
     }
 
+    /**
+     * Удаление истории одного участника группы. Ответ — {@code messages.affectedHistory}:
+     * обработчик {@code channels.deleteParticipantHistory} читает {@code pts}, {@code pts_count}
+     * и {@code offset}. Тот же тип, что у канального варианта ({@link #clearChannelMemberHistory}).
+     */
     static TLObject groupClearMemberHistory(int account, long groupId, long target) throws WaysGramApi.ApiException {
         try {
             WaysGramApi.delete(account, "/api/groups/" + groupId + "/members/" + target + "/messages");
@@ -2012,10 +2020,11 @@ public class WaysGramChats {
             if (e.status == 403) throw new WaysGramApi.ApiException(400, "CHAT_ADMIN_REQUIRED");
             throw e;
         }
-        TLRPC.TL_messages_affectedMessages affected = new TLRPC.TL_messages_affectedMessages();
-        affected.pts = 0;
-        affected.pts_count = 0;
-        return affected;
+        TLRPC.TL_messages_affectedHistory out = new TLRPC.TL_messages_affectedHistory();
+        out.pts = 1;
+        out.pts_count = 1;
+        out.offset = 0;
+        return out;
     }
 
     static TLObject groupGetMessages(int account, TLRPC.TL_channels_getMessages req, long selfId) throws WaysGramApi.ApiException {

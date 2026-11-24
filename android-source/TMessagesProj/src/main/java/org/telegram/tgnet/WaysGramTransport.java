@@ -229,10 +229,26 @@ public class WaysGramTransport {
                 FileLog.e(t);
                 error = error(500, "INTERNAL");
             }
-            if (delegate != null) {
-                delegate.run(response, error);
-            }
+            deliver(delegate, response, error);
         });
+    }
+
+    /**
+     * Ответ запроса в колбэк.
+     *
+     * <p>Колбэк — это код интерфейса: если он бросает исключение (например, приводит ответ к
+     * неверному типу), раньше исключение уходило в пул потоков и валило приложение. Теперь оно
+     * попадает в лог, а остальные запросы продолжают работать.</p>
+     */
+    private static void deliver(RequestDelegate delegate, TLObject response, TLRPC.TL_error error) {
+        if (delegate == null) {
+            return;
+        }
+        try {
+            delegate.run(response, error);
+        } catch (Throwable t) {
+            FileLog.e(t);
+        }
     }
 
     private static android.content.SharedPreferences paidTextPrefs() {
@@ -286,9 +302,9 @@ public class WaysGramTransport {
                 FileLog.e(e);
                 failure = error(500, "INTERNAL");
             }
-            if (delegate != null) delegate.run(result, failure);
+            deliver(delegate, result, failure);
         }), () -> WaysGramApi.NETWORK.execute(() -> {
-            if (delegate != null) delegate.run(null, error(400, "MESSAGE_FEE_NOT_CONFIRMED"));
+            deliver(delegate, null, error(400, "MESSAGE_FEE_NOT_CONFIRMED"));
         }));
     }
 
