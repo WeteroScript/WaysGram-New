@@ -8,8 +8,11 @@ the original bezier easing, so the loop is "1 в 1" with the other Plush Pepe mo
 
 Only the artwork is changed:
 
-* the pink heart becomes the WaysGram red heart and is drawn in front of the arms,
-  so the hands hold it instead of covering it;
+* the pink heart becomes the WaysGram red heart and is drawn *under* the hands, so the
+  frog holds it (the hands are in front, exactly like the original sticker);
+* the «WaysGram» wordmark is attached to the heart analytically: its size is measured
+  once and its position every frame comes from the heart layer transform (body + heart),
+  so the letters cannot jitter or drift over the heart;
 * a black outer contour is added around the whole silhouette (the contour that was
   lost in the earlier, hand-drawn glow/hearts animation).
 
@@ -108,8 +111,8 @@ def redraw_heart(data: dict[str, Any]) -> dict[str, Any]:
     return data
 
 
-# The three hands in the original Plush Pepe TGS. They are drawn after the body and
-# before the heart: Pepe holds the heart, but the heart itself stays in front.
+# The three hands in the original Plush Pepe TGS. They are drawn last, on top of the
+# heart: Pepe holds the heart with his hands in front of it.
 HAND_INDICES = {1, 2, 15}
 #: Слой сердца: по нему считается, куда ставить надпись и какая его часть не закрыта руками.
 HEART_INDEX = 3
@@ -160,8 +163,9 @@ def heart_transform(data: dict[str, Any], frame: int, offset: int) -> tuple[floa
 def wordmark() -> "Any":
     """Надпись «WaysGram» для сердца.
 
-    Рисуется отдельным слоем и накладывается на сердце уже после того, как сердце
-    нарисовано поверх рук: так надпись никогда не уезжает под руку.
+    Рисуется один раз в «сердечном» масштабе, а каждый кадр только поворачивается и
+    переносится трансформом слоя сердца — поэтому надпись намертво прикреплена к сердцу
+    и не дёргается от кадра к кадру.
     """
     from PIL import Image, ImageDraw, ImageFont
 
@@ -258,11 +262,78 @@ def render_frames(data: dict[str, Any], tgs: pathlib.Path, folder: pathlib.Path,
     offset = int(data.get("ip", 0))
     logo = wordmark()
 
+    # Надпись крепится к сердцу в локальных координатах сердечного слоя: один раз
+    # измеряем видимую рамку сердца, дальше каждый кадр только применяем трансформ
+    # слоя (позиция, поворот, масштаб). Раньше размер и центр считались по пиксельной
+    # рамке каждого кадра, из-за чего буквы «дышали» и дрожали.
+    heart_layer = next(layer for layer in data["layers"] if layer.get("nm") == "heart")
+    heart_anchor = heart_layer["ks"]["a"]["k"][:2]
+    first_center_x, first_center_y, first_rotation, first_scale = heart_transform(data, 0, offset)
+    first_box = heart_animation.render_pillow_frame(0).convert("RGBA").getchannel("A").getbbox()
+    if first_box is None:
+        raise SystemExit("the heart layer renders empty")
+    first_w = (first_box[2] - first_box[0]) / first_scale
+    first_h = (first_box[3] - first_box[1]) / first_scale
+    logo_scale = min(first_w * 0.70 / logo.width, first_h * 0.34 / logo.height)
+    logo_scaled = logo.resize((max(1, round(logo.width * logo_scale)),
+                               max(1, round(logo.height * logo_scale))), Image.LANCZOS)
+    # Где именно на сердце ставить надпись: руки рисуются поверх сердца, поэтому ищем
+    # такое место, где ладони закрывают минимум букв — и сразу на нескольких кадрах,
+    # чтобы надпись не «пряталась» в середине анимации. Найденная точка постоянна,
+    # поэтому дёрганья нет.
+    def screen_point(local_x: float, local_y: float, rotation: float, scale: float,
+                     centre_x: float, centre_y: float) -> tuple[float, float]:
+        theta = math.radians(rotation)
+        dx = (local_x - heart_anchor[0]) * scale
+        dy = (local_y - heart_anchor[1]) * scale
+        return (centre_x + dx * math.cos(theta) - dy * math.sin(theta),
+                centre_y + dx * math.sin(theta) + dy * math.cos(theta))
+
+    sample_frames = sorted({min(count - 1, round(count * k / 8)) for k in range(8)})
+    samples = []
+    for sample in sample_frames:
+        centre_x, centre_y, rotation, scale = heart_transform(data, sample, offset)
+        samples.append((
+            centre_x, centre_y, rotation, scale,
+            heart_animation.render_pillow_frame(sample).convert("RGBA").getchannel("A"),
+            hands_animation.render_pillow_frame(sample).convert("RGBA").getchannel("A"),
+        ))
+
+    best = (-1.0, None)
+    for vertical in [0.14 + 0.02 * k for k in range(23)]:
+        for shift in [(-0.12 + 0.02 * k) for k in range(13)]:
+            local_x = heart_anchor[0] + ((first_box[0] + first_box[2]) / 2 - first_center_x) / first_scale \
+                + shift * first_w
+            local_y = heart_anchor[1] + (first_box[1] + first_h * vertical * first_scale - first_center_y) / first_scale
+            worst = 1.0
+            for centre_x, centre_y, rotation, scale, heart_mask, hand_mask in samples:
+                px, py = screen_point(local_x, local_y, rotation, scale, centre_x, centre_y)
+                text = logo_scaled if abs(scale - first_scale) < 1e-6 else logo_scaled.resize(
+                    (max(1, round(logo_scaled.width * scale / first_scale)),
+                     max(1, round(logo_scaled.height * scale / first_scale))), Image.LANCZOS)
+                text = text.rotate(rotation, resample=Image.BICUBIC, expand=True)
+                layer = Image.new("L", heart_mask.size, 0)
+                layer.paste(text.getchannel("A"),
+                            (round(px - text.width / 2), round(py - text.height / 2)))
+                total = ImageChops.multiply(layer, heart_mask.point(lambda v: 255 if v > 8 else 0))
+                covered = sum(1 for value in total.getdata() if value > 0)
+                hidden = sum(1 for value in ImageChops.multiply(total, hand_mask).getdata() if value > 0)
+                visible = 1.0 - (hidden / covered) if covered else 0.0
+                worst = min(worst, visible)
+                if worst <= best[0]:
+                    break
+            if worst > best[0]:
+                best = (worst, (local_x, local_y))
+    if best[1] is None:
+        raise SystemExit("could not place the wordmark on the heart")
+    local_center_x, local_center_y = best[1]
+    wordmark_visible = best[0]
+
     for index in range(count):
         body = animation.render_pillow_frame(index).convert("RGBA")
         hands = hands_animation.render_pillow_frame(index).convert("RGBA")
         heart = heart_animation.render_pillow_frame(index).convert("RGBA")
-        _, _, rotation, _ = heart_transform(data, index, offset)
+        heart_center_x, heart_center_y, rotation, scale = heart_transform(data, index, offset)
         # The contour follows the complete silhouette, including the hands.
         solid = Image.alpha_composite(Image.alpha_composite(body, hands), heart).getchannel("A").point(
             lambda value: 255 if value > 18 else 0)
@@ -271,37 +342,36 @@ def render_frames(data: dict[str, Any], tgs: pathlib.Path, folder: pathlib.Path,
         contour.paste((6, 10, 5, 255), (0, 0), contour_mask)
         frame = Image.alpha_composite(contour, body)
 
-        # Порядок слоёв: контур → тело → руки → сердце. Сердце рисуется последним,
-        # иначе правая рука перекрывает его середину (это и было на устройстве).
-        frame = Image.alpha_composite(frame, hands)
+        # Порядок слоёв: контур → тело → сердце → надпись → руки. Руки рисуются
+        # последними: лягушка держит сердце, ладони лежат поверх него, как в оригинале.
         frame = Image.alpha_composite(frame, heart)
 
-        # Надпись «WaysGram» — на сердце. Положение и размер считаются по пикселям
-        # сердца в этом кадре, наклон — по повороту сердца, поэтому надпись двигается
-        # вместе с ним и всегда лежит на нём, а не на руке или на теле.
+        # Надпись «WaysGram» — на сердце и намертво: размер постоянный, положение и
+        # наклон берутся из трансформа сердечного слоя этого кадра.
         heart_alpha = heart.getchannel("A")
-        box = heart_alpha.getbbox()
-        if box:
-            box_w, box_h = box[2] - box[0], box[3] - box[1]
-            scale_factor = min(box_w * 0.80 / logo.width, box_h * 0.40 / logo.height)
-            text = logo.resize((max(1, round(logo.width * scale_factor)),
-                                max(1, round(logo.height * scale_factor))), Image.LANCZOS)
-            text = text.rotate(rotation, resample=Image.BICUBIC, expand=True)
-            centre_x = (box[0] + box[2]) / 2
-            centre_y = box[1] + box_h * 0.40
-            layer = Image.new("RGBA", frame.size, (0, 0, 0, 0))
-            layer.paste(text, (round(centre_x - text.width / 2),
-                               round(centre_y - text.height / 2)), text)
-            # Обрезаем строго по сердцу: буквы не должны вылезать на тело.
-            layer.putalpha(ImageChops.multiply(layer.getchannel("A"),
-                                               heart_alpha.point(lambda v: 255 if v > 8 else 0)))
-            frame = Image.alpha_composite(frame, layer)
+        theta = math.radians(rotation)
+        offset_x = (local_center_x - heart_anchor[0]) * scale
+        offset_y = (local_center_y - heart_anchor[1]) * scale
+        centre_x = heart_center_x + offset_x * math.cos(theta) - offset_y * math.sin(theta)
+        centre_y = heart_center_y + offset_x * math.sin(theta) + offset_y * math.cos(theta)
+        text = logo_scaled
+        if text.width != max(1, round(logo_scaled.width * scale)) or text.height != max(1, round(logo_scaled.height * scale)):
+            text = logo_scaled.resize((max(1, round(logo_scaled.width * scale)),
+                                       max(1, round(logo_scaled.height * scale))), Image.LANCZOS)
+        text = text.rotate(rotation, resample=Image.BICUBIC, expand=True)
+        layer = Image.new("RGBA", frame.size, (0, 0, 0, 0))
+        layer.paste(text, (round(centre_x - text.width / 2), round(centre_y - text.height / 2)), text)
+        # Обрезаем строго по сердцу: буквы не должны вылезать на тело.
+        layer.putalpha(ImageChops.multiply(layer.getchannel("A"),
+                                           heart_alpha.point(lambda v: 255 if v > 8 else 0)))
+        frame = Image.alpha_composite(frame, layer)
+        frame = Image.alpha_composite(frame, hands)
 
         frame.save(folder / f"frame_{index:04d}.png", optimize=False)
         if want_preview is not None and index == 0:
             frame.save(want_preview)
 
-    return (width, height), fps
+    return (width, height), fps, wordmark_visible
 
 
 def normalize_webm(path: pathlib.Path) -> None:
@@ -344,7 +414,8 @@ def update_manifest(webm: pathlib.Path, manifest: pathlib.Path) -> dict[str, str
             model["mime_type"] = "video/webm"
     payload["source"] = (
         "Original Plush Pepe TGS motion (60 fps, 3 s, original bezier easing) rendered "
-        "with rlottie; red WaysGram heart drawn in front of the arms and a restored black contour; "
+        "with rlottie; red WaysGram heart held by the arms, wordmark attached to the heart, "
+        "a restored black contour; "
         "encoded as WebM with alpha"
     )
     manifest.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
@@ -367,7 +438,7 @@ def main() -> None:
     data = redraw_heart(load_composition(args.tgs))
     with tempfile.TemporaryDirectory(prefix="waysgram-model-") as tmp:
         folder = pathlib.Path(tmp)
-        size, fps = render_frames(data, args.tgs, folder, want_preview=args.preview)
+        size, fps, wordmark_visible = render_frames(data, args.tgs, folder, want_preview=args.preview)
         encode(ffmpeg_binary(args.ffmpeg), folder, args.out, fps)
 
     if args.raw:
@@ -378,7 +449,7 @@ def main() -> None:
     if args.manifest.is_file():
         info.update(update_manifest(args.out, args.manifest))
     print(f"{args.out}: {info['bytes']} bytes, sha256 {info['sha256']}")
-    print(f"{size[0]}x{size[1]}, {fps} fps, original 3 s Plush Pepe loop")
+    print(f"{size[0]}x{size[1]}, {fps} fps, original 3 s Plush Pepe loop; wordmark visible on {wordmark_visible * 100:.0f}% of the worst sampled frame")
 
 
 if __name__ == "__main__":
