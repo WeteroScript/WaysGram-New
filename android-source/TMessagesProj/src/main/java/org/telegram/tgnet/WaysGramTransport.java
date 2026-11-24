@@ -1367,6 +1367,9 @@ public class WaysGramTransport {
                 result.messages.add(WaysGramMapper.toMessage(lastId, lastSender, recipient,
                         c.optString("last_message", ""), c.optInt("created_at"), selfId));
                 TLRPC.TL_user user = WaysGramMapper.toUser(c);
+                // «Избранное» — это чат с самим собой. Без флага self строка теряет иконку
+                // закладки и показывает имя с аватаркой аккаунта (UserObject.isUserSelf).
+                user.self = user.id == selfId;
                 result.users.add(user);
             }
         }

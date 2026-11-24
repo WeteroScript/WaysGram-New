@@ -117,3 +117,38 @@ def test_private_channel_gifts_need_access_and_stars(env) -> None:
             assert sold == 0
 
     run(scenario())
+
+
+def test_conversations_include_the_worn_gift(env) -> None:
+    """Значок подарка в списке чатов не должен ждать открытия профиля."""
+    path, app = env
+
+    async def scenario() -> None:
+        async with await client_for(app) as client:
+            await bot_module.set_telegram_gift_values("g1", price=40, supply=5)
+            bought = await client.post("/api/telegram/gifts/g1/purchase", headers=headers(102), json={})
+            assert bought.status_code == 201
+            serial = bought.json()["gift"]["serial_number"]
+
+            await client.post("/api/messages", headers=headers(102), json={"recipient_id": 101, "body": "hi"})
+            plain = (await client.get("/api/conversations", headers=headers(101))).json()["conversations"]
+            peer = next(item for item in plain if item["id"] == 102)
+            assert "worn_gift" not in peer
+
+            # «Носить» можно только коллекционный подарок; для списка чатов важен сам
+            # факт profile_worn, поэтому ставим его напрямую в хранилище.
+            import db_split
+
+            conn = db_split.sqlite_connect(path)
+            try:
+                conn.execute("UPDATE user_gifts SET profile_worn=1 WHERE serial_number=?", (serial,))
+                conn.commit()
+            finally:
+                conn.close()
+            with_gift = (await client.get("/api/conversations", headers=headers(101))).json()["conversations"]
+            peer = next(item for item in with_gift if item["id"] == 102)
+            assert peer["worn_gift"]["serial_number"] == serial
+            assert peer["worn_gift"]["telegram_gift_id"] == "g1"
+            assert isinstance(peer["worn_gift"]["traits"], dict)
+
+    run(scenario())

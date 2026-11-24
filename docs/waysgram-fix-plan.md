@@ -318,3 +318,31 @@ authbot командой `/exportreactions` (см. `docs/reaction-emoji-export.m
 - регрессия: `scripts/test_android_channel_gifts.py` (7 тестов).
 
 Статический набор: **283 OK**. Бэкенд-выборка по подаркам/профилю: 145 passed.
+
+## 5. Список чатов: подарок «на себе», «Избранное» и видео из истории
+
+### Значок подарка появлялся через 2–3 минуты (исправлено)
+
+`/api/conversations` не отдавал `worn_gift`, а клиент рисует подарок «на себе» из
+`user.emoji_status` (см. `WaysGramMapper.toUser`). Пока профиль собеседника не был
+загружен, в строке чата значка не было. Теперь `list_conversations` кладёт
+`worn_gift` (id, serial, title, traits) через пакетный `worn_gift_map` — без обогащения
+документами, чтобы не тормозить список.
+
+### «Избранное» превращалось в профиль аккаунта (исправлено)
+
+`WaysGramTransport.loadConversations()` строил пользователя из строки `/api/conversations`
+и не помечал его как себя. Без флага `user.self` `UserObject.isUserSelf()` возвращал false,
+и строка «Избранное» рисовала имя с аватаркой (`DialogCell`, `AvatarDrawable`). Флаг
+выставляется по `selfId` — имя и закладка снова штатные.
+
+### «App was unable to play this video» (частично)
+
+`WaysGramMedia.buildMedia()` строил документ без `TL_documentAttributeVideo`, если у медиа
+пустой `media_kind` (старые записи, истории): файл с `video/mp4` становился «документом»
+и не проигрывался. Теперь тип выводится из mime (`!forceDocument`), атрибут видео
+добавляется. Отдельно проверено, что `ensure()` качает файл целиком и сверяет длину,
+а `serveFile()` корректно отдаёт диапазоны `offset/limit`.
+
+Регрессии: `scripts/test_android_chat_list_identity.py` (4), `test_channel_gifts.py`
+(3, включая `worn_gift` в списке чатов).

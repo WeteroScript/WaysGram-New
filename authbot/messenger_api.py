@@ -5666,6 +5666,36 @@ def build_messenger_router(
                     await db.commit()
         return {"status": "logged_out"}
 
+    async def worn_gift_map(db: Any, uids: list[int]) -> dict[int, dict[str, Any]]:
+        """Подарки «на себе» для списка чатов: без обогащения документами (оно дорогое).
+
+        Клиент рисует подарок рядом с именем из `user.emoji_status`, а без этого поля
+        значок появлялся только после того, как был открыт профиль собеседника.
+        """
+        if not uids:
+            return {}
+        marks = ",".join("?" for _ in uids)
+        cur = await db.execute(
+            f"""SELECT owner_telegram_id,id,serial_number,telegram_gift_id,gift_name,attributes_json
+                FROM user_gifts WHERE profile_worn=1 AND profile_hidden=0
+                  AND owner_telegram_id IN ({marks})""",
+            tuple(uids),
+        )
+        out: dict[int, dict[str, Any]] = {}
+        for row in await cur.fetchall():
+            try:
+                traits = gift_upgrades.traits_of(json.loads(row[5] or "{}")) or {}
+            except (TypeError, ValueError):
+                traits = {}
+            out[int(row[0])] = {
+                "id": row[1],
+                "serial_number": row[2],
+                "telegram_gift_id": row[3],
+                "title": row[4],
+                "traits": traits,
+            }
+        return out
+
     async def worn_gift_status(db: Any, uid: int) -> dict[str, Any] | None:
         cur = await db.execute(
             "SELECT id,serial_number,telegram_gift_id,gift_name,attributes_json FROM user_gifts WHERE owner_telegram_id=? AND profile_worn=1 AND profile_hidden=0",
@@ -17467,10 +17497,13 @@ def build_messenger_router(
                 (uid, uid, uid, uid, uid, uid, uid, uid, uid),
             )
             rows = await avatar_visible_rows(db, await cur.fetchall(), uid)
+            worn = await worn_gift_map(db, [int(row["id"]) for row in rows])
         conversations = []
         for row in rows:
             item = dict(row)
             item["labels"] = await entity_labels("account", int(item["id"]))
+            if int(item["id"]) in worn:
+                item["worn_gift"] = worn[int(item["id"])]
             conversations.append(item)
         return {"conversations": conversations}
 

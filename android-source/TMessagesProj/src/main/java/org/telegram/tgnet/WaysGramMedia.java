@@ -249,6 +249,10 @@ public class WaysGramMedia {
         // Repair older recordings produced by WaysGram before it stored the media kind.
         String lowerName = name == null ? "" : name.toLowerCase(java.util.Locale.ROOT);
         if (TextUtils.isEmpty(kind) && mime != null && mime.startsWith("video/") && lowerName.startsWith("round_video_")) kind = "video_note";
+        // Старые записи и истории без media_kind оставались документом без
+        // TL_documentAttributeVideo: такой файл не проигрывался («App was unable to
+        // play this video»). Тип берём из самого mime.
+        if (!forceDocument && TextUtils.isEmpty(kind) && mime != null && mime.startsWith("video/")) kind = "video";
         if (TextUtils.isEmpty(kind) && mime != null && mime.startsWith("audio/") && lowerName.startsWith("audio_recording_voice_")) kind = "voice";
         if (info == null) info = new JSONObject();
         double duration = info.optDouble("duration", 0);
