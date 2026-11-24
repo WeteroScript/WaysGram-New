@@ -46,6 +46,11 @@ final class WaysGramChannelInbox {
         });
     }
 
+    private static long dialogId(String path) {
+        java.util.regex.Matcher matcher = java.util.regex.Pattern.compile("/api/channels/(\\d+)/inbox").matcher(path);
+        return matcher.find() ? -WaysGramChats.channelTg(Long.parseLong(matcher.group(1))) : 0;
+    }
+
     private static String base(long id) { return "/api/channels/" + WaysGramChats.channelServer(id) + "/inbox"; }
     private static String text(int resource) { return LocaleController.getString(resource); }
 
@@ -329,7 +334,7 @@ final class WaysGramChannelInbox {
         if (!active(fragment, account, token)) return;
         // Stock Telegram confirmation; WaysGram still attaches the internal debit
         // in send() while keeping its own idempotency key and payment history.
-        org.telegram.ui.Components.AlertsCreator.showPayForMessageAlert(account, fragment.getDialogId(), Math.max(0, fee), 1,
+        org.telegram.ui.Components.AlertsCreator.showPayForMessageAlert(account, dialogId(path), Math.max(0, fee), 1,
                 () -> send(fragment, account, token, path, owner, pending, slot, body, fee, proposal, sponsor, key));
     }
 

@@ -56,7 +56,9 @@ class PaidMessagesChecks(unittest.TestCase):
         self.assertIn('put("approved_fee_stars", fee)', inbox)
         self.assertIn("private static void confirm(", inbox)
         # Стоковый диалог Telegram, внутреннее списание остаётся в send().
-        self.assertIn("AlertsCreator.showPayForMessageAlert(account, fragment.getDialogId()", inbox)
+        self.assertIn("AlertsCreator.showPayForMessageAlert(account, dialogId(path)", inbox)
+        self.assertIn("private static long dialogId(String path)", inbox)
+        self.assertIn("-WaysGramChats.channelTg(Long.parseLong(matcher.group(1)))", inbox)
         self.assertNotIn("R.string.WaysGramInboxConfirm", inbox)
         self.assertNotIn("R.string.WaysGramInboxRetry", inbox)
         # Повтор использует прежний ключ идемпотентности, а не новую оплату.

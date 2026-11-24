@@ -39,7 +39,7 @@ public final class WaysGramLinks {
             }
         }
         if (isApiHost(uri.getHost()) && path != null) {
-            java.util.Matcher matcher = java.util.regex.Pattern
+            java.util.regex.Matcher matcher = java.util.regex.Pattern
                     .compile("/api/(?:groups|channels)/invites/([A-Za-z0-9_-]{20,128})")
                     .matcher(path);
             if (matcher.matches()) {

@@ -671,7 +671,7 @@ public class WaysGramChats {
         return snapshot;
     }
 
-    private static TLRPC.TL_updates updatesWithChat(JSONObject group, long selfId) {
+    private static TLRPC.TL_updates updatesWithChat(int account, JSONObject group, long selfId) {
         TLRPC.TL_updates updates = new TLRPC.TL_updates();
         updates.date = (int) (System.currentTimeMillis() / 1000);
         updates.chats.add(toMegagroup(account, group, selfId));
@@ -1683,7 +1683,7 @@ public class WaysGramChats {
         }
         String path = "/api/groups/" + chatId;
         WaysGramApi.put(account, path, body);
-        return updatesWithChat(WaysGramApi.get(account, path), selfId);
+        return updatesWithChat(account, WaysGramApi.get(account, path), selfId);
     }
 
     public static TLRPC.TL_messages_invitedUsers createChat(int account, TLRPC.TL_messages_createChat req, long selfId) throws WaysGramApi.ApiException {
@@ -1701,7 +1701,7 @@ public class WaysGramChats {
         JSONObject created = WaysGramApi.post(account, "/api/groups", body);
         if (created.optLong("id") <= 0) throw new WaysGramApi.ApiException(502, "BAD_RESPONSE");
         TLRPC.TL_messages_invitedUsers out = new TLRPC.TL_messages_invitedUsers();
-        out.updates = updatesWithChat(created, selfId);
+        out.updates = updatesWithChat(account, created, selfId);
         JSONArray skipped = created.optJSONArray("skipped_member_ids");
         for (int i = 0; skipped != null && i < skipped.length(); i++) {
             long userId = skipped.optLong(i);
@@ -1717,7 +1717,7 @@ public class WaysGramChats {
     public static TLRPC.TL_messages_invitedUsers addUser(int account, long chatId, long userId, long selfId) throws WaysGramApi.ApiException {
         addMember(account, chatId, userId);
         TLRPC.TL_messages_invitedUsers out = new TLRPC.TL_messages_invitedUsers();
-        out.updates = updatesWithChat(WaysGramApi.get(account, "/api/groups/" + chatId), selfId);
+        out.updates = updatesWithChat(account, WaysGramApi.get(account, "/api/groups/" + chatId), selfId);
         return out;
     }
 
@@ -1728,7 +1728,7 @@ public class WaysGramChats {
             updates.date = (int) (System.currentTimeMillis() / 1000);
             return updates;
         }
-        return updatesWithChat(WaysGramApi.get(account, "/api/groups/" + chatId), selfId);
+        return updatesWithChat(account, WaysGramApi.get(account, "/api/groups/" + chatId), selfId);
     }
 
     // ---------------------------------------------------------------- search and join
@@ -1863,7 +1863,7 @@ public class WaysGramChats {
         }
         int mask = adminMask(req.admin_rights);
         editGroupAdmin(account, req.channel.channel_id, req.user_id.user_id, mask != 0, mask == 0 ? null : mask);
-        return updatesWithChat(WaysGramApi.get(account, "/api/groups/" + req.channel.channel_id), selfId);
+        return updatesWithChat(account, WaysGramApi.get(account, "/api/groups/" + req.channel.channel_id), selfId);
     }
 
     /** The group ban list is a mute with denied rights; a full ban removes the member. */
@@ -1906,7 +1906,7 @@ public class WaysGramChats {
                 if (e.status != 409) throw e;
             }
         }
-        return updatesWithChat(WaysGramApi.get(account, "/api/groups/" + groupId), selfId);
+        return updatesWithChat(account, WaysGramApi.get(account, "/api/groups/" + groupId), selfId);
     }
 
     static TLRPC.TL_updates groupJoin(int account, long groupId, long selfId) throws WaysGramApi.ApiException {
