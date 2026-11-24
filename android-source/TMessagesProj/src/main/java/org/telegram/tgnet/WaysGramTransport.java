@@ -503,6 +503,8 @@ public class WaysGramTransport {
         } else if (request instanceof TLRPC.TL_upload_getFile) {
             TLObject localEmoji = WaysGramAnimatedEmoji.getFile((TLRPC.TL_upload_getFile) request);
             if (localEmoji != null) return localEmoji;
+            TLObject reactionTexture = WaysGramReactionTextures.getFile((TLRPC.TL_upload_getFile) request);
+            if (reactionTexture != null) return reactionTexture;
             TLObject file = WaysGramMedia.getFile(account, (TLRPC.TL_upload_getFile) request);
             return file != null ? file : WaysGramGifts.getFile(account, (TLRPC.TL_upload_getFile) request);
         }

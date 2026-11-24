@@ -327,13 +327,10 @@ final class WaysGramChannelInbox {
     private static void confirm(BaseFragment fragment, int account, String token, String path, boolean owner,
                                 SharedPreferences pending, String slot, String body, int fee, boolean proposal, int sponsor, String key) {
         if (!active(fragment, account, token)) return;
-        String message = sponsor > 0 ? LocaleController.formatString(key == null ? R.string.WaysGramSponsorConfirm : R.string.WaysGramSponsorRetry, fee, sponsor)
-                : key != null ? LocaleController.formatString(R.string.WaysGramInboxRetry, fee)
-                : LocaleController.formatString(proposal ? R.string.WaysGramProposalConfirm : R.string.WaysGramInboxConfirm, fee);
-        fragment.showDialog(dialog(fragment, R.string.WaysGramInboxTitle).setMessage(message)
-                .setNegativeButton(text(R.string.Cancel), null)
-                .setPositiveButton(text(key == null ? R.string.Send : R.string.WaysGramPaidRetry), (d, w) ->
-                        send(fragment, account, token, path, owner, pending, slot, body, fee, proposal, sponsor, key)).create());
+        // Stock Telegram confirmation; WaysGram still attaches the internal debit
+        // in send() while keeping its own idempotency key and payment history.
+        org.telegram.ui.Components.AlertsCreator.showPayForMessageAlert(account, fragment.getDialogId(), Math.max(0, fee), 1,
+                () -> send(fragment, account, token, path, owner, pending, slot, body, fee, proposal, sponsor, key));
     }
 
     private static void clear(SharedPreferences pending, String slot, String key) {

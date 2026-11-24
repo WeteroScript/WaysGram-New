@@ -67,6 +67,33 @@ class ReactionRegressionChecks(unittest.TestCase):
             bulletin,
         )
 
+    def test_reaction_catalog_is_published_to_the_client(self):
+        reactions = self.source("tgnet/WaysGramReactions.java")
+        self.assertIn("TLRPC.TL_messages_getAvailableReactions", reactions)
+        self.assertIn("public static synchronized ArrayList<TLRPC.TL_availableReaction> catalog()", reactions)
+        self.assertIn("WaysGramReactionTextures.get(entry[0])", reactions)
+        self.assertIn("reaction.center_icon = art;", reactions)
+        transport = self.source("tgnet/WaysGramTransport.java")
+        self.assertIn("WaysGramReactions.handles(request)", transport)
+        self.assertIn("WaysGramReactionTextures.getFile((TLRPC.TL_upload_getFile) request)", transport)
+
+    def test_reaction_textures_are_original_telegram_artwork(self):
+        textures = self.source("tgnet/WaysGramReactionTextures.java")
+        self.assertIn("Original Telegram emoji artwork", textures)
+        self.assertIn('doc.mime_type = "image/webp";', textures)
+        self.assertIn('private static final String ASSET_DIR = "telegram_reactions/";', textures)
+        self.assertNotIn("waysgram_emoji/react", textures)
+        prefix = "WaysGram-Android/TMessagesProj/src/main/assets/telegram_reactions/"
+        assets = [n for n in self.archive.namelist() if n.startswith(prefix) and n.endswith(".webp")]
+        self.assertEqual(len(assets), 51)
+        # The thumbs-up is byte-for-byte the texture decoded from Telegram's EPK3 pack.
+        thumb = self.archive.read(prefix + "1f44d.webp")
+        self.assertEqual(
+            __import__("hashlib").sha256(thumb).hexdigest(),
+            "e191ff400c87794d7ea5d721f0eab51b6d4c3189f26baba7488c4ef0de7285dd",
+        )
+        self.assertTrue(thumb.startswith(b"RIFF") and b"WEBP" in thumb)
+
 
 if __name__ == "__main__":
     unittest.main()

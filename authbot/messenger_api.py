@@ -29,7 +29,7 @@ from star_rating import profile_rating
 import gift_upgrades  # noqa: F401  # official Telegram upgrade pools
 import httpx
 from fastapi import APIRouter, Header, HTTPException, Query, Request, Response
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, RedirectResponse
 from PIL import Image, ImageOps, UnidentifiedImageError
 from pydantic import BaseModel, Field
 from cryptography.hazmat.primitives import hashes, serialization
@@ -156,6 +156,48 @@ def _invite_share_origin(request: Request) -> str:
         return "https://t.wg"
     return _external_api_base_url(request)
 
+
+SHARE_HOST = "t.wg"
+SHARE_BASE = f"https://{SHARE_HOST}"
+# Telegram-style invite codes: 22 URL-safe characters (16 random bytes).
+INVITE_CODE_RE = re.compile(r"[A-Za-z0-9_-]{20,128}")
+USERNAME_LINK_RE = re.compile(r"[a-z][a-z0-9_]{0,31}")
+
+
+def _new_invite_code() -> str:
+    """Short, URL-safe invite code in the same format as Telegram's t.me codes."""
+    return secrets.token_urlsafe(16)
+
+
+def _share_link(code_or_username: str) -> str:
+    return f"{SHARE_BASE}/{code_or_username}"
+
+
+def _public_share_link(username: str | None) -> str | None:
+    username = str(username or "").strip().lower()
+    return _share_link(username) if USERNAME_LINK_RE.fullmatch(username) else None
+
+
+def _invite_code_from_link(value: str) -> str | None:
+    """Accept short t.wg links, legacy API links and bare invite codes."""
+    value = str(value or "").strip()
+    if INVITE_CODE_RE.fullmatch(value):
+        return value
+    parsed = urlsplit(value)
+    if parsed.scheme not in {"http", "https"}:
+        return None
+    if (parsed.hostname or "").lower() not in {SHARE_HOST, "www." + SHARE_HOST}:
+        return None
+    candidate = parsed.path.lstrip("/").split("/")[0]
+    return candidate if INVITE_CODE_RE.fullmatch(candidate) else None
+
+
+def _group_username_from_link(value: str) -> str | None:
+    parsed = urlsplit(str(value or "").strip())
+    if (parsed.hostname or "").lower() not in {SHARE_HOST, "www." + SHARE_HOST}:
+        return None
+    candidate = parsed.path.lstrip("/").split("/")[0].lower()
+    return candidate if USERNAME_LINK_RE.fullmatch(candidate) else None
 
 
 
@@ -9404,7 +9446,7 @@ def build_messenger_router(
             raise HTTPException(status_code=400, detail="Публичному каналу нужен username: латиница, цифры и _, первый символ — буква")
         if not is_public:
             username = "private_" + secrets.token_hex(16)
-        invite_token = secrets.token_urlsafe(32) if not is_public else None
+        invite_token = _new_invite_code() if not is_public else None
         now = int(time.time())
         owner_id = int(user["telegram_id"])
         try:
@@ -9432,7 +9474,8 @@ def build_messenger_router(
             "is_public": is_public,
         }
         if invite_token:
-            result["invite_link"] = _invite_share_origin(request) + f"/api/channels/invites/{invite_token}"
+            result["invite_link"] = _share_link(invite_token)
+            result["invite_token"] = invite_token
         return result
 
     @router.get("/api/channels/{channel_id}/invite")
@@ -9452,12 +9495,12 @@ def build_messenger_router(
                 raise HTTPException(409, "Приглашение доступно только для приватного канала")
             token = channel[2]
             if request.method == "POST":
-                token = secrets.token_urlsafe(32)
+                token = _new_invite_code()
                 await db.execute("UPDATE channels SET invite_token=? WHERE id=?", (token, channel_id))
             if not token:
                 raise HTTPException(404, "Ссылка не найдена")
             await db.commit()
-        return {"invite_link": _invite_share_origin(request) + f"/api/channels/invites/{token}",
+        return {"invite_link": _share_link(token), "invite_token": token,
                 "created_at": channel[3]}
 
     @router.get("/api/channels/{channel_id}/invites")
@@ -9466,7 +9509,6 @@ def build_messenger_router(
                                     admin_id: int | None = None, revoked: bool = False, after: str | None = None,
                                     limit: int = 50, authorization: str | None = Header(default=None)) -> dict[str, Any]:
         uid = int((await current_user(authorization))["telegram_id"])
-        base = _invite_share_origin(request) + "/api/channels/invites/"
         async with aiosqlite.connect(db_path()) as db:
             db.row_factory = aiosqlite.Row
             await db.execute("BEGIN IMMEDIATE")
@@ -9492,7 +9534,7 @@ def build_messenger_router(
                 await db.execute("""INSERT INTO channel_invites(token,channel_id,created_by,created_at,expires_at,max_uses,label,require_approval)
                     VALUES(?,?,?,?,?,?,?,?)""", (token, channel_id, uid, now, expires, uses, label, int(options.get("require_approval", False))))
                 await db.commit()
-                return {"invite_link": base + token, "created_by": uid, "created_at": now,
+                return {"invite_link": _share_link(token), "invite_token": token, "created_by": uid, "created_at": now,
                         "expires_at": expires, "max_uses": uses, "uses": 0, "label": label, "require_approval": options.get("require_approval", False)}
             where = "channel_id=? AND created_by=? AND (revoked_at IS NOT NULL)=?"
             args = (channel_id, uid if admin_id is None else admin_id, int(revoked))
@@ -9505,7 +9547,9 @@ def build_messenger_router(
                                    args + (max(1, min(100, limit)),))
             rows = [dict(r) for r in await cur.fetchall()]
         for row in rows:
-            row["invite_link"] = base + row.pop("token")
+            token = row.pop("token")
+            row["invite_token"] = token
+            row["invite_link"] = _share_link(token)
         return {"count": count, "invites": rows}
 
     @router.patch("/api/channels/{channel_id}/invites/{token}")
@@ -9599,14 +9643,9 @@ def build_messenger_router(
     ) -> dict[str, Any]:
         user = await current_user(authorization)
         invite_value = str(payload.get("invite_link") or payload.get("invite_token") or "").strip()
-        match = re.fullmatch(r"[A-Za-z0-9_-]{20,128}", invite_value)
-        if match:
-            invite_token = invite_value
-        else:
-            match = re.search(r"/api/channels/invites/([A-Za-z0-9_-]{20,128})(?:[?#].*)?$", invite_value)
-            if not match:
-                raise HTTPException(status_code=400, detail="Вставьте полную ссылку WaysGram или код приглашения")
-            invite_token = match.group(1)
+        invite_token = _invite_code_from_link(invite_value)
+        if not invite_token:
+            raise HTTPException(status_code=400, detail="Вставьте полную ссылку WaysGram или код приглашения")
         uid = int(user["telegram_id"])
         now = int(time.time())
         async with aiosqlite.connect(db_path()) as db:
@@ -18052,22 +18091,25 @@ def build_messenger_router(
             member = await require_group_member(db, group_id, uid)
             if not group_has_right(member, 2):
                 raise HTTPException(403, "Нет права создавать приглашения")
-            cur = await db.execute("""SELECT share_token,created_at FROM group_invites
-                WHERE group_id=? AND created_by=? AND is_permanent=1 AND revoked_at IS NULL""", (group_id, uid))
+            cur = await db.execute("""SELECT i.share_token,i.created_at,g.username FROM group_invites i
+                JOIN chat_groups g ON g.id=i.group_id
+                WHERE i.group_id=? AND i.created_by=? AND i.is_permanent=1 AND i.revoked_at IS NULL""", (group_id, uid))
             row = await cur.fetchone()
             if row and not rotate:
-                token, created_at = row
+                token, created_at, group_username = row
             else:
+                group_username = row[2] if row else None
                 created_at = int(time.time())
                 if row:
                     await db.execute("""UPDATE group_invites SET revoked_at=?
                         WHERE group_id=? AND created_by=? AND is_permanent=1 AND revoked_at IS NULL""", (created_at, group_id, uid))
-                token = secrets.token_urlsafe(32)
+                token = _new_invite_code()
                 await db.execute("""INSERT INTO group_invites
                     (token_hash,group_id,created_by,created_at,share_token,is_permanent)
                     VALUES(?,?,?,?,?,1)""", (hashlib.sha256(token.encode()).hexdigest(), group_id, uid, created_at, token))
             await db.commit()
-        return {"invite_link": _invite_share_origin(request) + f"/api/groups/invites/{token}", "created_at": created_at}
+        link = _public_share_link(group_username) or _share_link(token)
+        return {"invite_link": link, "invite_token": token, "created_at": created_at}
 
     @router.get("/api/groups/{group_id}/admins-with-invites")
     async def group_admins_with_invites(group_id: int,
@@ -18121,15 +18163,18 @@ def build_messenger_router(
             if after:
                 where += " AND (created_at,token_hash)<(SELECT created_at,token_hash FROM group_invites WHERE group_id=? AND share_token=?)"
                 args += (group_id, after)
-            cur = await db.execute(f"""SELECT share_token,created_by,created_at,expires_at,max_uses,uses,require_approval,revoked_at,label
+            cur = await db.execute(f"""SELECT share_token,created_by,created_at,expires_at,max_uses,uses,
+                    require_approval,revoked_at,label,
+                    (SELECT username FROM chat_groups WHERE id=group_id) AS username
                 FROM group_invites WHERE {where} ORDER BY created_at DESC,token_hash DESC LIMIT ?""",
                 args + (max(1, min(100, limit)),))
             rows = await cur.fetchall()
-        base = _invite_share_origin(request) + "/api/groups/invites/"
         invites = []
         for row in rows:
             item = dict(row)
-            item["invite_link"] = base + item.pop("share_token")
+            token = item.pop("share_token")
+            item["invite_token"] = token
+            item["invite_link"] = _public_share_link(item.pop("username", None)) or _share_link(token)
             invites.append(item)
         return {"count": count, "invites": invites}
 
@@ -18204,7 +18249,7 @@ def build_messenger_router(
             raise HTTPException(400, "Слишком длинное название ссылки")
         now = int(time.time())
         expires_at = now + expires_seconds if expires_seconds is not None else None
-        token = secrets.token_urlsafe(32)
+        token = _new_invite_code()
         token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
         async with aiosqlite.connect(db_path()) as db:
             await db.execute("BEGIN IMMEDIATE")
@@ -18218,13 +18263,14 @@ def build_messenger_router(
                    VALUES(?,?,?,?,?,?,0,?,NULL,?,?)""",
                 (token_hash, group_id, uid, now, expires_at, max_uses, int(require_approval), token, label),
             )
-            cur = await db.execute("SELECT title FROM chat_groups WHERE id=?", (group_id,))
+            cur = await db.execute("SELECT title,username FROM chat_groups WHERE id=?", (group_id,))
             group = await cur.fetchone()
             await db.commit()
         return {
             "group_id": group_id,
             "title": str(group[0]),
-            "invite_link": _invite_share_origin(request) + f"/api/groups/invites/{token}",
+            "invite_link": _public_share_link(group[1]) or _share_link(token),
+            "invite_token": token,
             "expires_at": expires_at,
             "max_uses": max_uses,
             "uses": 0,
@@ -18272,17 +18318,43 @@ def build_messenger_router(
     ) -> dict[str, Any]:
         user = await current_user(authorization)
         invite_value = str(payload.get("invite_link") or payload.get("invite_token") or "").strip()
-        match = re.fullmatch(r"[A-Za-z0-9_-]{20,128}", invite_value)
-        if match:
-            invite_token = invite_value
-        else:
-            match = re.search(r"/api/groups/invites/([A-Za-z0-9_-]{20,128})(?:[?#].*)?$", invite_value)
-            if not match:
-                raise HTTPException(status_code=400, detail="Вставьте полную ссылку WaysGram или код приглашения")
-            invite_token = match.group(1)
-        token_hash = hashlib.sha256(invite_token.encode("utf-8")).hexdigest()
+        group_username = _group_username_from_link(invite_value)
+        if not group_username and invite_value.startswith("@"):
+            candidate = invite_value[1:].lower()
+            if USERNAME_LINK_RE.fullmatch(candidate):
+                group_username = candidate
         uid = int(user["telegram_id"])
         now = int(time.time())
+        if group_username:
+            # Public group link: same membership path as joining by username in Telegram.
+            async with aiosqlite.connect(db_path()) as db:
+                await db.execute("BEGIN IMMEDIATE")
+                cur = await db.execute(
+                    "SELECT id,title FROM chat_groups WHERE username=? COLLATE NOCASE", (group_username,)
+                )
+                group = await cur.fetchone()
+                if group is None:
+                    await db.rollback()
+                    raise HTTPException(404, "Группа не найдена")
+                group_id = int(group[0])
+                cur = await db.execute(
+                    "SELECT 1 FROM group_members WHERE group_id=? AND telegram_id=?", (group_id, uid)
+                )
+                already_member = await cur.fetchone() is not None
+                joined = not already_member
+                if not already_member:
+                    await db.execute(
+                        """INSERT OR IGNORE INTO group_members(group_id,telegram_id,role,joined_at)
+                           VALUES(?,?,'member',?)""", (group_id, uid, now)
+                    )
+                    await seed_group_history_marker(db, group_id, uid, now)
+                await db.commit()
+            return {"joined": joined, "join_requested": False, "already_member": already_member,
+                    "id": group_id, "title": str(group[1])}
+        invite_token = _invite_code_from_link(invite_value)
+        if not invite_token:
+            raise HTTPException(status_code=400, detail="Вставьте полную ссылку WaysGram или код приглашения")
+        token_hash = hashlib.sha256(invite_token.encode("utf-8")).hexdigest()
         async with aiosqlite.connect(db_path()) as db:
             await db.execute("BEGIN IMMEDIATE")
             cur = await db.execute(
@@ -19766,5 +19838,45 @@ def build_messenger_router(
             "ok":True,
             "result":{"message_id":message_id,"chat":{"id":chat_id},"text":body},
         }
+
+    @router.get("/{share_code}", include_in_schema=False)
+    async def resolve_short_share_link(share_code: str) -> Response:
+        """Public https://t.wg/<username-or-code> entry point.
+
+        Private invites keep their (now short) token in the path; public groups use
+        their username. Both resolve through the existing JSON preview endpoints,
+        so old API links and clients continue to work.
+        """
+        value = share_code.strip().lower()
+        async with aiosqlite.connect(db_path()) as db:
+            if USERNAME_LINK_RE.fullmatch(value):
+                cur = await db.execute(
+                    """SELECT id,title,
+                              (SELECT COUNT(*) FROM group_members m WHERE m.group_id=chat_groups.id) AS member_count
+                       FROM chat_groups WHERE username=? COLLATE NOCASE""", (value,)
+                )
+                group = await cur.fetchone()
+                if group is not None:
+                    return {"group_id": int(group[0]), "title": str(group[1]),
+                            "username": value, "member_count": int(group[2])}
+            if INVITE_CODE_RE.fullmatch(share_code):
+                cur = await db.execute(
+                    "SELECT group_id FROM group_invites WHERE share_token=? AND revoked_at IS NULL", (share_code,)
+                )
+                row = await cur.fetchone()
+                if row is not None:
+                    return await preview_group_invite(share_code)
+                cur = await db.execute(
+                    "SELECT 1 FROM channels WHERE is_public=0 AND invite_token=?", (share_code,)
+                )
+                if await cur.fetchone() is not None:
+                    return await preview_channel_invite(share_code)
+                cur = await db.execute(
+                    """SELECT 1 FROM channel_invites i JOIN channels c ON c.id=i.channel_id
+                       WHERE i.token=? AND i.revoked_at IS NULL AND c.is_public=0""", (share_code,)
+                )
+                if await cur.fetchone() is not None:
+                    return await preview_channel_invite(share_code)
+        raise HTTPException(404, "Ссылка не найдена или отозвана")
 
     return router

@@ -198,7 +198,7 @@ class NativeMessagingSourceChecks(unittest.TestCase):
         helper = self.source('ui/WaysGramPaidDm.java')
         self.assertIn('WaysGramPaidDm.settings(this, currentAccount)', privacy)
         self.assertIn('new JSONArray(ids)', helper)
-        self.assertIn('R.string.WaysGramPaidDmConfirm, fee', helper)
+        self.assertIn('AlertsCreator.showPayForMessageAlert(account, peer', helper)
         self.assertIn('putInt(slot, fee).putLong(slot + ":since", since).commit()', transport)
         self.assertIn('body.put("approved_fee_stars", approvedFee)', transport)
         self.assertIn('confirmPaidText(account, send, token, changed, false', transport)

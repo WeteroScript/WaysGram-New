@@ -50,15 +50,30 @@ class PaidMessagesChecks(unittest.TestCase):
         chat = self.source("ui/ChatActivity.java")
         self.assertNotIn("headerItem.lazilyAddSubItem(waysgram_paid_history", chat)
 
-    def test_deduction_requires_confirmation(self):
+    def test_deduction_requires_stock_confirmation(self):
         inbox = self.source("ui/WaysGramChannelInbox.java")
         # Без подтверждённой цены запрос уходит без approved_fee_stars, и сервер отвечает 402.
         self.assertIn('put("approved_fee_stars", fee)', inbox)
         self.assertIn("private static void confirm(", inbox)
-        self.assertIn("R.string.WaysGramInboxConfirm", inbox)
+        # Стоковый диалог Telegram, внутреннее списание остаётся в send().
+        self.assertIn("AlertsCreator.showPayForMessageAlert(account, fragment.getDialogId()", inbox)
+        self.assertNotIn("R.string.WaysGramInboxConfirm", inbox)
+        self.assertNotIn("R.string.WaysGramInboxRetry", inbox)
         # Повтор использует прежний ключ идемпотентности, а не новую оплату.
         self.assertIn("String previous", inbox)
-        self.assertIn("WaysGramInboxRetry", inbox)
+        dm = self.source("ui/WaysGramPaidDm.java")
+        self.assertIn("AlertsCreator.showPayForMessageAlert(account, peer", dm)
+        self.assertNotIn("R.string.WaysGramPaidDmConfirm", dm)
+        self.assertNotIn("R.string.WaysGramPaidDmRetry", dm)
+        transport = self.source("tgnet/WaysGramTransport.java")
+        self.assertIn("sendTo(account, send.peer, send.message, send.random_id", transport)
+        self.assertIn("token, fee, -1L);", transport)
+
+    def test_stock_paid_message_alert_is_available(self):
+        alerts = self.source("ui/Components/AlertsCreator.java")
+        self.assertIn("public static void showPayForMessageAlert(int currentAccount, long dialogId, long stars", alerts)
+        self.assertIn("R.string.MessageLockedStarsConfirmTitle", alerts)
+        self.assertIn("showAlertWithCheckboxWithBalance", alerts)
 
     def test_history_screen_reads_paid_messages(self):
         history = self.source("ui/WaysGramPaidHistory.java")

@@ -25,6 +25,11 @@ public final class WaysGramPaidDm {
                 && !TextUtils.isEmpty(token) && TextUtils.equals(token, WaysGramApi.getToken(account));
     }
 
+    /**
+     * Stock Telegram paid-message confirmation. WaysGram only appends the internal
+     * debit to the confirmed callback (see WaysGramTransport.confirmPaidText); all
+     * UI strings, balance checks and "don't ask again" behaviour are Telegram's own.
+     */
     public static void confirm(int account, long peer, String token, int fee, boolean retry, Runnable approved, Runnable cancelled) {
         AndroidUtilities.runOnUIThread(() -> {
             BaseFragment fragment = LaunchActivity.getLastFragment();
@@ -35,20 +40,14 @@ public final class WaysGramPaidDm {
             }
             AtomicBoolean finished = new AtomicBoolean();
             Runnable reject = () -> { if (finished.compareAndSet(false, true)) cancelled.run(); };
-            String description = retry ? LocaleController.formatString(R.string.WaysGramPaidDmRetry, fee)
-                    : fee > 0 ? LocaleController.formatString(R.string.WaysGramPaidDmConfirm, fee) : text(R.string.WaysGramPaidDmNowFree);
-            AlertDialog dialog = new AlertDialog.Builder(fragment.getParentActivity()).setTitle(text(R.string.WaysGramPaidDmTitle))
-                    .setMessage(description)
-                    .setNegativeButton(text(R.string.Cancel), (d, w) -> reject.run())
-                    .setPositiveButton(text(retry ? R.string.WaysGramPaidRetry : R.string.Send), (d, w) -> {
-                        if (!active(fragment, account, token) || UserConfig.selectedAccount != account
-                                || LaunchActivity.getLastFragment() != fragment) {
-                            reject.run();
-                        } else if (finished.compareAndSet(false, true)) {
-                            approved.run();
-                        }
-                    }).create();
-            if (fragment.showDialog(dialog, ignored -> reject.run()) == null) reject.run();
+            org.telegram.ui.Components.AlertsCreator.showPayForMessageAlert(account, peer, Math.max(0, fee), 1, () -> {
+                if (!active(fragment, account, token) || UserConfig.selectedAccount != account
+                        || LaunchActivity.getLastFragment() != fragment) {
+                    reject.run();
+                } else if (finished.compareAndSet(false, true)) {
+                    approved.run();
+                }
+            });
         });
     }
 
