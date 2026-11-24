@@ -55,8 +55,21 @@ public class WaysGramMedia {
         return id;
     }
 
+    /**
+     * Идентификатор медиа по числовому id.
+     *
+     * <p>Аватары во {@code TL_photo}/{@code TL_chatPhoto} собираются с отрицательным
+     * {@code volume_id} (`-photoId`, см. {@code WaysGramMapper.avatarLocation}), а сам файл
+     * регистрируется по положительному id. Без этой проверки знака большой аватар в профиле
+     * канала не находился вовсе: {@code upload.getFile} возвращал null и картинка оставалась
+     * пустой.</p>
+     */
     public static String mediaIdFor(long id) {
-        return prefs().getString("m_" + id, null);
+        String found = prefs().getString("m_" + id, null);
+        if (found == null && id < 0) {
+            found = prefs().getString("m_" + (-id), null);
+        }
+        return found;
     }
 
     public static File cacheFile(String mediaId) {
@@ -333,7 +346,10 @@ if (!TextUtils.isEmpty(coverMediaId) && kind.equals("video")) {
      */
     public static TLRPC.Message attach(int account, TLRPC.Message message, JSONObject json) {
         WaysGramMapper.applyExtras(message, json,
-                message.peer_id instanceof TLRPC.TL_peerChat ? WaysGramChats.GROUP_MESSAGE_OFFSET : 0);
+                message.peer_id instanceof TLRPC.TL_peerChat
+                        || (message.peer_id instanceof TLRPC.TL_peerChannel
+                            && WaysGramChats.isGroupChannel(((TLRPC.TL_peerChannel) message.peer_id).channel_id))
+                        ? WaysGramChats.GROUP_MESSAGE_OFFSET : 0);
         if (WaysGramCards.attach(message, json.optJSONObject("card"), json.optInt("id"))) return message;
         JSONObject contact = json.optJSONObject("contact");
         String contactName = contact != null ? contact.optString("name", "") : json.optString("contact_name", "");

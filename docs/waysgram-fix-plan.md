@@ -273,3 +273,24 @@ authbot командой `/exportreactions` (см. `docs/reaction-emoji-export.m
 
 Тесты: `scripts/test_android_reaction_animation.py` (8), `authbot/tests/test_reaction_export.py`
 (5). APK не собирался; архив вырос до 126,3 МБ, части по 26 МБ.
+
+## 4. Аватар канала в профиле и подарки каналу
+
+### Аватар в профиле (исправлено)
+
+Большой аватар в профиле канала не грузился: `WaysGramMapper.avatarLocation()` пишет
+`volume_id = -photoId` (Telegram так помечает локации файлов), а `WaysGramMedia.register()`
+запоминает файл по **положительному** id. `upload.getFile` приходил с отрицательным id,
+`mediaIdFor()` возвращал `null`, и `ProfileActivity` оставался без картинки.
+
+`WaysGramMedia.mediaIdFor()` теперь при отрицательном id проверяет ещё и `-id`.
+Маленькие аватары (`photo_small`) шли через `inputPeerPhotoFileLocation` и работали, поэтому
+проблема была видна именно на большом аватаре в профиле.
+
+Регрессия: `scripts/test_android_profile_avatar_ids.py` (3 теста).
+
+### Подарки каналу (открыто)
+
+Серверная часть знает только личные подарки (`/api/telegram/gifts/...` для пользователей);
+хранения и выдачи подарков канала нет. Нужно решение: повторять ли механику Telegram
+(подарок уходит каналу и виден в его профиле) или скрыть отправку подарка у каналов.
