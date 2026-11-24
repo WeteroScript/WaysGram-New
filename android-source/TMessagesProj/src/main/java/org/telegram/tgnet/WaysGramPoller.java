@@ -458,6 +458,11 @@ public class WaysGramPoller {
             }
             return;
         }
+        if (kind.equals("chat_changed")) {
+            // Права, аватар, название или состав чата изменились на другом устройстве.
+            WaysGramChats.chatChanged(account, scope, e.optLong("chat_id"));
+            return;
+        }
         if (kind.equals("pin") || kind.equals("unpin") || kind.equals("pin_local") || kind.equals("unpin_local")) {
             long dialogId;
             if (scope.equals("dm")) {

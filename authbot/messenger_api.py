@@ -10858,6 +10858,7 @@ def build_messenger_router(
                 elif payload.get("is_public") is True:
                     await db.execute("UPDATE channels SET is_public=1 WHERE id=?", (channel_id,))
                     await db.execute("DELETE FROM channel_subscription_offers WHERE channel_id=?", (channel_id,))
+                await record_event(db, "channel", 0, "chat_changed", uid, chat_id=channel_id)
                 await db.commit()
         except aiosqlite.IntegrityError as exc:
             raise HTTPException(status_code=409, detail="Username канала уже занят") from exc
@@ -10904,6 +10905,7 @@ def build_messenger_router(
                 await require_owned_image(db, media_id, uid)
             await db.execute("UPDATE channels SET avatar_media_id=? WHERE id=?", (media_id, channel_id))
             await log_channel_event(db, channel_id, uid, "change_photo", {"avatar_media_id": media_id})
+            await record_event(db, "channel", 0, "chat_changed", uid, chat_id=channel_id)
             await db.commit()
         return {"id": channel_id, "avatar_media_id": media_id}
 
@@ -10921,6 +10923,7 @@ def build_messenger_router(
                 raise HTTPException(status_code=403, detail="Нет права изменять информацию о канале")
             await db.execute("UPDATE channels SET avatar_media_id='' WHERE id=?", (channel_id,))
             await log_channel_event(db, channel_id, uid, "change_photo", {"avatar_media_id": ""})
+            await record_event(db, "channel", 0, "chat_changed", uid, chat_id=channel_id)
             await db.commit()
         return {"id": channel_id, "avatar_media_id": ""}
 
@@ -12230,6 +12233,7 @@ def build_messenger_router(
             await db.execute("DELETE FROM channel_join_requests WHERE channel_id=? AND telegram_id=?", (channel_id, target_id))
             await log_channel_event(db, channel_id, uid, "participant_promote",
                                     {"telegram_id": target_id, "rights": rights})
+            await record_event(db, "channel", 0, "chat_changed", uid, chat_id=channel_id)
             await db.commit()
         return {"channel_id": channel_id, "telegram_id": target_id, "admin": True}
 
@@ -12251,6 +12255,7 @@ def build_messenger_router(
             if cur.rowcount:
                 await log_channel_event(db, channel_id, int(user["telegram_id"]), "participant_demote",
                                         {"telegram_id": telegram_id})
+                await record_event(db, "channel", 0, "chat_changed", int(user["telegram_id"]), chat_id=channel_id)
             await db.commit()
         if cur.rowcount == 0:
             raise HTTPException(status_code=404, detail="Администратор канала не найден")
@@ -12818,6 +12823,7 @@ def build_messenger_router(
             await db.execute("UPDATE group_members SET role='admin' WHERE group_id=? AND telegram_id=?",
                              (group_id, uid))
             await db.execute("UPDATE chat_groups SET owner_telegram_id=? WHERE id=?", (target, group_id))
+            await record_event(db, "group", 0, "chat_changed", uid, chat_id=group_id)
             await db.commit()
         return {"id": group_id, "owner_telegram_id": target}
 
@@ -12859,6 +12865,7 @@ def build_messenger_router(
                 raise HTTPException(403, "Нет права изменять администраторов")
             await db.execute("UPDATE group_members SET rank=? WHERE group_id=? AND telegram_id=?",
                              (rank.strip(), group_id, target_id))
+            await record_event(db, "group", 0, "chat_changed", uid, chat_id=group_id)
             await db.commit()
         return {"group_id": group_id, "telegram_id": target_id, "rank": rank.strip()}
 
@@ -17323,6 +17330,7 @@ def build_messenger_router(
                                    (int(enabled), group_id, target_id))
             if not cur.rowcount:
                 raise HTTPException(404, "CHAT_ADMIN_REQUIRED")
+            await record_event(db, "group", 0, "chat_changed", uid, chat_id=group_id)
             await db.commit()
         return {"enabled": enabled}
 
@@ -17836,6 +17844,7 @@ def build_messenger_router(
                 raise HTTPException(403, "Изменять группу может только владелец или администратор")
             assignments = ",".join(f"{key}=?" for key in fields)
             await db.execute(f"UPDATE chat_groups SET {assignments} WHERE id=?", (*fields.values(), group_id))
+            await record_event(db, "group", 0, "chat_changed", uid, chat_id=group_id)
             await db.commit()
         result: dict[str, Any] = {"id": group_id}
         for key, value in fields.items():
@@ -17858,6 +17867,7 @@ def build_messenger_router(
             if media_id:
                 await require_owned_image(db, media_id, uid)
             await db.execute("UPDATE chat_groups SET avatar_media_id=? WHERE id=?", (media_id, group_id))
+            await record_event(db, "group", 0, "chat_changed", uid, chat_id=group_id)
             await db.commit()
         return {"id": group_id, "avatar_media_id": media_id}
 
@@ -17870,6 +17880,7 @@ def build_messenger_router(
             if not group_has_right(membership, 1):
                 raise HTTPException(403, "Изменять группу может только владелец или администратор")
             await db.execute("UPDATE chat_groups SET avatar_media_id='' WHERE id=?", (group_id,))
+            await record_event(db, "group", 0, "chat_changed", uid, chat_id=group_id)
             await db.commit()
         return {"id": group_id, "avatar_media_id": ""}
 
@@ -17889,6 +17900,7 @@ def build_messenger_router(
                 raise HTTPException(403, "GROUP_CHANGE_INFO_REQUIRED")
             await db.execute("UPDATE chat_groups SET default_send_restrictions=?,anti_spam_enabled=COALESCE(?,anti_spam_enabled) WHERE id=?",
                              (mask, payload.get("anti_spam_enabled"), group_id))
+            await record_event(db, "group", 0, "chat_changed", uid, chat_id=group_id)
             cur = await db.execute("SELECT anti_spam_enabled FROM chat_groups WHERE id=?", (group_id,))
             enabled = bool((await cur.fetchone())[0])
             await db.commit()
@@ -17906,6 +17918,7 @@ def build_messenger_router(
                                    (int(hidden), group_id, uid))
             if not cur.rowcount:
                 raise HTTPException(404, "GROUP_NOT_FOUND")
+            await record_event(db, "group", 0, "chat_changed", uid, chat_id=group_id)
             await db.commit()
         return {"members_hidden": hidden}
 
@@ -18083,6 +18096,7 @@ def build_messenger_router(
                 "UPDATE chat_groups SET slow_mode_seconds=? WHERE id=?",
                 (seconds, group_id),
             )
+            await record_event(db, "group", 0, "chat_changed", uid, chat_id=group_id)
             await db.commit()
         return {"group_id": group_id, "slow_mode_seconds": seconds}
 
@@ -18663,6 +18677,7 @@ def build_messenger_router(
             )
             if cur.rowcount == 1:
                 await seed_group_history_marker(db, group_id, target_id, now)
+                await record_event(db, "group", 0, "chat_changed", uid, chat_id=group_id)
             await db.commit()
         return {
             "group_id": group_id,
@@ -18693,6 +18708,7 @@ def build_messenger_router(
                 "DELETE FROM group_members WHERE group_id=? AND telegram_id=?",
                 (group_id, telegram_id),
             )
+            await record_event(db, "group", 0, "chat_changed", uid, chat_id=group_id)
             await db.commit()
         return {"removed": cur.rowcount == 1, "group_id": group_id, "telegram_id": telegram_id}
 
@@ -18717,6 +18733,7 @@ def build_messenger_router(
             else:
                 await db.execute("""INSERT INTO group_mutes(group_id,telegram_id,until_date,rights) VALUES(?,?,?,?)
                     ON CONFLICT(group_id,telegram_id) DO UPDATE SET until_date=excluded.until_date,rights=excluded.rights""", (group_id, target_id, until, rights))
+            await record_event(db, "group", 0, "chat_changed", uid, chat_id=group_id)
             await db.commit()
         return {"muted": until is not None, "until_date": until}
 
@@ -18754,6 +18771,7 @@ def build_messenger_router(
                 (effective_rights, group_id, target_id),
             )
             await db.execute("DELETE FROM group_mutes WHERE group_id=? AND telegram_id=?", (group_id, target_id))
+            await record_event(db, "group", 0, "chat_changed", uid, chat_id=group_id)
             await db.commit()
         return {"group_id": group_id, "telegram_id": target_id, "role": "admin", "admin_rights": effective_rights}
 
@@ -18774,6 +18792,8 @@ def build_messenger_router(
                 "UPDATE group_members SET role='member',anonymous_allowed=0 WHERE group_id=? AND telegram_id=? AND role='admin'",
                 (group_id, telegram_id),
             )
+            if cur.rowcount == 1:
+                await record_event(db, "group", 0, "chat_changed", uid, chat_id=group_id)
             await db.commit()
         if cur.rowcount != 1:
             raise HTTPException(status_code=404, detail="Администратор группы не найден")

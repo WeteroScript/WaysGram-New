@@ -93,6 +93,31 @@ public class WaysGramChats {
         return chatCache.get(cacheKey(account, tgId));
     }
 
+    /**
+     * Чат изменился на сервере (права, аватар, название, состав) — перечитываем его для этого аккаунта.
+     *
+     * <p>Раньше изменения настроек группы или канала не доставлялись вовсе: другой участник видел
+     * новые права только после перезапуска приложения, а иногда не видел совсем. Сервер теперь
+     * присылает событие {@code chat_changed}, здесь сбрасывается кэш именно этого аккаунта и
+     * заново запрашивается профиль чата вместе с объектом {@code TLRPC.Chat}.</p>
+     */
+    public static void chatChanged(int account, String scope, long id) {
+        if (id <= 0) {
+            return;
+        }
+        final long tgId = "channel".equals(scope) ? channelTg(id) : id;
+        synchronized (WaysGramChats.class) {
+            chatCache.remove(cacheKey(account, tgId));
+        }
+        org.telegram.messenger.AndroidUtilities.runOnUIThread(() -> {
+            org.telegram.messenger.MessagesController controller =
+                    org.telegram.messenger.MessagesController.getInstance(account);
+            controller.loadFullChat(tgId, 0, true);
+            org.telegram.messenger.NotificationCenter.getInstance(account)
+                    .postNotificationName(org.telegram.messenger.NotificationCenter.dialogsNeedReload);
+        });
+    }
+
     // ---------------------------------------------------------------- joined channels (device-side)
 
     private static SharedPreferences prefs() {
@@ -146,20 +171,45 @@ public class WaysGramChats {
         chat.creator = g.optLong("owner_telegram_id") == selfId;
         String role = g.optString("my_role", g.optString("role", ""));
         if ("admin".equals(role)) {
-            chat.admin_rights = new TLRPC.TL_chatAdminRights();
-            int rights = g.optInt("admin_rights", 63);
-            chat.admin_rights.change_info = (rights & 1) != 0;
-            chat.admin_rights.invite_users = (rights & 2) != 0;
-            chat.admin_rights.ban_users = (rights & 4) != 0;
-            chat.admin_rights.pin_messages = (rights & 8) != 0;
-            chat.admin_rights.manage_call = (rights & 32) != 0;
-            chat.admin_rights.delete_messages = (rights & 16) != 0;
+            chat.admin_rights = groupAdminRights(g.optInt("admin_rights", 63));
             chat.flags |= TLObject.FLAG_14;
         }
         synchronized (WaysGramChats.class) {
             chatCache.put(cacheKey(account, chat.id), chat);
         }
         return chat;
+    }
+
+    /**
+     * Права сравниваются по {@code flags} ({@code TL_chatAdminRights.equals} / {@code TL_chatBannedRights.equals}),
+     * а {@code flags} в TLRPC вычисляется только в {@code serializeToStream}. Объект, собранный вручную,
+     * до первой сериализации выглядит «без прав»: {@code ChatEditActivity} на {@code channelRightsUpdated}
+     * сравнивал такой чат со своим снимком и закрывал редактор — с устройства это выглядело как
+     * «после смены аватара группы редактирование сразу выбрасывает в чат». Клон прогоняет объект через
+     * провод, поэтому в памяти он совпадает с тем, что приходит с сервера.
+     */
+    private static TLRPC.TL_chatAdminRights normalized(TLRPC.TL_chatAdminRights rights) {
+        return TLRPC.TL_chatAdminRights.clone(rights);
+    }
+
+    private static TLRPC.TL_chatBannedRights normalized(TLRPC.TL_chatBannedRights rights) {
+        return TLRPC.TL_chatBannedRights.clone(rights);
+    }
+
+    /**
+     * Права администратора группы: у групп своя маска (1 — менять информацию, 2 — добавлять участников,
+     * 4 — банить, 8 — закреплять, 16 — удалять сообщения, 32 — медленный режим). Раньше для групп
+     * применялась канальная маска, поэтому права админа показывались не те.
+     */
+    private static TLRPC.TL_chatAdminRights groupAdminRights(int mask) {
+        TLRPC.TL_chatAdminRights rights = new TLRPC.TL_chatAdminRights();
+        rights.change_info = (mask & 1) != 0;
+        rights.invite_users = (mask & 2) != 0;
+        rights.ban_users = (mask & 4) != 0;
+        rights.pin_messages = (mask & 8) != 0;
+        rights.delete_messages = (mask & 16) != 0;
+        rights.manage_call = (mask & 32) != 0;
+        return normalized(rights);
     }
 
     private static TLRPC.TL_chatAdminRights channelRights(int mask) {
@@ -171,7 +221,7 @@ public class WaysGramChats {
         rights.invite_users = (mask & 16) != 0;
         rights.ban_users = (mask & 32) != 0;
         rights.change_info = (mask & 64) != 0;
-        return rights;
+        return normalized(rights);
     }
 
     static TLObject editChannelAdmin(int account, TLRPC.TL_channels_editAdmin req, long selfId) throws WaysGramApi.ApiException {
@@ -329,7 +379,7 @@ public class WaysGramChats {
         }
         String role = g.optString("my_role", g.optString("role", ""));
         if (chat.creator || "admin".equals(role)) {
-            chat.admin_rights = channelRights(g.optInt("admin_rights", 63));
+            chat.admin_rights = groupAdminRights(g.optInt("admin_rights", 63));
             chat.flags |= TLObject.FLAG_14;
         }
         applyChannelFlags(chat, g);
@@ -1035,7 +1085,16 @@ public class WaysGramChats {
         rights.send_gifs = (mask & 16) != 0;
         rights.send_games = (mask & 16) != 0;
         rights.send_docs = (mask & 32) != 0;
-        return rights;
+        /*
+         * Флаги берём в проводном виде — по ним сравниваются права, — но решения интерфейса
+         * («можно ли отправлять») остаются по исходной маске: TLRPC выводит send_messages и
+         * send_media из детальных флагов, и после проводной нормализации запрет сообщений
+         * выглядел бы снятым.
+         */
+        TLRPC.TL_chatBannedRights stable = normalized(rights);
+        stable.send_messages |= (mask & 1) != 0;
+        stable.send_media |= (mask & 2) != 0;
+        return stable;
     }
 
     static int sendRestrictionMask(TLRPC.TL_chatBannedRights rights) {
@@ -1130,9 +1189,10 @@ public class WaysGramChats {
         peer.user_id = userId;
         participant.peer = peer;
         participant.date = (int) (System.currentTimeMillis() / 1000);
-        participant.banned_rights = new TLRPC.TL_chatBannedRights();
-        participant.banned_rights.view_messages = true;
-        participant.banned_rights.until_date = untilDate;
+        TLRPC.TL_chatBannedRights participantBanned = new TLRPC.TL_chatBannedRights();
+        participantBanned.view_messages = true;
+        participantBanned.until_date = untilDate;
+        participant.banned_rights = normalized(participantBanned);
         return participant;
     }
 
@@ -1353,9 +1413,10 @@ public class WaysGramChats {
             participant = new TLRPC.TL_channelParticipantBanned();
             participant.left = true;
             participant.kicked_by = owner;
-            participant.banned_rights = new TLRPC.TL_chatBannedRights();
-            participant.banned_rights.view_messages = true;
-            participant.banned_rights.until_date = row.optInt("until_date");
+            TLRPC.TL_chatBannedRights memberBanned = new TLRPC.TL_chatBannedRights();
+            memberBanned.view_messages = true;
+            memberBanned.until_date = row.optInt("until_date");
+            participant.banned_rights = normalized(memberBanned);
         } else if ("owner".equals(role) || "admin".equals(role)) {
             participant = "owner".equals(role) ? new TLRPC.TL_channelParticipantCreator() : new TLRPC.TL_channelParticipantAdmin();
             participant.admin_rights = channelRights("owner".equals(role) ? 127 : row.optInt("admin_rights", 15));
@@ -1588,15 +1649,7 @@ public class WaysGramChats {
                 } else if ("admin".equals(memberRole)) {
                     participant = new TLRPC.TL_chatParticipantAdmin();
                     adminsCount++;
-                    int mask = m.optInt("admin_rights", 63);
-                    TLRPC.TL_chatAdminRights rights = new TLRPC.TL_chatAdminRights();
-                    rights.change_info = (mask & 1) != 0;
-                    rights.invite_users = (mask & 2) != 0;
-                    rights.ban_users = (mask & 4) != 0;
-                    rights.pin_messages = (mask & 8) != 0;
-                    rights.manage_call = (mask & 32) != 0;
-                    rights.delete_messages = (mask & 16) != 0;
-                    participant.waysGramAdminRights = rights;
+                    participant.waysGramAdminRights = groupAdminRights(m.optInt("admin_rights", 63));
                 } else {
                     participant = new TLRPC.TL_chatParticipant();
                 }
