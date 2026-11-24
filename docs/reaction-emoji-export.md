@@ -62,9 +62,15 @@ GitHub (браузер: ветка → «Add file» → «Upload files»; из �
 
 ## Куда это попадает
 
-* в APK: `assets/waysgram_emoji/tg/<id>.tgs` + таблица `WaysGramEmojiTable`, документы
-  раздаёт `WaysGramAnimatedEmoji` через `upload.getFile`;
-* либо на сервер WaysGram (вариант «без пересборки»): authbot сохраняет файлы, клиент тянет
-  каталог и сами документы по требованию.
+Разбор делает `scripts/waysgram_reaction_assets.py`: проверяет каждый документ (TGS —
+gzip+Lottie 512×512, 60 fps, ≤64 КБ, без растровых слоёв; WebP — RIFF и размеры из заголовка),
+раскладывает файлы в `assets/waysgram_emoji/tg/<id>.tgs|webp` и генерирует
+`WaysGramReactionAssets.java` (эмодзи → документы по слотам). Дальше
+`WaysGramReactions.catalog()` собирает каталог из этих документов, а транспорт отдаёт файлы
+через `upload.getFile` — клиент качает их как обычные телеграмные документы.
 
-Тесты выгрузки: `authbot/tests/test_reaction_export.py` (3).
+Выгрузка 24.11: **74 реакции, 516 документов, 12,4 МБ** (TGS 512×512/60 fps, иконки 72×72 WebP).
+Части архива репозитория теперь по 26 МБ (5 частей), потому что архив вырос на эти ассеты.
+
+Тесты: `authbot/tests/test_reaction_export.py` (5) и
+`scripts/test_android_reaction_animation.py` (8).

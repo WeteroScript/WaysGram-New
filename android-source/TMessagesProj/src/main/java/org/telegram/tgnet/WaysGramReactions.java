@@ -114,7 +114,7 @@ public final class WaysGramReactions {
                 return true;
             }
         }
-        return WaysGramAnimatedEmoji.has(normalized);
+        return WaysGramAnimatedEmoji.has(normalized) || WaysGramReactionAssets.indexOf(normalized) >= 0;
     }
 
     /** Сравнение эмодзи без U+FE0F и модификаторов оттенка кожи. */
@@ -213,6 +213,13 @@ public final class WaysGramReactions {
         if (cached != null) {
             return cached;
         }
+        if (WaysGramReactionAssets.count() > 0) {
+            ArrayList<TLRPC.TL_availableReaction> list = telegramCatalog();
+            if (!list.isEmpty()) {
+                cached = list;
+                return list;
+            }
+        }
         ArrayList<TLRPC.TL_availableReaction> list = new ArrayList<>(REACTIONS.length * 2);
         for (String[] entry : REACTIONS) {
             TLRPC.Document art = WaysGramReactionTextures.get(entry[0]);
@@ -228,6 +235,62 @@ public final class WaysGramReactions {
         }
         cached = list;
         return list;
+    }
+
+    /**
+     * Каталог из настоящих документов Telegram (выгрузка `/exportreactions`).
+     *
+     * <p>Идентификаторы документов телеграмные, файлы раздаёт {@link WaysGramReactionAssets}
+     * через `upload.getFile`. Поэтому штатные `ReactionsEffectOverlay` и
+     * `ReactionsLayoutInBubble` играют официальные анимации: `appear/select/activate` —
+     * появление эмодзи, `effect_animation` — вспышка, `around_animation` — частицы.</p>
+     */
+    private static ArrayList<TLRPC.TL_availableReaction> telegramCatalog() {
+        ArrayList<TLRPC.TL_availableReaction> list = new ArrayList<>();
+        for (int i = 0; i < WaysGramReactionAssets.count(); i++) {
+            TLRPC.TL_availableReaction reaction = telegramReaction(i, list.size());
+            if (reaction == null) {
+                continue;
+            }
+            list.add(reaction);
+            // Сервер может вернуть эмодзи с U+FE0F: карта ищется по точной строке.
+            String alias = normalize(WaysGramReactionAssets.EMOJI[i]);
+            if (!alias.equals(WaysGramReactionAssets.EMOJI[i])) {
+                TLRPC.TL_availableReaction copy = telegramReaction(i, list.size());
+                if (copy != null) {
+                    copy.reaction = alias;
+                    copy.inactive = true;
+                    list.add(copy);
+                }
+            }
+        }
+        return list;
+    }
+
+    private static TLRPC.TL_availableReaction telegramReaction(int index, int position) {
+        TLRPC.Document icon = WaysGramReactionAssets.document(index, "static_icon");
+        TLRPC.Document appear = WaysGramReactionAssets.document(index, "appear_animation");
+        if (icon == null || appear == null) {
+            return null;
+        }
+        TLRPC.TL_availableReaction reaction = new TLRPC.TL_availableReaction();
+        reaction.reaction = WaysGramReactionAssets.EMOJI[index];
+        reaction.title = WaysGramReactionAssets.TITLE[index];
+        reaction.static_icon = icon;
+        reaction.appear_animation = appear;
+        reaction.select_animation = WaysGramReactionAssets.document(index, "select_animation");
+        if (reaction.select_animation == null) reaction.select_animation = appear;
+        reaction.activate_animation = WaysGramReactionAssets.document(index, "activate_animation");
+        if (reaction.activate_animation == null) reaction.activate_animation = appear;
+        reaction.effect_animation = WaysGramReactionAssets.document(index, "effect_animation");
+        if (reaction.effect_animation == null) reaction.effect_animation = appear;
+        reaction.around_animation = WaysGramReactionAssets.document(index, "around_animation");
+        if (reaction.around_animation == null) reaction.around_animation = reaction.effect_animation;
+        reaction.center_icon = WaysGramReactionAssets.document(index, "center_icon");
+        if (reaction.center_icon == null) reaction.center_icon = icon;
+        reaction.flags |= TLObject.FLAG_1; // around_animation + center_icon
+        reaction.positionInList = position;
+        return reaction;
     }
 
     private static TLRPC.TL_availableReaction available(TLRPC.Document art, String emoji,

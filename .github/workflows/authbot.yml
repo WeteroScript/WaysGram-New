@@ -385,7 +385,9 @@ jobs:
               assert b'remove_media' in archive.read("WaysGram-Android/TMessagesProj/src/main/java/org/telegram/tgnet/WaysGramMessages.java")
               assert b'req.id.size() > 20' in archive.read("WaysGram-Android/TMessagesProj/src/main/java/org/telegram/tgnet/WaysGramMessages.java")
               assert b'WaysGramTransport.ENABLED ? 20 : 100' in archive.read("WaysGram-Android/TMessagesProj/src/main/java/org/telegram/messenger/SendMessagesHelper.java")
-          part_size = 23_068_672
+          # Пять частей по 26 МБ: архив вырос после вшивания документов реакций Telegram
+          # (12,4 МБ ассетов), а клиенты склеивают части по порядку и размеру не доверяют.
+          part_size = 26_000_000
           data = rebuilt.read_bytes()
           assert len(data) > part_size * 4
           for index in range(5):

@@ -70,6 +70,58 @@ class ReactionAnimation(unittest.TestCase):
         self.assertIn(": availableReaction.activate_animation;", block)
         self.assertIn("popWaysGramStaticReaction(document);", block)
 
+    def test_catalog_uses_telegram_documents_when_they_are_bundled(self):
+        table = self.archive.read(
+            BASE + "java/org/telegram/tgnet/WaysGramReactionAssets.java").decode("utf-8")
+        self.assertIn("final class WaysGramReactionAssets {", table)
+        self.assertIn("static synchronized TLRPC.Document document(int reaction, String slot)", table)
+        self.assertIn("static String assetName(long id)", table)
+        self.assertIn("static TLObject getFile(TLRPC.TL_upload_getFile request)", table)
+        self.assertIn("WaysGramReactionAssets.count() > 0", self.reactions)
+        self.assertIn("telegramCatalog()", self.reactions)
+        self.assertIn('WaysGramReactionAssets.document(index, "static_icon")', self.reactions)
+        self.assertIn('WaysGramReactionAssets.document(index, "appear_animation")', self.reactions)
+        self.assertIn('reaction.static_icon = icon;', self.reactions)
+        self.assertIn('reaction.appear_animation = appear;', self.reactions)
+        for slot in ("select_animation", "activate_animation", "effect_animation",
+                     "around_animation", "center_icon"):
+            self.assertIn(f'WaysGramReactionAssets.document(index, "{slot}")', self.reactions,
+                          f"слот {slot} должен браться из выгрузки Telegram")
+        transport = self.archive.read(
+            BASE + "java/org/telegram/tgnet/WaysGramTransport.java").decode("utf-8")
+        self.assertIn("WaysGramReactionAssets.getFile((TLRPC.TL_upload_getFile) request)", transport)
+
+    def test_bundled_documents_match_the_java_table(self):
+        import re
+
+        table = self.archive.read(
+            BASE + "java/org/telegram/tgnet/WaysGramReactionAssets.java").decode("utf-8")
+        block = table.split("long[] DOC_ID = {", 1)[1].split("};", 1)[0]
+        ids = [int(value) for value in re.findall(r"(\d+)L", block)]
+        files = re.findall(r'"(tg/[0-9]+\.(?:tgs|webp))"', table)
+        self.assertGreaterEqual(len(ids), 500)
+        self.assertEqual(len(ids), len(files))
+        self.assertEqual(len(set(ids)), len(ids))
+        assets = {n.rsplit("/", 1)[-1] for n in self.archive.namelist() if "/waysgram_emoji/tg/" in n}
+        self.assertEqual(len(assets), len(ids))
+        for document_id, name in zip(ids, files):
+            self.assertEqual(name, f"tg/{document_id}.{name.rsplit('.', 1)[-1]}")
+            self.assertIn(f"{document_id}.{name.rsplit('.', 1)[-1]}", assets)
+
+    def test_bundled_documents_are_official_telegram_animations(self):
+        names = [n for n in self.archive.namelist()
+                 if "/waysgram_emoji/tg/" in n and n.endswith(".tgs")]
+        self.assertGreaterEqual(len(names), 400)
+        for name in names[:40]:
+            document = json.loads(gzip.decompress(self.archive.read(name)))
+            self.assertEqual(document.get("tgs"), 1, name)
+            self.assertEqual((document.get("w"), document.get("h")), (512, 512), name)
+            self.assertEqual(document.get("fr"), 60, name)
+            self.assertLessEqual(self.archive.getinfo(name).file_size, 64 * 1024, name)
+        icons = [n for n in self.archive.namelist() if "/waysgram_emoji/tg/" in n and n.endswith(".webp")]
+        self.assertGreaterEqual(len(icons), 70)
+        self.assertEqual({webp_size(self.archive.read(n)) for n in icons[:10]}, {(72, 72)})
+
     def test_catalog_uses_telegram_artwork_and_telegram_effects(self):
         self.assertIn("TLRPC.Document art = WaysGramReactionTextures.get(entry[0]);", self.reactions)
         self.assertIn("reaction.static_icon = art;", self.reactions)

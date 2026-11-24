@@ -261,9 +261,15 @@ APK не собирался.
 появлении по центру). Раньше в этих слотах тоже был рисунок, но без движения — эмодзи
 «включался» рывком.
 
-**Если анимированные эмодзи всё-таки нужны:** их можно выгрузить из аккаунта Telegram и
-вшить в APK — механизм для этого уже есть (`WaysGramAnimatedEmoji`: синтетические документы
-+ `upload.getFile` из `assets/`), достаточно положить файлы в
-`assets/waysgram_emoji/tg/` и добавить их в таблицу.
+**Анимированные эмодзи получены (24.11).** Набор выгружен из авторизованной Telethon-сессии
+authbot командой `/exportreactions` (см. `docs/reaction-emoji-export.md`): **74 реакции,
+516 документов, 12,4 МБ**. `scripts/waysgram_reaction_assets.py` проверил каждый документ и
+собрал `WaysGramReactionAssets` + `assets/waysgram_emoji/tg/`; `WaysGramReactions.catalog()`
+теперь строит реакции из настоящих телеграмных документов (id/`access_hash`/mime/размер
+настоящие), а транспорт раздаёт файлы через `upload.getFile`. Значит `appear/select/activate`
+играют официальные анимации появления, `effect` — вспышку вокруг сообщения, `around` —
+частицы в чипе; самодельная пружина остаётся только как запасной путь для статичных (webp)
+документов.
 
-Тесты: `scripts/test_android_reaction_animation.py` (5). APK не собирался.
+Тесты: `scripts/test_android_reaction_animation.py` (8), `authbot/tests/test_reaction_export.py`
+(5). APK не собирался; архив вырос до 126,3 МБ, части по 26 МБ.
