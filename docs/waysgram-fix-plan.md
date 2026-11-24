@@ -233,3 +233,37 @@ APK не собирался.
 
 Тесты: `authbot/tests/test_welcome_messages.py` (3 сценария: группа, канал с лимитом,
 пустой текст), `scripts/test_android_welcome_messages.py` (4). APK не собирался.
+
+## Реакции как в Telegram (24.11)
+
+Пункт 3 списка с устройства: «реакции должны быть оригинальные как в Telegram».
+Разбор по слоям и что из них оригинальное:
+
+| Слой реакции | Что лежит в клиенте | Оригинал? |
+| --- | --- | --- |
+| Текстура эмодзи (чип, попап, панель — 51 эмодзи) | `assets/telegram_reactions/*.webp`, вырезка из телеграмного `assets/emoji.pack` (EPK3, спрайты 64×64) | да, тот же рисунок, что клиент рисует в сообщениях |
+| Эффект по нажатию (`effect/around_animation`) | `assets/waysgram_emoji/*.tgs` — байт-в-байт файлы набора `ilyhalight/telegram-emoji-effects` (салют, конфетти, фейерверк, мыльные пузыри) | да, это телеграмные Lottie (512×512, 60 fps, без растровых слоёв) |
+| `appear/select/activate_animation` (появление эмодзи) | официальная текстура эмодзи (статичная) | арт оригинальный, анимации не было |
+| Анимированные эмодзи Telegram (TGS) | нет и не будет из публичных источников | нет |
+
+**Почему TGS нет.** Настоящие `appear/select/activate/effect_animation` Telegram приходят
+из `messages.getAvailableReactions` и лежат на серверах Telegram; из песочницы
+`api.telegram.org` недоступен. Проверены публичные наборы: `ilyhalight/telegram-emoji-effects`
+(только эффекты: у 🎉 слой `Confetti`, у 🎆 `fireworks`, у 🍌 `взрыв`, `Hand_1…Hand_7` есть
+лишь у 👍), `ericsahne/telegram-emoji-collection`, `sliva0/tgradish`,
+`Malith-Rukshan/animated-country-flags` — анимированных эмодзи Telegram нет ни в одном;
+`tdesktop` и `Telegram Android` их в репозиториях не держат.
+
+**Что сделано.** Раз анимации нет, «поп» рисует сам клиент: для статичного документа
+(webp) `ReactionsEffectOverlay` перелетает из 35 % в 100 % за 260 мс с перелётом
+(`CubicBezierInterpolator.EASE_OUT_BACK`) — тот же пружинный вылет, что в Telegram, и он
+применяется к `appear/select/activate` (то есть и при выборе реакции в панели, и при
+появлении по центру). Раньше в этих слотах тоже был рисунок, но без движения — эмодзи
+«включался» рывком.
+
+**Если анимированные эмодзи всё-таки нужны:** их можно выгрузить из аккаунта Telegram и
+вшить в APK — механизм для этого уже есть (`WaysGramAnimatedEmoji`: синтетические документы
++ `upload.getFile` из `assets/`), достаточно положить файлы в
+`assets/waysgram_emoji/tg/` и добавить их в таблицу.
+
+Тесты: `scripts/test_android_reaction_animation.py` (5). APK не собирался.
