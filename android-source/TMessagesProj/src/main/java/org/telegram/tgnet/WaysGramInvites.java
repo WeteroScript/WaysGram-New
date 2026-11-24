@@ -24,6 +24,15 @@ public final class WaysGramInvites {
         throw new WaysGramApi.ApiException(400, "INVITE_HASH_INVALID");
     }
 
+    /** Помечает ответ типом приглашения; JSONException тут не бывает на практике. */
+    private static void markScope(JSONObject json, String scope) {
+        try {
+            json.put("__scope", scope);
+        } catch (JSONException ignored) {
+            // optString("__scope") тогда вернёт пустую строку и сработает запасной вариант.
+        }
+    }
+
     private static boolean unknownKind(String path) {
         return path.startsWith("/api/invites/");
     }
@@ -39,11 +48,11 @@ public final class WaysGramInvites {
                     try { body.put("invite_token", token); }
                     catch (JSONException e) { throw new WaysGramApi.ApiException(400, "INVITE_HASH_INVALID"); }
                     JSONObject joined = WaysGramApi.post(account, "/api/" + scope + "/join", body);
-                    joined.put("__scope", scope);
+                    markScope(joined, scope);
                     return joined;
                 }
                 JSONObject preview = WaysGramApi.get(account, "/api/" + scope + "/invites/" + token);
-                preview.put("__scope", scope);
+                markScope(preview, scope);
                 return preview;
             } catch (WaysGramApi.ApiException e) {
                 if (first == null) first = e;

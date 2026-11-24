@@ -47,6 +47,17 @@ class InviteLinkChecks(unittest.TestCase):
         self.assertIn("unknown ? resolveUnknown(account, path, false) : WaysGramApi.get(account, path)", invites)
 
 
+class InviteCompilesChecks(unittest.TestCase):
+    """JSONObject.put бросает JSONException: без обработки javac валит сборку APK."""
+
+    def test_scope_mark_does_not_throw_a_checked_exception(self):
+        path = (ROOT / "android-source" / "TMessagesProj" / "src" / "main" / "java" / "org"
+                / "telegram" / "tgnet" / "WaysGramInvites.java").read_text(encoding="utf-8")
+        self.assertIn("private static void markScope(JSONObject json, String scope)", path)
+        self.assertNotIn('joined.put("__scope"', path)
+        self.assertNotIn('preview.put("__scope"', path)
+
+
 class ChannelRightsCacheChecks(unittest.TestCase):
     """Локальная проверка прав канала не должна пропускать запрос «наугад»."""
 
