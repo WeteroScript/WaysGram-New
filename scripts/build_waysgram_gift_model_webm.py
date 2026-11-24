@@ -8,8 +8,8 @@ the original bezier easing, so the loop is "1 в 1" with the other Plush Pepe mo
 
 Only the artwork is changed:
 
-* the pink heart becomes the WaysGram red heart;
-* the WaysGram wordmark is painted on it and follows the heart's original transform;
+* the pink heart becomes the WaysGram red heart and is drawn in front of the arms,
+  so the hands hold it instead of covering it;
 * a black outer contour is added around the whole silhouette (the contour that was
   lost in the earlier, hand-drawn glow/hearts animation).
 
@@ -108,12 +108,15 @@ def redraw_heart(data: dict[str, Any]) -> dict[str, Any]:
     return data
 
 
-# The three hands in the original Plush Pepe TGS. They must be drawn *after* the
-# WaysGram wordmark: in the original art the arms cross in front of the heart.
+# The three hands in the original Plush Pepe TGS. They are drawn after the body and
+# before the heart: Pepe holds the heart, but the heart itself stays in front.
 HAND_INDICES = {1, 2, 15}
+#: Слой сердца: по нему считается, куда ставить надпись и какая его часть не закрыта руками.
+HEART_INDEX = 3
 
 
-def subset_shapes(data: dict[str, Any], *, keep_hands: bool) -> dict[str, Any]:
+def subset_shapes(data: dict[str, Any], *, keep: set[int] | None = None,
+                  drop: set[int] | tuple[int, ...] = ()) -> dict[str, Any]:
     """Keeps every layer transform but hides the shapes of the other layer group.
 
     Emptying ``shapes`` (instead of deleting layers) preserves parenting, so the
@@ -121,107 +124,21 @@ def subset_shapes(data: dict[str, Any], *, keep_hands: bool) -> dict[str, Any]:
     """
     result = copy.deepcopy(data)
     for layer in result["layers"]:
-        wanted = layer.get("ind") in HAND_INDICES
-        if wanted != keep_hands:
+        ind = layer.get("ind")
+        wanted = (keep is None or ind in keep) and ind not in set(drop)
+        if not wanted:
             layer["shapes"] = []
     return result
 
 
-def bezier(progress: float, x1: float, y1: float, x2: float, y2: float) -> float:
-    low, high = 0.0, 1.0
-    for _ in range(24):
-        mid = (low + high) / 2.0
-        x = 3 * (1 - mid) ** 2 * mid * x1 + 3 * (1 - mid) * mid * mid * x2 + mid ** 3
-        if x < progress:
-            low = mid
-        else:
-            high = mid
-    mid = (low + high) / 2.0
-    return 3 * (1 - mid) ** 2 * mid * y1 + 3 * (1 - mid) * mid * mid * y2 + mid ** 3
+def _no_wordmark_note() -> None:
+    """Надпись «WaysGram» больше не рисуется поверх модели.
 
-
-def value_at(prop: dict[str, Any], frame: float) -> Any:
-    """Lottie keyframe value at ``frame`` (with the file's original easing)."""
-    keys = prop.get("k")
-    if prop.get("a") == 0 or not isinstance(keys, list) or not keys or not isinstance(keys[0], dict):
-        return keys
-    if "t" not in keys[0]:
-        return keys
-    for start, end in zip(keys, keys[1:]):
-        if start["t"] <= frame <= end["t"]:
-            u = (frame - start["t"]) / max(1e-9, end["t"] - start["t"])
-            out, inc = start.get("o", {}), start.get("i", {})
-            ox, oy = out.get("x", 0.333), out.get("y", 0.0)
-            ix, iy = inc.get("x", 0.667), inc.get("y", 1.0)
-            if isinstance(ox, list):
-                ox = ox[0]
-            if isinstance(oy, list):
-                oy = oy[0]
-            if isinstance(ix, list):
-                ix = ix[0]
-            if isinstance(iy, list):
-                iy = iy[0]
-            progress = bezier(u, float(ox), float(oy), float(ix), float(iy))
-            a, b = start.get("s", end.get("s")), end.get("s", start.get("s"))
-            if isinstance(a, list) and isinstance(b, list):
-                return [a[i] + (b[i] - a[i]) * progress for i in range(min(len(a), len(b)))]
-            if isinstance(a, (int, float)) and isinstance(b, (int, float)):
-                return a + (b - a) * progress
-            return a
-    return keys[-1].get("s", keys[-1])
-
-
-def heart_transform(data: dict[str, Any], frame: int, offset: int) -> tuple[float, float, float, float]:
-    """Where the wordmark has to sit: heart anchor in screen space + its rotation."""
-    layers = {layer["ind"]: layer for layer in data["layers"]}
-    heart = next(layer for layer in data["layers"] if layer.get("nm") == "heart")
-    body = layers[heart["parent"]]
-
-    body_rotation = value_at(body["ks"]["r"], frame + offset)
-    body_position = value_at(body["ks"]["p"], frame + offset)
-    body_scale = value_at(body["ks"]["s"], frame + offset)
-    heart_rotation = value_at(heart["ks"]["r"], frame + offset)
-    heart_position = value_at(heart["ks"]["p"], frame + offset)
-    body_anchor = body["ks"]["a"]["k"][:2]
-    if isinstance(body_rotation, list):
-        body_rotation = body_rotation[0]
-    if isinstance(heart_rotation, list):
-        heart_rotation = heart_rotation[0]
-
-    sx, sy = body_scale[0] / 100.0, body_scale[1] / 100.0
-    x = (heart_position[0] - body_anchor[0]) * sx
-    y = (heart_position[1] - body_anchor[1]) * sy
-    angle = math.radians(body_rotation)
-    cx = body_position[0] + x * math.cos(angle) - y * math.sin(angle)
-    cy = body_position[1] + x * math.sin(angle) + y * math.cos(angle)
-    return cx, cy, body_rotation + heart_rotation, (sx + sy) / 2.0
-
-
-def wordmark() -> "Any":
-    from PIL import Image, ImageDraw, ImageFont
-
-    try:
-        font = ImageFont.truetype("DejaVuSans-Bold.ttf", 46)
-    except OSError:
-        font = ImageFont.load_default()
-    from PIL import Image as _Image
-
-    image = _Image.new("RGBA", (520, 150), (0, 0, 0, 0))
-    draw = ImageDraw.Draw(image)
-    x, y = 10, 34
-    draw.text((x + 5, y + 5), "WaysGram", font=font, fill=(38, 38, 42, 255),
-              stroke_width=6, stroke_fill=(38, 38, 42, 255))
-    draw.text((x, y), "WaysGram", font=font, fill=(252, 252, 252, 255),
-              stroke_width=5, stroke_fill=(48, 48, 52, 255))
-    bbox = image.getbbox()
-    if bbox:
-        image = image.crop(bbox)
-    image = image.resize((round(image.width * 0.53), round(image.height * 0.53)), _Image.LANCZOS)
-    shear = 0.16
-    sheared = _Image.new("RGBA", (image.width + round(image.height * shear), image.height), (0, 0, 0, 0))
-    sheared.paste(image, (0, 0), image)
-    return sheared.transform(sheared.size, _Image.AFFINE, (1, shear, 0, 0, 1, 0),
-                             resample=_Image.BICUBIC)
+    Раньше она накладывалась в экранных координатах по пересчёту трансформов сердца:
+    на устройстве буквы уезжали с сердца, не двигались вместе с ним и попадали под
+    руку. Название модели и так выводится в карточке подарка («Model: WaysGram»),
+    поэтому арт остаётся чистым.
+    """
 
 
 def render_frames(data: dict[str, Any], tgs: pathlib.Path, folder: pathlib.Path,
@@ -231,14 +148,17 @@ def render_frames(data: dict[str, Any], tgs: pathlib.Path, folder: pathlib.Path,
 
     base_tgs = folder / "plush_pepe_base.tgs"
     hands_tgs = folder / "plush_pepe_hands.tgs"
+    heart_tgs = folder / "plush_pepe_heart.tgs"
     for target, payload in (
-        (base_tgs, subset_shapes(data, keep_hands=False)),
-        (hands_tgs, subset_shapes(data, keep_hands=True)),
+        (base_tgs, subset_shapes(data, drop=HAND_INDICES | {HEART_INDEX})),
+        (hands_tgs, subset_shapes(data, keep=HAND_INDICES)),
+        (heart_tgs, subset_shapes(data, keep={HEART_INDEX})),
     ):
         target.write_bytes(gzip.compress(
             json.dumps(payload, separators=(",", ":")).encode("utf-8"), mtime=0))
     animation = LottieAnimation.from_tgs(str(base_tgs))
     hands_animation = LottieAnimation.from_tgs(str(hands_tgs))
+    heart_animation = LottieAnimation.from_tgs(str(heart_tgs))
 
     width, height = animation.lottie_animation_get_size()
     fps = int(round(animation.lottie_animation_get_framerate()))
@@ -246,29 +166,23 @@ def render_frames(data: dict[str, Any], tgs: pathlib.Path, folder: pathlib.Path,
     if hands_animation.lottie_animation_get_totalframe() != count:
         raise SystemExit("hand and body animations have different lengths")
     offset = int(data.get("ip", 0))
-    logo = wordmark()
 
     for index in range(count):
         body = animation.render_pillow_frame(index).convert("RGBA")
         hands = hands_animation.render_pillow_frame(index).convert("RGBA")
+        heart = heart_animation.render_pillow_frame(index).convert("RGBA")
         # The contour follows the complete silhouette, including the hands.
-        solid = Image.alpha_composite(body, hands).getchannel("A").point(
+        solid = Image.alpha_composite(Image.alpha_composite(body, hands), heart).getchannel("A").point(
             lambda value: 255 if value > 18 else 0)
         contour_mask = solid.filter(ImageFilter.MaxFilter(9)).filter(ImageFilter.GaussianBlur(0.7))
         contour = Image.new("RGBA", body.size, (0, 0, 0, 0))
         contour.paste((6, 10, 5, 255), (0, 0), contour_mask)
         frame = Image.alpha_composite(contour, body)
 
-        cx, cy, rotation, scale = heart_transform(data, index, offset)
-        text = logo.rotate(rotation - 8.0, resample=Image.BICUBIC, expand=True)
-        layer = Image.new("RGBA", frame.size, (0, 0, 0, 0))
-        # The wordmark sits on the upper-left of the heart; the original hands
-        # still cross in front of its lower edge.
-        layer.paste(text, (round(cx - 30 * scale - text.width / 2),
-                           round(cy - 40 * scale - text.height / 2)), text)
-        frame = Image.alpha_composite(frame, layer)
-        # Hands go on top of the wordmark, exactly like the original Plush Pepe.
+        # Порядок слоёв: контур → тело → руки → сердце. Сердце рисуется последним,
+        # иначе правая рука перекрывает его середину (это и было на устройстве).
         frame = Image.alpha_composite(frame, hands)
+        frame = Image.alpha_composite(frame, heart)
 
         frame.save(folder / f"frame_{index:04d}.png", optimize=False)
         if want_preview is not None and index == 0:
@@ -317,7 +231,7 @@ def update_manifest(webm: pathlib.Path, manifest: pathlib.Path) -> dict[str, str
             model["mime_type"] = "video/webm"
     payload["source"] = (
         "Original Plush Pepe TGS motion (60 fps, 3 s, original bezier easing) rendered "
-        "with rlottie; red WaysGram heart with its wordmark and a restored black contour; "
+        "with rlottie; red WaysGram heart drawn in front of the arms and a restored black contour; "
         "encoded as WebM with alpha"
     )
     manifest.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")

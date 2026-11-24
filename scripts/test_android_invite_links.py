@@ -47,6 +47,19 @@ class InviteLinkChecks(unittest.TestCase):
         self.assertIn("unknown ? resolveUnknown(account, path, false) : WaysGramApi.get(account, path)", invites)
 
 
+class ChannelRightsCacheChecks(unittest.TestCase):
+    """Локальная проверка прав канала не должна пропускать запрос «наугад»."""
+
+    def test_unknown_channel_is_checked_against_the_server(self):
+        chats = (ROOT / "android-source" / "TMessagesProj" / "src" / "main" / "java" / "org"
+                 / "telegram" / "tgnet" / "WaysGramChats.java").read_text(encoding="utf-8")
+        body = chats[chats.index("public static void requireChannelPostRight"):]
+        body = body[:body.index("public static TLObject send(")]
+        self.assertIn("if (chat == null)", body)
+        self.assertIn('WaysGramApi.get(account, "/api/channels/" + channelServer(channelTgId))', body)
+        self.assertIn('throw new WaysGramApi.ApiException(403, "CHAT_WRITE_FORBIDDEN")', body)
+
+
 class DiscussionAccessChecks(unittest.TestCase):
     """Кнопка «Discuss» и комментарии должны работать у подписчика канала."""
 

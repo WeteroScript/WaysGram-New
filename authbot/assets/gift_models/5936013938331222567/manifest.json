@@ -1,6 +1,6 @@
 {
   "gift_id": "5936013938331222567",
-  "source": "Original Plush Pepe TGS motion (60 fps, 3 s, original bezier easing) rendered with rlottie; red WaysGram heart with its wordmark and a restored black contour; encoded as WebM with alpha",
+  "source": "Original Plush Pepe TGS motion (60 fps, 3 s, original bezier easing) rendered with rlottie; red WaysGram heart drawn in front of the arms and a restored black contour; encoded as WebM with alpha",
   "commit": "",
   "models": [
     {
@@ -8,8 +8,8 @@
       "file": "waysgram.webm",
       "document_id": -5936013938331222567,
       "mime_type": "video/webm",
-      "sha256": "3dce69092fb237ebd137e02eaf94bb0e97e7f24a06b91407b983162911fc73df",
-      "bytes": 574797
+      "sha256": "3119cd40a44f6e84ac4201aad9baa6f9d8f03c2488c3086120af1d162f70eadb",
+      "bytes": 505155
     }
   ]
 }

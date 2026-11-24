@@ -558,6 +558,18 @@ public class WaysGramChats {
             return;
         }
         TLRPC.Chat chat = cachedChat(account, channelTgId);
+        if (chat == null) {
+            // Кэш этого аккаунта ещё пуст (канал открыт в другой сессии). Раньше
+            // проверка в этом случае просто пропускала запрос: аккаунт без прав
+            // отправлял пост и получал 403 только от сервера. Права спрашиваем сразу.
+            try {
+                chat = toChannel(account,
+                        WaysGramApi.get(account, "/api/channels/" + channelServer(channelTgId)),
+                        org.telegram.messenger.UserConfig.getInstance(account).getClientUserId(), true);
+            } catch (WaysGramApi.ApiException e) {
+                throw new WaysGramApi.ApiException(403, "CHAT_WRITE_FORBIDDEN");
+            }
+        }
         if (!(chat instanceof TLRPC.TL_channel) || chat.megagroup || !chat.broadcast) {
             return;
         }
