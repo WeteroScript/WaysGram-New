@@ -1263,3 +1263,20 @@ async def export_reaction_emoji(client: Any, concurrency: int = 4) -> tuple[dict
     manifest["files"] = len(files)
     manifest["bytes"] = sum(len(value) for value in files.values())
     return manifest, files
+
+
+# Загрузка на GitHub через браузер ограничена 25 МБ на файл, поэтому большой архив
+# отправляется частями: waysgram_reaction_emoji.zip.001, .002, …
+REACTION_ARCHIVE_PART_BYTES = 20 * 1024 * 1024
+
+
+def split_archive(data: bytes, limit: int = REACTION_ARCHIVE_PART_BYTES) -> list[bytes]:
+    """Режет архив на части не больше `limit` байт (пустой вход — пустой список)."""
+    if not data:
+        return []
+    size = max(1, int(limit))
+    return [data[index:index + size] for index in range(0, len(data), size)]
+
+
+def archive_part_name(index: int) -> str:
+    return f"waysgram_reaction_emoji.zip.{index:03d}"

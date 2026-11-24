@@ -102,6 +102,19 @@ class ReactionExport(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             self.run_export(client)
 
+    def test_archive_is_split_into_uploadable_parts(self):
+        payload = bytes(range(256)) * 400  # 102 400 байт
+        parts = telegram_mtproto.split_archive(payload, limit=40_000)
+        self.assertEqual(len(parts), 3)
+        self.assertEqual(b"".join(parts), payload)
+        self.assertEqual([len(part) for part in parts], [40_000, 40_000, 22_400])
+        self.assertEqual(telegram_mtproto.split_archive(b""), [])
+        self.assertEqual(telegram_mtproto.split_archive(b"small"), [b"small"])
+
+    def test_part_names_keep_the_order(self):
+        self.assertEqual(telegram_mtproto.archive_part_name(1), "waysgram_reaction_emoji.zip.001")
+        self.assertEqual(telegram_mtproto.archive_part_name(12), "waysgram_reaction_emoji.zip.012")
+
     def run_export(self, client):
         import asyncio
 

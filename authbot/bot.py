@@ -37,7 +37,12 @@ from cryptography.fernet import Fernet, InvalidToken
 import gift_upgrades
 from messenger_api import _assign_unique_number, _gift_attribute_rows, _gift_supports_upgrade, _normalise_attribute_name
 from messenger_api import build_messenger_router, init_messenger_storage, sync_telegram_gifts, _telegram_gift_metadata
-from telegram_mtproto import TelegramMTProtoGiftCatalog, export_reaction_emoji
+from telegram_mtproto import (
+    TelegramMTProtoGiftCatalog,
+    archive_part_name,
+    export_reaction_emoji,
+    split_archive,
+)
 
 # All secrets are read only from hosting environment variables.
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
@@ -2454,14 +2459,19 @@ async def export_reactions_handler(message: Message) -> None:
         for name, payload in files.items():
             archive.writestr(name, payload)
     archive_bytes = buffer.getvalue()
+    parts = split_archive(archive_bytes)
     await status.edit_text(
         f"Готово: {manifest.get('count', 0)} реакций, {manifest.get('files', 0)} файлов, "
-        f"{len(archive_bytes) / 1048576:.1f} МБ."
+        f"{len(archive_bytes) / 1048576:.1f} МБ"
+        + (f", частей: {len(parts)}" if len(parts) > 1 else "")
+        + "."
     )
-    await message.answer_document(
-        BufferedInputFile(archive_bytes, filename="waysgram_reaction_emoji.zip"),
-        caption="Официальные документы реакций Telegram для APK WaysGram.",
-    )
+    for index, part in enumerate(parts, start=1):
+        name = "waysgram_reaction_emoji.zip" if len(parts) == 1 else archive_part_name(index)
+        caption = "Официальные документы реакций Telegram для APK WaysGram."
+        if len(parts) > 1:
+            caption = f"Часть {index} из {len(parts)}. Официальные документы реакций Telegram."
+        await message.answer_document(BufferedInputFile(part, filename=name), caption=caption)
 
 
 @router.message(Command("admin"))
