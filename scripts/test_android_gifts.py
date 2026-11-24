@@ -298,6 +298,17 @@ class AndroidGiftSourceChecks(unittest.TestCase):
         controller = self.source("messenger/waysgram/WaysGramProfileGiftsController.java")
         self.assertIn('savedGift.pinned_to_top = isCollectible && optBooleanLike(item, "profile_pinned")', controller)
 
+    def test_async_art_rebuild_does_not_lose_newly_pinned_gifts(self):
+        controller = self.source("messenger/waysgram/WaysGramProfileGiftsController.java")
+        container = self.source("ui/Gifts/ProfileGiftsContainer.java")
+        self.assertIn("restoreLivePinState(nativeGifts)", controller)
+        self.assertIn("private void restoreLivePinState(", controller)
+        self.assertIn("gift.pinned_to_top = current.pinned_to_top;", controller)
+        self.assertIn('item.put("profile_pinned", gift.pinned_to_top && !gift.unsaved);', controller)
+        self.assertIn("java.util.Collections.sort(nativeGifts", controller)
+        self.assertIn("public ArrayList<TL_stars.SavedStarGift> getWaysGramGifts()", container)
+        self.assertIn("copy.addAll(list.gifts);", container)
+
     def test_waysgram_pins_render_on_native_profile_cover_before_opening_gifts(self):
         profile = self.source("ui/ProfileActivity.java")
         media = self.source("ui/Components/SharedMediaLayout.java")

@@ -868,11 +868,11 @@ def test_private_channel_invite_rotation_preserves_membership(env, monkeypatch):
             assert (await client.post('/api/channels/join', headers=member, json={'invite_link': old})).status_code == 200
             assert (await client.get(path, headers=member)).status_code == 403
             assert (await client.post(path, headers=member)).status_code == 403
-            monkeypatch.setenv("WAYSGRAM_BRANDED_INVITES", "1")
             rotated = await client.post(path, headers=owner)
             assert rotated.status_code == 200
             new = rotated.json()['invite_link']
-            assert new.startswith("https://t.wg/api/channels/invites/")
+            assert new.startswith("https://t.wg/")
+            assert len(new.rsplit('/', 1)[-1]) == 22
             assert new != old
             assert (await client.get(old)).status_code == 404
             assert (await client.post('/api/channels/join', headers=guest, json={'invite_link': old})).status_code == 404

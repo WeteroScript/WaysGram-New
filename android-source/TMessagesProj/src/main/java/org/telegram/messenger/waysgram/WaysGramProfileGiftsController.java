@@ -847,8 +847,58 @@ public final class WaysGramProfileGiftsController {
             return;
         }
         ArrayList<TL_stars.SavedStarGift> nativeGifts = toNativeGifts(lastInventory, lastGiftAccount, false);
+        // A pin can be changed while model/pattern documents are still downloading. The
+        // rebuild below must not resurrect the old profile_pinned value from lastInventory:
+        // carry the state of the live cards forward, pinned ones first.
+        restoreLivePinState(nativeGifts);
         container.replaceWaysGramInventory(nativeGifts);
         updateProfileCover(nativeGifts);
+    }
+
+    /**
+     * Preserves the pin/visibility state of cards the user has already changed while an
+     * asynchronous artwork rebuild is in flight. Keeps the cached JSON in sync so later
+     * rebuilds cannot bring the stale flag back, and puts pinned gifts at the front.
+     */
+    private void restoreLivePinState(ArrayList<TL_stars.SavedStarGift> nativeGifts) {
+        if (nativeGifts == null || nativeGifts.isEmpty() || container == null || lastInventory == null) {
+            return;
+        }
+        ArrayList<TL_stars.SavedStarGift> live = container.getWaysGramGifts();
+        if (live == null || live.isEmpty()) {
+            return;
+        }
+        java.util.HashMap<Long, TL_stars.SavedStarGift> liveById = new java.util.HashMap<>();
+        for (TL_stars.SavedStarGift gift : live) {
+            if (gift != null && gift.saved_id > 0) liveById.put(gift.saved_id, gift);
+        }
+        java.util.HashMap<Long, TL_stars.SavedStarGift> rebuiltById = new java.util.HashMap<>();
+        for (TL_stars.SavedStarGift gift : nativeGifts) {
+            if (gift == null) continue;
+            rebuiltById.put(gift.saved_id, gift);
+            TL_stars.SavedStarGift current = liveById.get(gift.saved_id);
+            if (current != null) {
+                gift.pinned_to_top = current.pinned_to_top;
+                gift.unsaved = current.unsaved;
+            }
+        }
+        java.util.Collections.sort(nativeGifts, (a, b) -> {
+            boolean ap = a != null && a.pinned_to_top && !a.unsaved;
+            boolean bp = b != null && b.pinned_to_top && !b.unsaved;
+            return Boolean.compare(!ap, !bp);
+        });
+        try {
+            for (int i = 0; i < lastInventory.length(); i++) {
+                JSONObject item = lastInventory.optJSONObject(i);
+                if (item == null) continue;
+                TL_stars.SavedStarGift gift = rebuiltById.get(item.optLong("id", 0));
+                if (gift == null) continue;
+                item.put("profile_pinned", gift.pinned_to_top && !gift.unsaved);
+                item.put("profile_hidden", gift.unsaved);
+            }
+        } catch (org.json.JSONException ignored) {
+            // A malformed cached row is skipped; the native cards are already correct.
+        }
     }
 
     private void updateProfileCover(ArrayList<TL_stars.SavedStarGift> nativeGifts) {

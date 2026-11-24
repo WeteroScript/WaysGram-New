@@ -1817,6 +1817,7 @@ async def init_messenger_storage(database_path: Path) -> None:
         # /api/me/gifts depends on these columns. Migrate them here as well as
         # in the admin initializer so the messenger API remains self-contained.
         for column, definition in (
+            ("owner_telegram_id", "INTEGER NOT NULL DEFAULT 0"),
             ("telegram_gift_id", "TEXT NOT NULL DEFAULT ''"),
             ("gift_emoji", "TEXT NOT NULL DEFAULT ''"),
             ("telegram_gift_metadata_json", "TEXT NOT NULL DEFAULT '{}'"),

@@ -2639,6 +2639,14 @@ public class ProfileGiftsContainer extends FrameLayout implements NotificationCe
         this.waysGramGiftUpdatedListener = listener;
     }
 
+    /** Current inventory cards; the WaysGram controller uses it to keep pin state across async rebuilds. */
+    public ArrayList<TL_stars.SavedStarGift> getWaysGramGifts() {
+        ArrayList<TL_stars.SavedStarGift> copy = new ArrayList<>();
+        if (!waysGramInventory || list == null) return copy;
+        copy.addAll(list.gifts);
+        return copy;
+    }
+
     public void setWaysGramInventory(ArrayList<TL_stars.SavedStarGift> gifts) {
         if (!waysGramInventory) return;
         list.gifts.clear();
