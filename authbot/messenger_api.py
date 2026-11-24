@@ -2040,6 +2040,23 @@ async def init_messenger_storage(database_path: Path) -> None:
                             ("location_address", "TEXT NOT NULL DEFAULT ''")):
             if column not in channel_columns:
                 await db.execute(f"ALTER TABLE channels ADD COLUMN {column} {ddl}")
+        await db.execute("""CREATE TABLE IF NOT EXISTS main.chat_welcome_messages (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            scope TEXT NOT NULL,
+            chat_id INTEGER NOT NULL,
+            author_id INTEGER NOT NULL,
+            body TEXT NOT NULL DEFAULT '',
+            entities TEXT NOT NULL DEFAULT '[]',
+            created_at INTEGER NOT NULL
+        )""")
+        await db.execute("""CREATE TABLE IF NOT EXISTS main.chat_wallpapers (
+            scope TEXT NOT NULL,
+            chat_id INTEGER NOT NULL,
+            telegram_id INTEGER NOT NULL,
+            settings TEXT NOT NULL DEFAULT '{}',
+            updated_at INTEGER NOT NULL,
+            PRIMARY KEY(scope, chat_id, telegram_id)
+        )""")
         await db.execute("""CREATE TABLE IF NOT EXISTS channel_admin_log (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             channel_id INTEGER NOT NULL,
@@ -9762,6 +9779,7 @@ def build_messenger_router(
             active, pinned = await cur.fetchone()
             channel["stories_active"] = bool(active)
             channel["stories_pinned_available"] = bool(pinned)
+            channel["wallpaper"] = await chat_wallpaper(db, "channel", channel_id, int(user["telegram_id"]))
             if channel["owner_telegram_id"] == int(user["telegram_id"]):
                 cur = await db.execute("""SELECT r.telegram_id,COUNT(*) OVER () FROM channel_join_requests r
                     JOIN channel_invites i ON i.channel_id=r.channel_id AND i.token=r.invite_token
@@ -11147,6 +11165,20 @@ def build_messenger_router(
             await db.commit()
         return {"channel_id": channel_id, "user_ids": targets}
 
+    async def chat_wallpaper(db: Any, scope: str, chat_id: int, uid: int) -> dict[str, Any] | None:
+        """Обои, выбранные этим аккаунтом для чата («Внешний вид и эмодзи»)."""
+        cur = await db.execute(
+            "SELECT settings FROM main.chat_wallpapers WHERE scope=? AND chat_id=? AND telegram_id=?",
+            (scope, chat_id, uid))
+        row = await cur.fetchone()
+        if not row:
+            return None
+        try:
+            stored = json.loads(row[0] or "{}")
+        except (TypeError, ValueError):
+            return None
+        return stored if isinstance(stored, dict) and stored else None
+
     STORY_CHANNEL_ACCESS = """NOT EXISTS(SELECT 1 FROM channel_bans b WHERE b.channel_id=c.id AND b.telegram_id=?
         AND (b.until_date=0 OR b.until_date>CAST(strftime('%s','now') AS INTEGER)))
         AND (c.is_public=1 OR c.owner_telegram_id=? OR EXISTS(SELECT 1 FROM channel_admins ca WHERE ca.channel_id=c.id AND ca.telegram_id=?)
@@ -11339,6 +11371,121 @@ def build_messenger_router(
                 for item in items:
                     item["can_delete"] = archive or item["author_id"] == uid
             return result
+
+    async def require_welcome_manager(db: Any, scope: str, chat_id: int, uid: int) -> None:
+        """Приветственные сообщения правит тот, кто может менять информацию о чате."""
+        if scope == "group":
+            if not group_has_right(await require_group_member(db, chat_id, uid), 1):
+                raise HTTPException(403, "CHAT_ADMIN_REQUIRED")
+        elif not await can_manage_channel(chat_id, uid):
+            raise HTTPException(403, "CHAT_ADMIN_REQUIRED")
+
+    @router.get("/api/chats/{scope}/{chat_id}/welcome")
+    async def list_welcome_messages(scope: Literal["group", "channel"], chat_id: int,
+                                    authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        """`ephemeral.getWelcomeMessages`: без него экран «Welcome message» крутил загрузку вечно."""
+        uid = int((await current_user(authorization))["telegram_id"])
+        async with aiosqlite.connect(db_path()) as db:
+            db.row_factory = aiosqlite.Row
+            await db.execute("BEGIN")
+            await require_welcome_manager(db, scope, chat_id, uid)
+            cur = await db.execute("""SELECT id,author_id,body,entities,created_at FROM main.chat_welcome_messages
+                WHERE scope=? AND chat_id=? ORDER BY id LIMIT 20""", (scope, chat_id))
+            rows = [dict(row) for row in await cur.fetchall()]
+        for row in rows:
+            try:
+                row["entities"] = json.loads(row["entities"] or "[]")
+            except (TypeError, ValueError):
+                row["entities"] = []
+        digest = 0
+        for row in rows:
+            digest = (digest * 31 + int(row["id"]) * 7 + len(row["body"])) & 0x7FFFFFFFFFFFFFFF
+        return {"messages": rows, "hash": digest}
+
+    @router.post("/api/chats/{scope}/{chat_id}/welcome", status_code=201)
+    async def add_welcome_message(scope: Literal["group", "channel"], chat_id: int, payload: dict[str, Any],
+                                  authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        uid = int((await current_user(authorization))["telegram_id"])
+        body = payload.get("message", "")
+        entities = payload.get("entities", [])
+        if not isinstance(body, str) or not 1 <= len(body.strip()) <= 4096:
+            raise HTTPException(400, "MESSAGE_EMPTY")
+        if not isinstance(entities, list):
+            raise HTTPException(400, "MESSAGE_EMPTY")
+        now = int(time.time())
+        async with aiosqlite.connect(db_path()) as db:
+            db.row_factory = aiosqlite.Row
+            await db.execute("BEGIN IMMEDIATE")
+            await require_welcome_manager(db, scope, chat_id, uid)
+            cur = await db.execute("SELECT COUNT(*) FROM main.chat_welcome_messages WHERE scope=? AND chat_id=?",
+                                   (scope, chat_id))
+            if (await cur.fetchone())[0] >= 5:
+                raise HTTPException(429, "WELCOME_MESSAGES_TOO_MUCH")
+            cur = await db.execute("""INSERT INTO main.chat_welcome_messages(scope,chat_id,author_id,body,entities,created_at)
+                VALUES(?,?,?,?,?,?)""",
+                (scope, chat_id, uid, body, json.dumps(entities, ensure_ascii=False), now))
+            message_id = int(cur.lastrowid)
+            await db.commit()
+        return {"id": message_id, "author_id": uid, "body": body, "entities": entities, "created_at": now}
+
+    @router.delete("/api/chats/{scope}/{chat_id}/welcome")
+    async def delete_welcome_messages(scope: Literal["group", "channel"], chat_id: int,
+                                      message_id: int = Query(default=0, ge=0),
+                                      authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        uid = int((await current_user(authorization))["telegram_id"])
+        async with aiosqlite.connect(db_path()) as db:
+            await db.execute("BEGIN IMMEDIATE")
+            await require_welcome_manager(db, scope, chat_id, uid)
+            if message_id:
+                await db.execute("DELETE FROM main.chat_welcome_messages WHERE scope=? AND chat_id=? AND id=?",
+                                 (scope, chat_id, message_id))
+            else:
+                await db.execute("DELETE FROM main.chat_welcome_messages WHERE scope=? AND chat_id=?",
+                                 (scope, chat_id))
+            await db.commit()
+        return {"deleted": True}
+
+    @router.put("/api/chats/{scope}/{chat_id}/wallpaper")
+    async def set_chat_wallpaper(scope: Literal["group", "channel"], chat_id: int, payload: dict[str, Any],
+                                 authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        """Обои чата: клиент присылает настройки градиента/узора из «Внешний вид и эмодзи».
+
+        Раньше `messages.setChatWallPaper` уходил в обработчик по умолчанию, то есть никуда:
+        выбранные обои не сохранялись и не возвращались в карточке чата, поэтому после
+        переоткрытия настроек фон снова был стандартным.
+        """
+        uid = int((await current_user(authorization))["telegram_id"])
+        wallpaper = payload.get("wallpaper")
+        if wallpaper is not None and not isinstance(wallpaper, dict):
+            raise HTTPException(400, "WALLPAPER_INVALID")
+        if wallpaper is not None:
+            wallpaper = {key: value for key, value in wallpaper.items() if value is not None}
+        async with aiosqlite.connect(db_path()) as db:
+            db.row_factory = aiosqlite.Row
+            await db.execute("BEGIN IMMEDIATE")
+            if scope == "group":
+                await require_group_member(db, chat_id, uid)
+            else:
+                await require_channel_not_banned(db, chat_id, uid)
+                cur = await db.execute("SELECT 1 FROM channels WHERE id=?", (chat_id,))
+                if not await cur.fetchone():
+                    raise HTTPException(404, "CHANNEL_NOT_FOUND")
+            await db.execute("""INSERT INTO main.chat_wallpapers(scope,chat_id,telegram_id,settings,updated_at)
+                VALUES(?,?,?,?,?) ON CONFLICT(scope,chat_id,telegram_id)
+                DO UPDATE SET settings=excluded.settings, updated_at=excluded.updated_at""",
+                (scope, chat_id, uid, json.dumps(wallpaper or {}, ensure_ascii=False), int(time.time())))
+            await db.commit()
+        return {"scope": scope, "chat_id": chat_id, "wallpaper": wallpaper}
+
+    @router.delete("/api/chats/{scope}/{chat_id}/wallpaper")
+    async def clear_chat_wallpaper(scope: Literal["group", "channel"], chat_id: int,
+                                   authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        uid = int((await current_user(authorization))["telegram_id"])
+        async with aiosqlite.connect(db_path()) as db:
+            await db.execute("DELETE FROM main.chat_wallpapers WHERE scope=? AND chat_id=? AND telegram_id=?",
+                             (scope, chat_id, uid))
+            await db.commit()
+        return {"scope": scope, "chat_id": chat_id, "wallpaper": None}
 
     @router.get("/api/stories/all")
     async def list_all_stories(limit: int = Query(default=100, ge=1, le=100),
@@ -17359,6 +17506,8 @@ def build_messenger_router(
             result["available_reactions"] = json.loads((reactions_row[2] if reactions_row else "") or "[]")
         except (TypeError, ValueError):
             result["available_reactions"] = []
+        async with aiosqlite.connect(db_path()) as db:
+            result["wallpaper"] = await chat_wallpaper(db, "group", group_id, uid)
         result["members"] = []
         for row in members:
             item = dict(row)

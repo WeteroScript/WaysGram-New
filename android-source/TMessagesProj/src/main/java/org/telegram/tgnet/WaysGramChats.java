@@ -212,6 +212,58 @@ public class WaysGramChats {
         return normalized(rights);
     }
 
+    /**
+     * Обои чата из «Внешний вид и эмодзи» в том виде, в каком их держит клиент.
+     *
+     * <p>Сервер хранит настройки для аккаунта и отдаёт их в карточке чата; без этого поля
+     * {@code ChatThemeController.getDialogWallpaper} всегда возвращал {@code null} и фон
+     * после переоткрытия настроек сбрасывался на стандартный.</p>
+     */
+    static TLRPC.WallPaper wallpaper(JSONObject data) {
+        if (data == null) {
+            return null;
+        }
+        TLRPC.TL_wallPaperNoFile paper = new TLRPC.TL_wallPaperNoFile();
+        paper.id = data.optLong("id", 0);
+        TLRPC.TL_wallPaperSettings settings = new TLRPC.TL_wallPaperSettings();
+        if (data.has("background_color")) {
+            settings.background_color = data.optInt("background_color");
+            settings.flags |= TLObject.FLAG_0;
+        }
+        if (data.optBoolean("blur")) {
+            settings.blur = true;
+            settings.flags |= TLObject.FLAG_1;
+        }
+        if (data.optBoolean("motion")) {
+            settings.motion = true;
+            settings.flags |= TLObject.FLAG_2;
+        }
+        if (data.has("intensity")) {
+            settings.intensity = data.optInt("intensity");
+            settings.flags |= TLObject.FLAG_3;
+        }
+        if (data.has("second_background_color")) {
+            settings.second_background_color = data.optInt("second_background_color");
+            settings.rotation = data.optInt("rotation");
+            settings.flags |= TLObject.FLAG_4;
+        }
+        if (data.has("third_background_color")) {
+            settings.third_background_color = data.optInt("third_background_color");
+            settings.flags |= TLObject.FLAG_5;
+        }
+        if (data.has("fourth_background_color")) {
+            settings.fourth_background_color = data.optInt("fourth_background_color");
+            settings.flags |= TLObject.FLAG_6;
+        }
+        if (data.has("emoticon")) {
+            settings.emoticon = data.optString("emoticon", "");
+            settings.flags |= TLObject.FLAG_7;
+        }
+        paper.settings = settings;
+        paper.flags |= TLObject.FLAG_2;
+        return paper;
+    }
+
     private static TLRPC.TL_chatAdminRights channelRights(int mask) {
         TLRPC.TL_chatAdminRights rights = new TLRPC.TL_chatAdminRights();
         rights.post_messages = (mask & 1) != 0;
@@ -1560,6 +1612,8 @@ public class WaysGramChats {
         full.flags |= TLObject.FLAG_30;
         full.reactions_limit = channel.optInt("reactions_limit", 11);
         full.flags2 |= TLObject.FLAG_13;
+        full.wallpaper = wallpaper(channel.optJSONObject("wallpaper"));
+        if (full.wallpaper != null) full.flags2 |= 128;
         full.paid_reactions_available = channel.optBoolean("paid_reactions_enabled");
         if (full.paid_reactions_available) full.flags2 |= TLObject.FLAG_16;
         full.paid_media_allowed = full.paid_reactions_available;
@@ -1705,6 +1759,8 @@ public class WaysGramChats {
         full.flags |= TLObject.FLAG_30;
         full.reactions_limit = group.optInt("reactions_limit", 11);
         full.flags2 |= TLObject.FLAG_13;
+        full.wallpaper = wallpaper(group.optJSONObject("wallpaper"));
+        if (full.wallpaper != null) full.flags2 |= 128;
         boolean canViewStats = group.optBoolean("can_view_stats", admin);
         full.can_view_stats = canViewStats;
         if (canViewStats) full.flags |= TLObject.FLAG_20;

@@ -211,3 +211,25 @@ APK не собирался.
 Тесты: `authbot/tests/test_group_reactions_settings.py` (3 сценария: группа, канал, запрет
 для не-админа), `scripts/test_android_reaction_settings.py` (5).
 APK не собирался.
+
+## Обои «Внешний вид и эмодзи» не применялись (24.11)
+
+| Что | Причина | Как закрыто |
+| --- | --- | --- |
+| В группе и канале выбранные обои не появляются | `messages.setChatWallPaper` не обслуживался: запрос уходил в обработчик по умолчанию, сервер о выборе не знал | `WaysGramExtras.setChatWallpaper`: обои (цвета, градиенты, интенсивность, поворот, размытие, движение, эмодзи-узор) уходят в `PUT /api/chats/{scope}/{chat_id}/wallpaper`, сброс — `DELETE`; личные чаты остаются локальными |
+| Фон сбрасывался после переоткрытия настроек | карточка чата не возвращала обои, поэтому `ChatThemeController.getDialogWallpaper` всегда получал `null` | у каналов и групп появилось поле `wallpaper`; `fullChannel`/`fullChat` кладут его в `TL_channelFull.wallpaper` (`flags2 |= 128`) |
+| Обои одного аккаунта не должны попадать другому | — | хранение в `main.chat_wallpapers(scope, chat_id, telegram_id)` — своя запись на аккаунт |
+
+Тесты: `authbot/tests/test_chat_wallpaper.py` (3 сценария: группа, канал, посторонний),
+`scripts/test_android_chat_wallpaper.py` (4). APK не собирался.
+
+## «Welcome message» крутил бесконечную загрузку (24.11)
+
+| Что | Причина | Как закрыто |
+| --- | --- | --- |
+| Экран «Welcome message» в канале и группе висит на загрузке | экран ждёт ответ на `ephemeral.getWelcomeMessages`, а `WaysGramExtras` этот запрос не обслуживал: возвращался `null`, ответ не приходил вовсе, и загрузчик (`MessagesController` при `MODE_WELCOME_MESSAGES`) ждал вечно — колбэк срабатывает только при `res != null` | транспорт отвечает: `ephemeral.getWelcomeMessages` → `GET /api/chats/{scope}/{chat_id}/welcome` (пустой список — нормальный ответ, `hash` даёт `welcomeMessagesNotModified`), `ephemeral.sendMessage` с флагом `welcome` → `POST`, `deleteWelcomeMessage`/`deleteAllWelcomeMessages` → `DELETE` |
+| Приветственные сообщения негде было хранить | таблицы не существовало | `main.chat_welcome_messages(scope, chat_id, author_id, body, entities, created_at)`, до 5 штук на чат (`429 WELCOME_MESSAGES_TOO_MUCH`), текст 1…4096 символов |
+| Кто правит | — | тот, кто может менять информацию о чате: у группы бит `1` (`group_has_right`), у канала `can_manage_channel`; остальным `403 CHAT_ADMIN_REQUIRED` |
+
+Тесты: `authbot/tests/test_welcome_messages.py` (3 сценария: группа, канал с лимитом,
+пустой текст), `scripts/test_android_welcome_messages.py` (4). APK не собирался.
