@@ -10,12 +10,25 @@ import org.telegram.tgnet.tl.TL_update;
 final class WaysGramStories {
     private WaysGramStories() {}
 
-    private static boolean isChannel(TLRPC.InputPeer peer) {
-        return peer instanceof TLRPC.TL_inputPeerChannel && peer.channel_id > WaysGramChats.CHANNEL_OFFSET;
+    /**
+     * Истории есть и у каналов, и у групп: группы живут в диапазоне ниже {@code CHANNEL_OFFSET},
+     * каналы — выше. Раньше каналом считался только id больше смещения, поэтому в группе
+     * {@code stories.canSendStory}/{@code sendStory}/{@code getPeerStories} возвращали
+     * {@code METHOD_NOT_SUPPORTED} и истории группы видел только тот, кто их постил в этой же сессии.
+     */
+    private static boolean isChat(TLRPC.InputPeer peer) {
+        return peer instanceof TLRPC.TL_inputPeerChannel && peer.channel_id > 0;
     }
 
-    private static String path(long channelId) {
-        return "/api/channels/" + WaysGramChats.channelServer(channelId) + "/stories";
+    private static boolean isGroup(long peerId) {
+        return WaysGramChats.isGroupChannel(peerId);
+    }
+
+    private static String path(long peerId) {
+        if (isGroup(peerId)) {
+            return "/api/groups/" + peerId + "/stories";
+        }
+        return "/api/channels/" + WaysGramChats.channelServer(peerId) + "/stories";
     }
 
     private static TLRPC.TL_peerChannel peer(long channelId) {
@@ -62,10 +75,61 @@ final class WaysGramStories {
         return out;
     }
 
+    /** Чат для пира истории: `stories.getAllStories` требует, чтобы чат уже был известен клиенту. */
+    private static TLRPC.Chat chat(int account, String scope, long serverId, long selfId) throws WaysGramApi.ApiException {
+        long peerId = "channel".equals(scope) ? WaysGramChats.channelTg(serverId) : serverId;
+        TLRPC.Chat known = WaysGramChats.cachedChat(account, peerId);
+        if (known != null) {
+            return known;
+        }
+        if ("channel".equals(scope)) {
+            return WaysGramChats.toChannel(account, WaysGramApi.get(account, "/api/channels/" + serverId), selfId,
+                    WaysGramChats.joinedChannels(account).contains(serverId));
+        }
+        return WaysGramChats.toMegagroup(account, WaysGramApi.get(account, "/api/groups/" + serverId), selfId);
+    }
+
+    /**
+     * Все чаты с активными историями. Раньше этот запрос вообще не обслуживался, поэтому
+     * кольца историй в списке чатов не появлялись ни у кого, кроме автора: клиент не знал,
+     * у какого пира есть истории.
+     */
+    static TL_stories.TL_stories_allStories all(int account, long selfId) throws WaysGramApi.ApiException {
+        JSONObject data = WaysGramApi.get(account, "/api/stories/all");
+        TL_stories.TL_stories_allStories out = new TL_stories.TL_stories_allStories();
+        out.count = data.optInt("count");
+        out.state = "waysgram-" + out.count + "-" + (System.currentTimeMillis() / 60000L);
+        JSONArray peers = data.optJSONArray("peers");
+        for (int i = 0; peers != null && i < peers.length(); i++) {
+            JSONObject row = peers.optJSONObject(i);
+            if (row == null) continue;
+            String scope = row.optString("scope", "channel");
+            long serverId = row.optLong("id");
+            if (serverId <= 0) continue;
+            long peerId = "channel".equals(scope) ? WaysGramChats.channelTg(serverId) : serverId;
+            TL_stories.TL_peerStories peerStories = new TL_stories.TL_peerStories();
+            peerStories.peer = peer(peerId);
+            peerStories.max_read_id = row.optInt("max_read_id", 0);
+            if (peerStories.max_read_id > 0) peerStories.flags |= TLObject.FLAG_1;
+            JSONArray stories = row.optJSONArray("stories");
+            for (int j = 0; stories != null && j < stories.length(); j++) {
+                JSONObject story = stories.optJSONObject(j);
+                if (story != null) peerStories.stories.add(item(account, peerId, story, selfId));
+            }
+            if (peerStories.stories.isEmpty()) continue;
+            out.peer_stories.add(peerStories);
+            out.chats.add(chat(account, scope, serverId, selfId));
+        }
+        return out;
+    }
+
     static TLObject handle(int account, TLObject req, long selfId) throws WaysGramApi.ApiException {
+        if (req instanceof TL_stories.TL_stories_getAllStories) {
+            return all(account, selfId);
+        }
         if (req instanceof TL_stories.TL_stories_canSendStory) {
             TLRPC.InputPeer peer = ((TL_stories.TL_stories_canSendStory) req).peer;
-            if (!isChannel(peer)) return null;
+            if (!isChat(peer)) return null;
             TL_stories.canSendStoryCount out = new TL_stories.canSendStoryCount();
             out.count_remains = WaysGramApi.get(account, path(peer.channel_id) + "/can-post").optInt("count_remains");
             if (out.count_remains <= 0) throw new WaysGramApi.ApiException(429, "STORIES_TOO_MUCH");
@@ -73,7 +137,7 @@ final class WaysGramStories {
         }
         if (req instanceof TL_stories.TL_stories_sendStory) {
             TL_stories.TL_stories_sendStory send = (TL_stories.TL_stories_sendStory) req;
-            if (!isChannel(send.peer)) return null;
+            if (!isChat(send.peer)) return null;
             if (send.fwd_from_id != null || send.music != null || (send.albums != null && !send.albums.isEmpty()) || !send.media_areas.isEmpty()) {
                 throw new WaysGramApi.ApiException(400, "STORY_OPTION_NOT_SUPPORTED");
             }
@@ -105,30 +169,30 @@ final class WaysGramStories {
         }
         if (req instanceof TL_stories.TL_stories_getPeerStories) {
             TLRPC.InputPeer peer = ((TL_stories.TL_stories_getPeerStories) req).peer;
-            if (!isChannel(peer)) return null;
+            if (!isChat(peer)) return null;
             TL_stories.TL_stories_peerStories out = new TL_stories.TL_stories_peerStories();
             out.stories = active(account, peer.channel_id, selfId);
             return out;
         }
         if (req instanceof TL_stories.TL_stories_getStoriesByID) {
             TL_stories.TL_stories_getStoriesByID byId = (TL_stories.TL_stories_getStoriesByID) req;
-            if (!isChannel(byId.peer)) return null;
+            if (!isChat(byId.peer)) return null;
             if (byId.id.isEmpty()) return new TL_stories.TL_stories_stories();
             return list(account, byId.peer.channel_id, selfId, "mode=ids&ids=" + android.text.TextUtils.join(",", byId.id));
         }
         if (req instanceof TL_stories.TL_stories_getPinnedStories) {
             TL_stories.TL_stories_getPinnedStories pinned = (TL_stories.TL_stories_getPinnedStories) req;
-            if (!isChannel(pinned.peer)) return null;
+            if (!isChat(pinned.peer)) return null;
             return list(account, pinned.peer.channel_id, selfId, "mode=pinned&offset=" + pinned.offset_id + "&limit=" + Math.max(1, Math.min(100, pinned.limit)));
         }
         if (req instanceof TL_stories.TL_stories_getStoriesArchive) {
             TL_stories.TL_stories_getStoriesArchive archive = (TL_stories.TL_stories_getStoriesArchive) req;
-            if (!isChannel(archive.peer)) return null;
+            if (!isChat(archive.peer)) return null;
             return list(account, archive.peer.channel_id, selfId, "mode=archive&offset=" + archive.offset_id + "&limit=" + Math.max(1, Math.min(100, archive.limit)));
         }
         if (req instanceof TL_stories.TL_stories_deleteStories) {
             TL_stories.TL_stories_deleteStories delete = (TL_stories.TL_stories_deleteStories) req;
-            if (!isChannel(delete.peer)) return null;
+            if (!isChat(delete.peer)) return null;
             JSONObject body = new JSONObject();
             try { body.put("ids", new JSONArray(delete.id)); }
             catch (JSONException e) { throw new WaysGramApi.ApiException(400, "STORY_INVALID"); }

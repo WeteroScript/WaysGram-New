@@ -63,7 +63,7 @@ class GroupChannelNavigationChecks(unittest.TestCase):
 
     def test_stories_work_for_groups_and_channels(self):
         stories = self.source("tgnet/WaysGramStories.java")
-        self.assertIn("private static boolean isStoryPeer(TLRPC.InputPeer peer) {", stories)
+        self.assertIn("private static boolean isChat(TLRPC.InputPeer peer) {", stories)
         self.assertIn("peer.channel_id > 0;", stories)
         self.assertIn('return "/api/groups/" + peerId + "/stories";', stories)
         self.assertIn('return "/api/channels/" + WaysGramChats.channelServer(peerId) + "/stories";', stories)

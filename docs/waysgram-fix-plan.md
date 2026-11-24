@@ -187,3 +187,15 @@ APK не собирался.
 
 Тесты: `scripts/test_android_chat_rights_flags.py` (6 проверок), статический набор — 247 OK.
 APK не собирался.
+
+## Истории видел только автор (24.11)
+
+| Что | Причина | Как закрыто |
+| --- | --- | --- |
+| Истории канала/группы видны только тому, кто их опубликовал | `stories.getAllStories` (единственный источник колец историй в списке чатов) на клиенте не обслуживался вообще: клиент не знал ни одного пира с историями | сервер: `GET /api/stories/all` — активные истории всех доступных каналов (по `STORY_CHANNEL_ACCESS`) и групп (по членству), просроченные исключены, закреплённые остаются; клиент: `WaysGramStories.all()` собирает `TL_stories_allStories` вместе с чатами (`toChannel`/`toMegagroup`) |
+| В группе истории не работали совсем | `WaysGramStories` считал пиром только канал (`channel_id > CHANNEL_OFFSET`), группы живут ниже смещения — все запросы уходили в `METHOD_NOT_SUPPORTED` | путь строится по типу чата: `/api/groups/<id>/stories` или `/api/channels/<id>/stories`; все обработчики принимают группу |
+| Кольца истории нет в профиле группы | `fullChat` не заполнял `TL_channelFull.stories`/`stories_pinned_available`, и карточка группы не отдавала эти флаги | `get_group` возвращает `stories_active`/`stories_pinned_available`, `fullChat` кладёт их и `WaysGramStories.active(...)` в `full` |
+
+Тесты: `authbot/tests/test_stories_visibility.py` (3 сценария: подписчик канала, участник и
+посторонний в группе, истёкшая история), `scripts/test_android_story_visibility.py` (5).
+APK не собирался.

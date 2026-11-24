@@ -1721,6 +1721,17 @@ public class WaysGramChats {
                 if (e.status != 403 && e.status != 404) org.telegram.messenger.FileLog.e(e);
             }
         }
+        full.stories_pinned_available = group.optBoolean("stories_pinned_available");
+        if (full.stories_pinned_available) full.flags2 |= TLObject.FLAG_5;
+        if (group.optBoolean("stories_active")) {
+            try {
+                full.stories = WaysGramStories.active(account, chatId, selfId);
+                full.flags2 |= TLObject.FLAG_4;
+            } catch (WaysGramApi.ApiException e) {
+                if (e.status == 401) throw e;
+                org.telegram.messenger.FileLog.e(e);
+            }
+        }
         full.chat_photo = WaysGramMapper.photo(group.optString("avatar_media_id", ""));
 
         TLRPC.TL_messages_chatFull out = new TLRPC.TL_messages_chatFull();

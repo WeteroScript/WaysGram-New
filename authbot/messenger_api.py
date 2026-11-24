@@ -11283,6 +11283,39 @@ def build_messenger_router(
                     item["can_delete"] = archive or item["author_id"] == uid
             return result
 
+    @router.get("/api/stories/all")
+    async def list_all_stories(limit: int = Query(default=100, ge=1, le=100),
+                               authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        """Активные истории всех каналов и групп, доступных этому аккаунту.
+
+        ``stories.getAllStories`` — единственный источник колец историй в списке чатов.
+        Пока его не было, клиент не знал ни одного пира с историями, и чужую историю
+        увидеть было нельзя даже в открытом канале.
+        """
+        uid = int((await current_user(authorization))["telegram_id"])
+        now = int(time.time())
+        async with aiosqlite.connect(db_path()) as db:
+            db.row_factory = aiosqlite.Row
+            await db.execute("BEGIN")
+            cur = await db.execute("SELECT c.id FROM channels c WHERE " + STORY_CHANNEL_ACCESS, (uid, uid, uid, uid))
+            channel_ids = [int(row[0]) for row in await cur.fetchall()]
+            cur = await db.execute("""SELECT g.id FROM chat_groups g
+                JOIN group_members gm ON gm.group_id=g.id WHERE gm.telegram_id=?""", (uid,))
+            group_ids = [int(row[0]) for row in await cur.fetchall()]
+            peers: list[dict[str, Any]] = []
+            for scope, table, ids in (("channel", "channel_stories", channel_ids),
+                                      ("group", "group_stories", group_ids)):
+                for chat_id in ids:
+                    cur = await db.execute(
+                        "SELECT " + STORY_COLUMNS + f" FROM {table} s JOIN media_assets m ON m.id=s.media_id"
+                        " WHERE s.channel_id=? AND s.deleted=0 AND (s.expires_at>? OR s.pinned=1)"
+                        " ORDER BY s.id LIMIT 20", (chat_id, now))
+                    stories = [dict(row) for row in await cur.fetchall()]
+                    if stories:
+                        peers.append({"scope": scope, "id": chat_id, "max_read_id": 0, "stories": stories})
+        peers.sort(key=lambda peer: peer["stories"][0]["created_at"], reverse=True)
+        return {"count": len(peers), "peers": peers[:limit]}
+
     @router.post("/api/channels/{channel_id}/stories/delete")
     @router.post("/api/groups/{channel_id}/stories/delete")
     async def delete_channel_stories(channel_id: int, request: Request, payload: dict[str, Any], authorization: str | None = Header(default=None)):
@@ -17251,6 +17284,13 @@ def build_messenger_router(
         result["my_telegram_id"] = uid
         result["requests_pending"] = pending
         result["recent_requesters"] = recent_requesters
+        async with aiosqlite.connect(db_path()) as db:
+            cur = await db.execute("""SELECT COALESCE(MAX(expires_at>?),0),COALESCE(MAX(pinned),0)
+                                       FROM group_stories WHERE channel_id=? AND deleted=0""",
+                                   (int(time.time()), group_id))
+            story_active, story_pinned = await cur.fetchone()
+        result["stories_active"] = bool(story_active)
+        result["stories_pinned_available"] = bool(story_pinned)
         result["members"] = []
         for row in members:
             item = dict(row)
