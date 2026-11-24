@@ -1173,3 +1173,93 @@ class TelegramMTProtoGiftCatalog:
         while len(self._media_cache) > MAX_STICKER_CACHE_ITEMS:
             self._media_cache.popitem(last=False)
         return result
+
+
+# ---------------------------------------------------------------- экспорт реакций
+
+# Слоты `availableReaction`: рисунок и анимации. Анимированные эмодзи Telegram
+# (`application/x-tgsticker`) есть только на серверах Telegram, поэтому их нужно один раз
+# выгрузить из авторизованной сессии и положить в APK.
+REACTION_SLOTS = (
+    "static_icon",
+    "appear_animation",
+    "select_animation",
+    "activate_animation",
+    "effect_animation",
+    "around_animation",
+    "center_icon",
+)
+
+
+def _document_file_name(document: Any) -> str:
+    """Имя файла документа: официальный id Telegram + расширение по типу."""
+    document_id = _int_value(document, "id") or 0
+    mime_type = str(_value(document, "mime_type", "") or "")
+    if mime_type == "application/x-tgsticker":
+        extension = "tgs"
+    elif mime_type == "image/webp":
+        extension = "webp"
+    elif mime_type == "video/webm":
+        extension = "webm"
+    else:
+        extension = "bin"
+    return f"files/{document_id}.{extension}"
+
+
+async def export_reaction_emoji(client: Any, concurrency: int = 4) -> tuple[dict[str, Any], dict[str, bytes]]:
+    """Выгружает официальные документы реакций Telegram.
+
+    Возвращает манифест (`emoji -> документы по слотам`) и словарь `имя файла -> байты`.
+    Один и тот же документ может стоять в нескольких слотах, поэтому файлы дедуплицируются
+    по id. Скачивание идёт пачками, чтобы большой набор не растягивался на минуты.
+    """
+    response = await client(functions.messages.GetAvailableReactionsRequest(hash=0))
+    reactions = _value(response, "reactions") or []
+    manifest: dict[str, Any] = {
+        "exported_at": int(time.time()),
+        "count": len(reactions),
+        "slots": list(REACTION_SLOTS),
+        "reactions": [],
+    }
+    jobs: dict[str, Any] = {}
+    for reaction in reactions:
+        entry: dict[str, Any] = {
+            "emoji": str(_value(reaction, "reaction", "") or ""),
+            "title": str(_value(reaction, "title", "") or ""),
+            "inactive": bool(_value(reaction, "inactive", False)),
+            "documents": {},
+        }
+        for slot in REACTION_SLOTS:
+            document = _value(reaction, slot)
+            if document is None:
+                continue
+            file_name = _document_file_name(document)
+            entry["documents"][slot] = {
+                "id": _int_value(document, "id"),
+                "dc_id": _int_value(document, "dc_id"),
+                "mime_type": str(_value(document, "mime_type", "") or ""),
+                "size": _int_value(document, "size"),
+                "file": file_name,
+            }
+            jobs.setdefault(file_name, document)
+        if entry["documents"]:
+            manifest["reactions"].append(entry)
+
+    files: dict[str, bytes] = {}
+    semaphore = asyncio.Semaphore(max(1, int(concurrency)))
+
+    async def fetch(file_name: str, document: Any) -> None:
+        async with semaphore:
+            payload = await client.download_media(document, file=bytes)
+            if hasattr(payload, "getvalue"):
+                payload = payload.getvalue()
+            if not isinstance(payload, (bytes, bytearray)) or not payload:
+                raise RuntimeError(f"MTProto returned no bytes for {file_name}")
+            if len(payload) > MAX_STICKER_BYTES:
+                raise ValueError(f"Telegram document exceeds the supported size: {file_name}")
+            files[file_name] = bytes(payload)
+
+    await asyncio.gather(*(fetch(name, document) for name, document in jobs.items()))
+    manifest["files"] = len(files)
+    manifest["bytes"] = sum(len(value) for value in files.values())
+    return manifest, files

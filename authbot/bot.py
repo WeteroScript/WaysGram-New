@@ -20,6 +20,7 @@ import httpx
 from aiogram import Bot, Dispatcher, F, Router
 from aiogram.filters import Command, CommandStart
 from aiogram.types import (
+    BufferedInputFile,
     CallbackQuery,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
@@ -36,7 +37,7 @@ from cryptography.fernet import Fernet, InvalidToken
 import gift_upgrades
 from messenger_api import _assign_unique_number, _gift_attribute_rows, _gift_supports_upgrade, _normalise_attribute_name
 from messenger_api import build_messenger_router, init_messenger_storage, sync_telegram_gifts, _telegram_gift_metadata
-from telegram_mtproto import TelegramMTProtoGiftCatalog
+from telegram_mtproto import TelegramMTProtoGiftCatalog, export_reaction_emoji
 
 # All secrets are read only from hosting environment variables.
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
@@ -2416,6 +2417,51 @@ async def admin_create_username_channel(username: str, owner_id: int, *, actor_i
         )
         await db.commit()
     return channel_id
+
+
+@router.message(Command("exportreactions"))
+async def export_reactions_handler(message: Message) -> None:
+    """Одноразовая выгрузка официальных документов реакций Telegram в ZIP.
+
+    Анимированные эмодзи реакций (`application/x-tgsticker`) приходят только с серверов
+    Telegram, поэтому их нельзя достать из публичных репозиториев. Сессия, которая уже
+    подключена для моделей подарков, выгружает набор в архив: его кладут в APK.
+    """
+    if (not message.from_user or not is_private_admin_chat(message)
+            or not await is_authbot_admin(message.from_user.id)):
+        await message.answer("Доступ запрещён.")
+        return
+    client = mtproto_gift_user_client or mtproto_client
+    if client is None:
+        await message.answer(
+            "Нет подключённой MTProto-сессии: задайте TELEGRAM_API_ID, TELEGRAM_API_HASH "
+            "и WAYSGRAM_GIFT_USER_SESSION."
+        )
+        return
+    status = await message.answer("Собираю документы реакций из Telegram…")
+    try:
+        manifest, files = await export_reaction_emoji(client)
+    except Exception as exc:  # noqa: BLE001 - оператору нужен текст ошибки, а не трейс
+        log.warning("reaction emoji export failed", exc_info=True)
+        await status.edit_text(f"Не получилось выгрузить реакции: {type(exc).__name__}: {exc}")
+        return
+    import io
+    import zipfile
+
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("manifest.json", json.dumps(manifest, ensure_ascii=False, indent=1))
+        for name, payload in files.items():
+            archive.writestr(name, payload)
+    archive_bytes = buffer.getvalue()
+    await status.edit_text(
+        f"Готово: {manifest.get('count', 0)} реакций, {manifest.get('files', 0)} файлов, "
+        f"{len(archive_bytes) / 1048576:.1f} МБ."
+    )
+    await message.answer_document(
+        BufferedInputFile(archive_bytes, filename="waysgram_reaction_emoji.zip"),
+        caption="Официальные документы реакций Telegram для APK WaysGram.",
+    )
 
 
 @router.message(Command("admin"))
