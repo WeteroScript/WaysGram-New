@@ -346,3 +346,27 @@ authbot командой `/exportreactions` (см. `docs/reaction-emoji-export.m
 
 Регрессии: `scripts/test_android_chat_list_identity.py` (4), `test_channel_gifts.py`
 (3, включая `worn_gift` в списке чатов).
+
+## 6. Экран приватности «Сообщения»
+
+Экран (`PrivacySettingsActivity`) грузится двумя запросами: `account.getGlobalPrivacySettings`
+и `account.getPrivacy` для каждого ключа, включая `inputPrivacyKeyNoPaidMessages`.
+Не обслуживались ни тот, ни другой:
+
+- `WaysGramProfile.privacySetting()` не знал `TL_inputPrivacyKeyNoPaidMessages` — запрос уходил
+  в заглушку «действие не поддерживается», переключатель «Платные сообщения» ничего не сохранял;
+- `account.getGlobalPrivacySettings` не обрабатывался вовсе, поэтому «Скрывать галочки
+  прочтения», «Хранить архив», «Кнопка подарков» и порог платных сообщений оставались
+  значениями по умолчанию и не сохранялись.
+
+Сделано:
+
+- ключ `paid-messages` в клиенте и на сервере (по умолчанию `everyone`);
+- `GET/PUT /api/me/privacy/global` + таблица `account_global_privacy`(`hide_read_marks`,
+  `keep_archived_unmuted`, `keep_archived_folders`, `archive_and_mute_new_noncontact_peers`,
+  `new_noncontact_peers_require_premium`, `display_gifts_button`, `noncontact_peers_paid_stars`);
+- клиент: `WaysGramProfile.globalPrivacy()` читает и сохраняет настройки,
+  `WaysGramTransport` обслуживает оба запроса.
+
+Тесты: `authbot/tests/test_privacy_messages_screen.py` (2),
+`scripts/test_android_privacy_messages_screen.py` (3).

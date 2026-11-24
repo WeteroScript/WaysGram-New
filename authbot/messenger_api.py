@@ -1546,6 +1546,11 @@ async def init_messenger_storage(database_path: Path) -> None:
             CREATE TABLE IF NOT EXISTS profile_channels (
                 telegram_id INTEGER PRIMARY KEY, channel_id INTEGER NOT NULL
             );
+            -- Глобальные настройки приватности (экран «Приватность → Сообщения»):
+            -- скрытые галочки прочтения, архив, платные сообщения, кнопка подарков.
+            CREATE TABLE IF NOT EXISTS account_global_privacy (
+                telegram_id INTEGER PRIMARY KEY, settings TEXT NOT NULL
+            );
             CREATE TABLE IF NOT EXISTS phone_lookup_limits (
                 telegram_id INTEGER PRIMARY KEY, minute INTEGER NOT NULL, attempts INTEGER NOT NULL
             );
@@ -5794,7 +5799,7 @@ def build_messenger_router(
         else:
             cur = await db.execute("SELECT rules FROM account_profile_privacy WHERE telegram_id=? AND setting=?", (uid, setting))
         row = await cur.fetchone()
-        return json.loads(row[0]) if row else {"mode": {"invites": "everyone", "find-by-phone": "contacts", "avatar": "everyone", "bio": "everyone", "music": "everyone", "voice": "everyone", "forwards": "everyone", "gift-autosave": "everyone", "gifts": "everyone", "calls": "everyone"}.get(setting, "nobody"), "allow": [], "deny": []}
+        return json.loads(row[0]) if row else {"mode": {"invites": "everyone", "find-by-phone": "contacts", "avatar": "everyone", "bio": "everyone", "music": "everyone", "voice": "everyone", "forwards": "everyone", "gift-autosave": "everyone", "gifts": "everyone", "calls": "everyone", "paid-messages": "everyone"}.get(setting, "nobody"), "allow": [], "deny": []}
 
     async def privacy_allows(db: Any, owner: int, viewer: int, setting: str) -> bool:
         if owner == viewer:
@@ -5836,10 +5841,64 @@ def build_messenger_router(
         if not await privacy_allows(db, target, actor, "invites"):
             raise HTTPException(403, "USER_PRIVACY_RESTRICTED")
 
+    GLOBAL_PRIVACY_DEFAULTS: dict[str, Any] = {
+        "archive_and_mute_new_noncontact_peers": False,
+        "keep_archived_unmuted": False,
+        "keep_archived_folders": False,
+        "hide_read_marks": False,
+        "new_noncontact_peers_require_premium": False,
+        "display_gifts_button": True,
+        "noncontact_peers_paid_stars": 0,
+    }
+
+    async def global_privacy_settings(db: Any, uid: int) -> dict[str, Any]:
+        cur = await db.execute("SELECT settings FROM account_global_privacy WHERE telegram_id=?", (uid,))
+        row = await cur.fetchone()
+        settings = dict(GLOBAL_PRIVACY_DEFAULTS)
+        if row:
+            try:
+                stored = json.loads(row[0])
+            except (TypeError, ValueError):
+                stored = {}
+            if isinstance(stored, dict):
+                for key in GLOBAL_PRIVACY_DEFAULTS:
+                    if key in stored:
+                        settings[key] = stored[key]
+        return settings
+
+    @router.get("/api/me/privacy/global")
+    async def get_global_privacy(authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        uid = int((await current_user(authorization))["telegram_id"])
+        async with aiosqlite.connect(db_path()) as db:
+            return await global_privacy_settings(db, uid)
+
+    @router.put("/api/me/privacy/global")
+    async def set_global_privacy(payload: dict[str, Any], authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        uid = int((await current_user(authorization))["telegram_id"])
+        async with aiosqlite.connect(db_path()) as db:
+            settings = await global_privacy_settings(db, uid)
+            for key, default in GLOBAL_PRIVACY_DEFAULTS.items():
+                if key not in payload:
+                    continue
+                value = payload[key]
+                if isinstance(default, bool):
+                    if type(value) is not bool:
+                        raise HTTPException(400, "PRIVACY_RULE_INVALID")
+                else:
+                    if type(value) is not int or not 0 <= value <= 10**6:
+                        raise HTTPException(400, "PRIVACY_RULE_INVALID")
+                settings[key] = value
+            await db.execute(
+                "INSERT INTO account_global_privacy VALUES(?,?) ON CONFLICT(telegram_id) DO UPDATE SET settings=excluded.settings",
+                (uid, json.dumps(settings)),
+            )
+            await db.commit()
+        return settings
+
     @router.get("/api/me/privacy/{setting}")
     async def get_privacy(setting: str, authorization: str | None = Header(default=None)):
         uid = int((await current_user(authorization))["telegram_id"])
-        if setting not in ("invites", "phone", "last-seen", "find-by-phone", "avatar", "bio", "birthday", "music", "voice", "forwards", "gift-autosave", "gifts", "calls", "calls-p2p"):
+        if setting not in ("invites", "phone", "last-seen", "find-by-phone", "avatar", "bio", "birthday", "music", "voice", "forwards", "gift-autosave", "gifts", "calls", "calls-p2p", "paid-messages"):
             raise HTTPException(404, "PRIVACY_KEY_INVALID")
         async with aiosqlite.connect(db_path()) as db:
             return await privacy_rules(db, uid, setting)
@@ -5847,7 +5906,7 @@ def build_messenger_router(
     @router.put("/api/me/privacy/{setting}")
     async def set_privacy(setting: str, payload: dict[str, Any], authorization: str | None = Header(default=None)):
         uid = int((await current_user(authorization))["telegram_id"])
-        if setting not in ("invites", "phone", "last-seen", "find-by-phone", "avatar", "bio", "birthday", "music", "voice", "forwards", "gift-autosave", "gifts", "calls", "calls-p2p"):
+        if setting not in ("invites", "phone", "last-seen", "find-by-phone", "avatar", "bio", "birthday", "music", "voice", "forwards", "gift-autosave", "gifts", "calls", "calls-p2p", "paid-messages"):
             raise HTTPException(404, "PRIVACY_KEY_INVALID")
         mode = payload.get("mode")
         if mode not in ("everyone", "contacts", "nobody"):

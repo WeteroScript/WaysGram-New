@@ -664,6 +664,10 @@ public class WaysGramTransport {
                 return new TLRPC.TL_channels_sendAsPeers();
             }
             return WaysGramChats.sendAsPeers(account, group, selfId);
+        } else if (request instanceof TL_account.getGlobalPrivacySettings) {
+            return WaysGramProfile.globalPrivacy(account, null);
+        } else if (request instanceof TL_account.setGlobalPrivacySettings) {
+            return WaysGramProfile.globalPrivacy(account, ((TL_account.setGlobalPrivacySettings) request).settings);
         } else if (request instanceof TL_account.getPrivacy && WaysGramProfile.privacySetting(((TL_account.getPrivacy) request).key) != null) {
             TL_account.getPrivacy privacy = (TL_account.getPrivacy) request;
             return WaysGramProfile.privacy(account, selfId, WaysGramProfile.privacySetting(privacy.key), null);
