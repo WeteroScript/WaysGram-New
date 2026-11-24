@@ -2065,6 +2065,13 @@ async def init_messenger_storage(database_path: Path) -> None:
             await db.execute(f"ALTER TABLE {db_split.SCHEMA}.chat_groups ADD COLUMN members_hidden INTEGER NOT NULL DEFAULT 0")
         if "forum_enabled" not in chat_group_columns:
             await db.execute(f"ALTER TABLE {db_split.SCHEMA}.chat_groups ADD COLUMN forum_enabled INTEGER NOT NULL DEFAULT 0")
+        # Реакции группы: выключатель, лимит и свой набор эмодзи (у канала те же три колонки).
+        if "reactions_enabled" not in chat_group_columns:
+            await db.execute(f"ALTER TABLE {db_split.SCHEMA}.chat_groups ADD COLUMN reactions_enabled INTEGER NOT NULL DEFAULT 1")
+        if "reactions_limit" not in chat_group_columns:
+            await db.execute(f"ALTER TABLE {db_split.SCHEMA}.chat_groups ADD COLUMN reactions_limit INTEGER NOT NULL DEFAULT 11")
+        if "available_reactions" not in chat_group_columns:
+            await db.execute(f"ALTER TABLE {db_split.SCHEMA}.chat_groups ADD COLUMN available_reactions TEXT NOT NULL DEFAULT '[]'")
         for column, ddl in (("color_id", "INTEGER NOT NULL DEFAULT 0"),
                             ("background_emoji_id", "INTEGER NOT NULL DEFAULT 0"),
                             ("profile_color_id", "INTEGER NOT NULL DEFAULT 0"),
@@ -11167,6 +11174,56 @@ def build_messenger_router(
             await db.commit()
         return {"members_can_post": value}
 
+    @router.put("/api/groups/{group_id}/reactions-settings")
+    async def set_group_reactions_settings(group_id: int, payload: dict[str, Any],
+                                           authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        """Настройки реакций группы: «Реакции» в «Изменить» не должны откатываться.
+
+        Раньше группы хранили только канальную копию настроек, поэтому выключенные реакции
+        снова оказывались включёнными при повторном открытии экрана.
+        """
+        uid = int((await current_user(authorization))["telegram_id"])
+        fields: list[str] = []
+        values: list[Any] = []
+        if "enabled" in payload:
+            enabled = payload["enabled"]
+            if type(enabled) is not bool:
+                raise HTTPException(400, "INVALID_REACTIONS_SETTING")
+            fields.append("reactions_enabled=?")
+            values.append(int(enabled))
+        if "limit" in payload:
+            limit = payload["limit"]
+            if type(limit) is not int or not 1 <= limit <= 11:
+                raise HTTPException(400, "INVALID_REACTIONS_LIMIT")
+            fields.append("reactions_limit=?")
+            values.append(limit)
+        if "reactions" in payload:
+            reactions = payload["reactions"]
+            if (not isinstance(reactions, list) or len(reactions) > 100
+                    or any(not isinstance(item, str) or not item.strip() or len(item) > 32 for item in reactions)):
+                raise HTTPException(400, "INVALID_REACTIONS")
+            fields.append("available_reactions=?")
+            values.append(json.dumps(list(dict.fromkeys(item.strip() for item in reactions)), ensure_ascii=False))
+        if not fields:
+            raise HTTPException(400, "INVALID_REACTIONS_SETTING")
+        async with aiosqlite.connect(db_path()) as db:
+            db.row_factory = aiosqlite.Row
+            await db.execute("BEGIN IMMEDIATE")
+            if not group_has_right(await require_group_member(db, group_id, uid), 1):
+                raise HTTPException(403, "GROUP_CHANGE_INFO_REQUIRED")
+            await db.execute("UPDATE chat_groups SET " + ",".join(fields) + " WHERE id=?", (*values, group_id))
+            await record_event(db, "group", 0, "chat_changed", uid, chat_id=group_id)
+            cur = await db.execute(
+                "SELECT reactions_enabled,reactions_limit,available_reactions FROM chat_groups WHERE id=?",
+                (group_id,))
+            row = await cur.fetchone()
+            await db.commit()
+        try:
+            reactions = json.loads(row[2] or "[]")
+        except (TypeError, ValueError):
+            reactions = []
+        return {"enabled": bool(row[0]), "limit": int(row[1]), "reactions": reactions}
+
     @router.get("/api/channels/{channel_id}/stories/can-post")
     @router.get("/api/groups/{channel_id}/stories/can-post")
     async def channel_story_permission(channel_id: int, request: Request, authorization: str | None = Header(default=None)):
@@ -17291,6 +17348,17 @@ def build_messenger_router(
             story_active, story_pinned = await cur.fetchone()
         result["stories_active"] = bool(story_active)
         result["stories_pinned_available"] = bool(story_pinned)
+        async with aiosqlite.connect(db_path()) as db:
+            cur = await db.execute(
+                "SELECT reactions_enabled,reactions_limit,available_reactions FROM chat_groups WHERE id=?",
+                (group_id,))
+            reactions_row = await cur.fetchone()
+        result["reactions_enabled"] = bool(reactions_row[0]) if reactions_row else True
+        result["reactions_limit"] = int(reactions_row[1]) if reactions_row else 11
+        try:
+            result["available_reactions"] = json.loads((reactions_row[2] if reactions_row else "") or "[]")
+        except (TypeError, ValueError):
+            result["available_reactions"] = []
         result["members"] = []
         for row in members:
             item = dict(row)

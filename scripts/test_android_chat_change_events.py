@@ -57,9 +57,15 @@ class ChatChangeEventChecks(unittest.TestCase):
         self.assertIn('channel', emitted)
 
     def test_events_are_written_before_commit(self):
-        for block in re.findall(r'await record_event\(db, "(?:group|channel)", 0, "chat_changed".*?\n(.*?)\n',
-                                self.server)[:8]:
-            self.assertIn('commit', block)
+        lines = self.server.split('\n')
+        checked = 0
+        for index, line in enumerate(lines):
+            if '"chat_changed"' not in line or 'record_event' not in line:
+                continue
+            window = '\n'.join(lines[index:index + 8])
+            self.assertIn('commit', window, f'событие без commit рядом: {line.strip()}')
+            checked += 1
+        self.assertGreaterEqual(checked, 8)
 
 
 if __name__ == '__main__':

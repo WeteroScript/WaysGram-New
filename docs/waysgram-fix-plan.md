@@ -199,3 +199,15 @@ APK не собирался.
 Тесты: `authbot/tests/test_stories_visibility.py` (3 сценария: подписчик канала, участник и
 посторонний в группе, истёкшая история), `scripts/test_android_story_visibility.py` (5).
 APK не собирался.
+
+## «Реакции» откатывались после переоткрытия настроек (24.11)
+
+| Что | Причина | Как закрыто |
+| --- | --- | --- |
+| В группе переключатель «Реакции» не сохранялся | `WaysGramChats.setAvailableReactions` для группы возвращал пустой `TL_updates` с комментарием «сервер хранит отдельно», а сервер таких настроек не имел вовсе — запрос никуда не уходил | у `chat_groups` появились `reactions_enabled`, `reactions_limit`, `available_reactions`; новый `PUT /api/groups/{id}/reactions-settings` (право «менять информацию», пишет `chat_changed`), запрос клиента уходит туда же |
+| В канале включал/выключал — после переоткрытия снова включено | `fullChannel` строил `TL_chatReactionsSome` из сохранённого набора эмодзи, даже когда `reactions_enabled = false`; набор побеждал выключатель | при `reactions_enabled = false` всегда `TL_chatReactionsNone`, набор остаётся сохранённым на сервере |
+| В группе карточка не отдавала настройки реакций | `GET /api/groups/{id}` возвращал только канальные поля | карточка группы отдаёт `reactions_enabled`, `reactions_limit`, `available_reactions`, а `fullChat` кладёт их в `TL_channelFull` |
+
+Тесты: `authbot/tests/test_group_reactions_settings.py` (3 сценария: группа, канал, запрет
+для не-админа), `scripts/test_android_reaction_settings.py` (5).
+APK не собирался.

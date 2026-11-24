@@ -1467,14 +1467,12 @@ public class WaysGramChats {
 
     /** setChatAvailableReactions: включение, лимит и список эмодзи для канала. */
     public static TLRPC.TL_updates setAvailableReactions(int account, TLRPC.TL_messages_setChatAvailableReactions req, long selfId) throws WaysGramApi.ApiException {
-        if (WaysGramChats.isGroup(req.peer)) {
-            // Набор реакций группы сервер хранит отдельно от канальных настроек; не роняем экран.
-            return new TLRPC.TL_updates();
-        }
         if (!(req.peer instanceof TLRPC.TL_inputPeerChannel)) {
             throw new WaysGramApi.ApiException(400, "METHOD_NOT_SUPPORTED");
         }
-        long channelId = channelServer(((TLRPC.TL_inputPeerChannel) req.peer).channel_id);
+        boolean group = WaysGramChats.isGroup(req.peer);
+        long peerTgId = ((TLRPC.TL_inputPeerChannel) req.peer).channel_id;
+        long channelId = group ? peerTgId : channelServer(peerTgId);
         JSONObject body = new JSONObject();
         try {
             if (req.available_reactions instanceof TLRPC.TL_chatReactionsNone) {
@@ -1497,12 +1495,21 @@ public class WaysGramChats {
             if (TLObject.hasFlag(req.flags, TLObject.FLAG_0)) {
                 body.put("limit", Math.max(1, Math.min(11, req.reactions_limit)));
             }
-            if (TLObject.hasFlag(req.flags, TLObject.FLAG_1)) {
+            if (!group && TLObject.hasFlag(req.flags, TLObject.FLAG_1)) {
                 WaysGramApi.put(account, "/api/channels/" + channelId + "/paid-reactions",
                         new JSONObject().put("enabled", req.paid_enabled));
             }
         } catch (org.json.JSONException e) {
             throw new WaysGramApi.ApiException(400, "REACTIONS_INVALID");
+        }
+        if (group) {
+            // У группы свои настройки реакций: раньше запрос молча «успешно» игнорировался,
+            // поэтому выключенные реакции снова оказывались включёнными после переоткрытия.
+            WaysGramApi.put(account, "/api/groups/" + channelId + "/reactions-settings", body);
+            TLRPC.TL_updates groupUpdates = new TLRPC.TL_updates();
+            groupUpdates.date = (int) (System.currentTimeMillis() / 1000);
+            groupUpdates.chats.add(toMegagroup(account, WaysGramApi.get(account, "/api/groups/" + channelId), selfId));
+            return groupUpdates;
         }
         WaysGramApi.put(account, "/api/channels/" + channelId + "/reactions-settings", body);
         TLRPC.TL_updates updates = new TLRPC.TL_updates();
@@ -1533,8 +1540,12 @@ public class WaysGramChats {
         }
         JSONArray availableReactions = channel.optJSONArray("available_reactions");
         boolean reactionsEnabled = channel.optBoolean("reactions_enabled", true);
-        if (availableReactions == null || availableReactions.length() == 0) {
-            full.available_reactions = reactionsEnabled ? new TLRPC.TL_chatReactionsAll() : new TLRPC.TL_chatReactionsNone();
+        if (!reactionsEnabled) {
+            // Выключенные реакции важнее сохранённого набора эмодзи: раньше набор побеждал,
+            // и переключатель «Реакции» выглядел включённым после переоткрытия настроек.
+            full.available_reactions = new TLRPC.TL_chatReactionsNone();
+        } else if (availableReactions == null || availableReactions.length() == 0) {
+            full.available_reactions = new TLRPC.TL_chatReactionsAll();
         } else {
             TLRPC.TL_chatReactionsSome some = new TLRPC.TL_chatReactionsSome();
             for (int i = 0; i < availableReactions.length(); i++) {
@@ -1673,9 +1684,26 @@ public class WaysGramChats {
             full.admins_count = adminsCount;
             full.flags |= TLObject.FLAG_1;
         }
-        full.available_reactions = new TLRPC.TL_chatReactionsAll();
+        boolean groupReactionsEnabled = group.optBoolean("reactions_enabled", true);
+        JSONArray groupReactions = group.optJSONArray("available_reactions");
+        if (!groupReactionsEnabled) {
+            full.available_reactions = new TLRPC.TL_chatReactionsNone();
+        } else if (groupReactions == null || groupReactions.length() == 0) {
+            full.available_reactions = new TLRPC.TL_chatReactionsAll();
+        } else {
+            TLRPC.TL_chatReactionsSome groupSome = new TLRPC.TL_chatReactionsSome();
+            for (int i = 0; i < groupReactions.length(); i++) {
+                String emoji = groupReactions.optString(i, "").trim();
+                if (emoji.isEmpty()) continue;
+                TLRPC.TL_reactionEmoji reaction = new TLRPC.TL_reactionEmoji();
+                reaction.emoticon = emoji;
+                groupSome.reactions.add(reaction);
+            }
+            full.available_reactions = groupSome.reactions.isEmpty()
+                    ? new TLRPC.TL_chatReactionsAll() : groupSome;
+        }
         full.flags |= TLObject.FLAG_30;
-        full.reactions_limit = 11;
+        full.reactions_limit = group.optInt("reactions_limit", 11);
         full.flags2 |= TLObject.FLAG_13;
         boolean canViewStats = group.optBoolean("can_view_stats", admin);
         full.can_view_stats = canViewStats;
