@@ -1210,7 +1210,7 @@ def test_group_mute_blocks_sending_without_removing_read_access(env):
 
 
 def test_profile_channel_and_invite_privacy(env):
-    _, app = env
+    db_path, app = env
 
     async def scenario():
         async with await client_for(app) as client:
@@ -1221,8 +1221,23 @@ def test_profile_channel_and_invite_privacy(env):
             route = '/api/me/profile-channel'
             assert (await client.put(route, headers=other, json={'channel_id': cid})).status_code == 403
             assert (await client.put(route, headers=owner, json={'channel_id': cid})).status_code == 200
+            # Аватар прикреплённого канала обязан попадать в personal_channel: иначе
+            # во вкладке «Профиль» канал показывается без картинки.
+            from io import BytesIO
+            from PIL import Image
+            buffer = BytesIO()
+            Image.new('RGB', (8, 8), (30, 90, 150)).save(buffer, format='JPEG')
+            uploaded = await client.post(
+                '/api/media/images',
+                headers={**owner, 'Content-Type': 'image/jpeg'},
+                content=buffer.getvalue(),
+            )
+            assert uploaded.status_code == 201
+            avatar = uploaded.json()['id']
+            assert (await client.put(f'/api/channels/{cid}/avatar', headers=owner, json={'media_id': avatar})).status_code == 200
             profile = await client.get('/api/users/101', headers=other)
             assert profile.json()['personal_channel']['id'] == cid
+            assert profile.json()['personal_channel']['avatar_media_id'] == avatar
             assert (await client.put(route, headers=owner, json={'channel_id': 0})).status_code == 200
             assert (await client.get('/api/users/101', headers=other)).json()['personal_channel'] is None
 

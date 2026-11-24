@@ -276,21 +276,45 @@ authbot командой `/exportreactions` (см. `docs/reaction-emoji-export.m
 
 ## 4. Аватар канала в профиле и подарки каналу
 
-### Аватар в профиле (исправлено)
+### Аватар прикреплённого канала (исправлено)
 
-Большой аватар в профиле канала не грузился: `WaysGramMapper.avatarLocation()` пишет
-`volume_id = -photoId` (Telegram так помечает локации файлов), а `WaysGramMedia.register()`
-запоминает файл по **положительному** id. `upload.getFile` приходил с отрицательным id,
-`mediaIdFor()` возвращал `null`, и `ProfileActivity` оставался без картинки.
+Жалоба с устройства: «Канал прикреплённый к профилю, теряет аватарку при заходе во вкладку
+профиль». Причина — серверная: `profile_channel()` собирал карточку канала без
+`avatar_media_id`, поэтому `WaysGramChats.toChannel()` строил `TL_chatPhotoEmpty` и
+прикреплённый канал перерисовывался без картинки. В `SELECT` добавлен
+`c.avatar_media_id`, тест `test_profile_channel_and_invite_privacy` его проверяет.
 
-`WaysGramMedia.mediaIdFor()` теперь при отрицательном id проверяет ещё и `-id`.
-Маленькие аватары (`photo_small`) шли через `inputPeerPhotoFileLocation` и работали, поэтому
-проблема была видна именно на большом аватаре в профиле.
+Заодно исправлен большой аватар: `WaysGramMapper.avatarLocation()` пишет
+`volume_id = -photoId`, а `WaysGramMedia.register()` помнит файл по положительному id,
+поэтому `upload.getFile` для большого фото профиля не находил файл вовсе.
+`WaysGramMedia.mediaIdFor()` теперь проверяет и `-id`
+(регрессия — `scripts/test_android_profile_avatar_ids.py`).
 
-Регрессия: `scripts/test_android_profile_avatar_ids.py` (3 теста).
+### Подарки каналу (сделано, как в Telegram)
 
-### Подарки каналу (открыто)
+Подарок за звёзды отправляется каналу и остаётся у канала: в профиле канала появляется
+раздел подарков и кнопка «Отправить подарок».
 
-Серверная часть знает только личные подарки (`/api/telegram/gifts/...` для пользователей);
-хранения и выдачи подарков канала нет. Нужно решение: повторять ли механику Telegram
-(подарок уходит каналу и виден в его профиле) или скрыть отправку подарка у каналов.
+Сервер:
+
+- таблица `channel_gifts` (канал, подарок, отправитель, анонимность, сообщение, цена, дата);
+- `POST /api/channels/{id}/gifts` — покупка и отправка: списывает Stars, уменьшает сток
+  каталога, отказам 409 «Недостаточно Stars»/«Подарок закончился»; в личный инвентарь
+  (`user_gifts`) ничего не пишется;
+- `GET /api/channels/{id}/gifts` — список подарков канала (приватный канал требует доступа,
+  скрытый отправитель отдаётся как `sender_id = 0`, `hide_name = true`);
+- в карточке канала появились `stargifts_count` и `stargifts_available`.
+- тесты: `authbot/tests/test_channel_gifts.py` (2 сценария: оплата и хранение,
+  приватность/нехватка звёзд).
+
+Клиент:
+
+- `WaysGramGifts.savedGifts()` понимает `inputPeerChannel` и грузит подарки канала вместо
+  личного инвентаря;
+- `WaysGramGifts.sendForm()` для канала отправляет в `/api/channels/{id}/gifts`
+  (ошибка нехватки Stars доходит до интерфейса как `BALANCE_TOO_LOW`);
+- `WaysGramChats.toChannelFull()` прокидывает `stargifts_count` (flags2 `FLAG_18`), поэтому
+  раздел подарков появляется в профиле канала.
+- регрессия: `scripts/test_android_channel_gifts.py` (7 тестов).
+
+Статический набор: **283 OK**. Бэкенд-выборка по подаркам/профилю: 145 passed.

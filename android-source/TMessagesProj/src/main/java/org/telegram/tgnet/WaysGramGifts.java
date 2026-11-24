@@ -422,16 +422,59 @@ public class WaysGramGifts {
         TL_stars.TL_payments_savedStarGifts out = new TL_stars.TL_payments_savedStarGifts();
         boolean mine = req.peer instanceof TLRPC.TL_inputPeerSelf
                 || (req.peer instanceof TLRPC.TL_inputPeerUser && req.peer.user_id == selfId);
-        if (!mine || !TextUtils.isEmpty(req.offset) || req.collection_id != 0) {
+        // Подарки канала лежат не в личном инвентаре, а у самого канала (см. /api/channels/{id}/gifts).
+        boolean channelPeer = req.peer instanceof TLRPC.TL_inputPeerChannel
+                && ((TLRPC.TL_inputPeerChannel) req.peer).channel_id != 0;
+        if ((!mine && !channelPeer) || !TextUtils.isEmpty(req.offset) || req.collection_id != 0) {
             return out;
         }
         loadCatalog(account);
         HashMap<String, JSONObject> telegramByTitle = new HashMap<>();
+        HashMap<String, JSONObject> telegramById = new HashMap<>();
         for (int i = 0; i < catalogCache.length(); i++) {
             JSONObject g = catalogCache.optJSONObject(i);
             if (g != null) {
                 telegramByTitle.put(normalize(g.optString("title")), g);
+                telegramById.put(g.optString("id"), g);
             }
+        }
+        if (channelPeer) {
+            JSONObject json = WaysGramApi.get(account, "/api/channels/"
+                    + ((TLRPC.TL_inputPeerChannel) req.peer).channel_id + "/gifts");
+            JSONArray rows = json.optJSONArray("gifts");
+            if (rows == null) {
+                return out;
+            }
+            for (int i = 0; i < rows.length(); i++) {
+                JSONObject row = rows.optJSONObject(i);
+                if (row == null) {
+                    continue;
+                }
+                JSONObject tg = telegramById.get(row.optString("telegram_gift_id"));
+                if (tg == null) {
+                    tg = telegramByTitle.get(normalize(row.optString("gift_name")));
+                }
+                if (tg == null) {
+                    continue;
+                }
+                File file = ensureSticker(account, tg.optString("id"));
+                if (file == null) {
+                    file = placeholderSticker(parseId(tg.optString("id")));
+                }
+                if (file == null) {
+                    continue;
+                }
+                TL_stars.TL_starGift gift = toStarGift(tg, file);
+                gift.limited = false; // подарок канала не товар магазина: без счётчика остатка
+                TL_stars.TL_savedStarGift saved = new TL_stars.TL_savedStarGift();
+                saved.date = row.optInt("created_at");
+                saved.gift = gift;
+                saved.saved_id = row.optLong("id");
+                saved.flags |= TLObject.FLAG_11;
+                out.gifts.add(saved);
+            }
+            out.count = out.gifts.size();
+            return out;
         }
         JSONObject json = WaysGramApi.get(account, "/api/me/gifts");
         JSONArray owned = json.optJSONArray("gifts");
@@ -574,6 +617,25 @@ public class WaysGramGifts {
         }
         TLRPC.TL_inputInvoiceStarGift invoice = (TLRPC.TL_inputInvoiceStarGift) req.invoice;
         forSale(account, invoice.gift_id);
+        if (invoice.peer instanceof TLRPC.TL_inputPeerChannel) {
+            // Подарок каналу, как в Telegram: он остаётся у канала и виден в его профиле.
+            // Ошибки сервера (мало Stars, подарок закончился) обязаны дойти до интерфейса.
+            try {
+                WaysGramApi.post(account, "/api/channels/"
+                        + ((TLRPC.TL_inputPeerChannel) invoice.peer).channel_id + "/gifts",
+                        channelGiftBody(invoice));
+            } catch (WaysGramApi.ApiException e) {
+                if (e.status == 409 && e.detail != null && e.detail.contains("Stars")) {
+                    throw new WaysGramApi.ApiException(400, "BALANCE_TOO_LOW");
+                }
+                throw e;
+            }
+            invalidate(); // the stock changed
+            TLRPC.TL_payments_paymentResult channelResult = new TLRPC.TL_payments_paymentResult();
+            channelResult.updates = new TLRPC.TL_updates();
+            channelResult.updates.date = (int) (System.currentTimeMillis() / 1000);
+            return channelResult;
+        }
         JSONObject body = new JSONObject();
         try {
             if (invoice.peer instanceof TLRPC.TL_inputPeerUser) {
@@ -598,6 +660,19 @@ public class WaysGramGifts {
         result.updates = new TLRPC.TL_updates();
         result.updates.date = (int) (System.currentTimeMillis() / 1000);
         return result;
+    }
+
+    private static JSONObject channelGiftBody(TLRPC.TL_inputInvoiceStarGift invoice) {
+        JSONObject body = new JSONObject();
+        try {
+            body.put("telegram_gift_id", originalId(invoice.gift_id));
+            body.put("hide_name", invoice.hide_name);
+            if (invoice.message != null && invoice.message.text != null) {
+                body.put("message", invoice.message.text);
+            }
+        } catch (Exception ignore) {
+        }
+        return body;
     }
 
     private static String newKey() {

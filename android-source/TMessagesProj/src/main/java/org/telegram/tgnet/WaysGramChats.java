@@ -1620,6 +1620,8 @@ public class WaysGramChats {
         if (full.paid_media_allowed) full.flags2 |= TLObject.FLAG_14;
         full.stargifts_available = channel.optBoolean("stargifts_available");
         if (full.stargifts_available) full.flags2 |= TLObject.FLAG_19;
+        full.stargifts_count = channel.optInt("stargifts_count");
+        if (full.stargifts_count > 0) full.flags2 |= TLObject.FLAG_18;
         boolean canViewStats = channel.optBoolean("can_view_stats",
                 channel.optLong("owner_telegram_id") == selfId || channel.optBoolean("is_admin"));
         full.can_view_stats = canViewStats;

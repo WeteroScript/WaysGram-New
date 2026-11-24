@@ -1069,6 +1069,20 @@ async def init_messenger_storage(database_path: Path) -> None:
                 channel_id INTEGER NOT NULL, telegram_id INTEGER NOT NULL, created_at INTEGER NOT NULL,
                 PRIMARY KEY(channel_id,telegram_id)
             );
+            -- Подарки, отправленные каналу звёздами (как в Telegram: они лежат у канала,
+            -- а не в инвентаре отправителя, и видны в профиле канала).
+            CREATE TABLE IF NOT EXISTS channel_gifts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                channel_id INTEGER NOT NULL REFERENCES channels(id) ON DELETE CASCADE,
+                telegram_gift_id TEXT NOT NULL,
+                gift_name TEXT NOT NULL DEFAULT '',
+                sender_telegram_id INTEGER NOT NULL,
+                hide_name INTEGER NOT NULL DEFAULT 0,
+                message TEXT NOT NULL DEFAULT '',
+                price_stars INTEGER NOT NULL DEFAULT 0,
+                created_at INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_channel_gifts_channel ON channel_gifts(channel_id,id DESC);
             CREATE TABLE IF NOT EXISTS channel_members (
                 channel_id INTEGER NOT NULL REFERENCES channels(id) ON DELETE CASCADE,
                 telegram_id INTEGER NOT NULL,
@@ -5715,7 +5729,10 @@ def build_messenger_router(
         return {"worn_gift": status}
 
     async def profile_channel(db: Any, uid: int, viewer: int) -> dict[str, Any] | None:
-        cur = await db.execute("""SELECT c.id,c.title,c.username,c.owner_telegram_id,c.is_public
+        # avatar_media_id обязателен: WaysGramChats.toChannel() строит по нему TL_chatPhoto,
+        # без него прикреплённый канал показывался во вкладке «Профиль» без аватарки.
+        cur = await db.execute("""SELECT c.id,c.title,c.username,c.owner_telegram_id,c.is_public,
+            c.avatar_media_id
             FROM profile_channels p JOIN channels c ON c.id=p.channel_id
             WHERE p.telegram_id=? AND c.owner_telegram_id=? AND c.is_public=1 AND NOT EXISTS (
                 SELECT 1 FROM channel_bans b WHERE b.channel_id=c.id AND b.telegram_id=?
@@ -9807,6 +9824,11 @@ def build_messenger_router(
         # «Direct Messages» в карточке канала: платные сообщения от подписчиков.
         channel["paid_messages_enabled"] = bool(channel.get("paid_messages_enabled") or 0)
         channel["send_paid_messages_stars"] = int(channel.get("paid_messages_stars") or 0)
+        # Подарки канала: сколько уже получено и можно ли отправлять новые.
+        async with aiosqlite.connect(db_path()) as db:
+            cur = await db.execute("SELECT COUNT(*) FROM channel_gifts WHERE channel_id=?", (channel_id,))
+            channel["stargifts_count"] = int((await cur.fetchone())[0])
+        channel["stargifts_available"] = True
         channel["labels"] = await entity_labels("channel", channel_id)
         channel["location"] = chat_location_payload(channel)
         channel["can_set_location"] = channel.get("owner_telegram_id") == int(user["telegram_id"]) \
@@ -9815,6 +9837,127 @@ def build_messenger_router(
         channel["can_post"] = channel.get("owner_telegram_id") == int(user["telegram_id"]) \
             or (int(channel.get("admin_rights") or 0) & 1) == 1
         return channel
+
+    @router.get("/api/channels/{channel_id}/gifts")
+    async def channel_gifts(
+        channel_id: int,
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        """Подарки, полученные каналом (профиль канала, раздел «Подарки»)."""
+        user = await current_user(authorization)
+        await require_channel_access(channel_id, int(user["telegram_id"]))
+        async with aiosqlite.connect(db_path()) as db:
+            db.row_factory = aiosqlite.Row
+            cur = await db.execute(
+                """SELECT g.id,g.telegram_gift_id,g.gift_name,g.sender_telegram_id,g.hide_name,
+                          g.message,g.price_stars,g.created_at,a.display_name AS sender_name
+                   FROM channel_gifts g LEFT JOIN accounts a ON a.telegram_id=g.sender_telegram_id
+                   WHERE g.channel_id=? ORDER BY g.id DESC LIMIT 100""",
+                (channel_id,),
+            )
+            rows = await cur.fetchall()
+        gifts = []
+        for row in rows:
+            hidden = bool(int(row["hide_name"] or 0))
+            gifts.append({
+                "id": int(row["id"]),
+                "telegram_gift_id": str(row["telegram_gift_id"]),
+                "gift_name": str(row["gift_name"] or ""),
+                "sender_id": 0 if hidden else int(row["sender_telegram_id"]),
+                "sender_name": "" if hidden else str(row["sender_name"] or ""),
+                "message": str(row["message"] or ""),
+                "price_stars": int(row["price_stars"] or 0),
+                "created_at": int(row["created_at"]),
+                "hide_name": hidden,
+            })
+        return {"channel_id": channel_id, "count": len(gifts), "gifts": gifts}
+
+    @router.post("/api/channels/{channel_id}/gifts", status_code=201)
+    async def send_channel_gift(
+        channel_id: int,
+        payload: dict[str, Any],
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        """Отправить каналу подарок за звёзды — как в Telegram, подарок остаётся у канала."""
+        user = await current_user(authorization)
+        uid = int(user["telegram_id"])
+        gift_id = str(payload.get("telegram_gift_id") or "").strip()
+        if not re.fullmatch(r"[A-Za-z0-9_-]{1,120}", gift_id):
+            raise HTTPException(status_code=400, detail="Некорректный Telegram Gift ID")
+        raw_message = payload.get("message", "")
+        if not isinstance(raw_message, str):
+            raise HTTPException(status_code=400, detail="Некорректное сообщение к подарку")
+        caption = _message_body(raw_message.strip()) if raw_message.strip() else ""
+        hide_name = payload.get("hide_name", False)
+        if not isinstance(hide_name, bool):
+            raise HTTPException(status_code=400, detail="Некорректная настройка анонимности")
+        await require_channel_access(channel_id, uid)
+        await ensure_telegram_gifts_fresh()
+        now = int(time.time())
+        async with aiosqlite.connect(db_path()) as db:
+            db.row_factory = aiosqlite.Row
+            await db.execute("BEGIN IMMEDIATE")
+            cur = await db.execute(
+                "SELECT price_stars,supply,sold FROM telegram_gift_prices WHERE gift_id=?", (gift_id,)
+            )
+            priced = await cur.fetchone()
+            if not priced or int(priced["price_stars"]) <= 0 or int(priced["supply"]) - int(priced["sold"]) <= 0:
+                await db.rollback()
+                raise HTTPException(status_code=409, detail="Подарок недоступен для покупки")
+            title = await telegram_gift_title(db, gift_id)
+            if not title:
+                await db.rollback()
+                raise HTTPException(status_code=409, detail="Подарок не найден в каталоге WaysGram")
+            price = int(priced["price_stars"])
+            cur = await db.execute("SELECT stars,is_banned FROM accounts WHERE telegram_id=?", (uid,))
+            account = await cur.fetchone()
+            if not account or account["is_banned"]:
+                await db.rollback()
+                raise HTTPException(status_code=403, detail="Аккаунт недоступен")
+            cur = await db.execute(
+                "UPDATE accounts SET stars=stars-?,updated_at=? WHERE telegram_id=? AND stars>=?",
+                (price, now, uid, price),
+            )
+            if cur.rowcount != 1:
+                await db.rollback()
+                raise HTTPException(status_code=409, detail="Недостаточно Stars")
+            cur = await db.execute(
+                "UPDATE telegram_gift_prices SET sold=sold+1 WHERE gift_id=? AND sold<supply", (gift_id,)
+            )
+            if cur.rowcount != 1:
+                await db.rollback()
+                raise HTTPException(status_code=409, detail="Подарок закончился")
+            cur = await db.execute(
+                """INSERT INTO channel_gifts
+                   (channel_id,telegram_gift_id,gift_name,sender_telegram_id,hide_name,message,price_stars,created_at)
+                   VALUES(?,?,?,?,?,?,?,?)""",
+                (channel_id, gift_id, title, uid, 1 if hide_name else 0, caption, price, now),
+            )
+            gift_row_id = int(cur.lastrowid)
+            balance = int(account["stars"]) - price
+            await db.execute(
+                """INSERT INTO economy_transactions(telegram_id,asset,amount,balance_after,reason,admin_id,created_at)
+                   VALUES(?,'stars',?,?,?,NULL,?)""",
+                (uid, -price, balance, f"channel_gift:{channel_id}:{gift_id}", now),
+            )
+            await record_event(db, "channel", 0, "chat_changed", uid, chat_id=channel_id)
+            await db.commit()
+        return {
+            "status": "sent",
+            "gift": {
+                "id": gift_row_id,
+                "channel_id": channel_id,
+                "telegram_gift_id": gift_id,
+                "gift_name": title,
+                "sender_id": 0 if hide_name else uid,
+                "message": caption,
+                "price_stars": price,
+                "created_at": now,
+                "hide_name": hide_name,
+            },
+            "price_stars": price,
+            "stars": balance,
+        }
 
     @router.put("/api/channels/{channel_id}/location")
     @router.delete("/api/channels/{channel_id}/location")
