@@ -1,0 +1,64 @@
+name: Publish APK
+# Publishes an APK already built by the "Build Android APK" workflow as a
+# resumable release asset. Useful from the sandbox, which can trigger GitHub
+# Actions but cannot reach the Actions artifact blob storage directly.
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: "Successful Build Android APK run id"
+        required: true
+        default: "45304814549"
+      artifact_name:
+        description: "APK artifact name from that run"
+        required: true
+        default: "WaysGram-New-APK-319"
+      tag:
+        description: "Release tag to create or replace"
+        required: true
+        default: "apk-waysgram-bc5abc5d"
+
+permissions:
+  contents: write
+  actions: read
+
+jobs:
+  publish:
+    name: Publish APK from build
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Download built APK artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ inputs.artifact_name }}
+          run-id: ${{ inputs.run_id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          path: /tmp/waysgram-apk
+
+      - name: Publish release asset
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          test -s /tmp/waysgram-apk/app.apk
+          cp /tmp/waysgram-apk/app.apk WaysGram.apk
+          sha256sum WaysGram.apk > WaysGram.apk.sha256
+          SHA="$(cut -d' ' -f1 WaysGram.apk.sha256)"
+          SIZE="$(stat -c '%s' WaysGram.apk)"
+          gh release delete "$TAG" --repo "$GITHUB_REPOSITORY" --yes --cleanup-tag || true
+          gh release create "$TAG" WaysGram.apk WaysGram.apk.sha256 \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "WaysGram APK — build $TAG" \
+            --prerelease \
+            --notes "APK from successful build: https://github.com/$GITHUB_REPOSITORY/actions/runs/${{ inputs.run_id }}
+
+          Size: $SIZE bytes
+          SHA-256: $SHA
+
+          Download: https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG/WaysGram.apk
+
+          The release asset supports resuming. Check the size and \`sha256sum WaysGram.apk\` after downloading."
