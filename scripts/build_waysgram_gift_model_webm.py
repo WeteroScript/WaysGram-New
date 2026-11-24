@@ -131,19 +131,109 @@ def subset_shapes(data: dict[str, Any], *, keep: set[int] | None = None,
     return result
 
 
-def _no_wordmark_note() -> None:
-    """Надпись «WaysGram» больше не рисуется поверх модели.
+def heart_transform(data: dict[str, Any], frame: int, offset: int) -> tuple[float, float, float, float]:
+    """Where the wordmark has to sit: heart anchor in screen space + its rotation."""
+    layers = {layer["ind"]: layer for layer in data["layers"]}
+    heart = next(layer for layer in data["layers"] if layer.get("nm") == "heart")
+    body = layers[heart["parent"]]
 
-    Раньше она накладывалась в экранных координатах по пересчёту трансформов сердца:
-    на устройстве буквы уезжали с сердца, не двигались вместе с ним и попадали под
-    руку. Название модели и так выводится в карточке подарка («Model: WaysGram»),
-    поэтому арт остаётся чистым.
+    body_rotation = value_at(body["ks"]["r"], frame + offset)
+    body_position = value_at(body["ks"]["p"], frame + offset)
+    body_scale = value_at(body["ks"]["s"], frame + offset)
+    heart_rotation = value_at(heart["ks"]["r"], frame + offset)
+    heart_position = value_at(heart["ks"]["p"], frame + offset)
+    body_anchor = body["ks"]["a"]["k"][:2]
+    if isinstance(body_rotation, list):
+        body_rotation = body_rotation[0]
+    if isinstance(heart_rotation, list):
+        heart_rotation = heart_rotation[0]
+
+    sx, sy = body_scale[0] / 100.0, body_scale[1] / 100.0
+    x = (heart_position[0] - body_anchor[0]) * sx
+    y = (heart_position[1] - body_anchor[1]) * sy
+    angle = math.radians(body_rotation)
+    cx = body_position[0] + x * math.cos(angle) - y * math.sin(angle)
+    cy = body_position[1] + x * math.sin(angle) + y * math.cos(angle)
+    return cx, cy, body_rotation + heart_rotation, (sx + sy) / 2.0
+
+
+def wordmark() -> "Any":
+    """Надпись «WaysGram» для сердца.
+
+    Рисуется отдельным слоем и накладывается на сердце уже после того, как сердце
+    нарисовано поверх рук: так надпись никогда не уезжает под руку.
     """
+    from PIL import Image, ImageDraw, ImageFont
+
+    try:
+        font = ImageFont.truetype("DejaVuSans-Bold.ttf", 46)
+    except OSError:
+        font = ImageFont.load_default()
+
+    image = Image.new("RGBA", (520, 150), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(image)
+    x, y = 10, 34
+    draw.text((x + 5, y + 5), "WaysGram", font=font, fill=(38, 38, 42, 255),
+              stroke_width=6, stroke_fill=(38, 38, 42, 255))
+    draw.text((x, y), "WaysGram", font=font, fill=(252, 252, 252, 255),
+              stroke_width=5, stroke_fill=(48, 48, 52, 255))
+    bbox = image.getbbox()
+    if bbox:
+        image = image.crop(bbox)
+    shear = 0.16
+    sheared = Image.new("RGBA", (image.width + round(image.height * shear), image.height), (0, 0, 0, 0))
+    sheared.paste(image, (0, 0), image)
+    return sheared.transform(sheared.size, Image.AFFINE, (1, shear, 0, 0, 1, 0),
+                             resample=Image.BICUBIC)
+
+
+def bezier(progress: float, x1: float, y1: float, x2: float, y2: float) -> float:
+    low, high = 0.0, 1.0
+    for _ in range(24):
+        mid = (low + high) / 2.0
+        x = 3 * (1 - mid) ** 2 * mid * x1 + 3 * (1 - mid) * mid * mid * x2 + mid ** 3
+        if x < progress:
+            low = mid
+        else:
+            high = mid
+    mid = (low + high) / 2.0
+    return 3 * (1 - mid) ** 2 * mid * y1 + 3 * (1 - mid) * mid * mid * y2 + mid ** 3
+
+
+def value_at(prop: dict[str, Any], frame: float) -> Any:
+    """Lottie keyframe value at ``frame`` (with the file's original easing)."""
+    keys = prop.get("k")
+    if prop.get("a") == 0 or not isinstance(keys, list) or not keys or not isinstance(keys[0], dict):
+        return keys
+    if "t" not in keys[0]:
+        return keys
+    for start, end in zip(keys, keys[1:]):
+        if start["t"] <= frame <= end["t"]:
+            u = (frame - start["t"]) / max(1e-9, end["t"] - start["t"])
+            out, inc = start.get("o", {}), start.get("i", {})
+            ox, oy = out.get("x", 0.333), out.get("y", 0.0)
+            ix, iy = inc.get("x", 0.667), inc.get("y", 1.0)
+            if isinstance(ox, list):
+                ox = ox[0]
+            if isinstance(oy, list):
+                oy = oy[0]
+            if isinstance(ix, list):
+                ix = ix[0]
+            if isinstance(iy, list):
+                iy = iy[0]
+            progress = bezier(u, float(ox), float(oy), float(ix), float(iy))
+            a, b = start.get("s", end.get("s")), end.get("s", start.get("s"))
+            if isinstance(a, list) and isinstance(b, list):
+                return [a[i] + (b[i] - a[i]) * progress for i in range(min(len(a), len(b)))]
+            if isinstance(a, (int, float)) and isinstance(b, (int, float)):
+                return a + (b - a) * progress
+            return a
+    return keys[-1].get("s", keys[-1])
 
 
 def render_frames(data: dict[str, Any], tgs: pathlib.Path, folder: pathlib.Path,
                   *, want_preview: pathlib.Path | None = None) -> tuple[int, int]:
-    from PIL import Image, ImageFilter
+    from PIL import Image, ImageChops, ImageFilter
     from rlottie_python import LottieAnimation
 
     base_tgs = folder / "plush_pepe_base.tgs"
@@ -166,11 +256,13 @@ def render_frames(data: dict[str, Any], tgs: pathlib.Path, folder: pathlib.Path,
     if hands_animation.lottie_animation_get_totalframe() != count:
         raise SystemExit("hand and body animations have different lengths")
     offset = int(data.get("ip", 0))
+    logo = wordmark()
 
     for index in range(count):
         body = animation.render_pillow_frame(index).convert("RGBA")
         hands = hands_animation.render_pillow_frame(index).convert("RGBA")
         heart = heart_animation.render_pillow_frame(index).convert("RGBA")
+        _, _, rotation, _ = heart_transform(data, index, offset)
         # The contour follows the complete silhouette, including the hands.
         solid = Image.alpha_composite(Image.alpha_composite(body, hands), heart).getchannel("A").point(
             lambda value: 255 if value > 18 else 0)
@@ -183,6 +275,27 @@ def render_frames(data: dict[str, Any], tgs: pathlib.Path, folder: pathlib.Path,
         # иначе правая рука перекрывает его середину (это и было на устройстве).
         frame = Image.alpha_composite(frame, hands)
         frame = Image.alpha_composite(frame, heart)
+
+        # Надпись «WaysGram» — на сердце. Положение и размер считаются по пикселям
+        # сердца в этом кадре, наклон — по повороту сердца, поэтому надпись двигается
+        # вместе с ним и всегда лежит на нём, а не на руке или на теле.
+        heart_alpha = heart.getchannel("A")
+        box = heart_alpha.getbbox()
+        if box:
+            box_w, box_h = box[2] - box[0], box[3] - box[1]
+            scale_factor = min(box_w * 0.80 / logo.width, box_h * 0.40 / logo.height)
+            text = logo.resize((max(1, round(logo.width * scale_factor)),
+                                max(1, round(logo.height * scale_factor))), Image.LANCZOS)
+            text = text.rotate(rotation, resample=Image.BICUBIC, expand=True)
+            centre_x = (box[0] + box[2]) / 2
+            centre_y = box[1] + box_h * 0.40
+            layer = Image.new("RGBA", frame.size, (0, 0, 0, 0))
+            layer.paste(text, (round(centre_x - text.width / 2),
+                               round(centre_y - text.height / 2)), text)
+            # Обрезаем строго по сердцу: буквы не должны вылезать на тело.
+            layer.putalpha(ImageChops.multiply(layer.getchannel("A"),
+                                               heart_alpha.point(lambda v: 255 if v > 8 else 0)))
+            frame = Image.alpha_composite(frame, layer)
 
         frame.save(folder / f"frame_{index:04d}.png", optimize=False)
         if want_preview is not None and index == 0:

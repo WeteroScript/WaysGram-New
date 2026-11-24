@@ -99,15 +99,22 @@ class WaysGramModelAnimationTests(unittest.TestCase):
         for invented in ("glow", "sparkle", "drift"):
             self.assertNotIn(invented, source)
 
-    def test_heart_is_rendered_over_the_hands_and_has_no_wordmark(self) -> None:
-        """С устройства: правая рука закрывала сердце, а надпись «WaysGram» уезжала с него."""
+    def test_wordmark_sits_on_the_heart_drawn_over_the_hands(self) -> None:
+        """С устройства: рука закрывала сердце, а надпись «WaysGram» уезжала с него."""
         renderer = (ROOT / "scripts" / "build_waysgram_gift_model_webm.py").read_text(encoding="utf-8")
         self.assertIn("HAND_INDICES = {1, 2, 15}", renderer)
         self.assertIn("heart_animation = LottieAnimation.from_tgs", renderer)
         self.assertLess(renderer.index("frame = Image.alpha_composite(frame, hands)"),
                         renderer.index("frame = Image.alpha_composite(frame, heart)"),
                         "сердце должно рисоваться поверх рук")
-        self.assertNotIn("draw.text(", renderer, "надпись на арте убрана: она не совпадала с сердцем")
+        # Надпись обязана быть на сердце: её место считается по пикселям сердца,
+        # наклон — по повороту сердца, и она рисуется после самого сердца.
+        self.assertIn("logo = wordmark()", renderer)
+        self.assertIn("box = heart_alpha.getbbox()", renderer)
+        self.assertIn("_, _, rotation, _ = heart_transform(data, index, offset)", renderer)
+        self.assertLess(renderer.index("frame = Image.alpha_composite(frame, heart)"),
+                        renderer.index("frame = Image.alpha_composite(frame, layer)"),
+                        "надпись должна накладываться поверх сердца")
         # Timer is inherited from the original TGS: no invented speed-up or drift.
         self.assertIn("fps = int(round(animation.lottie_animation_get_framerate()))", renderer)
         self.assertIn("count = int(animation.lottie_animation_get_totalframe())", renderer)
