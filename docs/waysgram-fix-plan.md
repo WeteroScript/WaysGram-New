@@ -389,3 +389,15 @@ sha256 `126ab22880a62d6a16bba921807c58abdc6cbd533d2c81552ca912e4b30df230`,
 копия в APK (`res/raw/waysgram_model.webm`) обновлена. Тест
 `test_waysgram_model_animation.py` закрепляет порядок слоёв (надпись под кистями) и
 середину сердца.
+
+## 8. Сборка APK 326 → 327
+
+- **326** (run 45520370437, коммит `df4dcdb`) — упала на шаге «Compile WaysGram Java sources»:
+  `WaysGramExtras.java:245: error: cannot find symbol`. `messages.setChatWallPaper` держит
+  градиент/узор в собственном `settings`, а `wallpaper` — это `InputWallPaper`, у которого
+  поля `settings` нет. Исправлено на `req.settings`, добавлен регресс-тест
+  `test_settings_come_from_the_request_not_from_the_input_wallpaper`.
+- **327** (run 45524127137, коммит `29b9b51`) — успешно. APK 118 925 393 байт,
+  sha256 `674566372ee729917c83427522e99389f6ce239bdcde2009f57d4ca63dd36e13`,
+  релиз `apk-waysgram-327` (+ части по 24 МБ и `.sha256`). Сборка сама скачала
+  опубликованный файл обратно и сверила байты и CRC.
