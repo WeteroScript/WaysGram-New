@@ -679,3 +679,37 @@ Lottie нет, поэтому ни одна модель пула не попа�
   показывает стоковое `AlertsCreator.showPayForMessageAlert`.
 
 Проверки: `scripts/test_android_paid_messages.py` (11).
+
+### Сборка 335: экран «Сообщения» — штатный Telegram
+
+**Запрос.** После Privacy and Security → «Messages» нужен оригинальный экран Telegram:
+«Кто может отправлять мне сообщения?» → «Все» / «Контакты и Premium-подписчики» /
+«Сообщения за звёзды», описание, «Стоимость одного сообщения» со слайдером и подпись про 85%.
+
+**Что было.** У WaysGram на этом экране жил свой путь: `checkPrivacy()` не читал ни
+приватность, ни глобальные настройки, а `applyCurrentPrivacySettings()` писал цену в
+`/api/me/message-fee`. Из-за этого штатные строки (список «кто может писать», описание,
+слайдер) вообще не строились.
+
+**Правка.**
+- `PrivacyControlActivity`: WaysGram-ветки для `PRIVACY_RULES_TYPE_MESSAGES` удалены — и при
+  открытии, и при сохранении работает штатный код Telegram: `inputPrivacyKeyNoPaidMessages`
+  + `setGlobalPrivacySettings` (`noncontact_peers_paid_stars`), строки `priceHeaderRow`,
+  `priceRow`, `priceInfoRow`, `detailRow2`. Удалены ставшие мёртвыми
+  `applyWaysGramMessagesSettings`, `loadWaysGramMessagesFee`, `applyWaysGramFeeValues`.
+- `PrivacySettingsActivity`: подпись строки «Messages» — цена из глобальных настроек
+  (`noncontact_peers_paid_stars`), иначе «Контакты и Premium-подписчики» / «Все».
+- `WaysGramPaidDm`: убраны кэш цены и `loadFee`/`saveFee` — цену теперь пишет штатный экран.
+  Осталось то, что нужно при отправке: `peerFeeStars`/`loadPeerFee` (цена в шапке чата) и
+  `confirm` (стоковое подтверждение).
+- Сервер: `noncontact_peers_paid_stars` и `dm_message_fees.stars` — одна запись
+  (`sync_paid_stars`), allow-список ключа `paid-messages` и `exempt_users` синхронизированы в
+  обе стороны. Раньше цена со слайдера ни на что не влияла, а исключения жили отдельно.
+
+**Отличие от скриншота.** На скриншоте аккаунт без Premium, поэтому строка «Сообщения за
+звёзды» с замком, а вместо слайдера кнопка «Доступно с Telegram Premium». В WaysGram Premium
+есть у каждого аккаунта (`WaysGramMapper`), поэтому у нас та же разметка, но слайдер сразу
+доступен. Максимум слайдера — 10 000 ⭐ (предел сервера WaysGram), у Telegram в конфиге 35 000.
+
+Проверки: `scripts/test_android_paid_messages.py` (12), `scripts/` (341),
+`authbot/tests/test_privacy_messages_screen.py` (4), `authbot/tests/` (491).

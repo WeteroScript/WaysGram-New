@@ -73,22 +73,23 @@ class P0RegressionChecks(unittest.TestCase):
 
     def test_messages_privacy_opens_stock_rules(self):
         control = self.source("ui/PrivacyControlActivity.java")
-        # Saving still has a working WaysGram fee path, but it is reached only from
-        # an explicit choice on the screen, not from opening it.
+        # Экран «Сообщения» — штатный Telegram: никакого своего пути цены,
+        # ни при открытии, ни при сохранении.
         start = control.index("    private void applyCurrentPrivacySettings() {")
         end = control.index("    private void ", start + 10)
         block = control[start:end]
-        self.assertIn("applyWaysGramMessagesSettings()", block)
+        self.assertNotIn("applyWaysGramMessagesSettings", block)
+        # Подарки по-прежнему идут своим путём.
+        self.assertIn("applyWaysGramGiftsSettings()", block)
+        self.assertIn("TL_inputPrivacyKeyNoPaidMessages", control)
+        self.assertIn("starsPaidMessageAmountMax", control)
         start = control.index("    private void checkPrivacy() {")
-        branch = control.index(
-            "        if (rulesType == PRIVACY_RULES_TYPE_MESSAGES && org.telegram.tgnet.WaysGramTransport.ENABLED) {", start)
-        end = control.index("            return;\n        }", branch) + len("            return;\n        }")
-        block = control[branch:end]
-        self.assertIn("initialRulesType = currentType = TYPE_EVERYBODY;", block)
-        self.assertNotIn("TYPE_PAY", block)
+        block = control[start:control.index("    private void ", start + 10)]
+        self.assertIn("PRIVACY_RULES_TYPE_MESSAGES", block)
+        self.assertIn("noncontact_peers_paid_stars", block)
         self.assertNotIn("applyWaysGramFeeValues", block)
-        self.assertNotIn("WaysGramPaidDm.loadFee", block)
-        # The paid option remains an explicit user choice on this screen.
+        self.assertNotIn("WaysGramPaidDm", block)
+        # Платные сообщения остаются явным выбором на этом экране.
         self.assertIn("TYPE_PAY", control)
 
     # ------------------------------------------------------------------ B

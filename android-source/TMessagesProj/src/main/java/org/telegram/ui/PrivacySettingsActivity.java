@@ -1263,20 +1263,11 @@ public class PrivacySettingsActivity extends BaseFragment implements Notificatio
         return "unknown";
     }
 
-    private void loadWaysGramFee() {
-        WaysGramPaidDm.loadFee(currentAccount, (stars, users) -> {
-            if (listAdapter != null) {
-                listAdapter.notifyDataSetChanged();
-            }
-        });
-    }
-
     @Override
     public void onResume() {
         super.onResume();
         if (WaysGramTransport.ENABLED) {
             loadWaysGramInactivity(false);
-            loadWaysGramFee();
         }
         if (listAdapter != null) {
             listAdapter.notifyDataSetChanged();
@@ -1457,19 +1448,15 @@ public class PrivacySettingsActivity extends BaseFragment implements Notificatio
                         ImageView imageView = textCell.getValueImageView();
                         imageView.setColorFilter(new PorterDuffColorFilter(Theme.getColor(Theme.key_windowBackgroundWhiteGrayIcon), PorterDuff.Mode.MULTIPLY));
                     } else if (position == noncontactsRow) {
-                        if (WaysGramTransport.ENABLED) {
-                            // Подпись строки — цена, которую увидит новый собеседник, или
-                            // «Everybody», если платные сообщения выключены.
-                            final int feeStars = WaysGramPaidDm.hasCachedFee(currentAccount) ? WaysGramPaidDm.cachedFeeStars(currentAccount) : 0;
-                            value = feeStars > 0
-                                    ? "⭐" + AndroidUtilities.formatWholeNumber(feeStars, 0)
-                                    : getString(R.string.P2PEverybody);
-                            textCell.setTextAndValue(getString(R.string.PrivacyMessages), value, musicRow != -1);
-                        } else {
-                            value = getString(feeValue ? R.string.ContactsAndFee : noncontactsValue ? R.string.ContactsAndPremium : R.string.P2PEverybody);
-
-                            textCell.setTextAndValue(getMessagesController().newNoncontactPeersRequirePremiumWithoutOwnpremium && !getMessagesController().starsPaidMessagesAvailable ? getString(R.string.PrivacyMessages) : addPremiumStar(getString(R.string.PrivacyMessages)), value, musicRow != -1);
-                        }
+                        // Цена платных сообщений лежит в глобальных настройках приватности
+                        // (noncontact_peers_paid_stars), как в штатном Telegram.
+                        TLRPC.GlobalPrivacySettings paidSettings = getContactsController().getGlobalPrivacySettings();
+                        final int feeStars = paidSettings != null && (paidSettings.flags & 32) != 0
+                                ? (int) Math.max(0, paidSettings.noncontact_peers_paid_stars) : 0;
+                        value = feeStars > 0
+                                ? "⭐" + AndroidUtilities.formatWholeNumber(feeStars, 0)
+                                : getString(noncontactsValue ? R.string.ContactsAndPremium : R.string.P2PEverybody);
+                        textCell.setTextAndValue(getMessagesController().newNoncontactPeersRequirePremiumWithoutOwnpremium && !getMessagesController().starsPaidMessagesAvailable ? getString(R.string.PrivacyMessages) : addPremiumStar(getString(R.string.PrivacyMessages)), value, musicRow != -1);
                     } else if (position == passportRow) {
                         textCell.setText(getString("TelegramPassport", R.string.TelegramPassport), true);
                     } else if (position == deleteAccountRow) {

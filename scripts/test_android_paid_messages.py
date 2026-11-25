@@ -88,15 +88,12 @@ class PaidMessagesChecks(unittest.TestCase):
             self.assertIn(name, self.strings(), name)
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class PrivacyMessagesRowChecks(unittest.TestCase):
     """Скриншот «Privacy and Security»: строка «Messages» открывала свой диалог
     «Платные личные сообщения» (10000 / Cancel / Save) и подписывалась его
-    заголовком, а не ценой. Из-за этого не было видно ни штатного выбора «кто
-    может писать», ни сохранённой цены, и правка не проверялась глазом.
+    заголовком. Нужен штатный экран Telegram: «Кто может отправлять мне
+    сообщения?» → Все / Контакты и Premium-подписчики / Сообщения за звёзды,
+    слайдер «Стоимость одного сообщения» и подпись 85%.
     """
 
     @classmethod
@@ -125,49 +122,59 @@ class PrivacyMessagesRowChecks(unittest.TestCase):
 
     def test_row_opens_the_standard_messages_screen(self):
         branch = self.row_branch("presentFragment")
-        self.assertNotIn("WaysGramPaidDm.settings", branch)
+        self.assertNotIn("WaysGramPaidDm", branch)
         self.assertIn("new PrivacyControlActivity(ContactsController.PRIVACY_RULES_TYPE_MESSAGES)", branch)
 
     def test_row_value_is_the_saved_price(self):
         branch = self.row_branch("setTextAndValue")
-        self.assertIn("WaysGramPaidDm.cachedFeeStars(currentAccount)", branch)
+        self.assertIn("(paidSettings.flags & 32) != 0", branch)
+        self.assertIn("paidSettings.noncontact_peers_paid_stars", branch)
         self.assertIn("AndroidUtilities.formatWholeNumber(feeStars, 0)", branch)
+        self.assertIn("R.string.ContactsAndPremium", branch)
         self.assertIn("R.string.P2PEverybody", branch)
         # Раньше в подписи стоял заголовок диалога — отсюда «Платные личные сообщения».
         self.assertNotIn("WaysGramPaidDmTitle", branch)
 
-    def test_reopening_the_screen_keeps_the_price(self):
+    def test_screen_is_stock_telegram(self):
         control = self.source("ui/PrivacyControlActivity.java")
-        self.assertIn("loadWaysGramMessagesFee();", control)
-        load = control.split("private void loadWaysGramMessagesFee() {")[1].split("private void ")[0]
-        self.assertIn("WaysGramPaidDm.loadFee(currentAccount", load)
-        self.assertIn("applyWaysGramFeeValues(stars, users)", load)
-        apply = control.split("private void applyWaysGramFeeValues(int stars, ArrayList<Long> users) {")[1]
-        self.assertIn("currentType = TYPE_PAY", apply)
-        self.assertIn("currentType = TYPE_EVERYBODY", apply)
-        # Без подгрузки экран стартовал как «все могут писать» и обнулял цену при Save.
-        self.assertIn(
-            "initialRulesType = currentType = TYPE_EVERYBODY;\n            loadWaysGramMessagesFee();",
-            control.replace("\r\n", "\n"))
+        # Штатные строки экрана: список «кто может писать», описание, цена, доход.
+        for row in ("priceHeaderRow", "priceRow", "priceInfoRow", "payRow", "detailRow2"):
+            self.assertIn(row, control, row)
+        for string in ("R.string.PrivateMessagesChargePrice", "R.string.PrivacyMessagesContactsAndPremium"):
+            self.assertIn(string, control)
+        # Ключ приватности и цена — те же запросы, что шлёт оригинальный клиент.
+        self.assertIn("TLRPC.TL_inputPrivacyKeyNoPaidMessages", control)
+        self.assertIn("ContactsController.PRIVACY_RULES_TYPE_NO_PAID_MESSAGES", control)
+        self.assertIn("getMessagesController().starsPaidMessageAmountMax", control)
+
+    def test_no_waysgram_branch_on_the_messages_screen(self):
+        control = self.source("ui/PrivacyControlActivity.java")
+        for gone in ("applyWaysGramMessagesSettings", "loadWaysGramMessagesFee", "applyWaysGramFeeValues"):
+            self.assertNotIn(gone, control, gone)
+        # Ни загрузка, ни сохранение не перехватываются WaysGram-веткой.
+        self.assertNotIn(
+            "rulesType == PRIVACY_RULES_TYPE_MESSAGES && org.telegram.tgnet.WaysGramTransport.ENABLED", control)
+        # Подарки по-прежнему идут своим путём.
+        self.assertIn("applyWaysGramGiftsSettings", control)
 
     def test_own_fee_dialog_is_gone(self):
         paid = self.source("ui/WaysGramPaidDm.java")
-        for gone in ("public static void settings(", "private static void editor(", "private static void notice("):
-            self.assertNotIn(gone, paid, f"мёртвый диалог остался: {gone}")
+        for gone in ("public static void settings(", "private static void editor(", "private static void notice(",
+                     "public static void loadFee(", "public static void saveFee(", "hasCachedFee("):
+            self.assertNotIn(gone, paid, f"мёртвый код остался: {gone}")
         # Отправка платного сообщения показывает стоковое подтверждение Telegram.
         self.assertIn("AlertsCreator.showPayForMessageAlert(account, peer", paid)
         self.assertIn("public static int peerFeeStars(int account, long peer)", paid)
+        self.assertIn('/api/chats/" + peer + "/message-fee', paid)
 
     def test_dead_dialog_strings_are_removed(self):
         dead = ("WaysGramPaidDmTitle", "WaysGramPaidDmPrice", "WaysGramPaidDmExceptions",
                 "WaysGramPaidDmExceptionCount", "WaysGramPaidDmExceptionLimit", "WaysGramPaidDmSaved",
-                "WaysGramPaidDmConfirm", "WaysGramPaidDmRetry", "WaysGramPaidDmNowFree")
+                "WaysGramPaidDmConfirm", "WaysGramPaidDmRetry", "WaysGramPaidDmNowFree", "WaysGramPaidDmError")
         for name in ("values/strings.xml", "values-ru/strings.xml"):
             text = self.res(name)
             for key in dead:
                 self.assertNotIn(f'name="{key}"', text, f"{name}: остался {key}")
-            # Ошибка сохранения цены нужна экрану «Сообщения».
-            self.assertIn('name="WaysGramPaidDmError"', text)
 
     def test_russian_strings_keep_the_paths_that_are_used(self):
         ru = self.res("values-ru/strings.xml")

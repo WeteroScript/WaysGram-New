@@ -458,7 +458,6 @@
     <string name="WaysGramBoostBypassEnable">Разрешить обход</string>
     <string name="WaysGramBoostBypassDisable">Отключить обход</string>
     <string name="WaysGramBoostError">Не удалось загрузить или изменить бусты. Проверьте членство и срок переноса.</string>
-    <string name="WaysGramPaidDmError">Не удалось загрузить или сохранить цену сообщения.</string>
     <string name="WaysGramChannelReachSummary">Уникальные просмотры публикаций: %1$d\nОхвачено аккаунтов: %2$d</string>
     <string name="WaysGramChannelDepartures">Отписались: %1$d\nУдалены модераторами: %2$d</string>
     <string name="WaysGramProposalScheduled">Запланировано</string>

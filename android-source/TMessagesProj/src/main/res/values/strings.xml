@@ -11834,7 +11834,6 @@
     <string name="WaysGramBoostBypassEnable">Allow bypass</string>
     <string name="WaysGramBoostBypassDisable">Turn off bypass</string>
     <string name="WaysGramBoostError">Could not load or change boosts. Check membership and the move cooldown.</string>
-    <string name="WaysGramPaidDmError">Could not load or save the message fee.</string>
     <string name="WaysGramChannelReachSummary">Unique post views: %1$d\nAccounts reached: %2$d</string>
     <string name="WaysGramChannelDepartures">Voluntary departures: %1$d\nRemoved by moderation: %2$d</string>
     <string name="WaysGramProposalScheduled">Scheduled</string>

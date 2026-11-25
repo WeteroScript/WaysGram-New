@@ -198,8 +198,10 @@ class NativeMessagingSourceChecks(unittest.TestCase):
         helper = self.source('ui/WaysGramPaidDm.java')
         # Цена правится на штатном экране «Сообщения», своего диалога у WaysGram нет.
         self.assertIn('new PrivacyControlActivity(ContactsController.PRIVACY_RULES_TYPE_MESSAGES)', privacy)
-        self.assertNotIn('WaysGramPaidDm.settings', privacy)
-        self.assertIn('.put("exempt_users", new JSONArray(ids))', helper)
+        self.assertNotIn('WaysGramPaidDm', privacy)
+        # Цену и исключения пишет штатный экран Telegram: ключ paid-messages и
+        # global privacy settings, списание по-прежнему идёт через /message-fee.
+        self.assertIn('"/api/chats/" + peer + "/message-fee"', helper)
         self.assertIn('AlertsCreator.showPayForMessageAlert(account, peer', helper)
         self.assertIn('putInt(slot, fee).putLong(slot + ":since", since).commit()', transport)
         self.assertIn('body.put("approved_fee_stars", approvedFee)', transport)

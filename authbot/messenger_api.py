@@ -6088,7 +6088,12 @@ def build_messenger_router(
     async def get_global_privacy(authorization: str | None = Header(default=None)) -> dict[str, Any]:
         uid = int((await current_user(authorization))["telegram_id"])
         async with aiosqlite.connect(db_path()) as db:
-            return await global_privacy_settings(db, uid)
+            settings = await global_privacy_settings(db, uid)
+            cur = await db.execute("SELECT stars FROM dm_message_fees WHERE telegram_id=?", (uid,))
+            row = await cur.fetchone()
+            await cur.close()
+            settings["noncontact_peers_paid_stars"] = int(row[0]) if row else 0
+            return settings
 
     @router.put("/api/me/privacy/global")
     async def set_global_privacy(payload: dict[str, Any], authorization: str | None = Header(default=None)) -> dict[str, Any]:
@@ -6106,6 +6111,9 @@ def build_messenger_router(
                     if type(value) is not int or not 0 <= value <= 10**6:
                         raise HTTPException(400, "PRIVACY_RULE_INVALID")
                 settings[key] = value
+            if "noncontact_peers_paid_stars" in payload:
+                await sync_paid_stars(db, uid, int(settings["noncontact_peers_paid_stars"]))
+                settings["noncontact_peers_paid_stars"] = int(settings["noncontact_peers_paid_stars"])
             await db.execute(
                 "INSERT INTO account_global_privacy VALUES(?,?) ON CONFLICT(telegram_id) DO UPDATE SET settings=excluded.settings",
                 (uid, json.dumps(settings)),
@@ -6119,7 +6127,15 @@ def build_messenger_router(
         if setting not in ("invites", "phone", "last-seen", "find-by-phone", "avatar", "bio", "birthday", "music", "voice", "forwards", "gift-autosave", "gifts", "calls", "calls-p2p", "paid-messages"):
             raise HTTPException(404, "PRIVACY_KEY_INVALID")
         async with aiosqlite.connect(db_path()) as db:
-            return await privacy_rules(db, uid, setting)
+            rules = await privacy_rules(db, uid, setting)
+            if setting == "paid-messages":
+                cur = await db.execute("SELECT exempt_users FROM dm_message_fees WHERE telegram_id=?", (uid,))
+                row = await cur.fetchone()
+                await cur.close()
+                if row:
+                    exempt = [int(i) for i in json.loads(row[0]) if type(i) is int and i > 0]
+                    rules = {**rules, "allow": list(dict.fromkeys(rules.get("allow", []) + exempt))}
+            return rules
 
     @router.put("/api/me/privacy/{setting}")
     async def set_privacy(setting: str, payload: dict[str, Any], authorization: str | None = Header(default=None)):
@@ -6140,6 +6156,10 @@ def build_messenger_router(
                 await db.execute("INSERT INTO account_invite_privacy VALUES(?,?) ON CONFLICT(telegram_id) DO UPDATE SET rules=excluded.rules", (uid, json.dumps(result)))
             else:
                 await db.execute("INSERT INTO account_profile_privacy VALUES(?,?,?) ON CONFLICT(telegram_id,setting) DO UPDATE SET rules=excluded.rules", (uid, setting, json.dumps(result)))
+                if setting == "paid-messages":
+                    # allow-список штатного экрана = те, с кого плата не берётся.
+                    await db.execute("UPDATE dm_message_fees SET exempt_users=? WHERE telegram_id=?",
+                                     (json.dumps(result["allow"]), uid))
             await db.commit()
         return result
 
@@ -13707,6 +13727,40 @@ def build_messenger_router(
             (recipient, sender, recipient, sender))
         return 0 if await cur.fetchone() else int(settings[0])
 
+    async def paid_messages_allow(db: Any, uid: int) -> list[int]:
+        """Список тех, с кого плата за ЛС не берётся (ключ приватности «paid-messages»)."""
+        cur = await db.execute("SELECT rules FROM account_profile_privacy WHERE telegram_id=? AND setting='paid-messages'", (uid,))
+        row = await cur.fetchone()
+        await cur.close()
+        if not row:
+            return []
+        try:
+            rules = json.loads(row[0])
+        except (TypeError, ValueError):
+            return []
+        allow = rules.get("allow") if isinstance(rules, dict) else None
+        return [int(i) for i in allow or [] if type(i) is int and i > 0]
+
+    async def sync_paid_stars(db: Any, uid: int, stars: int) -> None:
+        """Цена из штатного экрана Telegram (noncontact_peers_paid_stars) — это наша плата за ЛС.
+
+        Экран приватности шлёт `account.setGlobalPrivacySettings`, а списание при отправке
+        смотрит в `dm_message_fees`. Держим одну запись, иначе выбранная на слайдере цена
+        ни на что не влияет.
+        """
+        if stars > 0:
+            cur = await db.execute("SELECT exempt_users FROM dm_message_fees WHERE telegram_id=?", (uid,))
+            row = await cur.fetchone()
+            await cur.close()
+            exempt = json.loads(row[0]) if row else await paid_messages_allow(db, uid)
+            await db.execute(
+                """INSERT INTO dm_message_fees VALUES(?,?,?) ON CONFLICT(telegram_id)
+                   DO UPDATE SET stars=excluded.stars,exempt_users=excluded.exempt_users""",
+                (uid, int(min(10000, stars)), json.dumps(sorted(set(int(i) for i in exempt)))),
+            )
+        else:
+            await db.execute("DELETE FROM dm_message_fees WHERE telegram_id=?", (uid,))
+
     @router.get("/api/me/message-fee")
     async def get_message_fee(authorization: str | None = Header(default=None)):
         uid = int((await current_user(authorization))["telegram_id"])
@@ -13729,6 +13783,14 @@ def build_messenger_router(
                     DO UPDATE SET stars=excluded.stars,exempt_users=excluded.exempt_users""", (uid, stars, json.dumps(exempt)))
             else:
                 await db.execute("DELETE FROM dm_message_fees WHERE telegram_id=?", (uid,))
+            await db.commit()
+        async with aiosqlite.connect(db_path()) as db:
+            settings = await global_privacy_settings(db, uid)
+            settings["noncontact_peers_paid_stars"] = stars
+            await db.execute(
+                "INSERT INTO account_global_privacy VALUES(?,?) ON CONFLICT(telegram_id) DO UPDATE SET settings=excluded.settings",
+                (uid, json.dumps(settings)),
+            )
             await db.commit()
         return {"stars": stars, "exempt_users": exempt}
 

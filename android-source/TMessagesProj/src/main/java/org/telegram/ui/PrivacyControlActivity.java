@@ -924,86 +924,6 @@ public class PrivacyControlActivity extends BaseFragment implements Notification
         finishFragment();
     }
 
-    private void applyWaysGramMessagesSettings() {
-        final boolean pay = currentType == TYPE_PAY;
-        final int stars = pay ? (int) Utilities.clamp(currentStars, getMessagesController().starsPaidMessageAmountMax, 1) : 0;
-        final ArrayList<Long> exempt = new ArrayList<>();
-        if (pay) {
-            for (int a = 0; a < currentPlus.size(); a++) {
-                Long id = currentPlus.get(a);
-                if (id != null && id > 0 && !exempt.contains(id)) {
-                    exempt.add(id);
-                }
-            }
-        }
-        WaysGramPaidDm.saveFee(currentAccount, stars, exempt, () -> {
-            initialStars = currentStars = pay ? Math.max(1, stars) : 10;
-            initialRulesType = currentType;
-            initialPlus.clear();
-            if (pay) {
-                initialPlus.addAll(currentPlus);
-            }
-            TLRPC.GlobalPrivacySettings globalSettings = getContactsController().getGlobalPrivacySettings();
-            if (globalSettings != null) {
-                if (pay) {
-                    globalSettings.flags |= 32;
-                    globalSettings.noncontact_peers_paid_stars = stars;
-                } else {
-                    globalSettings.flags &= ~32;
-                    globalSettings.noncontact_peers_paid_stars = 0;
-                }
-                globalSettings.new_noncontact_peers_require_premium = false;
-            }
-            getNotificationCenter().postNotificationName(NotificationCenter.privacyRulesUpdated);
-            AndroidUtilities.runOnUIThread(this::finished);
-        }, () -> AndroidUtilities.runOnUIThread(() -> {
-            if (getParentActivity() == null) {
-                return;
-            }
-            AlertDialog.Builder builder = new AlertDialog.Builder(getParentActivity(), resourceProvider);
-            builder.setTitle(LocaleController.getString(R.string.AppName));
-            builder.setMessage(LocaleController.getString(R.string.WaysGramPaidDmError));
-            builder.setPositiveButton(LocaleController.getString(R.string.OK), null);
-            showDialog(builder.create());
-        }));
-    }
-
-    /**
-     * Подтягивает сохранённую цену и исключения в уже открытый экран «Сообщения».
-     *
-     * <p>Пока данные едут, экран показывает «все могут писать»; как только они пришли,
-     * выбирается платный режим с прежней ценой, поэтому сохранение без правок ничего не
-     * стирает.</p>
-     */
-    private void loadWaysGramMessagesFee() {
-        WaysGramPaidDm.loadFee(currentAccount, (stars, users) -> {
-            if (isFinished || getParentActivity() == null || hasChanges()) {
-                return;
-            }
-            applyWaysGramFeeValues(stars, users);
-            updateRows(true);
-            if (listAdapter != null) {
-                listAdapter.notifyDataSetChanged();
-            }
-            updateDoneButton();
-        });
-    }
-
-    private void applyWaysGramFeeValues(int stars, ArrayList<Long> users) {
-        ArrayList<Long> loaded = users == null ? new ArrayList<>() : new ArrayList<>(users);
-        if (stars > 0) {
-            initialStars = currentStars = Math.max(1, Math.min(10000, stars));
-            initialRulesType = currentType = TYPE_PAY;
-            currentPlus = loaded;
-        } else {
-            initialStars = currentStars = 10;
-            initialRulesType = currentType = TYPE_EVERYBODY;
-            currentPlus = new ArrayList<>();
-        }
-        initialPlus.clear();
-        initialPlus.addAll(currentPlus);
-    }
-
     /** Путь WaysGram: кто может присылать подарки (все / только контакты / никто). */
     private static final String WAYSGRAM_GIFTS_PRIVACY_PATH = WaysGramGiftPrivacy.PATH;
 
@@ -1117,10 +1037,6 @@ public class PrivacyControlActivity extends BaseFragment implements Notification
     }
 
     private void applyCurrentPrivacySettings() {
-        if (rulesType == PRIVACY_RULES_TYPE_MESSAGES && org.telegram.tgnet.WaysGramTransport.ENABLED) {
-            applyWaysGramMessagesSettings();
-            return;
-        }
         if (rulesType == PRIVACY_RULES_TYPE_GIFTS && org.telegram.tgnet.WaysGramTransport.ENABLED) {
             applyWaysGramGiftsSettings();
             return;
@@ -1440,17 +1356,6 @@ public class PrivacyControlActivity extends BaseFragment implements Notification
             initialMinus.clear();
             initialRulesType = currentType = TYPE_EVERYBODY;
             loadWaysGramGiftsSettings();
-            return;
-        }
-        if (rulesType == PRIVACY_RULES_TYPE_MESSAGES && org.telegram.tgnet.WaysGramTransport.ENABLED) {
-            // Цена платных сообщений лежит на сервере WaysGram. Без подгрузки экран
-            // открывался как «все могут писать» и при сохранении обнулял назначенную цену.
-            currentMinus = new ArrayList<>();
-            currentPlus = new ArrayList<>();
-            initialPlus.clear();
-            initialStars = currentStars = 10;
-            initialRulesType = currentType = TYPE_EVERYBODY;
-            loadWaysGramMessagesFee();
             return;
         }
         if (rulesType == PRIVACY_RULES_TYPE_MESSAGES) {
