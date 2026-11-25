@@ -49,12 +49,17 @@ class GroupChannelNavigationChecks(unittest.TestCase):
         self.assertNotIn('String username = c.optString("username", "");', chats)
         self.assertNotIn('String username = g.optString("username", "");', chats)
 
-    def test_discussion_row_uses_the_stock_linking_screen(self):
+    def test_discussion_row_opens_the_waysgram_dialog_with_stock_fallback(self):
         edit = self.source("ui/ChatEditActivity.java")
         self.assertNotIn("TextCell discussionCell = new TextCell(context);", edit)
         self.assertNotIn("TextCell inboxCell = new TextCell(context);", edit)
-        self.assertNotIn("WaysGramDiscussions.settings(this, currentAccount, chatId);", edit)
+        # В WaysGram штатный ChatLinkActivity умеет только выбирать уже существующие
+        # группы, поэтому «Обсуждение» открывает диалог с созданием группы.
+        self.assertIn("WaysGramDiscussions.settings(this, currentAccount, chatId);", edit)
+        self.assertIn("if (org.telegram.tgnet.WaysGramTransport.ENABLED) {", edit)
         self.assertIn("ChatLinkActivity fragment = new ChatLinkActivity(chatId);", edit)
+        self.assertLess(edit.index("WaysGramDiscussions.settings(this, currentAccount, chatId);"),
+                        edit.rindex("ChatLinkActivity fragment = new ChatLinkActivity(chatId);"))
 
     def test_username_value_falls_back_to_chat_title(self):
         edit = self.source("ui/ChatEditActivity.java")

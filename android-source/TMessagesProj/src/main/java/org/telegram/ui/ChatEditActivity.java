@@ -944,6 +944,13 @@ public class ChatEditActivity extends BaseFragment implements ImageUpdater.Image
                 linkedCell.setBackgroundDrawable(Theme.getSelectorDrawable(true));
                 typeEditContainer.addView(linkedCell, LayoutHelper.createLinear(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
                 linkedCell.setOnClickListener(v -> {
+                    // В WaysGram группа обсуждений — обычная группа, и её можно создать
+                    // прямо из диалога: штатный ChatLinkActivity умеет только выбирать
+                    // уже существующие и упирается в «нет групп».
+                    if (org.telegram.tgnet.WaysGramTransport.ENABLED) {
+                        WaysGramDiscussions.settings(this, currentAccount, chatId);
+                        return;
+                    }
                     ChatLinkActivity fragment = new ChatLinkActivity(chatId);
                     fragment.setInfo(info);
                     presentFragment(fragment);

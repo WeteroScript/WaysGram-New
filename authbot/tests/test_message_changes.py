@@ -1988,7 +1988,9 @@ def test_channel_discussion_comments_use_group_permissions_and_moderation(env):
     async def scenario():
         async with await client_for(app) as client:
             owner, member, outsider = headers(101), headers(102), headers(ADMIN)
-            channel = await client.post('/api/channels', headers=owner, json={'title': 'Discuss news', 'is_public': False})
+            # Комментарии выключены: проверяем привязку группы вручную, без
+            # автоматически созданной при создании канала.
+            channel = await client.post('/api/channels', headers=owner, json={'title': 'Discuss news', 'is_public': False, 'comments': False})
             cid = channel.json()['id']
             base = f'/api/channels/{cid}'
             post = await client.post(base + '/messages', headers=owner, json={'body': 'News'})

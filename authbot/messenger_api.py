@@ -64,6 +64,14 @@ FCM_TOKEN_URI = "https://oauth2.googleapis.com/token"
 PLUSH_PEPE_GIFT_ID = "5936013938331222567"
 BUNDLED_GIFT_ASSETS = Path(__file__).with_name("assets") / "gifts"
 
+# Единый список реакций: генерируется из клиентского каталога
+# (`scripts/generate_reaction_catalog.py`), иначе палитра приложения шире вайтлиста
+# и часть реакций отклонялась с «Недопустимый набор реакций».
+REACTION_CATALOG_FILE = Path(__file__).with_name("assets") / "reactions.json"
+_REACTION_DATA = json.loads(REACTION_CATALOG_FILE.read_text(encoding="utf-8"))
+BASIC_REACTIONS = frozenset(_REACTION_DATA["basic"])
+ALL_REACTIONS = frozenset(_REACTION_DATA["catalog"])
+
 # Client palettes carry emoji without U+FE0F ("❤"), while the whitelists below are
 # written the way Telegram spells them ("❤️"). Comparing the raw strings rejected
 # exactly the most common reactions, so both sides are compared by this key and
@@ -9724,8 +9732,15 @@ def build_messenger_router(
         if not is_public:
             username = "private_" + secrets.token_hex(16)
         invite_token = _new_invite_code() if not is_public else None
+        # Комментарии включены по умолчанию: без связанной группы у постов нет кнопки
+        # комментариев вообще, и в приложении её «негде взять» (создавать группу вручную
+        # и привязывать её в настройках догадывается не каждый).
+        comments = payload.get("comments", True)
+        if not isinstance(comments, bool):
+            raise HTTPException(status_code=400, detail="comments должен быть true или false")
         now = int(time.time())
         owner_id = int(user["telegram_id"])
+        discussion_group_id = 0
         try:
             async with aiosqlite.connect(db_path()) as db:
                 await db.execute("BEGIN IMMEDIATE")
@@ -9740,6 +9755,10 @@ def build_messenger_router(
                     "INSERT INTO channel_members(channel_id,telegram_id,joined_at) VALUES(?,?,?)",
                     (channel_id, owner_id, now),
                 )
+                if comments:
+                    discussion_group_id = await create_channel_discussion_group(
+                        db, channel_id, title.strip(), owner_id, now,
+                    )
                 await db.commit()
         except aiosqlite.IntegrityError as exc:
             raise HTTPException(status_code=409, detail="Username канала уже занят") from exc
@@ -9753,6 +9772,8 @@ def build_messenger_router(
         if invite_token:
             result["invite_link"] = _share_link(invite_token)
             result["invite_token"] = invite_token
+        if discussion_group_id:
+            result["discussion_group_id"] = discussion_group_id
         return result
 
     @router.get("/api/channels/{channel_id}/invite")
@@ -10793,6 +10814,33 @@ def build_messenger_router(
                 await join_discussion_group_for_channel(db, channel_id, uid)
                 await db.commit()
         return {"group_id": group[0], "title": group[1]} if group else {"group_id": None}
+
+    @router.post("/api/channels/{channel_id}/discussion-group/create", status_code=201)
+    async def create_channel_discussion(channel_id: int,
+                                        authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        """Создаёт группу комментариев для канала и привязывает её.
+
+        Нужна каналам, созданным до этого: у них связанной группы нет, а значит нет
+        и кнопки комментариев у постов.
+        """
+        uid = int((await current_user(authorization))["telegram_id"])
+        async with aiosqlite.connect(db_path()) as db:
+            await db.execute("BEGIN IMMEDIATE")
+            cur = await db.execute("SELECT title,owner_telegram_id FROM channels WHERE id=?", (channel_id,))
+            channel = await cur.fetchone()
+            if channel is None:
+                raise HTTPException(404, "CHANNEL_NOT_FOUND")
+            if int(channel[1]) != uid:
+                raise HTTPException(403, "CHANNEL_OWNER_REQUIRED")
+            cur = await db.execute("SELECT group_id FROM channel_discussion_groups WHERE channel_id=?", (channel_id,))
+            existing = await cur.fetchone()
+            if existing is not None:
+                await db.commit()
+                return {"group_id": int(existing[0]), "created": False}
+            group_id = await create_channel_discussion_group(db, channel_id, str(channel[0]), uid, int(time.time()))
+            await log_channel_event(db, channel_id, uid, "create_linked_chat", {"group_id": group_id})
+            await db.commit()
+        return {"group_id": group_id, "created": True}
 
     @router.get("/api/channels/{channel_id}/subscription-offer")
     async def get_channel_subscription_offer(channel_id: int, authorization: str | None = Header(default=None)):
@@ -15787,7 +15835,7 @@ def build_messenger_router(
         user_id: int,
         reaction: str,
     ) -> dict[str, Any]:
-        allowed = _reaction_catalog({"👍", "❤️", "😂", "😮", "😢", "🎉", "🙏"})
+        allowed = _reaction_catalog(BASIC_REACTIONS)
         reaction_key = _reaction_key(reaction)
         if reaction_key not in allowed:
             raise HTTPException(status_code=400, detail="Недопустимая реакция")
@@ -15910,7 +15958,7 @@ def build_messenger_router(
     ) -> dict[str, Any]:
         """Atomically replace this account's emoji set, never toggle on retry."""
         basic = _reaction_catalog({"👍", "❤️", "😂", "😮", "😢", "🎉", "🙏"})
-        allowed = _reaction_catalog({"👍", "❤️", "😂", "😮", "😢", "🎉", "🙏", "👎", "🔥", "🥰", "👏", "😁", "🤔", "🤯", "😱", "🤬", "😡", "🤩", "😎", "💯", "❤️‍🔥", "💔", "💩", "🤮", "🤝", "👀", "🙌", "😍", "🥳", "😭", "😘", "🤣", "🤗", "🫡", "🕊️", "⚡", "🏆", "🍾", "🎄", "🤡"}) if extended else basic
+        allowed = _reaction_catalog(ALL_REACTIONS) if extended else basic
         if not isinstance(requested, list) or len(requested) > 3:
             raise HTTPException(status_code=400, detail="Можно выбрать не более трёх реакций")
         if not isinstance(big, bool) or (big and len(requested) != 1):
@@ -19578,6 +19626,30 @@ def build_messenger_router(
         items.reverse()
         await attach_my_reactions(items, "group", group_id, int(user["telegram_id"]))
         return {"query": term, "messages": items, "count": len(items), "has_more": len(items) == 100}
+
+    async def create_channel_discussion_group(db: Any, channel_id: int, title: str,
+                                             owner_id: int, now: int) -> int:
+        """Создаёт группу комментариев канала и сразу её привязывает.
+
+        Без связанной группы у постов нет кнопки комментариев: клиент рисует её по
+        `discussion_group_id`, который сервер отдаёт только для связанной группы.
+        """
+        group_title = f"Комментарии — {title}".strip()[:80]
+        cur = await db.execute(
+            """INSERT INTO chat_groups(username,title,description,owner_telegram_id,created_at)
+               VALUES(NULL,?,?,?,?)""",
+            (group_title, "", owner_id, now),
+        )
+        group_id = int(cur.lastrowid)
+        await db.execute(
+            "INSERT INTO group_members(group_id,telegram_id,role,joined_at) VALUES(?,?,'owner',?)",
+            (group_id, owner_id, now),
+        )
+        await db.execute(
+            "INSERT INTO channel_discussion_groups(channel_id,group_id) VALUES(?,?)",
+            (channel_id, group_id),
+        )
+        return group_id
 
     async def join_discussion_group_for_channel(db: Any, channel_id: int, uid: int) -> int | None:
         """Пускает в группу обсуждений того, кому доступен сам канал.

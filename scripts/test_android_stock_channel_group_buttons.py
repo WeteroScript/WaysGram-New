@@ -71,7 +71,6 @@ class StockChannelGroupButtonChecks(unittest.TestCase):
             "waysGramCells",
             "waysGramChannelCells",
             "waysGramChannelLocation",
-            "WaysGramDiscussions.settings(this, currentAccount, chatId)",
             "R.string.WaysGramPaidReactions",
             "R.string.WaysGramChannelAnalytics",
             "R.string.WaysGramInboxSettings",

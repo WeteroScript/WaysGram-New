@@ -567,3 +567,38 @@ SHA-256 `0119a3778c8b7ca95f7cb36e56070372d97f4d9e124127805ce1b64a2a22b0e7`.
 `scripts/test_android_symbol_check.py`: он проходит по архиву, вырезает комментарии и
 проверяет, что каждый вызов `Класс.метод(` у служебных классов WaysGram и
 `AndroidUtilities` действительно объявлен.
+
+### Сборка 331: комментарии под постами и единый каталог реакций
+
+**Почему в канале не было кнопки комментариев.** `TL_messageReplies` рисуется по
+`channel_message.replies`, а тот собирается из строки `channel_discussion_groups`
+(`WaysGramChats.channelMessage`). У канала, созданного в приложении, такой строки не
+было: `POST /api/channels` её не заводил, а штатный `ChatLinkActivity` умел только
+выбирать из уже существующих групп и упирался в «нет групп».
+
+- `POST /api/channels` принимает `comments` (по умолчанию `true`) и сразу заводит группу
+  «Комментарии — {title}» с владельцем в `group_members` и строкой в
+  `channel_discussion_groups`; в ответе — `discussion_group_id`.
+- Новый `POST /api/channels/{id}/discussion-group/create` (201, `{group_id, created}`) —
+  для каналов, созданных раньше.
+- В `WaysGramDiscussions` тупик «нет групп» заменён диалогом с «Create a group»; после
+  сохранения/создания вызывается `reload()` (`loadFullChat(channel, 0, true)` +
+  `dialogsNeedReload`), поэтому кнопка комментариев появляется без перезапуска.
+- «Обсуждение» в настройках канала при включённом `WaysGramTransport.ENABLED` открывает
+  этот диалог; штатный `ChatLinkActivity` остаётся запасным путём.
+
+**Реакции.** Сервер держал свой короткий вайтлист: градиент из 7 базовых и 40 «расширенных»,
+поэтому часть палитры приложения отклонялась с 400. Теперь каталог — файл
+`authbot/assets/reactions.json` (79 реакций, 7 базовых), который собирает
+`scripts/generate_reaction_catalog.py` из `WaysGramReactions.REACTIONS` и
+`WaysGramReactionAssets.EMOJI` (дедуп по identity без `U+FE0F` и тонов кожи). v1-маршрут
+остаётся на базовых, v2 принимает весь каталог; `--check` в генераторе ловит расхождение
+с архивом.
+
+Проверки: `scripts/test_android_comments_and_reactions.py` (10, включая сверку
+`reactions.json` с архивом и сохранность полной таблицы строк), `authbot/tests/test_reaction_catalog.py`
+(6), весь `scripts/` (319) и `authbot/tests/` (483).
+
+`strings.xml` собирать только из архива: зеркало `android-source/` отставало от него и
+теряло группы `WaysGramTransfer*`, `WaysGramInbox*`, `WaysGramPaidHistory*`,
+`WaysGramChannelTopics`.

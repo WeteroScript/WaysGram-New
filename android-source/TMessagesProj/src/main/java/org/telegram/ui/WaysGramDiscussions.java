@@ -90,7 +90,14 @@ final class WaysGramDiscussions {
                 }
             }
             if (ids.isEmpty()) {
-                notice(fragment, R.string.WaysGramDiscussionGroup, R.string.WaysGramDiscussionNoGroups);
+                // Раньше здесь был тупик: «у вас нет групп». Канал без связанной группы
+                // вообще не показывает кнопку комментариев, а создать группу вручную и
+                // вернуться сюда догадывался не каждый — теперь группу создаёт сервер.
+                fragment.showDialog(dialog(fragment, R.string.WaysGramDiscussionGroup)
+                        .setMessage(LocaleController.getString(R.string.WaysGramDiscussionNoGroups))
+                        .setNegativeButton(LocaleController.getString(R.string.Cancel), null)
+                        .setPositiveButton(LocaleController.getString(R.string.WaysGramDiscussionCreate), (d, w) ->
+                                create(fragment, account, token, path, channel)).create());
                 return;
             }
             fragment.showDialog(dialog(fragment, R.string.WaysGramDiscussionChoose).setItems(names.toArray(new CharSequence[0]), (d, index) -> {
@@ -107,7 +114,33 @@ final class WaysGramDiscussions {
     private static void save(BaseFragment fragment, int account, String token, String path, long channel, long group) {
         request(fragment, account, token, () -> WaysGramApi.request("PUT", path,
                 new JSONObject().put("group_id", group > 0 ? Long.valueOf(group) : JSONObject.NULL), token, 15000),
-                data -> settings(fragment, account, channel), error -> notice(fragment, R.string.WaysGramDiscussionGroup, R.string.WaysGramDiscussionError));
+                data -> {
+                    reload(fragment, account, channel);
+                    notice(fragment, R.string.WaysGramDiscussionGroup, R.string.WaysGramDiscussionEnabled);
+                    settings(fragment, account, channel);
+                }, error -> notice(fragment, R.string.WaysGramDiscussionGroup, R.string.WaysGramDiscussionError));
+    }
+
+    /** Группа комментариев создаётся на сервере: и название, и привязка — его работа. */
+    private static void create(BaseFragment fragment, int account, String token, String path, long channel) {
+        request(fragment, account, token, () -> WaysGramApi.request("POST", path + "/create", null, token, 20000),
+                created -> {
+                    reload(fragment, account, channel);
+                    notice(fragment, R.string.WaysGramDiscussionGroup, R.string.WaysGramDiscussionEnabled);
+                }, error -> notice(fragment, R.string.WaysGramDiscussionGroup, R.string.WaysGramDiscussionError));
+    }
+
+    /**
+     * Свежие данные канала после привязки группы: без них {@code linked_chat_id} в профиле
+     * остаётся нулём, и кнопка комментариев не появляется до перезапуска приложения.
+     */
+    private static void reload(BaseFragment fragment, int account, long channel) {
+        if (!active(fragment, account, WaysGramApi.getToken(account))) return;
+        org.telegram.messenger.MessagesController controller =
+                org.telegram.messenger.MessagesController.getInstance(account);
+        controller.loadFullChat(channel, 0, true);
+        fragment.getNotificationCenter().postNotificationName(
+                org.telegram.messenger.NotificationCenter.dialogsNeedReload);
     }
 
     static void open(BaseFragment fragment, int account, long channel, int post) {
