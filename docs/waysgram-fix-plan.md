@@ -602,3 +602,29 @@ SHA-256 `0119a3778c8b7ca95f7cb36e56070372d97f4d9e124127805ce1b64a2a22b0e7`.
 `strings.xml` собирать только из архива: зеркало `android-source/` отставало от него и
 теряло группы `WaysGramTransfer*`, `WaysGramInbox*`, `WaysGramPaidHistory*`,
 `WaysGramChannelTopics`.
+
+### Сборка 332: плашки push-сообщений
+
+**Что на скриншоте.** В шторке две одинаковые строки «+00000000» — по одной на сообщение,
+без имени, аватара и перехода в чат.
+
+- **Номер вместо имени.** Аккаунты, заведённые администратором
+  (`bot.admin_create_account`), получали `display_name = <номер>`, а push-заголовок
+  собирался как `display_name or username`. Теперь имя проходит через `name_or_empty`,
+  а все 13 мест отправки используют `sender_push_title` (имя → `@username` → `User N`), плюс
+  `deliver_push_notifications` сам подменяет телефон в заголовке (`push_title`).
+- **Плашка на каждое сообщение.** `WaysGramPushNotifications` считал `notificationId` по
+  `message_id`, поэтому два сообщения одного чата висели двумя строками. Теперь id — по
+  чату, плашки собраны в группу со сводкой («WaysGram»), нечитаемое системное `stat_notify_chat`
+  заменено на `R.drawable.notification`.
+- **Тап не открывал чат.** Переход был только для тем. Теперь для `dm`/`group`/`channel`
+  выставляется `com.tmessages.openchat` с id диалога (канал — со смещением `channelTg`) и
+  `waysgram_account`; `LaunchActivity` по этому полю выбирает аккаунт.
+- **Дубли со штатными плашками.** Если пуллер аккаунта работает, push не показывается
+  (`WaysGramPoller.isRunning` стал `public`): сообщение придёт обычным путём с именем,
+  аватаром и кнопками. `NotificationsController.cleanup` теперь убирает и наши плашки.
+- В данных push для всех устройств появился `account_id` (раньше — только для тем),
+  `title`/`body` кладутся в `data` всегда.
+
+Проверки: `authbot/tests/test_push_notifications.py` (5), `scripts/test_android_push_notifications.py`
+(9), весь `scripts/` (328) и `authbot/tests/` (489).

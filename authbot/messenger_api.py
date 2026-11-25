@@ -2586,6 +2586,53 @@ def _bio_of(row: Any) -> str:
         return ""
 
 
+_PHONE_TITLE_CHARS = set("+()- .\u00a0")
+
+
+def looks_like_phone_title(value: Any) -> bool:
+    """Номер телефона — не имя: в шторке он выглядит как «+00000000»."""
+    text = str(value or "").strip()
+    if len(text) < 5:
+        return False
+    digits = sum(1 for char in text if char.isdigit())
+    return digits >= 5 and all(char.isdigit() or char in _PHONE_TITLE_CHARS for char in text)
+
+
+def sender_push_title(user: Any, fallback: str = "Новое сообщение") -> str:
+    """Заголовок уведомления: имя, затем @username, затем подпись как в списке чатов.
+
+    У аккаунтов, заведённых администратором, в ``display_name`` когда-то лежал номер
+    телефона, и шторка показывала «+00000000» вместо имени.
+    """
+    def field(key: str) -> str:
+        try:
+            return str(user[key] or "").strip()
+        except (KeyError, IndexError, TypeError):
+            return ""
+
+    name = field("display_name")
+    if name and not looks_like_phone_title(name):
+        return name[:80]
+    username = field("username").lstrip("@")
+    if username:
+        return "@" + username[:64]
+    try:
+        identifier = int(field("telegram_id") or 0)
+    except ValueError:
+        identifier = 0
+    if identifier > 0:
+        return f"User {identifier}"
+    return fallback
+
+
+def push_title(value: Any, fallback: str = "Новое сообщение") -> str:
+    """Заголовок пуш-уведомления: телефон вместо имени заменяется подписью."""
+    text = str(value or "").strip()
+    if not text or looks_like_phone_title(text):
+        text = fallback
+    return text[:80]
+
+
 def _public_account(row: Any, include_phone: bool = False) -> dict[str, Any]:
     result = {
         "id": int(row["telegram_id"]),
@@ -3427,6 +3474,9 @@ def build_messenger_router(
                 if not credentials:
                     return False
             project_id, access_token = await get_fcm_access_token(credentials)
+            # Телефон вместо имени в заголовке выглядит в шторке как «+00000000».
+            title = push_title(title, "WaysGram")
+            body = str(body or "Новое сообщение")[:180] or "Новое сообщение"
             notification_data = {
                 "waysgram": "1",
                 **{
@@ -3434,12 +3484,12 @@ def build_messenger_router(
                     for key, value in data.items()
                     if str(key) != "waysgram" and value is not None
                 },
+                # Клиент показывает уведомление сам: заголовок и текст нужны и в data.
+                "title": title,
+                "body": body,
             }
             notification_message = {
-                "notification": {
-                    "title": str(title or "WaysGram")[:80],
-                    "body": str(body or "Новое сообщение")[:180],
-                },
+                "notification": {"title": title, "body": body},
                 "data": notification_data,
                 "android": {
                     "priority": "HIGH",
@@ -3449,19 +3499,18 @@ def build_messenger_router(
             if quiet or topic_push:
                 # Data-only pushes are displayed by a compatible client on its
                 # quiet channel. Older clients receive no push rather than sound.
-                notification_data["title"] = str(title or "WaysGram")[:80]
-                notification_data["body"] = str(body or "Новое сообщение")[:180]
                 notification_message = {"data": notification_data, "android": {"priority": "NORMAL" if quiet else "HIGH"}}
             delivered = True
             async with httpx.AsyncClient(timeout=httpx.Timeout(8.0)) as client:
                 for token_hash, token_value, quiet_push, device_account in devices:
                     if quiet and not quiet_push:
                         continue
+                    # account_id нужен клиенту, чтобы открыть чат в правильном аккаунте.
+                    message_data = {**notification_data, "account_id": str(device_account)}
                     response = await client.post(
                         f"https://fcm.googleapis.com/v1/projects/{quote(project_id, safe='')}/messages:send",
                         headers={"Authorization": f"Bearer {access_token}"},
-                        json={"message": {**notification_message, "token": str(token_value),
-                            **({"data": {**notification_data, "account_id": str(device_account)}} if topic_push else {})}},
+                        json={"message": {**notification_message, "token": str(token_value), "data": message_data}},
                     )
                     if response.status_code == 404:
                         async with aiosqlite.connect(db_path()) as db:
@@ -10741,7 +10790,7 @@ def build_messenger_router(
                                  (target, scheduled_at, reward, uid if action == "schedule" else None, proposal_id))
             await db.commit()
         if recipients:
-            await deliver_push_notifications(recipients, str(user.get("display_name") or user.get("username") or "Новая публикация"),
+            await deliver_push_notifications(recipients, sender_push_title(user, "Новая публикация"),
                                              ("Реклама / Sponsored: " + body) if sponsor else body, {"scope": "channel", "chat_id": str(channel_id), "message_id": str(post_id), "silent": "0"})
         return {"id": proposal_id, "proposal_state": target, "published_post_id": post_id,
                 "scheduled_at": scheduled_at, "reward_stars": reward}
@@ -12682,7 +12731,7 @@ def build_messenger_router(
             channel_recipients = [int(row[0]) for row in await cur.fetchall()]
         await deliver_push_notifications(
             channel_recipients,
-            str(user.get("display_name") or user.get("username") or "Новая публикация"),
+            sender_push_title(user, "Новая публикация"),
             body,
             {"scope": "channel", "chat_id": str(channel_id), "message_id": str(message_id), "silent": "1" if silent else "0"},
         )
@@ -12844,7 +12893,7 @@ def build_messenger_router(
             recipients = [int(row[0]) for row in await cur.fetchall()]
         await deliver_push_notifications(
             recipients,
-            str(user.get("display_name") or user.get("username") or "Новая публикация"),
+            sender_push_title(user, "Новая публикация"),
             f"{'Файлы' if batch_classes == {'document'} else 'Медиаальбом'} · {len(created_messages)} вложений",
             {
                 "scope": "channel",
@@ -13990,7 +14039,7 @@ def build_messenger_router(
             queued_push = False
             if recipient_id != uid and not silent:
                 queued_push = await enqueue_push(
-                    db, uid, recipient_id, str(user.get("display_name") or user.get("username") or "Новое сообщение"),
+                    db, uid, recipient_id, sender_push_title(user),
                     body, {"scope": "dm", "chat_id": str(uid), "message_id": str(message_id), "silent": "1" if silent else "0"}, now,
                 )
             await db.commit()
@@ -14142,7 +14191,7 @@ def build_messenger_router(
         if created:
             await deliver_push_notifications(
                 [recipient_id],
-                str(user.get("display_name") or user.get("username") or "WaysGram"),
+                sender_push_title(user, "WaysGram"),
                 "Пользователь начал делиться геолокацией в реальном времени",
                 {"scope": "dm", "chat_id": str(uid), "event": "live_location_started"},
             )
@@ -14394,7 +14443,7 @@ def build_messenger_router(
         if recipient_id != uid:
             await deliver_push_notifications(
                 [recipient_id],
-                str(user.get("display_name") or user.get("username") or "Новое сообщение"),
+                sender_push_title(user),
                 f"{'Файлы' if batch_classes == {'document'} else 'Медиаальбом'} · {len(created_messages)} вложений",
                 {
                     "scope": "dm",
@@ -14807,7 +14856,7 @@ def build_messenger_router(
                     await record_event(db, "dm", message_id, "new_message", uid, user_a=uid, user_b=peer)
                     await record_event(db, "scheduled", native_id, "scheduled_removed", uid, chat_id=peer)
                     if peer != uid:
-                        queued_push |= await enqueue_push(db, uid, peer, str(user.get("display_name") or user.get("username") or "Новое сообщение"),
+                        queued_push |= await enqueue_push(db, uid, peer, sender_push_title(user),
                             str(row["body"]), {"scope": "dm", "chat_id": str(uid), "message_id": str(message_id),
                             "silent": "1" if row["silent"] else "0"}, now)
                     result = {"id": message_id, "body": str(row["body"]), "created_at": now,
@@ -15026,7 +15075,7 @@ def build_messenger_router(
             }
             await idempotency_store(db, uid, scope, descriptor, result, now)
             queued_push = await enqueue_push(
-                db, uid, recipient_id, str(user.get("display_name") or user.get("username") or "Новый подарок"),
+                db, uid, recipient_id, sender_push_title(user, "Новый подарок"),
                 f"Подарок WaysGram: {gift_name}",
                 {"scope": "dm", "chat_id": str(uid), "message_id": str(message_id), "type": "gift"}, now,
             )
@@ -15320,7 +15369,7 @@ def build_messenger_router(
             await idempotency_store(db, uid, scope, descriptor, result, now)
             if target_scope == "dm" and target_peer != uid and not silent:
                 queued_push = await enqueue_push(db, uid, target_peer,
-                    str(user.get("display_name") or user.get("username") or "Новое сообщение"),
+                    sender_push_title(user),
                     "Переслано сообщений: " + str(len(created)),
                     {"scope": "dm", "chat_id": str(uid), "message_id": str(created[-1]["id"]), "silent": "1" if silent else "0"}, now)
             elif target_scope in ("group", "channel") and not silent:
@@ -15331,7 +15380,7 @@ def build_messenger_router(
         if queued_push:
             push_wakeup.set()
         if notifications:
-            await deliver_push_notifications(notifications, str(user.get("display_name") or "Новое сообщение"),
+            await deliver_push_notifications(notifications, sender_push_title(user),
                 "Переслано сообщений: " + str(len(created)),
                 {"scope": target_scope, "chat_id": str(target_peer), "message_id": str(created[-1]["id"]), "silent": "1" if silent else "0"})
         return result
@@ -15467,7 +15516,7 @@ def build_messenger_router(
             await db.commit()
         await deliver_push_notifications(
             [recipient_id],
-            str(user.get("display_name") or user.get("username") or "Новое сообщение"),
+            sender_push_title(user),
             str(source["body"]),
             {"scope": "dm", "chat_id": str(uid), "message_id": str(new_message_id)},
         )
@@ -20069,7 +20118,7 @@ def build_messenger_router(
             group_recipients = [int(row[0]) for row in await cur.fetchall()]
         await deliver_push_notifications(
             group_recipients,
-            identity_title or str(user.get("display_name") or user.get("username") or "Новое сообщение"),
+            identity_title or sender_push_title(user),
             body,
             {"scope": "group", "chat_id": str(group_id), "message_id": str(message_id), "silent": "1" if silent else "0"},
         )
@@ -20248,7 +20297,7 @@ def build_messenger_router(
             recipients = [int(row[0]) for row in await cur.fetchall()]
         await deliver_push_notifications(
             recipients,
-            str(user.get("display_name") or user.get("username") or "Новое сообщение"),
+            sender_push_title(user),
             f"{'Файлы' if batch_classes == {'document'} else 'Медиаальбом'} · {len(created_messages)} вложений",
             {
                 "scope": "group",

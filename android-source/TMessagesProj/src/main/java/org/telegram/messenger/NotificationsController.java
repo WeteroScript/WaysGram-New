@@ -3337,6 +3337,9 @@ public class NotificationsController extends BaseController implements Notificat
 
     private void dismissNotification() {
         FileLog.d("NotificationsController dismissNotification");
+        if (org.telegram.tgnet.WaysGramTransport.ENABLED && currentAccount == UserConfig.selectedAccount) {
+            org.telegram.messenger.waysgram.WaysGramPushNotifications.dismissAll(ApplicationLoader.applicationContext);
+        }
         try {
             notificationManager.cancel(notificationId);
             pushMessages.clear();

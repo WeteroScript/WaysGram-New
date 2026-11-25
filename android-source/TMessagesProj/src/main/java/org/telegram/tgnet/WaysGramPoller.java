@@ -65,7 +65,8 @@ public class WaysGramPoller {
         WaysGramTyping.stop(account);
     }
 
-    static boolean isRunning(int account) {
+    /** Пуллер уже доставляет сообщения этого аккаунта: push-плашка не нужна. */
+    public static boolean isRunning(int account) {
         return flag(account).get();
     }
 

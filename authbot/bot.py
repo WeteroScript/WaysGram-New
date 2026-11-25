@@ -2458,7 +2458,8 @@ async def admin_create_account(number: str, stars: int, grams: int, *, actor_id:
         await db.execute(
             """INSERT INTO accounts(telegram_id,virtual_number,username,display_name,stars,grams,created_at,updated_at)
                VALUES(?,?,?,?,?,?,?,?)""",
-            (account_id, number, "", number, stars, grams, now, now),
+            # Номер телефона именем не считаем: иначе шторка показывает «+00000000».
+            (account_id, number, "", name_or_empty(number), stars, grams, now, now),
         )
         for asset, amount in (("stars", stars), ("grams", grams)):
             if amount:

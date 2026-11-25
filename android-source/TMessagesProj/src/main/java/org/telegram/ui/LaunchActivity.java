@@ -1541,8 +1541,13 @@ public class LaunchActivity extends BasePermissionsActivity implements INavigati
         int flags = intent.getFlags();
         String action = intent.getAction();
         final int[] intentAccount = new int[]{intent.getIntExtra("currentAccount", UserConfig.selectedAccount)};
-        if (org.telegram.tgnet.WaysGramTransport.ENABLED && "com.tmessages.openchat.waysgram.topic".equals(action)) {
-            long wanted = intent.getLongExtra("waysgram_topic_recipient", -1);
+        if (org.telegram.tgnet.WaysGramTransport.ENABLED && action != null
+                && action.startsWith("com.tmessages.openchat")) {
+            // Плашка push-сообщения знает только telegram_id получателя: по нему и
+            // выбираем аккаунт, иначе чат открылся бы в последнем открытом.
+            boolean topicIntent = "com.tmessages.openchat.waysgram.topic".equals(action);
+            long wanted = intent.getLongExtra("waysgram_topic_recipient",
+                    intent.getLongExtra("waysgram_account", -1));
             boolean matched = false;
             for (int a = 0; wanted > 0 && a < UserConfig.MAX_ACCOUNT_COUNT; a++) {
                 if (UserConfig.getInstance(a).getClientUserId() == wanted) {
@@ -1551,7 +1556,9 @@ public class LaunchActivity extends BasePermissionsActivity implements INavigati
                     break;
                 }
             }
-            if (!matched) return false;
+            // Тема без своего аккаунта открылась бы в чужом чате, для обычного чата
+            // достаточно выбранного аккаунта.
+            if (!matched && topicIntent) return false;
         }
         switchToAccount(intentAccount[0], true);
         final boolean isVoipIntent = action != null && action.equals("voip");
