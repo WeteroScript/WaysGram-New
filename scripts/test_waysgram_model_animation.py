@@ -99,8 +99,8 @@ class WaysGramModelAnimationTests(unittest.TestCase):
         for invented in ("glow", "sparkle", "drift"):
             self.assertNotIn(invented, source)
 
-    def test_hands_keep_the_sticker_stacking_and_the_wordmark_sits_under_them(self) -> None:
-        """С устройства: кусок правой кисти висел на сердце, надпись шла поверх рук."""
+    def test_hands_keep_the_sticker_stacking_and_the_wordmark_sits_in_the_middle(self) -> None:
+        """С устройства: кусок правой кисти висел на сердце; надпись должна быть посередине."""
         renderer = (ROOT / "scripts" / "build_waysgram_gift_model_webm.py").read_text(encoding="utf-8")
         self.assertIn("HAND_INDICES = {1, 2, 15}", renderer)
         self.assertIn("FRONT_HAND_INDICES = {1, 2}", renderer)
@@ -112,13 +112,13 @@ class WaysGramModelAnimationTests(unittest.TestCase):
         self.assertLess(renderer.index("frame = Image.alpha_composite(frame, heart)"),
                         renderer.index("frame = Image.alpha_composite(frame, layer)"),
                         "надпись должна лежать на сердце")
-        self.assertLess(renderer.index("frame = Image.alpha_composite(frame, layer)"),
-                        renderer.rindex("frame = Image.alpha_composite(frame, hands)"),
-                        "надпись должна идти ПОД передними кистями")
-        # Надпись по центру сердца по горизонтали, позиция постоянна (без болтанки).
+        self.assertLess(renderer.rindex("frame = Image.alpha_composite(frame, hands)"),
+                        renderer.index("frame = Image.alpha_composite(frame, layer)"),
+                        "в середине сердца кисти проходят по буквам, поэтому надпись идёт поверх них")
+        # Ровно середина сердца по обеим осям и постоянная точка крепления.
+        self.assertIn("LOCAL_MIDDLE = 0.50", renderer)
         self.assertIn("local_center_x = heart_anchor[0] + ((first_box[0] + first_box[2]) / 2 - first_center_x) / first_scale", renderer)
-        self.assertIn("for step in range(21):", renderer)
-        self.assertIn("share = visible_share(candidate_y)", renderer)
+        self.assertIn("best_share = visible_share(local_center_y)", renderer)
         # Крепление: размер один раз, положение из трансформа сердечного слоя.
         self.assertNotIn("box = heart_alpha.getbbox()", renderer)
         self.assertIn("logo_scaled = logo.resize(", renderer)

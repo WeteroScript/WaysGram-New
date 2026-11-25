@@ -282,7 +282,7 @@ def render_frames(data: dict[str, Any], tgs: pathlib.Path, folder: pathlib.Path,
         raise SystemExit("the heart layer renders empty")
     first_w = (first_box[2] - first_box[0]) / first_scale
     first_h = (first_box[3] - first_box[1]) / first_scale
-    logo_scale = min(first_w * 0.60 / logo.width, first_h * 0.34 / logo.height)
+    logo_scale = min(first_w * 0.66 / logo.width, first_h * 0.34 / logo.height)
     logo_scaled = logo.resize((max(1, round(logo.width * logo_scale)),
                                max(1, round(logo.height * logo_scale))), Image.LANCZOS)
 
@@ -294,11 +294,11 @@ def render_frames(data: dict[str, Any], tgs: pathlib.Path, folder: pathlib.Path,
         return (centre_x + dx * math.cos(theta) - dy * math.sin(theta),
                 centre_y + dx * math.sin(theta) + dy * math.cos(theta))
 
-    # Надпись стоит по центру сердца по горизонтали и ПОД передними кистями (1 и 2),
-    # как в исходном стикере: кисти её перекрывают, а не она их. Чтобы буквы при этом
-    # читались, вертикальное положение ищем по кадрам анимации — там, где кисти
-    # закрывают минимум букв. Точка постоянна и считается в координатах сердца,
-    # поэтому при анимации надпись не болтается.
+    # Надпись — ровно в середине сердца (просьба с устройства). Руки проходят по сердцу
+    # полосой как раз через его середину: под кистями буквы закрываются на 64…100 %
+    # (на середине рамки медиана видимости ~17 %), поэтому надпись рисуется поверх кистей —
+    # иначе она «мигает» во время анимации. Точка постоянна и считается в координатах
+    # сердца, поэтому надпись не болтается.
     local_center_x = heart_anchor[0] + ((first_box[0] + first_box[2]) / 2 - first_center_x) / first_scale
     sample_frames = sorted({min(count - 1, round(count * k / 8)) for k in range(8)})
     samples = []
@@ -329,13 +329,9 @@ def render_frames(data: dict[str, Any], tgs: pathlib.Path, folder: pathlib.Path,
                 break
         return worst
 
-    best_share, local_center_y = -1.0, 0.0
-    for step in range(21):
-        vertical = 0.12 + 0.01 * step
-        candidate_y = heart_anchor[1] + (first_box[1] + first_h * vertical * first_scale - first_center_y) / first_scale
-        share = visible_share(candidate_y)
-        if share > best_share:
-            best_share, local_center_y = share, candidate_y
+    LOCAL_MIDDLE = 0.50
+    local_center_y = heart_anchor[1] + (first_box[1] + first_h * LOCAL_MIDDLE * first_scale - first_center_y) / first_scale
+    best_share = visible_share(local_center_y)
 
     for index in range(count):
         body = animation.render_pillow_frame(index).convert("RGBA")
@@ -380,10 +376,10 @@ def render_frames(data: dict[str, Any], tgs: pathlib.Path, folder: pathlib.Path,
         if letters:
             kept = sum(1 for value in layer.getchannel("A").getdata() if value > 8)
             wordmark_inside = min(wordmark_inside, kept / letters)
-        # Передние кисти (1, 2) лежат на сердце, как в оригинале, и перекрывают надпись:
-        # по просьбе с устройства надпись идёт ПОД руками.
-        frame = Image.alpha_composite(frame, layer)
+        # Передние кисти (1, 2) лежат на сердце, как в оригинале; надпись идёт последней,
+        # чтобы руки не съедали её в середине сердца.
         frame = Image.alpha_composite(frame, hands)
+        frame = Image.alpha_composite(frame, layer)
 
         frame.save(folder / f"frame_{index:04d}.png", optimize=False)
         if want_preview is not None and index == 0:
