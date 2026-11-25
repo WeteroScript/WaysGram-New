@@ -4022,7 +4022,11 @@ public class StarGiftSheet extends BottomSheetWithRecyclerListView implements No
 
             @Override
             public boolean isLoaded() {
-                return imageReceiver.getLottieAnimation() != null;
+                // Модели WaysGram — WebM с альфой, у них нет Lottie: признак загрузки
+                // должен учитывать и видео-анимацию, иначе лента улучшения не видит
+                // ни одной модели и крутит одну и ту же картинку подарка.
+                return imageReceiver.getLottieAnimation() != null
+                        || imageReceiver.getAnimation() != null;
             }
         }
         public static class Symbol extends Attr {
@@ -6472,6 +6476,8 @@ public class StarGiftSheet extends BottomSheetWithRecyclerListView implements No
      * показывала разные варианты, а не одну и ту же анимацию по кругу.
      */
     private static final int WAYSGRAM_REEL_MODELS = 8;
+    /** Сколько записей пула просматривать: у WaysGram-подарков их 14 с особыми моделями. */
+    private static final int WAYSGRAM_POOL_LIMIT = 24;
     private static final int WAYSGRAM_REEL_PATTERNS = 3;
     /** Попытки по 250 мс, в течение которых страница «Улучшить» ждёт анимации пула. */
     private static final int WAYSGRAM_PREVIEW_ATTEMPTS = 40;
@@ -6486,7 +6492,7 @@ public class StarGiftSheet extends BottomSheetWithRecyclerListView implements No
             return 0;
         }
         int count = 0;
-        final int limit = Math.min(entries.length(), 12);
+        final int limit = Math.min(entries.length(), WAYSGRAM_POOL_LIMIT);
         for (int i = 0; i < limit; i++) {
             final JSONArray entry = entries.optJSONArray(i);
             if (entry != null && entry.optLong(3, 0) != 0L) {
@@ -6512,7 +6518,7 @@ public class StarGiftSheet extends BottomSheetWithRecyclerListView implements No
             return 0;
         }
         int cached = 0;
-        final int limit = Math.min(entries.length(), 12);
+        final int limit = Math.min(entries.length(), WAYSGRAM_POOL_LIMIT);
         for (int i = 0; i < limit; i++) {
             final JSONArray entry = entries.optJSONArray(i);
             final long documentId = entry == null ? 0L : entry.optLong(3, 0);
@@ -6637,7 +6643,7 @@ public class StarGiftSheet extends BottomSheetWithRecyclerListView implements No
         for (int kind = 0; kind < 3; kind++) {
             JSONArray entries = pool.optJSONArray(kind == 0 ? "models" : kind == 1 ? "patterns" : "backdrops");
             if (entries == null) continue;
-            for (int i = 0; i < Math.min(entries.length(), 12); i++) {
+            for (int i = 0; i < Math.min(entries.length(), WAYSGRAM_POOL_LIMIT); i++) {
                 JSONArray entry = entries.optJSONArray(i);
                 if (entry == null || TextUtils.isEmpty(entry.optString(0, ""))) continue;
                 TL_stars.TL_starGiftAttributeRarity rarity = new TL_stars.TL_starGiftAttributeRarity();

@@ -628,3 +628,26 @@ SHA-256 `0119a3778c8b7ca95f7cb36e56070372d97f4d9e124127805ce1b64a2a22b0e7`.
 
 Проверки: `authbot/tests/test_push_notifications.py` (5), `scripts/test_android_push_notifications.py`
 (9), весь `scripts/` (328) и `authbot/tests/` (489).
+
+### Сборка 333: лента улучшения крутила одну модель
+
+**Симптом.** На странице результата прокрутка улучшения показывает одну и ту же модель,
+пока не нажмёшь «Skip»; ползунок шансов при этом уже показывает итоговые «Model 0%,
+Symbol 0.4%, Backdrop 1.2%».
+
+**Причина (клиент).** `StarGiftSheet.Roller.Sticker.isLoaded()` считал готовой только
+Lottie-анимацию (`getLottieAnimation() != null`). Модели WaysGram — WebM с альфой, у них
+Lottie нет, поэтому ни одна модель пула не попадала в выбор: `AttrRoller.next()` возвращал
+`start` — картинку самого подарка, — и лента бесконечно рисовала её же. До `finish`
+прокрутка не доходила, пока не срабатывал 16-секундный таймаут и `skip()`.
+
+- `isLoaded()` теперь принимает и видео-анимацию (`getAnimation()`), и Lottie.
+- Пул просматривался только до 12 записей, а у WaysGram-подарков их 14 (12 общих и 2 особые):
+  обрезка выбрасывала как раз особые модели, включая выпавшую. Введён `WAYSGRAM_POOL_LIMIT = 24`.
+
+**Данные сервера в порядке** и зафиксированы тестом: пул Mellstroy отдаёт 14 моделей с
+разными синтетическими id, и каждый id скачивается файлом
+(`gift_model_fallbacks.model_for_document(..., synthetic=True)`).
+
+Проверки: `scripts/test_android_gift_upgrade_reel.py` (6), весь `scripts/` (334),
+`authbot/tests/` (489).
