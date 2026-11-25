@@ -25,6 +25,7 @@ sys.path.insert(0, str(ROOT))
 
 import bot as bot_module
 import messenger_api
+import waysgram_gifts
 from messenger_api import build_messenger_router, init_messenger_storage
 from telegram_mtproto import TelegramMTProtoGiftCatalog
 
@@ -3132,12 +3133,13 @@ def test_telegram_gift_catalog_sync_and_sticker_proxy(api_env, monkeypatch) -> N
             assert payload["source"] == "telegram_bot_api"
             assert payload["scope"] == "gifts_available_to_authbot"
             assert payload["currency"] == "stars"
-            # The app storefront only lists offers after AuthBot configures price and stock.
-            assert payload["count"] == 0
+            # Telegram's offers appear only after AuthBot configures price and stock;
+            # WaysGram's own gift is on sale out of the box.
+            assert [gift["id"] for gift in payload["gifts"]] == [waysgram_gifts.GIFT_ID]
             # The legacy all=1 switch is ignored; private admin inventory remains in AuthBot only.
             full_catalog = await client.get("/api/telegram/gifts?all=1", headers=auth)
             assert full_catalog.status_code == 200
-            assert full_catalog.json()["count"] == 0
+            assert [gift["id"] for gift in full_catalog.json()["gifts"]] == [waysgram_gifts.GIFT_ID]
             edit_attempt = await client.patch(
                 "/api/telegram/gifts/gift_123",
                 headers=auth,
@@ -3151,9 +3153,11 @@ def test_telegram_gift_catalog_sync_and_sticker_proxy(api_env, monkeypatch) -> N
 
             catalog = await client.get("/api/telegram/gifts", headers=auth)
             payload = catalog.json()
-            assert payload["count"] == 1
+            # Telegram's priced gift plus WaysGram's own gift, which is always on sale.
+            assert payload["count"] == 2
+            assert payload["gifts"][-1]["id"] == waysgram_gifts.GIFT_ID
 
-            gift = payload["gifts"][0]
+            gift = next(item for item in payload["gifts"] if item["id"] == "gift_123")
             assert gift["price_stars"] == 40
             assert gift["remaining"] == 3
             assert gift["telegram_star_count"] == 25
@@ -3282,13 +3286,14 @@ def test_mtproto_gift_catalog_api_and_sticker_proxy(api_env) -> None:
             assert payload["source"] == "telegram_mtproto"
             assert payload["scope"] == "telegram_full_mtproto_catalog"
             assert payload["currency"] == "stars"
-            assert payload["count"] == 0  # hidden until the administrator prices it
+            # Telegram's gift is hidden until the administrator prices it; ours is not.
+            assert [gift["id"] for gift in payload["gifts"]] == [waysgram_gifts.GIFT_ID]
             with db_split.sqlite_connect(path) as db:
                 db.execute(
                     "INSERT INTO telegram_gift_prices(gift_id,price_stars,supply,sold,updated_at) VALUES('987654321',60,5,0,1)"
                 )
             payload = (await client.get("/api/telegram/gifts", headers=auth)).json()
-            assert payload["count"] == 1
+            assert [gift["id"] for gift in payload["gifts"]] == ["987654321", waysgram_gifts.GIFT_ID]
 
             gift = payload["gifts"][0]
             assert gift["id"] == "987654321"
@@ -6976,7 +6981,9 @@ def test_bundled_original_plush_pepe_artwork_and_manual_inventory(api_env) -> No
 
             catalog = await client.get("/api/telegram/gifts", headers={"Authorization": f"Bearer {token}"})
             assert catalog.status_code == 200
-            assert catalog.json()["gifts"][0]["title"] == "Plush Pepe"
+            listed = catalog.json()["gifts"]
+            # Sold-out Telegram gifts sort after the available ones, so find it by id.
+            assert next(g for g in listed if g["id"] == gift_id)["title"] == "Plush Pepe"
             bought = await client.post(f"/api/telegram/gifts/{gift_id}/purchase",
                                        headers={"Authorization": f"Bearer {token}"},
                                        json={"recipient_id": 88160})

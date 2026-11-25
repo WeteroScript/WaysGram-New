@@ -1,0 +1,156 @@
+{
+  "gift_id": "7390000000000000001",
+  "title": "Mellstroy",
+  "source": "WaysGram model pack: original clips re-encoded with an alpha channel (black canvas keyed out, dark clothing kept opaque)",
+  "models": [
+    {
+      "name": "Основной",
+      "file": "main.webm",
+      "kind": "main",
+      "bytes": 62486,
+      "sha256": "769c305789fb96aebb2718924e9a267ad0ab1331129a69410728218617d830c4",
+      "frames": 90,
+      "fps": 30
+    },
+    {
+      "name": "Привет",
+      "file": "hi.webm",
+      "kind": "model",
+      "document_id": -7700000000000000,
+      "bytes": 22002,
+      "sha256": "42f190a90d73a788b7ca4a3dd08d557ef1a3de383438268d9df68279298ff4bf",
+      "frames": 32,
+      "fps": 30
+    },
+    {
+      "name": "Танцует",
+      "file": "tantsuet.webm",
+      "kind": "model",
+      "document_id": -7700000000000001,
+      "bytes": 310027,
+      "sha256": "32c625f2a22b1d21f003cc5ca53ffbc97beb90379687629a2003593e8dfba84d",
+      "frames": 90,
+      "fps": 30
+    },
+    {
+      "name": "Удовлетворённость",
+      "file": "ydovletvorenost.webm",
+      "kind": "model",
+      "document_id": -7700000000000002,
+      "bytes": 230955,
+      "sha256": "cf0c22cf4c91f3cf31302d3fdaaacdfdd2337bab6e90e475eacc0cc52d27fad8",
+      "frames": 90,
+      "fps": 30
+    },
+    {
+      "name": "Мама птица",
+      "file": "mamaptitsa.webm",
+      "kind": "model",
+      "document_id": -7700000000000003,
+      "bytes": 97395,
+      "sha256": "c996dda29d484323e152d71465237f3dbda24ca75ab2eab3affebe90d1b08a08",
+      "frames": 90,
+      "fps": 30
+    },
+    {
+      "name": "Неудачность",
+      "file": "neudancnost.webm",
+      "kind": "model",
+      "document_id": -7700000000000004,
+      "bytes": 148836,
+      "sha256": "0099449487f3c92b0a028a63f5b8841b007b4dae92ea8909a879a9188c53a1cc",
+      "frames": 81,
+      "fps": 30
+    },
+    {
+      "name": "Омайгад",
+      "file": "omaigad.webm",
+      "kind": "model",
+      "document_id": -7700000000000005,
+      "bytes": 235578,
+      "sha256": "1bcb1173ec35d020900bf34975615f771ef254f495bd333cb26e947b497e2c77",
+      "frames": 89,
+      "fps": 30
+    },
+    {
+      "name": "Пам-пам-пам-пам",
+      "file": "pampampampam.webm",
+      "kind": "model",
+      "document_id": -7700000000000006,
+      "bytes": 166106,
+      "sha256": "3fc8677291cdc7451dc8ad7467fbb0946961afc21c1a791b39170ce15b1d5fc0",
+      "frames": 88,
+      "fps": 30
+    },
+    {
+      "name": "Разбил",
+      "file": "razbil.webm",
+      "kind": "model",
+      "document_id": -7700000000000007,
+      "bytes": 282212,
+      "sha256": "3456dd8b22a8c2473183f8cc429dd0383cab6eb2f01823b9a7730d0506a4d668",
+      "frames": 81,
+      "fps": 30
+    },
+    {
+      "name": "Средневековый",
+      "file": "srednevekovii.webm",
+      "kind": "model",
+      "document_id": -7700000000000008,
+      "bytes": 213258,
+      "sha256": "4599ea2972cc4b2a7bdc30c1c64ea0e0fd96bc9e570b21f37b6226dbe69f8d6d",
+      "frames": 89,
+      "fps": 30
+    },
+    {
+      "name": "Страшно",
+      "file": "strashnoo.webm",
+      "kind": "model",
+      "document_id": -7700000000000009,
+      "bytes": 214094,
+      "sha256": "4f5b85c9dcaf3d99eb1e4b61d657d52340a97dcd07aaeedce63be8a435a52a99",
+      "frames": 89,
+      "fps": 30
+    },
+    {
+      "name": "Тужится",
+      "file": "tyzitsya.webm",
+      "kind": "model",
+      "document_id": -7700000000000010,
+      "bytes": 105450,
+      "sha256": "08193121e55cddbf6709b19926e8ed10b9211a37310a428c435ee716efd8e0c6",
+      "frames": 82,
+      "fps": 30
+    },
+    {
+      "name": "Я уже красный",
+      "file": "yauzekrasnii.webm",
+      "kind": "model",
+      "document_id": -7700000000000011,
+      "bytes": 222795,
+      "sha256": "0012f708af061384613e940b7c73b5ef95bea43c837a6acbcb557357228e5f1d",
+      "frames": 90,
+      "fps": 30
+    },
+    {
+      "name": "Зарядка",
+      "file": "zaryadka.webm",
+      "kind": "model",
+      "document_id": -7700000000000012,
+      "bytes": 319294,
+      "sha256": "35c2f70fe8cbd925204304c25edf947bd7e418da23f0ba6b0e2acbb64208e6ac",
+      "frames": 90,
+      "fps": 30
+    },
+    {
+      "name": "Злой",
+      "file": "zloi.webm",
+      "kind": "model",
+      "document_id": -7700000000000013,
+      "bytes": 69121,
+      "sha256": "22240ab23355e09c29968d4143f8a284fc966404c67219f08864cfba2eacc1f0",
+      "frames": 41,
+      "fps": 30
+    }
+  ]
+}

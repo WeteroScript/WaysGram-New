@@ -16,6 +16,7 @@ verified Telegram odds. The effective chance is rounded to integer permille for 
 from __future__ import annotations
 
 import json
+import math
 import secrets
 from pathlib import Path
 from typing import Any, Iterable
@@ -36,6 +37,25 @@ SPECIAL_MODELS: dict[str, list[dict[str, Any]]] = {
             "rarity": "legendary",
             "document_id": -5936013938331222567,
         }
+    ],
+    # Mellstroy: our own gift, so its two rarest models replace the whole pool draw with the
+    # exact published chances. The two draws are independent and never touch the odds of the
+    # twelve models that stay in the weighted pool.
+    "7390000000000000001": [
+        {
+            "name": "Привет",
+            "one_in": 2000,
+            "chance_percent": 0.05,
+            "rarity": "legendary",
+            "document_id": -7700000000000000,
+        },
+        {
+            "name": "Танцует",
+            "one_in": 1000,
+            "chance_percent": 0.1,
+            "rarity": "legendary",
+            "document_id": -7700000000000001,
+        },
     ],
 }
 
@@ -116,10 +136,29 @@ def special_model_trait(entry: dict[str, Any]) -> dict[str, Any]:
 
 
 def roll_special_model(gift_id: Any) -> dict[str, Any] | None:
-    """Draws one of the exclusive models of a gift; ``None`` when nothing dropped."""
-    for entry in special_models(gift_id):
-        one_in = int(entry.get("one_in") or 0)
-        if one_in > 0 and secrets.randbelow(one_in) == 0:
+    """Draws one of the exclusive models of a gift; ``None`` when nothing dropped.
+
+    Every entry keeps the exact marginal chance it publishes. Independent 1/n draws in a
+    loop would dilute the later entries - the second draw only happens when the first one
+    missed, so a 0.1 % model after a 0.05 % model would really drop in 0.0999 % of rolls.
+    All entries therefore share one denominator and one draw, where entry *i* wins with
+    probability exactly 1 / ``one_in``.
+    """
+    entries = special_models(gift_id)
+    if not entries:
+        return None
+    scales = [max(1, int(entry.get("one_in") or 0) or 1) for entry in entries]
+    denominator = math.lcm(*scales)
+    weights = [denominator // scale for scale in scales]
+    total = sum(weights)
+    if total >= denominator:
+        # The chances claim 100 % or more; keep their relative order instead of drawing.
+        denominator = total
+    roll = secrets.randbelow(denominator)
+    cumulative = 0
+    for entry, weight in zip(entries, weights):
+        cumulative += weight
+        if roll < cumulative:
             return special_model_trait(entry)
     return None
 

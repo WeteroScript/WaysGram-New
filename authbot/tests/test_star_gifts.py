@@ -12,6 +12,7 @@ from fastapi import FastAPI
 import bot as bot_module
 import db_split
 import messenger_api
+import waysgram_gifts
 from messenger_api import build_messenger_router, init_messenger_storage
 from test_messenger_api import FakeBot, add_account, add_session, client_for, run
 
@@ -64,13 +65,17 @@ def test_gifts_are_hidden_until_admin_sets_price_and_supply(env) -> None:
     async def scenario() -> None:
         async with await client_for(app) as client:
             hidden = (await client.get("/api/telegram/gifts", headers=headers(101))).json()
-            assert hidden["count"] == 0
+            # Only WaysGram's own gift is on sale by default; Telegram's gifts wait for the
+            # administrator to set a price and a stock.
+            assert [gift["id"] for gift in hidden["gifts"]] == [waysgram_gifts.GIFT_ID]
+            assert hidden["gifts"][0]["price_stars"] == 5000
+            assert hidden["gifts"][0]["supply"] == 1000
             # The app storefront never exposes unlisted catalog entries, even via all=1
             # or when the authenticated WaysGram account is also an AuthBot administrator.
             full = (await client.get("/api/telegram/gifts?all=1", headers=headers(101))).json()
-            assert full["count"] == 0
+            assert [gift["id"] for gift in full["gifts"]] == [waysgram_gifts.GIFT_ID]
             everything = (await client.get("/api/telegram/gifts?all=1", headers=headers(ADMIN))).json()
-            assert everything["count"] == 0
+            assert [gift["id"] for gift in everything["gifts"]] == [waysgram_gifts.GIFT_ID]
 
             # Price and stock are managed only through the AuthBot Telegram admin panel,
             # not through authenticated app REST sessions, even for the admin account.
@@ -81,7 +86,8 @@ def test_gifts_are_hidden_until_admin_sets_price_and_supply(env) -> None:
             await bot_module.set_telegram_gift_values("g1", price=40, supply=2)
 
             shown = (await client.get("/api/telegram/gifts", headers=headers(101))).json()
-            assert [g["id"] for g in shown["gifts"]] == ["g1"]
+            # Telegram's catalogue keeps its order; our own gift is listed after it.
+            assert [g["id"] for g in shown["gifts"]] == ["g1", waysgram_gifts.GIFT_ID]
             assert shown["gifts"][0]["price_stars"] == 40 and shown["gifts"][0]["remaining"] == 2
             assert (await client.patch("/api/admin/telegram-gifts/g1", headers=headers(ADMIN), json={"price_stars": -1})).status_code in (404, 405)
 
@@ -186,7 +192,7 @@ def test_buying_a_gift_charges_stars_and_reduces_stock(env) -> None:
             assert sold_out.status_code == 409
             assert (await client.get("/api/me", headers=headers(101))).json()["stars"] == 5000 - 80
             gone = (await client.get("/api/telegram/gifts", headers=headers(101))).json()
-            assert gone["count"] == 0
+            assert [gift["id"] for gift in gone["gifts"]] == [waysgram_gifts.GIFT_ID]
 
     run(scenario())
 
@@ -390,6 +396,7 @@ def test_removed_telegram_gift_cannot_be_purchased(env, monkeypatch: pytest.Monk
             inventory = (await client.get("/api/me/gifts", headers=headers(101))).json()["gifts"]
             assert len(inventory) == 1 and inventory[0]["telegram_gift_id"] == "g1"
             archived_admin_rows = await bot_module.telegram_gift_rows()
+            # Own gifts have their own AuthBot screen, so the Telegram list stays Telegram's.
             assert {str(row["id"]) for row in archived_admin_rows} == {"g1", "g2"}
 
         connection = db_split.sqlite_connect(path)

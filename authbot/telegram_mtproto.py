@@ -17,6 +17,7 @@ from PIL import Image, UnidentifiedImageError
 import aiosqlite
 import gift_names
 import gift_model_fallbacks
+import waysgram_gifts
 from telethon import functions, types
 from telethon.extensions import BinaryReader
 
@@ -438,14 +439,18 @@ class TelegramMTProtoGiftCatalog:
                     )
                     gift_ids = [item["gift_id"] for item in payloads]
                     placeholders_ids = ",".join("?" for _ in gift_ids)
+                    # WaysGram's own gifts are not part of Telegram's answer: their
+                    # availability belongs to the administrator, never to the sync.
                     await db.execute(
                         f"""UPDATE telegram_mtproto_gift_catalog
-                            SET is_available=0 WHERE gift_id NOT IN ({placeholders_ids})""",
+                            SET is_available=0
+                            WHERE gift_id NOT IN ({placeholders_ids}) AND is_waysgram=0""",
                         gift_ids,
                     )
                 else:
                     await db.execute(
-                        "UPDATE telegram_mtproto_gift_catalog SET is_available=0"
+                        "UPDATE telegram_mtproto_gift_catalog"
+                        " SET is_available=0 WHERE is_waysgram=0"
                     )
                 await db.execute(
                     """INSERT INTO telegram_gift_sync_state(id,last_synced_at,gift_count,source)
@@ -886,9 +891,14 @@ class TelegramMTProtoGiftCatalog:
         Manually added or sold-out gifts live only in the Bot API tables, and the shop still
         sells them, so their artwork has to be downloaded as well.
         """
+        # WaysGram's own gifts carry bundled artwork, so they are not Telegram downloads.
+        # ``COALESCE`` keeps trimmed-down schemas usable, where the marker column is absent.
         queries = (
-            "SELECT gift_id FROM telegram_mtproto_gift_catalog WHERE is_available=1 ORDER BY position",
-            "SELECT gift_id FROM telegram_gift_prices WHERE price_stars>0",
+            "SELECT gift_id FROM telegram_mtproto_gift_catalog"
+            " WHERE is_available=1 AND COALESCE(is_waysgram,0)=0 ORDER BY position",
+            "SELECT gift_id FROM telegram_gift_prices p WHERE price_stars>0"
+            " AND NOT EXISTS (SELECT 1 FROM telegram_mtproto_gift_catalog c"
+            "                 WHERE c.gift_id=p.gift_id AND COALESCE(c.is_waysgram,0)=1)",
             "SELECT gift_id FROM telegram_gift_catalog ORDER BY position",
         )
         seen: list[str] = []
@@ -928,6 +938,10 @@ class TelegramMTProtoGiftCatalog:
                 ids = await self._catalog_artwork_ids(database_path)
             state["total"] = len(ids)
             for gift_id in ids:
+                if waysgram_gifts.is_waysgram_gift(gift_id):
+                    # Their artwork is bundled with the backend, not downloaded from Telegram.
+                    state["done"] = int(state["done"]) + 1
+                    continue
                 try:
                     await self.download_sticker(gift_id, database_path)
                 except Exception:

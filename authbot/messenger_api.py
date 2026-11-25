@@ -24,6 +24,7 @@ import aiosqlite
 from virtual_numbers import is_virtual_number, normalize_number
 import gift_names
 import gift_model_fallbacks
+import waysgram_gifts  # noqa: F401  # our own shop gifts
 import db_split  # noqa: F401  # two-file database layout
 from star_rating import profile_rating
 import gift_upgrades  # noqa: F401  # official Telegram upgrade pools
@@ -64,12 +65,82 @@ PLUSH_PEPE_GIFT_ID = "5936013938331222567"
 BUNDLED_GIFT_ASSETS = Path(__file__).with_name("assets") / "gifts"
 
 
-def _bundled_gift_artwork(gift_id: str, animated: bool) -> Path | None:
+def _mtproto_gift_payload(row: Any) -> dict[str, Any]:
+    """One ``telegram_mtproto_gift_catalog`` row in storefront shape.
+
+    Telegram's catalogue and WaysGram's own gifts share this table and these fields,
+    so both reach the client through the same payload.
+    """
+    gift_id = str(row["gift_id"])
+    sticker_url = f"/api/telegram/gifts/{quote(gift_id, safe='')}/sticker"
+    released_by = json.loads(row["released_by_json"]) if row["released_by_json"] else None
+    background = json.loads(row["background_json"]) if row["background_json"] else None
+    payload = {
+        "id": gift_id,
+        "source": "telegram",
+        "catalog_source": "telegram_mtproto",
+        "title": _gift_display_title(row["title"], row["sticker_set_name"], gift_id),
+        "emoji": str(row["sticker_emoji"] or ""),
+        "star_count": int(row["stars"]),
+        "currency": "telegram_stars",
+        "upgrade_star_count": row["upgrade_stars"],
+        "is_premium": bool(row["require_premium"]),
+        "has_colors": bool(row["peer_color_available"]),
+        "is_limited": bool(row["limited"]),
+        "sold_out": bool(row["sold_out"]),
+        "birthday": bool(row["birthday"]),
+        "require_premium": bool(row["require_premium"]),
+        "limited_per_user": bool(row["limited_per_user"]),
+        "auction": bool(row["auction"]),
+        "availability_resale": row["availability_resale"],
+        "convert_stars": row["convert_stars"],
+        "first_sale_date": row["first_sale_date"],
+        "last_sale_date": row["last_sale_date"],
+        "resell_min_stars": row["resell_min_stars"],
+        "released_by": released_by,
+        "per_user_total": row["per_user_total"],
+        "per_user_remains": row["per_user_remains"],
+        "locked_until_date": row["locked_until_date"],
+        "auction_slug": str(row["auction_slug"] or ""),
+        "gifts_per_round": row["gifts_per_round"],
+        "auction_start_date": row["auction_start_date"],
+        "upgrade_variants": row["upgrade_variants"],
+        "total_count": row["availability_total"],
+        "remaining_count": row["availability_remains"],
+        "personal_total_count": row["per_user_total"],
+        "personal_remaining_count": row["per_user_remains"],
+        "background": background,
+        "sticker": {
+            "type": "video" if bool(row["sticker_is_video"]) else (
+                "animated" if bool(row["sticker_is_animated"]) else "regular"
+            ),
+            "set_name": str(row["sticker_set_name"] or ""),
+            "width": row["sticker_width"],
+            "height": row["sticker_height"],
+            "is_animated": bool(row["sticker_is_animated"]),
+            "is_video": bool(row["sticker_is_video"]),
+            "mime_type": str(row["sticker_mime_type"] or ""),
+            "url": sticker_url,
+        },
+        "synced_at": int(row["synced_at"]),
+    }
+    if waysgram_gifts.is_waysgram_gift(gift_id):
+        # Not a Telegram gift: the client needs no special case, but any diagnostic that
+        # shows where a gift came from must not claim Telegram's catalogue.
+        payload["source"] = "waysgram"
+        payload["catalog_source"] = "waysgram"
+    return payload
+
+
+def _bundled_gift_artwork(gift_id: str, animated: bool) -> tuple[Path, str] | None:
+    """Artwork WaysGram ships itself: the file and the media type to answer with."""
     # Explicit allowlist: never construct a path from an arbitrary API input.
-    if str(gift_id) != PLUSH_PEPE_GIFT_ID:
-        return None
-    path = BUNDLED_GIFT_ASSETS / (PLUSH_PEPE_GIFT_ID + (".tgs" if animated else ".png"))
-    return path if path.is_file() else None
+    key = str(gift_id)
+    if key == PLUSH_PEPE_GIFT_ID:
+        path = BUNDLED_GIFT_ASSETS / (PLUSH_PEPE_GIFT_ID + (".tgs" if animated else ".png"))
+        return (path, "application/x-tgsticker" if animated else "image/png") if path.is_file() else None
+    # Our own gifts: the WebM pack is the shop animation, its poster is the still frame.
+    return waysgram_gifts.sticker(key, bool(animated))
 
 
 def _b64url(value: bytes) -> str:
@@ -439,6 +510,10 @@ async def _gift_attribute_rows(db: Any, gift_id: str) -> dict[str, list[dict[str
     gift_id = str(gift_id or "").strip()
     if not gift_id:
         return {}
+    if waysgram_gifts.is_waysgram_gift(gift_id):
+        # Our models are bundled files and the borrowed patterns come from the donor row
+        # set, so the whole answer is local and never depends on a Telegram session.
+        return await waysgram_gifts.attribute_rows(db, gift_id)
     try:
         cur = await db.execute(
             """SELECT kind,position,name,rarity,permille,document_id,
@@ -1469,6 +1544,7 @@ async def init_messenger_storage(database_path: Path) -> None:
                 source_payload TEXT NOT NULL,
                 position INTEGER NOT NULL DEFAULT 0,
                 is_available INTEGER NOT NULL DEFAULT 1,
+                is_waysgram INTEGER NOT NULL DEFAULT 0,
                 synced_at INTEGER NOT NULL
             );
             CREATE INDEX IF NOT EXISTS idx_telegram_mtproto_gifts_available
@@ -2440,6 +2516,23 @@ async def init_messenger_storage(database_path: Path) -> None:
             await _assign_unique_number(
                 db, serial, key or (gift_key_hint or title_hint or "waysgram"), now
             )
+
+        # WaysGram's own gifts live in the Telegram catalogue table, marked so that the
+        # Telegram sync never retires them and the administrator can hide them. The column
+        # is added to databases created before the first own gift existed.
+        try:
+            cur = await db.execute(
+                f"PRAGMA {db_split.SCHEMA}.table_info(telegram_mtproto_gift_catalog)"
+            )
+            catalog_columns = {str(row[1]) for row in await cur.fetchall()}
+            if "is_waysgram" not in catalog_columns:
+                await db.execute(
+                    "ALTER TABLE telegram_mtproto_gift_catalog"
+                    " ADD COLUMN is_waysgram INTEGER NOT NULL DEFAULT 0"
+                )
+            await waysgram_gifts.ensure_catalog(db)
+        except Exception:  # noqa: BLE001 - trimmed-down schemas have no gift catalogue
+            LOGGER.warning("WaysGram gift catalogue seeding skipped", exc_info=True)
         await db.commit()
 
 
@@ -2565,7 +2658,7 @@ async def _telegram_gift_metadata(db: Any, gift_id: str) -> dict[str, Any] | Non
             "sticker_available": True,
             "sticker": {"url": f"/api/telegram/gifts/{quote(gift_id, safe='')}/sticker",
                         "is_animated": bool(_bundled_gift_artwork(gift_id, True)),
-                        "mime_type": "application/x-tgsticker"},
+                        "mime_type": (_bundled_gift_artwork(gift_id, True) or ("", ""))[1]},
         }
     row = rows[source]
     fallback_source = "telegram_gift_catalog" if source == "telegram_mtproto" else "telegram_mtproto"
@@ -3197,6 +3290,9 @@ def build_messenger_router(
         key = str(gift_id or "").strip()
         provider = mtproto_gift_provider() if mtproto_gift_provider else None
         if provider is None or not key.isdigit() or key in pending_attribute_syncs:
+            return
+        if waysgram_gifts.is_waysgram_gift(key):
+            # Our own gifts have a bundled attribute set; Telegram knows nothing about them.
             return
         pending_attribute_syncs.add(key)
 
@@ -7310,6 +7406,7 @@ def build_messenger_router(
                              AND p.price_stars>0
                              AND (p.supply>=2000000000 OR p.supply>p.sold)
                        )
+                         AND (is_waysgram=0 OR is_available=1)
                        ORDER BY is_available DESC, position ASC"""
                 )
                 rows = await cur.fetchall()
@@ -7335,59 +7432,7 @@ def build_messenger_router(
         gifts: list[dict[str, Any]] = []
         for row in rows:
             if source == "telegram_mtproto":
-                gift_id = str(row["gift_id"])
-                sticker_url = f"/api/telegram/gifts/{quote(gift_id, safe='')}/sticker"
-                released_by = json.loads(row["released_by_json"]) if row["released_by_json"] else None
-                background = json.loads(row["background_json"]) if row["background_json"] else None
-                gifts.append({
-                    "id": gift_id,
-                    "source": "telegram",
-                    "catalog_source": "telegram_mtproto",
-                    "title": _gift_display_title(row["title"], row["sticker_set_name"], gift_id),
-                    "emoji": str(row["sticker_emoji"] or ""),
-                    "star_count": int(row["stars"]),
-                    "currency": "telegram_stars",
-                    "upgrade_star_count": row["upgrade_stars"],
-                    "is_premium": bool(row["require_premium"]),
-                    "has_colors": bool(row["peer_color_available"]),
-                    "is_limited": bool(row["limited"]),
-                    "sold_out": bool(row["sold_out"]),
-                    "birthday": bool(row["birthday"]),
-                    "require_premium": bool(row["require_premium"]),
-                    "limited_per_user": bool(row["limited_per_user"]),
-                    "auction": bool(row["auction"]),
-                    "availability_resale": row["availability_resale"],
-                    "convert_stars": row["convert_stars"],
-                    "first_sale_date": row["first_sale_date"],
-                    "last_sale_date": row["last_sale_date"],
-                    "resell_min_stars": row["resell_min_stars"],
-                    "released_by": released_by,
-                    "per_user_total": row["per_user_total"],
-                    "per_user_remains": row["per_user_remains"],
-                    "locked_until_date": row["locked_until_date"],
-                    "auction_slug": str(row["auction_slug"] or ""),
-                    "gifts_per_round": row["gifts_per_round"],
-                    "auction_start_date": row["auction_start_date"],
-                    "upgrade_variants": row["upgrade_variants"],
-                    "total_count": row["availability_total"],
-                    "remaining_count": row["availability_remains"],
-                    "personal_total_count": row["per_user_total"],
-                    "personal_remaining_count": row["per_user_remains"],
-                    "background": background,
-                    "sticker": {
-                        "type": "video" if bool(row["sticker_is_video"]) else (
-                            "animated" if bool(row["sticker_is_animated"]) else "regular"
-                        ),
-                        "set_name": str(row["sticker_set_name"] or ""),
-                        "width": row["sticker_width"],
-                        "height": row["sticker_height"],
-                        "is_animated": bool(row["sticker_is_animated"]),
-                        "is_video": bool(row["sticker_is_video"]),
-                        "mime_type": str(row["sticker_mime_type"] or ""),
-                        "url": sticker_url,
-                    },
-                    "synced_at": int(row["synced_at"]),
-                })
+                gifts.append(_mtproto_gift_payload(row))
             else:
                 gift_id = str(row["gift_id"])
                 gifts.append({
@@ -7421,6 +7466,29 @@ def build_messenger_router(
                     },
                     "synced_at": int(row["synced_at"]),
                 })
+
+        # WaysGram's own gifts belong to this server, not to Telegram: they stay in the
+        # storefront even when the active catalogue source is the Bot API one. Only the
+        # administrator's "in the shop" switch removes them.
+        own_known = {str(gift["id"]) for gift in gifts}
+        async with aiosqlite.connect(db_path()) as own_db:
+            own_db.row_factory = aiosqlite.Row
+            cur = await own_db.execute(
+                """SELECT * FROM telegram_mtproto_gift_catalog
+                   WHERE is_waysgram=1 AND is_available=1
+                     AND EXISTS (
+                         SELECT 1 FROM telegram_gift_prices p
+                         WHERE p.gift_id=telegram_mtproto_gift_catalog.gift_id
+                           AND p.price_stars>0
+                           AND (p.supply>=2000000000 OR p.supply>p.sold)
+                     )"""
+            )
+            own_rows = await cur.fetchall()
+        own_gifts = [
+            _mtproto_gift_payload(row) for row in own_rows
+            if str(row["gift_id"]) not in own_known
+        ]
+        gifts = gifts + own_gifts
 
         # Include records retained in the other catalog source as historical WaysGram items.
         # Telegram availability is informational only; internal pricing and stock govern WaysGram.
@@ -7490,6 +7558,7 @@ def build_messenger_router(
                               availability_total,availability_resale,convert_stars,first_sale_date,
                               last_sale_date,upgrade_stars,resell_min_stars,released_by_json,
                               per_user_total,per_user_remains,locked_until_date,auction_slug,
+                              sticker_document_id,sticker_dc_id,sticker_size,
                               gifts_per_round,auction_start_date,upgrade_variants,background_json,
                               synced_at
                        FROM telegram_mtproto_gift_catalog
@@ -7499,6 +7568,7 @@ def build_messenger_router(
                              AND p.price_stars>0
                              AND (p.supply>=2000000000 OR p.supply>p.sold)
                        )
+                         AND COALESCE(is_waysgram,0)=0
                        ORDER BY synced_at DESC"""
                 )
                 historical_rows = await cur.fetchall()
@@ -7642,12 +7712,12 @@ def build_messenger_router(
         animated: int = Query(default=0, ge=0, le=1),
     ) -> Response:
         await current_user(authorization)
-        # The original sold-out Plush Pepe asset is bundled by its exact gift ID.
-        # Prefer it over a stale Bot API thumbnail or an arbitrary upgrade model.
+        # Bundled artwork (Plush Pepe, our own gifts) is preferred over a stale Bot API
+        # thumbnail or an arbitrary upgrade model.
         bundled = _bundled_gift_artwork(gift_id, bool(animated))
         if bundled is not None:
             return FileResponse(
-                bundled, media_type="application/x-tgsticker" if animated else "image/png",
+                bundled[0], media_type=bundled[1],
                 headers={"Cache-Control": "private, max-age=3600"},
             )
         async with aiosqlite.connect(db_path()) as db:
@@ -7981,6 +8051,10 @@ def build_messenger_router(
         key = str(gift_id or "").strip()
         if not key.isdigit():
             raise HTTPException(status_code=400, detail="Некорректный идентификатор подарка")
+        if waysgram_gifts.is_waysgram_gift(key):
+            async with aiosqlite.connect(db_path()) as gift_db:
+                gift_db.row_factory = aiosqlite.Row
+                return await waysgram_gifts.attributes_payload(gift_db, key)
         provider = _gift_provider()
         if provider is None:
             raise HTTPException(status_code=503, detail="Каталог подарков Telegram недоступен")
@@ -8054,6 +8128,11 @@ def build_messenger_router(
             return FileResponse(local_model["path"],
                                 media_type=local_model.get("mime") or "application/x-tgsticker",
                                 headers={"Cache-Control": "private, max-age=604800"})
+        if waysgram_gifts.is_waysgram_gift(key) and numeric_document > 0:
+            # Patterns and backdrops of an own gift are the donor's Telegram documents, so
+            # the download has to be asked under the gift that actually owns them.
+            async with aiosqlite.connect(db_path()) as owner_db:
+                key = await waysgram_gifts.document_gift_id(owner_db, key, numeric_document)
         provider = _gift_provider()
         error = None
         if provider is not None:
