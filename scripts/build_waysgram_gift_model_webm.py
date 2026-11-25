@@ -282,15 +282,60 @@ def render_frames(data: dict[str, Any], tgs: pathlib.Path, folder: pathlib.Path,
         raise SystemExit("the heart layer renders empty")
     first_w = (first_box[2] - first_box[0]) / first_scale
     first_h = (first_box[3] - first_box[1]) / first_scale
-    logo_scale = min(first_w * 0.70 / logo.width, first_h * 0.34 / logo.height)
+    logo_scale = min(first_w * 0.60 / logo.width, first_h * 0.34 / logo.height)
     logo_scaled = logo.resize((max(1, round(logo.width * logo_scale)),
                                max(1, round(logo.height * logo_scale))), Image.LANCZOS)
-    # Надпись — ровно по центру сердца (и по горизонтали, и по вертикали), как просили
-    # с устройства. Место постоянное и считается от рамки сердца на первом кадре, поэтому
-    # буквы не дёргаются; по вертикали больше не перебираем — поиск «свободного места»
-    # загонял надпись под верхнюю кромку сердца, где она обрезалась.
+
+    def local_point(local_x: float, local_y: float, rotation: float, scale: float,
+                    centre_x: float, centre_y: float) -> tuple[float, float]:
+        theta = math.radians(rotation)
+        dx = (local_x - heart_anchor[0]) * scale
+        dy = (local_y - heart_anchor[1]) * scale
+        return (centre_x + dx * math.cos(theta) - dy * math.sin(theta),
+                centre_y + dx * math.sin(theta) + dy * math.cos(theta))
+
+    # Надпись стоит по центру сердца по горизонтали и ПОД передними кистями (1 и 2),
+    # как в исходном стикере: кисти её перекрывают, а не она их. Чтобы буквы при этом
+    # читались, вертикальное положение ищем по кадрам анимации — там, где кисти
+    # закрывают минимум букв. Точка постоянна и считается в координатах сердца,
+    # поэтому при анимации надпись не болтается.
     local_center_x = heart_anchor[0] + ((first_box[0] + first_box[2]) / 2 - first_center_x) / first_scale
-    local_center_y = heart_anchor[1] + (first_box[1] + first_h * 0.50 * first_scale - first_center_y) / first_scale
+    sample_frames = sorted({min(count - 1, round(count * k / 8)) for k in range(8)})
+    samples = []
+    for sample in sample_frames:
+        samples.append((
+            heart_transform(data, sample, offset),
+            heart_animation.render_pillow_frame(sample).convert("RGBA").getchannel("A"),
+            hands_animation.render_pillow_frame(sample).convert("RGBA").getchannel("A"),
+        ))
+
+    def visible_share(local_y: float) -> float:
+        """Какая доля букв видна на худшем из проверенных кадров (0…1)."""
+        worst = 1.0
+        for (centre_x, centre_y, rotation, scale), heart_mask, hand_mask in samples:
+            px, py = local_point(local_center_x, local_y, rotation, scale, centre_x, centre_y)
+            text = logo_scaled.rotate(rotation, resample=Image.BICUBIC, expand=True)
+            layer = Image.new("L", heart_mask.size, 0)
+            layer.paste(text.getchannel("A"), (round(px - text.width / 2), round(py - text.height / 2)))
+            letters = sum(1 for value in layer.getdata() if value > 8)
+            if not letters:
+                return 0.0
+            inside = ImageChops.multiply(layer, heart_mask.point(lambda v: 255 if v > 8 else 0))
+            hidden = ImageChops.multiply(inside, hand_mask.point(lambda v: 255 if v > 8 else 0))
+            visible = (sum(1 for value in inside.getdata() if value > 8)
+                       - sum(1 for value in hidden.getdata() if value > 8)) / letters
+            worst = min(worst, visible)
+            if worst < 0.02:
+                break
+        return worst
+
+    best_share, local_center_y = -1.0, 0.0
+    for step in range(21):
+        vertical = 0.12 + 0.01 * step
+        candidate_y = heart_anchor[1] + (first_box[1] + first_h * vertical * first_scale - first_center_y) / first_scale
+        share = visible_share(candidate_y)
+        if share > best_share:
+            best_share, local_center_y = share, candidate_y
 
     for index in range(count):
         body = animation.render_pillow_frame(index).convert("RGBA")
@@ -335,16 +380,16 @@ def render_frames(data: dict[str, Any], tgs: pathlib.Path, folder: pathlib.Path,
         if letters:
             kept = sum(1 for value in layer.getchannel("A").getdata() if value > 8)
             wordmark_inside = min(wordmark_inside, kept / letters)
-        # Передние кисти (1, 2) лежат на сердце, как в оригинале, а надпись идёт последней:
-        # она читается целиком и не прячется под рукой.
-        frame = Image.alpha_composite(frame, hands)
+        # Передние кисти (1, 2) лежат на сердце, как в оригинале, и перекрывают надпись:
+        # по просьбе с устройства надпись идёт ПОД руками.
         frame = Image.alpha_composite(frame, layer)
+        frame = Image.alpha_composite(frame, hands)
 
         frame.save(folder / f"frame_{index:04d}.png", optimize=False)
         if want_preview is not None and index == 0:
             frame.save(want_preview)
 
-    return (width, height), fps, wordmark_inside
+    return (width, height), fps, wordmark_inside, best_share
 
 
 def normalize_webm(path: pathlib.Path) -> None:
@@ -411,7 +456,8 @@ def main() -> None:
     data = redraw_heart(load_composition(args.tgs))
     with tempfile.TemporaryDirectory(prefix="waysgram-model-") as tmp:
         folder = pathlib.Path(tmp)
-        size, fps, wordmark_inside = render_frames(data, args.tgs, folder, want_preview=args.preview)
+        size, fps, wordmark_inside, wordmark_visible = render_frames(
+            data, args.tgs, folder, want_preview=args.preview)
         encode(ffmpeg_binary(args.ffmpeg), folder, args.out, fps)
 
     if args.raw:
@@ -423,7 +469,8 @@ def main() -> None:
         info.update(update_manifest(args.out, args.manifest))
     print(f"{args.out}: {info['bytes']} bytes, sha256 {info['sha256']}")
     print(f"{size[0]}x{size[1]}, {fps} fps, original 3 s Plush Pepe loop; "
-          f"wordmark inside the heart on {wordmark_inside * 100:.1f}% of the worst frame")
+          f"wordmark inside the heart on {wordmark_inside * 100:.1f}% of the worst frame; "
+          f"visible under the hands on {wordmark_visible * 100:.1f}%")
 
 
 if __name__ == "__main__":

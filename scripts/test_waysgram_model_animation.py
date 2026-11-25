@@ -99,8 +99,8 @@ class WaysGramModelAnimationTests(unittest.TestCase):
         for invented in ("glow", "sparkle", "drift"):
             self.assertNotIn(invented, source)
 
-    def test_hands_keep_the_sticker_stacking_and_the_wordmark_is_centred(self) -> None:
-        """С устройства: кусок правой кисти висел на сердце, надпись была сбоку."""
+    def test_hands_keep_the_sticker_stacking_and_the_wordmark_sits_under_them(self) -> None:
+        """С устройства: кусок правой кисти висел на сердце, надпись шла поверх рук."""
         renderer = (ROOT / "scripts" / "build_waysgram_gift_model_webm.py").read_text(encoding="utf-8")
         self.assertIn("HAND_INDICES = {1, 2, 15}", renderer)
         self.assertIn("FRONT_HAND_INDICES = {1, 2}", renderer)
@@ -110,14 +110,15 @@ class WaysGramModelAnimationTests(unittest.TestCase):
                         renderer.index("frame = Image.alpha_composite(frame, heart)"),
                         "правая кисть должна оставаться за сердцем")
         self.assertLess(renderer.index("frame = Image.alpha_composite(frame, heart)"),
-                        renderer.index("frame = Image.alpha_composite(frame, hands)"),
-                        "левые кисти должны лежать на сердце")
-        # Надпись ровно по центру сердца и последним слоем, чтобы её не закрывала рука.
-        self.assertIn("local_center_y = heart_anchor[1] + (first_box[1] + first_h * 0.50", renderer)
-        self.assertNotIn("for shift in", renderer)
-        self.assertLess(renderer.index("frame = Image.alpha_composite(frame, hands)"),
-                        renderer.rindex("frame = Image.alpha_composite(frame, layer)"),
-                        "надпись идёт последней")
+                        renderer.index("frame = Image.alpha_composite(frame, layer)"),
+                        "надпись должна лежать на сердце")
+        self.assertLess(renderer.index("frame = Image.alpha_composite(frame, layer)"),
+                        renderer.rindex("frame = Image.alpha_composite(frame, hands)"),
+                        "надпись должна идти ПОД передними кистями")
+        # Надпись по центру сердца по горизонтали, позиция постоянна (без болтанки).
+        self.assertIn("local_center_x = heart_anchor[0] + ((first_box[0] + first_box[2]) / 2 - first_center_x) / first_scale", renderer)
+        self.assertIn("for step in range(21):", renderer)
+        self.assertIn("share = visible_share(candidate_y)", renderer)
         # Крепление: размер один раз, положение из трансформа сердечного слоя.
         self.assertNotIn("box = heart_alpha.getbbox()", renderer)
         self.assertIn("logo_scaled = logo.resize(", renderer)
