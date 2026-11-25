@@ -49,6 +49,14 @@ class ChatWallpaper(unittest.TestCase):
                       'fourth_background_color', 'intensity', 'rotation', 'blur', 'motion', 'emoticon'):
             self.assertIn(f'"{field}"', body, field)
 
+    def test_settings_come_from_the_request_not_from_the_input_wallpaper(self):
+        # `request.wallpaper` имеет тип TLRPC.InputWallPaper, у которого нет поля settings;
+        # обращение к нему не компилируется (упавшая сборка 326). Градиент/узор лежат
+        # только в `request.settings`.
+        body = self.body(self.extras, 'private static JSONObject wallpaperJson(')
+        self.assertIn('TLRPC.WallPaperSettings settings = req.settings;', body)
+        self.assertNotIn('req.wallpaper.settings', body)
+
     def test_chat_card_carries_the_wallpaper(self):
         builder = self.body(self.chats, 'static TLRPC.WallPaper wallpaper(JSONObject data)')
         self.assertIn('TLRPC.TL_wallPaperNoFile paper = new TLRPC.TL_wallPaperNoFile();', builder)

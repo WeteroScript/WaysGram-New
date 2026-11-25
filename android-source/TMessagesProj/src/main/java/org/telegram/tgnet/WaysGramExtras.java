@@ -242,7 +242,9 @@ public final class WaysGramExtras {
 
     /** Настройки обоев в том же виде, в каком их вернёт карточка чата. */
     private static JSONObject wallpaperJson(TLRPC.TL_messages_setChatWallPaper req) throws JSONException {
-        TLRPC.WallPaperSettings settings = req.wallpaper != null ? req.wallpaper.settings : req.settings;
+        // В messages.setChatWallPaper поле wallpaper — это InputWallPaper (без настроек),
+        // поэтому градиент/узор берём только из req.settings.
+        TLRPC.WallPaperSettings settings = req.settings;
         JSONObject out = new JSONObject();
         out.put("for_both", req.for_both);
         if (settings == null) {
