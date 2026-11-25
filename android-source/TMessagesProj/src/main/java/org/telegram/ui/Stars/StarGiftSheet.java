@@ -6751,7 +6751,7 @@ public class StarGiftSheet extends BottomSheetWithRecyclerListView implements No
             final boolean reelReady = waysGramReelReady(resultGiftId, rollPool);
             final boolean reelWaitedEnough = attempts <= WAYSGRAM_REVEAL_ATTEMPTS - WAYSGRAM_REVEAL_REEL_WAIT_ATTEMPTS;
             if (waysGramPreviewAnimated && (!ready || (!reelReady && !reelWaitedEnough)) && attempts > 0) {
-                AndroidUtilities.runOnUiThread(() -> finishWaysGramUpgrade(serial, result, attempts - 1), 250);
+                AndroidUtilities.runOnUIThread(() -> finishWaysGramUpgrade(serial, result, attempts - 1), 250);
                 return;
             }
             // The server may have refreshed its catalog after the preview. Only use
