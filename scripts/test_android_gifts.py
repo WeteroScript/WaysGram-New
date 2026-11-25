@@ -407,5 +407,29 @@ class AndroidGiftSourceChecks(unittest.TestCase):
         self.assertIn('action.flags |= TLObject.FLAG_1', messages)
 
 
+    def test_upgrade_reel_downloads_and_waits_for_the_whole_model_pool(self):
+        # Лента прокрутки улучшения умеет рисовать только уже скачанные анимации
+        # (WaysGramGiftAttributes.documentById отдаёт документ лишь с диска), поэтому
+        # снимок пула из одной модели крутился по кругу. Клиент должен сам поставить
+        # в очередь весь пул и не стартовать спин, пока лента не наполнится.
+        sheet = self.source("ui/Stars/StarGiftSheet.java")
+        for marker in (
+            "WAYSGRAM_REEL_MODELS = 8",
+            "WAYSGRAM_REEL_PATTERNS = 3",
+            "WAYSGRAM_PREVIEW_REEL_WAIT_ATTEMPTS = 10",
+            "private void waysGramPrefetchReel(String giftId, JSONObject pool)",
+            "waysGramPrefetchReel(preview == null",
+            "private boolean waysGramReelReady(String giftId, JSONObject pool)",
+            "waysGramHasAllAttributes(attributes) && (waitedEnough || waysGramReelReady(giftId, pool))",
+            "final boolean reelReady = waysGramReelReady(resultGiftId, rollPool)",
+            "final boolean reelWaitedEnough = attempts <= WAYSGRAM_REVEAL_ATTEMPTS - WAYSGRAM_REVEAL_REEL_WAIT_ATTEMPTS",
+            "resultGiftId, rollPool);",
+        ):
+            self.assertIn(marker, sheet)
+        # 0‰ в чипе шанса — это «<0.1 %», а не «0 %».
+        self.assertIn('return permille <= 0 ? "<0.1%" : percents(permille);', sheet)
+        self.assertNotIn("ButtonSpan.make(percents(rarity_permille)", sheet)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -205,6 +205,15 @@ import java.util.Map;
 
 public class StarGiftSheet extends BottomSheetWithRecyclerListView implements NotificationCenter.NotificationCenterDelegate {
 
+    /**
+     * Сторона квадрата, в котором играет модель подарка.
+     *
+     * <p>От неё считаются все отступы карточки: подпись «Название #номер» начинается сразу
+     * под квадратом. Если где-то останется зашитое число, подпись заедет под модель —
+     * именно так «Plush Pepe» оказывался под лапами.</p>
+     */
+    private static final int MODEL_IMAGE_SIZE_DP = 160;
+
     private final long dialogId;
     private ContainerView container;
     private ViewPagerFixed viewPager;
@@ -2370,12 +2379,12 @@ public class StarGiftSheet extends BottomSheetWithRecyclerListView implements No
                     layout[i].addView(buttonsLayout, LayoutHelper.createLinear(LayoutHelper.MATCH_PARENT, LayoutHelper.WRAP_CONTENT, Gravity.FILL_HORIZONTAL, 0, 15, 0, 0));
                 }
 
-                addView(layout[i], layoutLayoutParams[i] = LayoutHelper.createFrame(LayoutHelper.MATCH_PARENT, LayoutHelper.WRAP_CONTENT, Gravity.FILL, 16, i == 2 ? 32 : 8 + 160 + 2, 16, 0));
+                addView(layout[i], layoutLayoutParams[i] = LayoutHelper.createFrame(LayoutHelper.MATCH_PARENT, LayoutHelper.WRAP_CONTENT, Gravity.FILL, 16, i == 2 ? 32 : 8 + MODEL_IMAGE_SIZE_DP + 2, 16, 0));
             }
-            addView(imageLayout, LayoutHelper.createFrame(160, 160, Gravity.CENTER_HORIZONTAL | Gravity.TOP, 0, 8, 0, 0));
+            addView(imageLayout, LayoutHelper.createFrame(MODEL_IMAGE_SIZE_DP, MODEL_IMAGE_SIZE_DP, Gravity.CENTER_HORIZONTAL | Gravity.TOP, 0, 8, 0, 0));
 
             imagesRollView = new StickersRollView(context, resourcesProvider);
-            addView(imagesRollView, LayoutHelper.createFrame(LayoutHelper.MATCH_PARENT, 160, Gravity.FILL_HORIZONTAL | Gravity.TOP, 0, 8, 0, 0));
+            addView(imagesRollView, LayoutHelper.createFrame(LayoutHelper.MATCH_PARENT, MODEL_IMAGE_SIZE_DP, Gravity.FILL_HORIZONTAL | Gravity.TOP, 0, 8, 0, 0));
 
             closeView = new ImageView(context);
             closeView.setBackground(Theme.createCircleDrawable(dp(28), 0x24FFFFFF));
@@ -2495,16 +2504,16 @@ public class StarGiftSheet extends BottomSheetWithRecyclerListView implements No
 
                 boolean changed;
                 if (backdrop[i] != null) {
-                    changed = dp(24 + 160) != layoutLayoutParams[i].topMargin || layout[i].getPaddingBottom() != dp(18);
+                    changed = dp(24 + MODEL_IMAGE_SIZE_DP) != layoutLayoutParams[i].topMargin || layout[i].getPaddingBottom() != dp(18);
                     if (changed) {
                         layout[i].setPadding(0, 0, 0, dp(18));
-                        layoutLayoutParams[i].topMargin = dp(24 + 160);
+                        layoutLayoutParams[i].topMargin = dp(24 + MODEL_IMAGE_SIZE_DP);
                     }
                 } else {
-                    changed = dp(8 + 160 + 2) != layoutLayoutParams[i].topMargin || layout[i].getPaddingBottom() != dp(3);
+                    changed = dp(8 + MODEL_IMAGE_SIZE_DP + 2) != layoutLayoutParams[i].topMargin || layout[i].getPaddingBottom() != dp(3);
                     if (changed) {
                         layout[i].setPadding(0, 0, 0, dp(3));
-                        layoutLayoutParams[i].topMargin = dp(8 + 160 + 2);
+                        layoutLayoutParams[i].topMargin = dp(8 + MODEL_IMAGE_SIZE_DP + 2);
                     }
                 }
                 subtitleViewLayoutParams[i].topMargin = dp((i == 1 ? 7.33f : (backdrop[0] == null ? 9 : 5.66f)) - 4);
@@ -2638,10 +2647,10 @@ public class StarGiftSheet extends BottomSheetWithRecyclerListView implements No
 //                imageLayout.setVisibility(View.INVISIBLE);
 //                imagesRollView.start(getUpgradeImageView(), findAttribute(gift.attributes, TL_stars.starGiftAttributeModel.class), () -> {
 //                    imageLayout.setVisibility(View.VISIBLE);
-//                    setGiftImage(imageView[page].getImageReceiver(), gift, 160);
+//                    setGiftImage(imageView[page].getImageReceiver(), gift, MODEL_IMAGE_SIZE_DP);
 //                });
 //            } else {
-                setGiftImage(imageView[page].getImageReceiver(), gift, 160);
+                setGiftImage(imageView[page].getImageReceiver(), gift, MODEL_IMAGE_SIZE_DP);
                 imageViewAttributes[page] = findAttribute(gift.attributes, TL_stars.starGiftAttributeModel.class);
 //            }
             onSwitchPage(currentPage);
@@ -2802,11 +2811,11 @@ public class StarGiftSheet extends BottomSheetWithRecyclerListView implements No
             setPattern(1, patterns.next(), true);
 
             imageViewAttributes[page] = models.next();
-            setGiftImage(imageView[page].getImageReceiver(), imageViewAttributes[page].document, 160);
+            setGiftImage(imageView[page].getImageReceiver(), imageViewAttributes[page].document, MODEL_IMAGE_SIZE_DP);
             setBackdropPaint(1, backdrop[1] = backdrops.next());
 
             imageViewAttributes[page + 1] = models.getNext();
-            setGiftImage(imageView[page + 1].getImageReceiver(), imageViewAttributes[page + 1].document, 160);
+            setGiftImage(imageView[page + 1].getImageReceiver(), imageViewAttributes[page + 1].document, MODEL_IMAGE_SIZE_DP);
 
             AndroidUtilities.cancelRunOnUIThread(checkToRotateRunnable);
             AndroidUtilities.runOnUIThread(checkToRotateRunnable, 2500);
@@ -2854,9 +2863,9 @@ public class StarGiftSheet extends BottomSheetWithRecyclerListView implements No
         }
 
         private void updateWearImageTranslation() {
-            wearImageScale = dpf2(33.33f) / dpf2(160.0f);
-            wearImageTx = -imageLayout.getLeft() + titleView[PAGE_WEAR].getX() + (titleView[PAGE_WEAR].getWidth() + Math.min(titleView[PAGE_WEAR].getPaint().measureText(titleView[PAGE_WEAR].getText().toString()), titleView[PAGE_WEAR].getWidth())) / 2.0f + dp(24) - dp(160 - 33.33f) / 2.0f;
-            wearImageTy = -imageLayout.getTop() + dp(124) - dp(160 - 33.33f) / 2.0f;
+            wearImageScale = dpf2(33.33f) / dpf2(MODEL_IMAGE_SIZE_DP);
+            wearImageTx = -imageLayout.getLeft() + titleView[PAGE_WEAR].getX() + (titleView[PAGE_WEAR].getWidth() + Math.min(titleView[PAGE_WEAR].getPaint().measureText(titleView[PAGE_WEAR].getText().toString()), titleView[PAGE_WEAR].getWidth())) / 2.0f + dp(24) - dp(MODEL_IMAGE_SIZE_DP - 33.33f) / 2.0f;
+            wearImageTy = -imageLayout.getTop() + dp(124) - dp(MODEL_IMAGE_SIZE_DP - 33.33f) / 2.0f;
         }
 
         private ValueAnimator rotationAnimator;
@@ -2891,7 +2900,7 @@ public class StarGiftSheet extends BottomSheetWithRecyclerListView implements No
             setBackdropPaint(1 + toggled, backdrop[1 + toggled] = attributes.backdrop);
             setPattern(1, attributes.pattern, true);
             imageViewAttributes[1 + toggled] = attributes.model;
-            setGiftImage(imageView[1 + toggled].getImageReceiver(), imageViewAttributes[1 + toggled].document, 160);
+            setGiftImage(imageView[1 + toggled].getImageReceiver(), imageViewAttributes[1 + toggled].document, MODEL_IMAGE_SIZE_DP);
 
             animateSwitch();
 
@@ -2946,7 +2955,7 @@ public class StarGiftSheet extends BottomSheetWithRecyclerListView implements No
                     toggleBackdrop = toggled;
                     onSwitchPage(currentPage);
                     imageViewAttributes[1 + (1 - toggled)] = models.getNext();
-                    setGiftImage(imageView[1 + (1 - toggled)].getImageReceiver(), imageViewAttributes[1 + (1 - toggled)].document, 160);
+                    setGiftImage(imageView[1 + (1 - toggled)].getImageReceiver(), imageViewAttributes[1 + (1 - toggled)].document, MODEL_IMAGE_SIZE_DP);
                     preloadPattern(patterns.getNext());
 
                     AndroidUtilities.cancelRunOnUIThread(checkToRotateRunnable);
@@ -3070,7 +3079,7 @@ public class StarGiftSheet extends BottomSheetWithRecyclerListView implements No
             canvas.clipRect(0, 0, getWidth(), height);
 
             final float cx = getWidth() / 2.0f;
-            final float cy = lerp(dp(8), dp(24), currentPage.at(PAGE_UPGRADE)) + dp(160 / 2);
+            final float cy = lerp(dp(8), dp(24), currentPage.at(PAGE_UPGRADE)) + dp(MODEL_IMAGE_SIZE_DP / 2);
 
             final float infoBackdrop = currentPage.at(PAGE_INFO, PAGE_WEAR, PAGE_CRAFT);
             if (infoBackdrop > 0 && backdrop[0] != null) {
@@ -3240,26 +3249,26 @@ public class StarGiftSheet extends BottomSheetWithRecyclerListView implements No
 
         public float getRealHeight() {
             float h = 0;
-            h += (dp(backdrop[0] != null ? 24 : 10) + dp(160) + layout[0].getMeasuredHeight()) * currentPage.at(PAGE_INFO);
-            h += (dp(backdrop[1] != null ? 24 : 10) + dp(160) + layout[1].getMeasuredHeight()) * currentPage.at(PAGE_UPGRADE);
+            h += (dp(backdrop[0] != null ? 24 : 10) + dp(MODEL_IMAGE_SIZE_DP) + layout[0].getMeasuredHeight()) * currentPage.at(PAGE_INFO);
+            h += (dp(backdrop[1] != null ? 24 : 10) + dp(MODEL_IMAGE_SIZE_DP) + layout[1].getMeasuredHeight()) * currentPage.at(PAGE_UPGRADE);
             h += (dp(64) + layout[PAGE_WEAR].getMeasuredHeight()) * currentPage.at(PAGE_WEAR);
-            h += (dp(backdrop[0] != null ? 24 : 10) + dp(160) + layout[PAGE_CRAFT].getMeasuredHeight()) * currentPage.at(PAGE_CRAFT);
+            h += (dp(backdrop[0] != null ? 24 : 10) + dp(MODEL_IMAGE_SIZE_DP) + layout[PAGE_CRAFT].getMeasuredHeight()) * currentPage.at(PAGE_CRAFT);
             h += (craftTopView.getMeasuredHeight() > 0 ? craftTopView.getMeasuredHeight() : dp(550)) * currentPage.at(PAGE_CRAFTING);
             return h;
         }
 
         public int getFinalHeight() {
             if (currentPage.to(PAGE_INFO)) {
-                return dp(backdrop[0] != null ? 24 : 10) + dp(160) + layout[0].getMeasuredHeight();
+                return dp(backdrop[0] != null ? 24 : 10) + dp(MODEL_IMAGE_SIZE_DP) + layout[0].getMeasuredHeight();
             }
             if (currentPage.to(PAGE_UPGRADE)) {
-                return dp(backdrop[1] != null ? 24 : 10) + dp(160) + layout[1].getMeasuredHeight();
+                return dp(backdrop[1] != null ? 24 : 10) + dp(MODEL_IMAGE_SIZE_DP) + layout[1].getMeasuredHeight();
             }
             if (currentPage.to(PAGE_WEAR)) {
                 return dp(64) + layout[2].getMeasuredHeight();
             }
             if (currentPage.to(PAGE_CRAFT)) {
-                return dp(160) + layout[PAGE_CRAFT].getMeasuredHeight();
+                return dp(MODEL_IMAGE_SIZE_DP) + layout[PAGE_CRAFT].getMeasuredHeight();
             }
             if (currentPage.to(PAGE_CRAFTING)) {
                 return (craftTopView.getMeasuredHeight() > 0 ? craftTopView.getMeasuredHeight() : dp(550));
@@ -3538,7 +3547,7 @@ public class StarGiftSheet extends BottomSheetWithRecyclerListView implements No
                         if (attrs != null) {
                             new StarGiftPreviewSheet(getContext(), resourcesProvider, currentAccount, gift.title, attrs, false).show();
                         } else {
-                            showHint(LocaleController.formatString(R.string.Gift2RarityHint, percents(attr.getRarityPermille())), textViewArr[0], false);
+                            showHint(LocaleController.formatString(R.string.Gift2RarityHint, waysGramChance(attr.getRarityPermille())), textViewArr[0], false);
                         }
                         loading[0] = false;
                     });
@@ -3991,7 +4000,7 @@ public class StarGiftSheet extends BottomSheetWithRecyclerListView implements No
 
                 mine = true;
                 imageReceiver = new ImageReceiver(parentView);
-                setGiftImage(imageReceiver, model.document, 160);
+                setGiftImage(imageReceiver, model.document, MODEL_IMAGE_SIZE_DP);
             }
 
             public Sticker(BackupImageView fromView, TL_stars.starGiftAttributeModel model) {
@@ -4162,7 +4171,7 @@ public class StarGiftSheet extends BottomSheetWithRecyclerListView implements No
                 if (name == lastName && lastRarity == rarity_permille) return;
 
                 final SpannableStringBuilder ssb = new SpannableStringBuilder(Emoji.replaceEmoji(name, getPaint().getFontMetricsInt(), false));
-                ssb.append(" ").append(ButtonSpan.make(percents(rarity_permille), showHint != null ? () -> showHint.run(LocaleController.formatString(R.string.Gift2RarityHint, percents(rarity_permille)), this, false) : null, resourcesProvider));
+                ssb.append(" ").append(ButtonSpan.make(waysGramChance(rarity_permille), showHint != null ? () -> showHint.run(LocaleController.formatString(R.string.Gift2RarityHint, waysGramChance(rarity_permille)), this, false) : null, resourcesProvider));
                 setText(ssb);
 
                 this.lastName = name;
@@ -6458,12 +6467,105 @@ public class StarGiftSheet extends BottomSheetWithRecyclerListView implements No
         return text.length() == 0 ? "Определяется сервером WaysGram" : text.toString();
     }
 
+    /**
+     * Сколько моделей и узоров пула должно лежать на диске, чтобы лента прокрутки улучшения
+     * показывала разные варианты, а не одну и ту же анимацию по кругу.
+     */
+    private static final int WAYSGRAM_REEL_MODELS = 8;
+    private static final int WAYSGRAM_REEL_PATTERNS = 3;
+    /** Попытки по 250 мс, в течение которых страница «Улучшить» ждёт анимации пула. */
+    private static final int WAYSGRAM_PREVIEW_ATTEMPTS = 40;
+    private static final int WAYSGRAM_PREVIEW_REEL_WAIT_ATTEMPTS = 10;
+    private static final int WAYSGRAM_REVEAL_ATTEMPTS = 20;
+    private static final int WAYSGRAM_REVEAL_REEL_WAIT_ATTEMPTS = 6;
+
+    /** Сколько записей пула вообще пригодны к показу: без документа анимацию не нарисовать. */
+    private int waysGramPoolArtworkCount(JSONObject pool, String key) {
+        final JSONArray entries = pool == null ? null : pool.optJSONArray(key);
+        if (entries == null) {
+            return 0;
+        }
+        int count = 0;
+        final int limit = Math.min(entries.length(), 12);
+        for (int i = 0; i < limit; i++) {
+            final JSONArray entry = entries.optJSONArray(i);
+            if (entry != null && entry.optLong(3, 0) != 0L) {
+                count++;
+            }
+        }
+        return count;
+    }
+
+    /**
+     * Сколько анимаций пула уже скачано.
+     *
+     * <p>{@code WaysGramGiftAttributes.documentById} отдаёт документ только для файла,
+     * который уже лежит на диске, а остальные ставит в очередь загрузки — поэтому вызов
+     * работает и как предзагрузка, и как проверка готовности ленты.</p>
+     */
+    private int waysGramCachedArtworkCount(String giftId, JSONObject pool, String key) {
+        if (TextUtils.isEmpty(giftId)) {
+            return 0;
+        }
+        final JSONArray entries = pool == null ? null : pool.optJSONArray(key);
+        if (entries == null) {
+            return 0;
+        }
+        int cached = 0;
+        final int limit = Math.min(entries.length(), 12);
+        for (int i = 0; i < limit; i++) {
+            final JSONArray entry = entries.optJSONArray(i);
+            final long documentId = entry == null ? 0L : entry.optLong(3, 0);
+            if (documentId == 0L) {
+                continue;
+            }
+            if (org.telegram.messenger.waysgram.WaysGramGiftAttributes.documentById(giftId, documentId) != null) {
+                cached++;
+            }
+        }
+        return cached;
+    }
+
+    /** Готова ли лента прокрутки: в ней должно быть несколько разных анимаций. */
+    private boolean waysGramReelReady(String giftId, JSONObject pool) {
+        final int models = waysGramPoolArtworkCount(pool, "models");
+        final int patterns = waysGramPoolArtworkCount(pool, "patterns");
+        if (models > 1 && waysGramCachedArtworkCount(giftId, pool, "models") < Math.min(models, WAYSGRAM_REEL_MODELS)) {
+            return false;
+        }
+        if (patterns > 1 && waysGramCachedArtworkCount(giftId, pool, "patterns") < Math.min(patterns, WAYSGRAM_REEL_PATTERNS)) {
+            return false;
+        }
+        return true;
+    }
+
+    /**
+     * Ставит в очередь скачивание всех анимаций пула, как только открылась страница
+     * «Улучшить». Без этого лента успевала получить только модель с карточки подарка,
+     * и прокрутка всю дорогу показывала один и тот же вариант.
+     */
+    private void waysGramPrefetchReel(String giftId, JSONObject pool) {
+        if (TextUtils.isEmpty(giftId) || pool == null) {
+            return;
+        }
+        // Сбойную загрузку пробуем ещё раз: арт мог появиться уже после первого запроса.
+        org.telegram.messenger.waysgram.WaysGramGiftAttributes.retryFailed();
+        waysGramCachedArtworkCount(giftId, pool, "models");
+        waysGramCachedArtworkCount(giftId, pool, "patterns");
+    }
+
+    /** Шанс атрибута: 0‰ — это «меньше 0.1 %», а не «0 %». */
+    private static CharSequence waysGramChance(int permille) {
+        return permille <= 0 ? "<0.1%" : percents(permille);
+    }
+
     private void showWaysGramUpgradePreview(String serial, JSONObject preview) {
         if (!waysGramUpgradeActive(serial)) return;
         waysGramUpgradePreview = preview;
         waysGramPreviewAnimated = false;
         int generation = ++waysGramPreviewGeneration;
         JSONObject pool = preview == null ? null : preview.optJSONObject("candidates");
+        waysGramPrefetchReel(preview == null ? "" : preview.optString("telegram_gift_id", ""), pool);
         int price = preview == null ? org.telegram.messenger.waysgram.WaysGramGiftUpgrade.DEFAULT_PRICE_STARS
                 : preview.optInt("price_stars", 0);
         if (price <= 0) {
@@ -6477,7 +6579,7 @@ public class StarGiftSheet extends BottomSheetWithRecyclerListView implements No
         topView.toggleBackdrop = 0.0f;
         topView.patternAttribute[1] = null;
         topView.pattern[1].set((TLRPC.Document) null, false);
-        setGiftImage(topView.imageView[1].getImageReceiver(), savedStarGift.gift, 160);
+        setGiftImage(topView.imageView[1].getImageReceiver(), savedStarGift.gift, MODEL_IMAGE_SIZE_DP);
         topView.setText(1, "Улучшить подарок", "Внутреннее улучшение WaysGram. Итоговые характеристики случайно выбирает сервер.", null, null);
         upgradeFeatureCells[0].set(R.drawable.menu_feature_unique, "Модель", waysGramExamples(pool, "models"));
         upgradeFeatureCells[1].set(R.drawable.menu_feature_unique, "Узор", waysGramExamples(pool, "patterns"));
@@ -6507,7 +6609,7 @@ public class StarGiftSheet extends BottomSheetWithRecyclerListView implements No
                     .show();
         });
         switchPage(PAGE_UPGRADE, true);
-        if (pool != null) tryWaysGramPreviewArtwork(serial, pool, generation, 40);
+        if (pool != null) tryWaysGramPreviewArtwork(serial, pool, generation, WAYSGRAM_PREVIEW_ATTEMPTS);
     }
 
     private void tryWaysGramPreviewArtwork(String serial, JSONObject pool, int generation, int attempts) {
@@ -6515,7 +6617,10 @@ public class StarGiftSheet extends BottomSheetWithRecyclerListView implements No
                 || generation != waysGramPreviewGeneration || waysGramPreviewAnimated || button.isLoading()) return;
         String giftId = waysGramUpgradePreview == null ? "" : waysGramUpgradePreview.optString("telegram_gift_id", "");
         ArrayList<TL_stars.StarGiftAttribute> attributes = waysGramCandidateAttributes(giftId, pool);
-        if (waysGramHasAllAttributes(attributes)) {
+        // Анимации пула докачиваются в фоне, а лента умеет рисовать только скачанное.
+        // Короткая пауза даёт ей наполниться; за её пределом крутим тем, что успело прийти.
+        final boolean waitedEnough = attempts <= WAYSGRAM_PREVIEW_ATTEMPTS - WAYSGRAM_PREVIEW_REEL_WAIT_ATTEMPTS;
+        if (waysGramHasAllAttributes(attributes) && (waitedEnough || waysGramReelReady(giftId, pool))) {
             waysGramPreviewAnimated = true;
             sample_attributes = attributes;
             if (roller == null) roller = new Roller(topView);
@@ -6576,7 +6681,7 @@ public class StarGiftSheet extends BottomSheetWithRecyclerListView implements No
                 new org.telegram.messenger.waysgram.WaysGramGiftUpgrade.ResultCallback() {
                     @Override public void onSuccess(JSONObject result) {
                         if (!waysGramUpgradeActive(serial)) return;
-                        finishWaysGramUpgrade(serial, result, 20);
+                        finishWaysGramUpgrade(serial, result, WAYSGRAM_REVEAL_ATTEMPTS);
                     }
                     @Override public void onError(String error) {
                         if (!waysGramUpgradeActive(serial)) return;
@@ -6639,14 +6744,20 @@ public class StarGiftSheet extends BottomSheetWithRecyclerListView implements No
             TL_stars.TL_starGiftUnique gift = (TL_stars.TL_starGiftUnique) nativeGifts.get(0).gift;
             gift.title = savedStarGift.gift.title;
             boolean ready = waysGramHasAllAttributes(gift.attributes);
-            if (waysGramPreviewAnimated && !ready && attempts > 0) {
-                AndroidUtilities.runOnUIThread(() -> finishWaysGramUpgrade(serial, result, attempts - 1), 250);
+            final String resultGiftId = result.optString("telegram_gift_id", "");
+            final JSONObject rollPool = result.optJSONObject("roll_pool");
+            // Анимации брошенного пула тоже докачиваются: ждём их совсем недолго, чтобы
+            // прокрутка не осталась с одной моделью, но результат не задерживаем.
+            final boolean reelReady = waysGramReelReady(resultGiftId, rollPool);
+            final boolean reelWaitedEnough = attempts <= WAYSGRAM_REVEAL_ATTEMPTS - WAYSGRAM_REVEAL_REEL_WAIT_ATTEMPTS;
+            if (waysGramPreviewAnimated && (!ready || (!reelReady && !reelWaitedEnough)) && attempts > 0) {
+                AndroidUtilities.runOnUiThread(() -> finishWaysGramUpgrade(serial, result, attempts - 1), 250);
                 return;
             }
             // The server may have refreshed its catalog after the preview. Only use
             // candidates from the successful roll response for the reveal itself.
             ArrayList<TL_stars.StarGiftAttribute> actualPool = waysGramCandidateAttributes(
-                    result.optString("telegram_gift_id", ""), result.optJSONObject("roll_pool"));
+                    resultGiftId, rollPool);
             boolean animate = waysGramPreviewAnimated && ready && roller != null && waysGramHasAllAttributes(actualPool);
             if (animate) roller.preload(actualPool);
             waysGramFinalResult = result;
