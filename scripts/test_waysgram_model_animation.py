@@ -100,7 +100,7 @@ class WaysGramModelAnimationTests(unittest.TestCase):
             self.assertNotIn(invented, source)
 
     def test_hands_keep_the_sticker_stacking_and_the_wordmark_sits_in_the_middle(self) -> None:
-        """С устройства: кусок правой кисти висел на сердце; надпись должна быть посередине."""
+        """С устройства: кусок правой кисти висел на сердце; надпись — посередине и под кистями."""
         renderer = (ROOT / "scripts" / "build_waysgram_gift_model_webm.py").read_text(encoding="utf-8")
         self.assertIn("HAND_INDICES = {1, 2, 15}", renderer)
         self.assertIn("FRONT_HAND_INDICES = {1, 2}", renderer)
@@ -112,9 +112,9 @@ class WaysGramModelAnimationTests(unittest.TestCase):
         self.assertLess(renderer.index("frame = Image.alpha_composite(frame, heart)"),
                         renderer.index("frame = Image.alpha_composite(frame, layer)"),
                         "надпись должна лежать на сердце")
-        self.assertLess(renderer.rindex("frame = Image.alpha_composite(frame, hands)"),
-                        renderer.index("frame = Image.alpha_composite(frame, layer)"),
-                        "в середине сердца кисти проходят по буквам, поэтому надпись идёт поверх них")
+        self.assertLess(renderer.index("frame = Image.alpha_composite(frame, layer)"),
+                        renderer.rindex("frame = Image.alpha_composite(frame, hands)"),
+                        "надпись должна идти ПОД передними кистями")
         # Ровно середина сердца по обеим осям и постоянная точка крепления.
         self.assertIn("LOCAL_MIDDLE = 0.50", renderer)
         self.assertIn("local_center_x = heart_anchor[0] + ((first_box[0] + first_box[2]) / 2 - first_center_x) / first_scale", renderer)

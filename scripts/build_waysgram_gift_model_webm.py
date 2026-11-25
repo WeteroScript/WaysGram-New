@@ -294,11 +294,10 @@ def render_frames(data: dict[str, Any], tgs: pathlib.Path, folder: pathlib.Path,
         return (centre_x + dx * math.cos(theta) - dy * math.sin(theta),
                 centre_y + dx * math.sin(theta) + dy * math.cos(theta))
 
-    # Надпись — ровно в середине сердца (просьба с устройства). Руки проходят по сердцу
-    # полосой как раз через его середину: под кистями буквы закрываются на 64…100 %
-    # (на середине рамки медиана видимости ~17 %), поэтому надпись рисуется поверх кистей —
-    # иначе она «мигает» во время анимации. Точка постоянна и считается в координатах
-    # сердца, поэтому надпись не болтается.
+    # Надпись — ровно в середине сердца и ПОД кистями (1 и 2): так просили с устройства,
+    # даже с учётом того, что полоса рук проходит через середину сердца и буквы частично
+    # скрыты. Точка постоянна и считается в координатах сердца, поэтому надпись не
+    # болтается; обрезка по силуэту сердца держит её «прямо на сердце».
     local_center_x = heart_anchor[0] + ((first_box[0] + first_box[2]) / 2 - first_center_x) / first_scale
     sample_frames = sorted({min(count - 1, round(count * k / 8)) for k in range(8)})
     samples = []
@@ -376,10 +375,10 @@ def render_frames(data: dict[str, Any], tgs: pathlib.Path, folder: pathlib.Path,
         if letters:
             kept = sum(1 for value in layer.getchannel("A").getdata() if value > 8)
             wordmark_inside = min(wordmark_inside, kept / letters)
-        # Передние кисти (1, 2) лежат на сердце, как в оригинале; надпись идёт последней,
-        # чтобы руки не съедали её в середине сердца.
-        frame = Image.alpha_composite(frame, hands)
+        # Передние кисти (1, 2) лежат на сердце, как в оригинале, и перекрывают надпись:
+        # по просьбе с устройства надпись идёт ПОД руками.
         frame = Image.alpha_composite(frame, layer)
+        frame = Image.alpha_composite(frame, hands)
 
         frame.save(folder / f"frame_{index:04d}.png", optimize=False)
         if want_preview is not None and index == 0:
