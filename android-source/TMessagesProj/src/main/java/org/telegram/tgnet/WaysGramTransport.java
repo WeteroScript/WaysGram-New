@@ -11,6 +11,7 @@ import org.telegram.messenger.UserConfig;
 import org.telegram.messenger.Utilities;
 import org.telegram.tgnet.tl.TL_account;
 import org.telegram.tgnet.tl.TL_stars;
+import org.telegram.tgnet.tl.TL_stories;
 
 import java.util.ArrayList;
 import java.util.Collections;
@@ -316,6 +317,29 @@ public class WaysGramTransport {
      * Цена хранится на сервере, а в ответ уходит обновлённый канал, чтобы экран сразу
      * показал новое состояние.</p>
      */
+    /**
+     * premium.getBoostsStatus. Бустов в WaysGram нет — уровень канала всегда первый.
+     *
+     * <p>Раньше метод не обслуживался вовсе: `ChannelBoostsController.getBoostsStats`
+     * получал ошибку, `boostsStatus` оставался null, и «Применить обои для канала»
+     * (`ThemePreviewActivity.applyWallpaperBackground`) молча выходил, а кнопка не
+     * показывала требуемый уровень. Теперь обои применяются сразу.</p>
+     */
+    private static TLObject boostsStatus(TL_stories.TL_premium_getBoostsStatus req) throws WaysGramApi.ApiException {
+        if (req.peer == null) {
+            throw new WaysGramApi.ApiException(400, "PEER_ID_INVALID");
+        }
+        TL_stories.TL_premium_boostsStatus status = new TL_stories.TL_premium_boostsStatus();
+        status.level = 1;
+        status.current_level_boosts = 1;
+        status.boosts = 1;
+        status.gift_boosts = 0;
+        status.next_level_boosts = 0;
+        status.boost_url = "https://t.me/waysgram";
+        status.flags |= 1 | 16;
+        return status;
+    }
+
     private static TLObject paidMessagesPrice(int account, TL_stars.updatePaidMessagesPrice price, long selfId)
             throws WaysGramApi.ApiException {
         if (!(price.channel instanceof TLRPC.TL_inputChannel)) {
@@ -406,6 +430,9 @@ public class WaysGramTransport {
 
         if (request instanceof TL_stars.updatePaidMessagesPrice) {
             return paidMessagesPrice(account, (TL_stars.updatePaidMessagesPrice) request, selfId);
+        }
+        if (request instanceof TL_stories.TL_premium_getBoostsStatus) {
+            return boostsStatus((TL_stories.TL_premium_getBoostsStatus) request);
         }
 
         // ---- update state (the server is polled, there is no push channel) ----

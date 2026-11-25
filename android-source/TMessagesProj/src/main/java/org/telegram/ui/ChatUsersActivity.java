@@ -2306,21 +2306,29 @@ public class ChatUsersActivity extends BaseFragment implements NotificationCente
                 final TL_stars.updatePaidMessagesPrice req = new TL_stars.updatePaidMessagesPrice();
                 req.channel = getMessagesController().getInputChannel(chatId);
                 req.send_paid_messages_stars = enablePrice ? starsPrice : 0;
+                // Переключатель «Direct Messages» и цена — разные поля запроса. Раньше
+                // suggestions_allowed не выставлялся вовсе, транспорт считал
+                // enabled = suggestions_allowed && stars > 0 и отправлял серверу
+                // «выключено»: настройка выглядела применённой только до переоткрытия.
+                req.suggestions_allowed = enablePrice;
+                req.flags |= 1;
                 getConnectionsManager().sendRequest(req, (res, err) -> AndroidUtilities.runOnUIThread(() -> {
-
-                }));
-
-                final TLRPC.Chat chat = getMessagesController().getChat(chatId);
-                if (chat != null) {
-                    if (enablePrice) {
-                        chat.flags2 |= 16384;
-                        chat.send_paid_messages_stars = starsPrice;
-                    } else {
-                        chat.flags2 &=~ 16384;
-                        chat.send_paid_messages_stars = 0;
+                    if (err != null) {
+                        // Сервер — источник правды: возвращаем переключатель к его ответу.
+                        TLRPC.Chat current = getMessagesController().getChat(chatId);
+                        if (current != null) {
+                            current.flags2 &=~ 16384;
+                            current.send_paid_messages_stars = 0;
+                            getMessagesController().putChat(current, true);
+                        }
+                        return;
                     }
-                    getMessagesController().putChat(chat, true);
-                }
+                    if (res instanceof TLRPC.Updates) {
+                        TLRPC.Updates updates = (TLRPC.Updates) res;
+                        getMessagesController().putChats(updates.chats, false);
+                        getMessagesController().processUpdates(updates, false);
+                    }
+                }));
             }
 
             if (hasNotRestrictBoostersChanges()) {

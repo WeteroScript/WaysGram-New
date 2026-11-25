@@ -255,6 +255,19 @@ public class WaysGramMedia {
         if (!forceDocument && TextUtils.isEmpty(kind) && mime != null && mime.startsWith("video/")) kind = "video";
         if (TextUtils.isEmpty(kind) && mime != null && mime.startsWith("audio/") && lowerName.startsWith("audio_recording_voice_")) kind = "voice";
         if (info == null) info = new JSONObject();
+        /*
+         * media_kind говорит «видео», но mime пуст или не video/* — так выглядят старые
+         * записи и часть историй. Документ без TL_documentAttributeVideo плеер открыть не
+         * может: отсюда «App was unable to play this video. Try to play it with external
+         * player?». Верим типу записи, а не заголовку, который мог не сохраниться.
+         */
+        boolean videoKind = "video".equals(kind) || "video_note".equals(kind) || "gif".equals(kind);
+        if (videoKind && (mime == null || !mime.startsWith("video/"))) {
+            if (mime != null && !mime.isEmpty()) {
+                FileLog.d("WaysGram: media " + mediaId + " has kind " + kind + " but mime " + mime);
+            }
+            mime = "video/mp4";
+        }
         double duration = info.optDouble("duration", 0);
         int width = info.optInt("width", 0), height = info.optInt("height", 0);
         if ((duration <= 0 || ((kind.equals("video") || kind.equals("video_note") || kind.equals("gif")) && (width <= 0 || height <= 0)))
@@ -290,7 +303,7 @@ public class WaysGramMedia {
                 } catch (IllegalArgumentException ignored) { }
             }
             doc.attributes.add(audio);
-        } else if ((kind.equals("video") || kind.equals("video_note") || kind.equals("gif")) && mime != null && mime.startsWith("video/")) {
+        } else if (videoKind && mime != null && mime.startsWith("video/")) {
             if (kind.equals("gif")) doc.attributes.add(new TLRPC.TL_documentAttributeAnimated());
             TLRPC.TL_documentAttributeVideo video = new TLRPC.TL_documentAttributeVideo();
             video.round_message = kind.equals("video_note");

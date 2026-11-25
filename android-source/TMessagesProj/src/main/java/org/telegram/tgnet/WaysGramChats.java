@@ -1120,23 +1120,36 @@ public class WaysGramChats {
 
     // ---------------------------------------------------------------- group send restrictions
 
+    /*
+     * Маска «что запрещено участникам». Биты 1..32 — исходные способы отправки, 64..1024
+     * добавлены позже, потому что экран «Права участников» показывает больше переключателей,
+     * чем было битов: реакции, опросы, ссылки, голосовые и кружочки раньше не сохранялись
+     * вовсе (переключатель возвращался в исходное положение), а музыка и голосовые делили
+     * один бит. Значения старых масок трактуются как прежде: отдельные биты лишь уточняют.
+     *
+     * 1 текст · 2 фото · 4 видео · 8 музыка · 16 стикеры/гифки/игры · 32 файлы ·
+     * 64 голосовые · 128 кружочки · 256 ссылки · 512 опросы · 1024 реакции
+     */
+
     /** WaysGram stores what members may send as a bitmask; the UI works with denied flags. */
     static TLRPC.TL_chatBannedRights bannedRightsFor(int mask) {
         TLRPC.TL_chatBannedRights rights = new TLRPC.TL_chatBannedRights();
         rights.send_messages = (mask & 1) != 0;
         rights.send_plain = (mask & 1) != 0;
         rights.send_inline = (mask & 1) != 0;
-        rights.send_polls = (mask & 1) != 0;
         rights.send_photos = (mask & 2) != 0;
         rights.send_media = (mask & 2) != 0;
         rights.send_videos = (mask & 4) != 0;
-        rights.send_roundvideos = (mask & 4) != 0;
-        rights.send_voices = (mask & 8) != 0;
         rights.send_audios = (mask & 8) != 0;
         rights.send_stickers = (mask & 16) != 0;
         rights.send_gifs = (mask & 16) != 0;
         rights.send_games = (mask & 16) != 0;
         rights.send_docs = (mask & 32) != 0;
+        rights.send_voices = (mask & 64) != 0;
+        rights.send_roundvideos = (mask & 128) != 0;
+        rights.embed_links = (mask & 256) != 0;
+        rights.send_polls = (mask & 512) != 0;
+        rights.send_reactions = (mask & 1024) != 0;
         /*
          * Флаги берём в проводном виде — по ним сравниваются права, — но решения интерфейса
          * («можно ли отправлять») остаются по исходной маске: TLRPC выводит send_messages и
@@ -1152,12 +1165,17 @@ public class WaysGramChats {
     static int sendRestrictionMask(TLRPC.TL_chatBannedRights rights) {
         if (rights == null) return 0;
         int mask = 0;
-        if (rights.send_messages || rights.send_plain || rights.send_inline || rights.send_polls) mask |= 1;
+        if (rights.send_messages || rights.send_plain || rights.send_inline) mask |= 1;
         if (rights.send_media || rights.send_photos) mask |= 2;
-        if (rights.send_videos || rights.send_roundvideos) mask |= 4;
-        if (rights.send_audios || rights.send_voices) mask |= 8;
+        if (rights.send_videos) mask |= 4;
+        if (rights.send_audios) mask |= 8;
         if (rights.send_stickers || rights.send_gifs || rights.send_games) mask |= 16;
         if (rights.send_docs) mask |= 32;
+        if (rights.send_voices) mask |= 64;
+        if (rights.send_roundvideos) mask |= 128;
+        if (rights.embed_links) mask |= 256;
+        if (rights.send_polls) mask |= 512;
+        if (rights.send_reactions) mask |= 1024;
         return mask;
     }
 
@@ -1604,7 +1622,7 @@ public class WaysGramChats {
                 String emoji = availableReactions.optString(i, "").trim();
                 if (emoji.isEmpty()) continue;
                 TLRPC.TL_reactionEmoji reaction = new TLRPC.TL_reactionEmoji();
-                reaction.emoticon = emoji;
+                reaction.emoticon = WaysGramReactions.canonical(emoji);
                 some.reactions.add(reaction);
             }
             full.available_reactions = some.reactions.isEmpty() ? new TLRPC.TL_chatReactionsAll() : some;
@@ -1752,7 +1770,7 @@ public class WaysGramChats {
                 String emoji = groupReactions.optString(i, "").trim();
                 if (emoji.isEmpty()) continue;
                 TLRPC.TL_reactionEmoji reaction = new TLRPC.TL_reactionEmoji();
-                reaction.emoticon = emoji;
+                reaction.emoticon = WaysGramReactions.canonical(emoji);
                 groupSome.reactions.add(reaction);
             }
             full.available_reactions = groupSome.reactions.isEmpty()

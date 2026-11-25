@@ -206,7 +206,9 @@ public class WaysGramMessages {
         java.util.HashSet<String> seen = new java.util.HashSet<>();
         for (TLRPC.Reaction value : req.reaction) {
             if (!(value instanceof TLRPC.TL_reactionEmoji)) throw new WaysGramApi.ApiException(400, "REACTION_NOT_SUPPORTED");
-            String emoji = ((TLRPC.TL_reactionEmoji) value).emoticon;
+            // Always send the catalog spelling: the server compares emoji identity
+            // (U+FE0F and skin tones ignored) and stores its own canonical form.
+            String emoji = WaysGramReactions.canonical(((TLRPC.TL_reactionEmoji) value).emoticon);
             if (!WaysGramReactions.contains(emoji) || !seen.add(emoji))
                 throw new WaysGramApi.ApiException(400, "REACTION_NOT_SUPPORTED");
             selected.put(emoji);

@@ -21872,7 +21872,11 @@ public class MessagesController extends BaseController implements NotificationCe
         }
         if (!live_stories) {
             final TLRPC.Chat chat = getChat(-dialogId);
-            if (chat == null || !ChatObject.canSendAsPeers(chat)) {
+            // В WaysGram отправителей задаёт сервер (владелец/анонимный админ группы и публичные
+            // каналы пользователя), поэтому приватность группы не блокирует список.
+            final boolean waysGramGroup = org.telegram.tgnet.WaysGramTransport.ENABLED
+                    && chat != null && ChatObject.isMegagroup(chat);
+            if (chat == null || !(waysGramGroup || ChatObject.canSendAsPeers(chat))) {
                 return null;
             }
         }
@@ -23346,8 +23350,20 @@ public class MessagesController extends BaseController implements NotificationCe
     }
 
     public void setChatReactions(long chatId, int type, List<String> reactions) {
+        setChatReactions(chatId, type, reactions, null);
+    }
+
+    /**
+     * @param paidEnabled {@code null} — не трогать платные реакции канала, иначе включить
+     *                    или выключить их ({@code paid_reactions_available}).
+     */
+    public void setChatReactions(long chatId, int type, List<String> reactions, Boolean paidEnabled) {
         TLRPC.TL_messages_setChatAvailableReactions req = new TLRPC.TL_messages_setChatAvailableReactions();
         req.peer = getInputPeer(-chatId);
+        if (paidEnabled != null) {
+            req.paid_enabled = paidEnabled;
+            req.flags |= 2;
+        }
         if (type == ChatReactionsEditActivity.SELECT_TYPE_NONE) {
             req.available_reactions = new TLRPC.TL_chatReactionsNone();
         } else if (type == ChatReactionsEditActivity.SELECT_TYPE_ALL) {
@@ -23373,6 +23389,10 @@ public class MessagesController extends BaseController implements NotificationCe
                         full.flags |= 1073741824;
                     }
                     full.available_reactions = req.available_reactions;
+                    if (paidEnabled != null) {
+                        full.paid_reactions_available = paidEnabled;
+                        full.flags2 = TLObject.setFlag(full.flags2, TLObject.FLAG_16, paidEnabled);
+                    }
                     getMessagesStorage().updateChatInfo(full, false);
                 }
                 AndroidUtilities.runOnUIThread(() -> getNotificationCenter().postNotificationName(NotificationCenter.chatAvailableReactionsUpdated, chatId, 0L));

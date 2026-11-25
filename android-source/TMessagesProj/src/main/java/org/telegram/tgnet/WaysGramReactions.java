@@ -101,6 +101,33 @@ public final class WaysGramReactions {
     }
 
     /**
+     * Каноническая форма эмодзи — та строка, которая лежит в каталоге.
+     *
+     * <p>Сервер хранит реакции в телеграфной записи (с U+FE0F: {@code "❤️"},
+     * {@code "🕊️"}), а каталог документов — без него ({@code "❤"}, {@code "🕊"}).
+     * Карта {@code MediaDataController.reactionsMap} строится по каталогу, поэтому
+     * реакция, пришедшая с сервера «как есть», не находила ни текстуру, ни анимацию,
+     * и чип рисовался системным шрифтом. Приводим любую запись к каталогу до того,
+     * как она попадёт в {@code TLRPC.TL_reactionEmoji}.</p>
+     */
+    public static String canonical(String value) {
+        if (value == null || value.isEmpty()) {
+            return value == null ? "" : value;
+        }
+        String normalized = normalize(value);
+        int asset = WaysGramReactionAssets.indexOf(normalized);
+        if (asset >= 0 && asset < WaysGramReactionAssets.EMOJI.length) {
+            return WaysGramReactionAssets.EMOJI[asset];
+        }
+        for (String[] entry : REACTIONS) {
+            if (normalize(entry[0]).equals(normalized)) {
+                return entry[0];
+            }
+        }
+        return value;
+    }
+
+    /**
      * Пускаем реакцию в отрисовку, если для неё есть локальная анимация или она
      * входит в палитру. U+FE0F и оттенки кожи не влияют на результат.
      */

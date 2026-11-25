@@ -64,6 +64,25 @@ FCM_TOKEN_URI = "https://oauth2.googleapis.com/token"
 PLUSH_PEPE_GIFT_ID = "5936013938331222567"
 BUNDLED_GIFT_ASSETS = Path(__file__).with_name("assets") / "gifts"
 
+# Client palettes carry emoji without U+FE0F ("❤"), while the whitelists below are
+# written the way Telegram spells them ("❤️"). Comparing the raw strings rejected
+# exactly the most common reactions, so both sides are compared by this key and
+# stored in the whitelist spelling.
+_SKIN_TONES = {chr(code) for code in range(0x1F3FB, 0x1F400)}
+
+
+def _reaction_key(value: str) -> str:
+    """Emoji identity: ignores the variation selector and skin-tone modifiers."""
+    return "".join(
+        char for char in value
+        if char != "\ufe0f" and char not in _SKIN_TONES
+    )
+
+
+def _reaction_catalog(emoji: set[str]) -> dict[str, str]:
+    """Map of :func:`_reaction_key` to the canonical spelling of a whitelist."""
+    return {_reaction_key(value): value for value in emoji}
+
 
 def _mtproto_gift_payload(row: Any) -> dict[str, Any]:
     """One ``telegram_mtproto_gift_catalog`` row in storefront shape.
@@ -2173,6 +2192,11 @@ async def init_messenger_storage(database_path: Path) -> None:
             await db.execute(f"ALTER TABLE {db_split.SCHEMA}.chat_groups ADD COLUMN anti_spam_enabled INTEGER NOT NULL DEFAULT 0")
         if "default_send_restrictions" not in chat_group_columns:
             await db.execute(f"ALTER TABLE {db_split.SCHEMA}.chat_groups ADD COLUMN default_send_restrictions INTEGER NOT NULL DEFAULT 0")
+        if "send_restrictions_version" not in chat_group_columns:
+            # 0 — историческая шестибитовая маска (музыка и голосовые делят бит 8,
+            # видео и кружочки — бит 4, текст и опросы — бит 1). 1 — текущая маска,
+            # в которой у каждого переключателя экрана «Права участников» свой бит.
+            await db.execute(f"ALTER TABLE {db_split.SCHEMA}.chat_groups ADD COLUMN send_restrictions_version INTEGER NOT NULL DEFAULT 0")
         if "members_hidden" not in chat_group_columns:
             await db.execute(f"ALTER TABLE {db_split.SCHEMA}.chat_groups ADD COLUMN members_hidden INTEGER NOT NULL DEFAULT 0")
         if "forum_enabled" not in chat_group_columns:
@@ -5190,33 +5214,74 @@ def build_messenger_router(
     def group_has_right(member: dict[str, Any], bit: int) -> bool:
         return member["role"] == "owner" or (member["role"] == "admin" and bool(member["admin_rights"] & bit))
 
+    # Bits of chat_groups.default_send_restrictions. Mirrors WaysGramChats.bannedRightsFor
+    # and sendRestrictionMask on the client: every switch of the "Permissions" screen has
+    # its own bit. Bits 1..32 are the original layout, 64..1024 refine it.
+    SEND_TEXT = 1
+    SEND_PHOTOS = 2
+    SEND_VIDEO = 4
+    SEND_AUDIO = 8
+    SEND_STICKERS = 16
+    SEND_DOCS = 32
+    SEND_VOICE = 64
+    SEND_ROUND_VIDEO = 128
+    EMBED_LINKS = 256
+    SEND_POLLS = 512
+    SEND_REACTIONS = 1024
+    MAX_SEND_RESTRICTIONS = SEND_TEXT | SEND_PHOTOS | SEND_VIDEO | SEND_AUDIO | SEND_STICKERS \
+        | SEND_DOCS | SEND_VOICE | SEND_ROUND_VIDEO | EMBED_LINKS | SEND_POLLS | SEND_REACTIONS
+
+    def send_restrictions(mask: int, version: int) -> int:
+        """Restrictions in the current bit layout.
+
+        Version 0 rows were written when 4 blocked any video, 8 any audio and 1 any
+        text; the finer bits are added so such rows keep blocking exactly what they
+        blocked before the switch of the client started splitting them.
+        """
+        if version >= 1:
+            return mask
+        if mask & SEND_VIDEO:
+            mask |= SEND_ROUND_VIDEO
+        if mask & SEND_AUDIO:
+            mask |= SEND_VOICE
+        if mask & SEND_TEXT:
+            mask |= SEND_POLLS
+        return mask
+
     async def require_group_can_send(db: Any, group_id: int, uid: int, media_id: str | None = None) -> None:
         cur = await db.execute("""SELECT
             CASE WHEN gm.role='member' THEN g.default_send_restrictions ELSE 0 END |
             COALESCE((SELECT rights FROM group_mutes WHERE group_id=g.id AND telegram_id=gm.telegram_id
-                AND (until_date=0 OR until_date>?)), 0)
+                AND (until_date=0 OR until_date>?)), 0),
+            CASE WHEN gm.role='member' THEN COALESCE(g.send_restrictions_version,0) ELSE 1 END
             FROM chat_groups g JOIN group_members gm ON gm.group_id=g.id
             WHERE g.id=? AND gm.telegram_id=?""", (int(time.time()), group_id, uid))
         row = await cur.fetchone()
         if row is None:
             raise HTTPException(403, "CHAT_WRITE_FORBIDDEN")
-        mask = int(row[0])
-        if mask & 1:
+        mask = send_restrictions(int(row[0]), int(row[1]))
+        if mask & SEND_TEXT:
             raise HTTPException(403, "CHAT_WRITE_FORBIDDEN")
         if media_id:
             fields = await media_message_fields(db, media_id)
             kind = fields["media_kind"]
             mime = str(fields["media_type"] or "").lower()
             if kind == "sticker" or mime in ("application/x-tgsticker", "application/x-tgsdice"):
-                bit = 16
+                bit = SEND_STICKERS
             elif kind == "voice":
-                bit = 8
+                bit = SEND_VOICE
+            elif kind == "video_note":
+                bit = SEND_ROUND_VIDEO
+            elif kind == "gif":
+                bit = SEND_STICKERS
+            elif kind == "audio" or mime.startswith("audio/"):
+                bit = SEND_AUDIO
             elif mime.startswith("image/"):
-                bit = 2
+                bit = SEND_PHOTOS
             elif mime.startswith("video/"):
-                bit = 4
+                bit = SEND_VIDEO
             else:
-                bit = 32
+                bit = SEND_DOCS
             if mask & bit:
                 raise HTTPException(403, "CHAT_WRITE_FORBIDDEN")
 
@@ -9248,7 +9313,7 @@ def build_messenger_router(
                 return previous
             cur = await db.execute(
                 """SELECT id,gift_name,telegram_gift_id,upgrade_level,attributes_json,
-                          gift_emoji
+                          gift_emoji,purchase_price
                    FROM user_gifts WHERE serial_number=? AND owner_telegram_id=?""",
                 (serial, uid),
             )
@@ -9437,6 +9502,8 @@ def build_messenger_router(
                 "upgrade_level": new_level,
                 "price_stars": price,
                 "upgrade_star_count": price,
+                # Карточка показывает «Value» — это уплаченная за подарок цена.
+                "purchase_price": int(gift["purchase_price"] or 0),
                 "stars_balance": new_balance,
                 "unique_num": unique_num,
                 "attributes": attributes,
@@ -15720,9 +15787,12 @@ def build_messenger_router(
         user_id: int,
         reaction: str,
     ) -> dict[str, Any]:
-        allowed = {"👍", "❤️", "😂", "😮", "😢", "🎉", "🙏"}
-        if reaction not in allowed:
+        allowed = _reaction_catalog({"👍", "❤️", "😂", "😮", "😢", "🎉", "🙏"})
+        reaction_key = _reaction_key(reaction)
+        if reaction_key not in allowed:
             raise HTTPException(status_code=400, detail="Недопустимая реакция")
+        # Store the whitelist spelling so every client reads back the same string.
+        reaction = allowed[reaction_key]
         now = int(time.time())
         async with aiosqlite.connect(db_path()) as db:
             await db.execute("BEGIN IMMEDIATE")
@@ -15839,14 +15909,20 @@ def build_messenger_router(
         requested: Any, peer_id: Any = None, extended: bool = False, big: Any = False,
     ) -> dict[str, Any]:
         """Atomically replace this account's emoji set, never toggle on retry."""
-        basic = {"👍", "❤️", "😂", "😮", "😢", "🎉", "🙏"}
-        allowed = {"👍", "❤️", "😂", "😮", "😢", "🎉", "🙏", "👎", "🔥", "🥰", "👏", "😁", "🤔", "🤯", "😱", "🤬", "😡", "🤩", "😎", "💯", "❤️‍🔥", "💔", "💩", "🤮", "🤝", "👀", "🙌", "😍", "🥳", "😭", "😘", "🤣", "🤗", "🫡", "🕊️", "⚡", "🏆", "🍾", "🎄", "🤡"} if extended else basic
+        basic = _reaction_catalog({"👍", "❤️", "😂", "😮", "😢", "🎉", "🙏"})
+        allowed = _reaction_catalog({"👍", "❤️", "😂", "😮", "😢", "🎉", "🙏", "👎", "🔥", "🥰", "👏", "😁", "🤔", "🤯", "😱", "🤬", "😡", "🤩", "😎", "💯", "❤️‍🔥", "💔", "💩", "🤮", "🤝", "👀", "🙌", "😍", "🥳", "😭", "😘", "🤣", "🤗", "🫡", "🕊️", "⚡", "🏆", "🍾", "🎄", "🤡"}) if extended else basic
         if not isinstance(requested, list) or len(requested) > 3:
             raise HTTPException(status_code=400, detail="Можно выбрать не более трёх реакций")
         if not isinstance(big, bool) or (big and len(requested) != 1):
             raise HTTPException(status_code=400, detail="Большая анимация доступна для одной реакции")
-        if any(not isinstance(value, str) or value not in allowed for value in requested) or len(set(requested)) != len(requested):
+        if any(not isinstance(value, str) for value in requested):
             raise HTTPException(status_code=400, detail="Недопустимый набор реакций")
+        # The palette of every client is written without U+FE0F, so the identity of
+        # a reaction is its key, not the exact spelling that arrived.
+        requested_keys = [_reaction_key(value) for value in requested]
+        if any(key not in allowed for key in requested_keys) or len(set(requested_keys)) != len(requested_keys):
+            raise HTTPException(status_code=400, detail="Недопустимый набор реакций")
+        requested = [allowed[key] for key in requested_keys]
         if not 0 < message_id <= 9223372036854775807 or (
             scope == "dm" and (isinstance(peer_id, bool) or not isinstance(peer_id, int)
                                or not 0 < peer_id <= 9223372036854775807)
@@ -15870,6 +15946,14 @@ def build_messenger_router(
                 event_a, event_b = int(message[0]), int(message[1])
             elif scope == "group":
                 await require_group_member(db, chat_id, user_id)
+                cur = await db.execute(
+                    "SELECT COALESCE(default_send_restrictions,0),COALESCE(send_restrictions_version,0)"
+                    " FROM chat_groups WHERE id=?", (chat_id,),
+                )
+                restrictions = await cur.fetchone()
+                if restrictions and send_restrictions(int(restrictions[0] or 0), int(restrictions[1] or 0)) & SEND_REACTIONS:
+                    # «Запретить реакции» в правах участников раньше ни на что не влияло.
+                    raise HTTPException(status_code=403, detail="Реакции запрещены в этой группе")
                 cur = await db.execute("SELECT 1 FROM group_messages WHERE group_id=? AND id=?", (chat_id, message_id))
                 if await cur.fetchone() is None:
                     raise HTTPException(status_code=404, detail="Сообщение не найдено")
@@ -15897,7 +15981,9 @@ def build_messenger_router(
             previous = {str(row[0]) for row in await cur.fetchall()}
             # Older clients cannot display extended choices and would otherwise
             # unintentionally erase them when replacing their own reaction set.
-            if not extended and previous - basic:
+            # Набор сравнивается по идентичности эмодзи: в базе лежит серверная запись
+            # (с U+FE0F), а базовый набор — без неё.
+            if not extended and any(_reaction_key(value) not in basic for value in previous):
                 raise HTTPException(status_code=409, detail="Обновите приложение для изменения расширенных реакций")
             desired = set(requested)
             changed = previous != desired
@@ -17758,7 +17844,8 @@ def build_messenger_router(
             cur = await db.execute(
                 """SELECT g.id,g.username,g.title,g.description,g.owner_telegram_id,g.created_at,
                           g.avatar_media_id,g.no_forwards,
-                          g.slow_mode_seconds,g.members_hidden,g.default_send_restrictions,g.anti_spam_enabled,
+                          g.slow_mode_seconds,g.members_hidden,g.default_send_restrictions,
+                          COALESCE(g.send_restrictions_version,0) AS send_restrictions_version,g.anti_spam_enabled,
                           g.pre_history_hidden,g.join_request,COALESCE(g.forum_enabled,0) AS forum_enabled,
                           g.location_latitude,g.location_longitude,g.location_label,g.location_address,
                           g.color_id,g.background_emoji_id,g.profile_color_id,g.profile_background_emoji_id,
@@ -17789,6 +17876,11 @@ def build_messenger_router(
                 pending = rows[0]["total"] if rows else 0
                 recent_requesters = [r["telegram_id"] for r in rows]
         result = dict(group)
+        # Клиент читает маску в текущей раскладке битов; старые значения расширяем.
+        result["default_send_restrictions"] = send_restrictions(
+            int(result.get("default_send_restrictions") or 0),
+            int(result.pop("send_restrictions_version", 0) or 0),
+        )
         result["members_hidden"] = bool(result["members_hidden"])
         result["anti_spam_enabled"] = bool(result["anti_spam_enabled"])
         result["pre_history_hidden"] = bool(result["pre_history_hidden"])
@@ -18460,7 +18552,7 @@ def build_messenger_router(
                                          authorization: str | None = Header(default=None)):
         uid = int((await current_user(authorization))["telegram_id"])
         mask = payload.get("default_send_restrictions")
-        if type(mask) is not int or not 0 <= mask <= 63:
+        if type(mask) is not int or not 0 <= mask <= MAX_SEND_RESTRICTIONS:
             raise HTTPException(400, "INVALID_GROUP_SEND_RESTRICTIONS")
         if "anti_spam_enabled" in payload and type(payload["anti_spam_enabled"]) is not bool:
             raise HTTPException(400, "INVALID_GROUP_ANTI_SPAM_SETTING")
@@ -18469,7 +18561,8 @@ def build_messenger_router(
             membership = await require_group_member(db, group_id, uid)
             if not group_has_right(membership, 1):
                 raise HTTPException(403, "GROUP_CHANGE_INFO_REQUIRED")
-            await db.execute("UPDATE chat_groups SET default_send_restrictions=?,anti_spam_enabled=COALESCE(?,anti_spam_enabled) WHERE id=?",
+            await db.execute("""UPDATE chat_groups SET default_send_restrictions=?,send_restrictions_version=1,
+                                anti_spam_enabled=COALESCE(?,anti_spam_enabled) WHERE id=?""",
                              (mask, payload.get("anti_spam_enabled"), group_id))
             await record_event(db, "group", 0, "chat_changed", uid, chat_id=group_id)
             cur = await db.execute("SELECT anti_spam_enabled FROM chat_groups WHERE id=?", (group_id,))

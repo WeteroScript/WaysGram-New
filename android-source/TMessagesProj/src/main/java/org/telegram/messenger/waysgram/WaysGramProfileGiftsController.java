@@ -284,9 +284,14 @@ public final class WaysGramProfileGiftsController {
                     ? 0 : Math.max(0, telegramGift.optInt("upgrade_variants", 0));
             boolean isCollectible = upgradeLevel > 0 || (traits != null && traits.length() > 0);
             int sellRefund = Math.max(0, item.optInt("sell_refund", 0));
-            // The WaysGram API refunds a share of the paid price, so the price itself is the
-            // refund scaled back up; the native card shows it in its value row.
-            int paidPrice = sellRefund > 0
+            // «Ценность» подарка — уплаченная за него цена, её и отдаёт сервер владельцу.
+            // Раньше цена выводилась из возврата при продаже, а возврат есть только пока
+            // подарок можно продать (7 дней и не выставлен на продажу): у старых подарков
+            // карточка показывала «Value ⭐0».
+            int purchasePrice = Math.max(0, item.optInt("purchase_price", 0));
+            int paidPrice = purchasePrice > 0
+                    ? purchasePrice
+                    : sellRefund > 0
                     ? (int) Math.min(Integer.MAX_VALUE, (long) sellRefund * 100L / Math.max(1, SELL_REFUND_PERCENT))
                     : 0;
             boolean isListed = optBooleanLike(item, "is_listed");
@@ -346,10 +351,17 @@ public final class WaysGramProfileGiftsController {
                 TLRPC.TL_document modelDocument = WaysGramGiftAttributes.traitDocument(
                         telegramGiftIdText, WaysGramGiftAttributes.MODEL, traits, "model"
                 );
-                if (modelDocument == null && WaysGramBundledArtwork.isBundledName(model)) {
-                    // Анимация эксклюзивной модели WaysGram лежит в приложении: даже если
-                    // сеть ещё не отдала документ, подарок не должен оставаться без модели.
-                    modelDocument = WaysGramBundledArtwork.document();
+                // Анимация эксклюзивной модели WaysGram лежит в приложении и является
+                // единственным источником правды для неё: серверный документ может быть не
+                // скачан, устарел или отсутствовать вовсе, а ячейка «Мои подарки» без файла
+                // на диске остаётся пустой карточкой с фоном. Поэтому встроенный арт всегда
+                // побеждает, если подарок несёт модель WaysGram.
+                if (WaysGramBundledArtwork.isBundledName(model)
+                        || (modelDocument != null && WaysGramBundledArtwork.isBundled(modelDocument.id))) {
+                    TLRPC.TL_document bundled = WaysGramBundledArtwork.document();
+                    if (bundled != null) {
+                        modelDocument = bundled;
+                    }
                 }
                 TLRPC.TL_document patternDocument = WaysGramGiftAttributes.traitDocument(
                         telegramGiftIdText, WaysGramGiftAttributes.PATTERN, traits, "pattern"
