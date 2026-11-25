@@ -553,3 +553,17 @@ Telegram) и жёлтый экран Play Protect при установке с �
 Проверки: `scripts/test_android_qa_report_fixes.py` (9), сервер —
 `authbot/tests/test_reaction_identity_and_group_restrictions.py` (4),
 клиент — весь `scripts/` (307) и `authbot/tests/` (478).
+
+### Сборка 330
+
+`gh run 45659545082`, тег `apk-waysgram-330`: 118 929 159 байт,
+SHA-256 `0119a3778c8b7ca95f7cb36e56070372d97f4d9e124127805ce1b64a2a22b0e7`.
+
+Дорога к ней: сборка 328 упала на `WaysGramExtras` (правка обоев), сборка 329 — на
+`StarGiftSheet.java:6754`, где правка ленты улучшения написала `runOnUiThread` вместо
+`runOnUIThread`; javac искал `runOnUiThread(Runnable,int)` и не находил. Отчёт об
+ошибках теперь печатает строки `symbol:` и `location:` — раньше в комментарий к PR
+попадала только первая строка. Чтобы такое не повторялось, добавлен
+`scripts/test_android_symbol_check.py`: он проходит по архиву, вырезает комментарии и
+проверяет, что каждый вызов `Класс.метод(` у служебных классов WaysGram и
+`AndroidUtilities` действительно объявлен.
