@@ -351,8 +351,12 @@ jobs:
             echo '```'
             if [ -s "$file" ]; then
               grep -E "^e: |error: |FAILED|Execution failed|What went wrong|Caused by" "$file" | head -40
+              # javac prints the offending symbol and its location on the following lines;
+              # without them a "cannot find symbol" is impossible to act on.
+              echo '--- javac context ---'
+              grep -A8 -E "error: |^e: " "$file" | head -120
               echo '...'
-              tail -n 60 "$file"
+              tail -n 40 "$file"
             else
               echo "no gradle output captured"
             fi
@@ -364,7 +368,7 @@ jobs:
           # must reach them.
           if [ -s "$file" ]; then
             {
-              grep -E '(^e: |error:|Error:|FAILED|What went wrong|Caused by|OutOfMemory|Could not (resolve|create|find)|Unresolved)' "$file" | head -25 || true
+              grep -E '(^e: |error:|Error:|FAILED|What went wrong|Caused by|OutOfMemory|Could not (resolve|create|find)|Unresolved|symbol:|location:)' "$file" | head -40 || true
               # Groovy/Kotlin DSL failures point at the script that broke the configuration.
               grep -E '\.gradle(\.kts)?' "$file" | grep -viE '^(Download|Downloading|Caching)' | head -15 || true
               if ! grep -qE '(^e: |error:|Error:|FAILED|What went wrong|Caused by)' "$file"; then
