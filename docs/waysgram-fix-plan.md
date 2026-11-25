@@ -429,3 +429,44 @@ sha256 `126ab22880a62d6a16bba921807c58abdc6cbd533d2c81552ca912e4b30df230`,
 (14 897 записей, части по 26 000 000 байт); регресс-тест —
 `scripts/test_android_gifts.py::test_upgrade_reel_downloads_and_waits_for_the_whole_model_pool`.
 APK не собирался: правка ждёт следующей сборки по команде.
+
+## 10. Подпись и «вредоносное приложение» в Play Protect
+
+VirusTotal показывал 14/64, Play Protect называл сборку вредоносной. Причина не в коде, а в
+двух настройках проекта:
+
+1. APK подписывался **публичным** ключом Telegram: `TMessagesProj/config/release.keystore`,
+   alias `androidkey`, пароль `android` (`gradle.properties`). Этим ключом подписаны все
+   форки Telegram и часть вредоносных сборок, поэтому сертификат ничего не доказывает — и
+   любой мог подписать «обновление» для `org.waysgram.messenger`.
+2. В манифесте висело `android.permission.REQUEST_INSTALL_PACKAGES` (установка APK из чата) —
+   главный «дроппер»-флаг для Play Protect. Кода, который реально ставит APK, в сборке
+   `afat` нет: файл просто открывается через `AndroidUtilities.openForView`, а без
+   разрешения показывается штатный диалог-запрет.
+
+Что сделано:
+
+| Файл | Правка |
+| --- | --- |
+| `TMessagesProj/config/release.keystore` | свой PKCS12-ключ: RSA 4096, `CN=WaysGram`, срок до 2056, alias `waysgram` |
+| `TMessagesProj_App/build.gradle` | `storeType 'PKCS12'` в `signingConfigs.debug` и `signingConfigs.release` |
+| `gradle.properties` | `RELEASE_KEY_ALIAS=waysgram`, оба пароля — свои (не `android`) |
+| `TMessagesProj/src/main/AndroidManifest.xml` | убран `REQUEST_INSTALL_PACKAGES`, `allowBackup="false"` |
+| `.github/workflows/build-apk.yml` | сборка падает, если `apksigner` не видит `CN=WaysGram` |
+
+Отпечаток сертификата (SHA-256, DER): `635239a56430aa10c9f7da080b2524a4dafa4dd079dc3c9217b33cdc31842843`,
+SHA-256 файла ключа: `64562f299fd64cb03882ffccf4c817d979a31518d8ff60cdcdc22765885ccbe0`.
+
+**Важно:** подпись сменилась, поэтому APK нельзя поставить поверх 327 — приложение нужно
+удалить и установить заново (переписки живут на сервере, локально пропадут настройки, кеш
+и секретные чаты). Все следующие сборки будут обновляться поверх нового ключа без проблем.
+
+Ключ лежит в репозитории, то есть он публичный — как и прежний ключ Telegram. Для настоящей
+защиты: убрать файл из репозитория, положить его base64 в секреты GitHub
+(`ANDROID_KEYSTORE_BASE64`, `ANDROID_KEY_ALIAS`, `ANDROID_STORE_PASSWORD`,
+`ANDROID_KEY_PASSWORD`) и распаковывать в workflow; `gradle.properties` тогда читает пароли
+из переменных окружения.
+
+Чего эти правки не сделают: 0/64 в VirusTotal (детекторы ловят сам факт модифицированного
+Telegram) и жёлтый экран Play Protect при установке с сайта — он появляется у любого APK не
+из Play. Проверки: `scripts/test_android_release_signing.py`.

@@ -409,7 +409,14 @@ jobs:
             exit 1
           fi
 
-          "$BUILD_TOOLS/apksigner" verify --verbose --print-certs "$APK"
+          CERTS="$("$BUILD_TOOLS/apksigner" verify --verbose --print-certs "$APK")"
+          printf '%s\\n' "$CERTS"
+          # Свой release-ключ WaysGram, а не публичный ключ Telegram: иначе APK снова
+          # попадает под «известный тестовый сертификат» в Play Protect.
+          if ! grep -Fq "CN=WaysGram" <<< "$CERTS"; then
+            echo "::error::APK is not signed with the WaysGram release key"
+            exit 1
+          fi
           # An APK is a zip: a corrupted archive must fail here, not on the phone with
           # "invalid stored block lengths".
           unzip -tq "$APK"

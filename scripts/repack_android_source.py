@@ -11,9 +11,14 @@ APK, поэтому любая правка клиентского кода до
         WaysGram-Android/TMessagesProj/src/main/java/org/telegram/ui/Stars/StarGiftSheet.java
 
 Аргументы — пути внутри архива (как в `zipinfo`). Новое содержимое берётся из
-`android-source/<путь без префикса WaysGram-Android/>`. Перед записью частей скрипт
-проверяет, что изменились только перечисленные записи, а после записи перечитывает
-готовые части и сверяет контрольные суммы.
+`android-source/<путь без префикса WaysGram-Android/>`. Для двоичных файлов, которых нет в
+зеркале, есть `--set <путь в архиве>=<локальный файл>`:
+
+    python3 scripts/repack_android_source.py \\
+        --set WaysGram-Android/TMessagesProj/config/release.keystore=/tmp/release.keystore
+
+Перед записью частей скрипт проверяет, что изменились только перечисленные записи, а после
+записи перечитывает готовые части и сверяет контрольные суммы.
 """
 
 from __future__ import annotations
@@ -48,7 +53,20 @@ def mirror_path(entry: str) -> Path:
     return REPO_ROOT / "android-source" / entry[len(ARCHIVE_PREFIX):]
 
 
-def repack(entries: list[str]) -> bytes:
+def parse_set(values: list[str]) -> dict[str, bytes]:
+    replacements: dict[str, bytes] = {}
+    for value in values:
+        entry, separator, local = value.partition("=")
+        if not separator or not entry or not local:
+            sys.exit(f"Ожидался формат --set <путь в архиве>=<файл>: {value}")
+        path = Path(local)
+        if not path.is_file():
+            sys.exit(f"Нет локального файла для подмены: {path}")
+        replacements[entry] = path.read_bytes()
+    return replacements
+
+
+def repack(entries: list[str], extra: dict[str, bytes]) -> bytes:
     original = read_archive()
     source = zipfile.ZipFile(io.BytesIO(original))
     names = source.namelist()
@@ -57,12 +75,14 @@ def repack(entries: list[str]) -> bytes:
 
     replacements: dict[str, bytes] = {}
     for entry in entries:
-        if entry not in names:
-            sys.exit(f"Записи нет в архиве: {entry}")
         path = mirror_path(entry)
         if not path.is_file():
             sys.exit(f"Нет файла в зеркале android-source: {path}")
         replacements[entry] = path.read_bytes()
+    replacements.update(extra)
+    for entry in list(replacements):
+        if entry not in names:
+            sys.exit(f"Записи нет в архиве: {entry}")
 
     crc_before = {info.filename: info.CRC for info in source.infolist() if info.filename not in replacements}
 
@@ -100,7 +120,7 @@ def repack(entries: list[str]) -> bytes:
         elif info.CRC != crc_before[info.filename]:
             sys.exit(f"Изменилась чужая запись: {info.filename}")
     check.close()
-    for entry in entries:
+    for entry in sorted(replacements):
         print(f"обновлено: {entry} ({len(replacements[entry])} B)")
     return result
 
@@ -124,10 +144,15 @@ def write_parts(data: bytes) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("entries", nargs="+", help="пути записей внутри архива")
+    parser.add_argument("entries", nargs="*", help="пути записей внутри архива (из зеркала)")
+    parser.add_argument("--set", action="append", default=[], metavar="ПУТЬ=ФАЙЛ",
+                        help="подменить запись файлом вне зеркала (двоичные файлы)")
     parser.add_argument("--dry-run", action="store_true", help="только собрать и проверить архив")
     options = parser.parse_args()
-    result = repack(options.entries)
+    extra = parse_set(options.set)
+    if not options.entries and not extra:
+        parser.error("укажите хотя бы одну запись или --set")
+    result = repack(options.entries, extra)
     print(f"новый архив: {len(result)} B ({len(zipfile.ZipFile(io.BytesIO(result)).namelist())} записей)")
     if options.dry_run:
         print("dry-run: части не перезаписаны")
