@@ -99,27 +99,29 @@ class WaysGramModelAnimationTests(unittest.TestCase):
         for invented in ("glow", "sparkle", "drift"):
             self.assertNotIn(invented, source)
 
-    def test_hands_hold_the_heart_and_the_wordmark_is_attached(self) -> None:
-        """С устройства: сердце было поверх рук, а надпись «дёргалась» на сердце."""
+    def test_hands_keep_the_sticker_stacking_and_the_wordmark_is_centred(self) -> None:
+        """С устройства: кусок правой кисти висел на сердце, надпись была сбоку."""
         renderer = (ROOT / "scripts" / "build_waysgram_gift_model_webm.py").read_text(encoding="utf-8")
         self.assertIn("HAND_INDICES = {1, 2, 15}", renderer)
-        self.assertIn("heart_animation = LottieAnimation.from_tgs", renderer)
-        # Руки рисуются последними — лягушка держит сердце, ладони поверх него.
+        self.assertIn("FRONT_HAND_INDICES = {1, 2}", renderer)
+        self.assertIn("BEHIND_HAND_INDICES = {15}", renderer)
+        # Как в исходном TGS: кисть 15 под сердцем, кисти 1 и 2 — над ним.
+        self.assertLess(renderer.index("frame = Image.alpha_composite(frame, behind)"),
+                        renderer.index("frame = Image.alpha_composite(frame, heart)"),
+                        "правая кисть должна оставаться за сердцем")
         self.assertLess(renderer.index("frame = Image.alpha_composite(frame, heart)"),
                         renderer.index("frame = Image.alpha_composite(frame, hands)"),
-                        "руки должны рисоваться поверх сердца")
-        # Надпись накладывается между сердцем и руками и режется по силуэту сердца.
-        self.assertLess(renderer.index("frame = Image.alpha_composite(frame, layer)"),
-                        renderer.rindex("frame = Image.alpha_composite(frame, hands)"),
-                        "надпись должна быть под руками, но поверх сердца")
-        # Размер надписи считается один раз, положение каждый кадр берётся из
-        # трансформа сердечного слоя — иначе буквы «дышат» и дёргаются.
+                        "левые кисти должны лежать на сердце")
+        # Надпись ровно по центру сердца и последним слоем, чтобы её не закрывала рука.
+        self.assertIn("local_center_y = heart_anchor[1] + (first_box[1] + first_h * 0.50", renderer)
+        self.assertNotIn("for shift in", renderer)
+        self.assertLess(renderer.index("frame = Image.alpha_composite(frame, hands)"),
+                        renderer.rindex("frame = Image.alpha_composite(frame, layer)"),
+                        "надпись идёт последней")
+        # Крепление: размер один раз, положение из трансформа сердечного слоя.
         self.assertNotIn("box = heart_alpha.getbbox()", renderer)
         self.assertIn("logo_scaled = logo.resize(", renderer)
         self.assertIn("heart_center_x, heart_center_y, rotation, scale = heart_transform(data, index, offset)", renderer)
-        self.assertIn("local_center_x, local_center_y = best[1]", renderer)
-        # Место надписи выбирается так, чтобы руки закрывали минимум букв.
-        self.assertIn("worst = min(worst, visible)", renderer)
         # Timer is inherited from the original TGS: no invented speed-up or drift.
         self.assertIn("fps = int(round(animation.lottie_animation_get_framerate()))", renderer)
         self.assertIn("count = int(animation.lottie_animation_get_totalframe())", renderer)

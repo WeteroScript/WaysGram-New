@@ -8,8 +8,9 @@ the original bezier easing, so the loop is "1 в 1" with the other Plush Pepe mo
 
 Only the artwork is changed:
 
-* the pink heart becomes the WaysGram red heart and is drawn *under* the hands, so the
-  frog holds it (the hands are in front, exactly like the original sticker);
+* the pink heart becomes the WaysGram red heart and keeps the sticker's own stacking:
+  the left hands (1 and 2) are in front of the heart, the right hand (15) is behind it,
+  exactly as in the original file, so no piece of an arm floats on the heart;
 * the «WaysGram» wordmark is attached to the heart analytically: its size is measured
   once and its position every frame comes from the heart layer transform (body + heart),
   so the letters cannot jitter or drift over the heart;
@@ -111,9 +112,12 @@ def redraw_heart(data: dict[str, Any]) -> dict[str, Any]:
     return data
 
 
-# The three hands in the original Plush Pepe TGS. They are drawn last, on top of the
-# heart: Pepe holds the heart with his hands in front of it.
+# The three hands of the original Plush Pepe TGS, split exactly as the sticker stacks
+# them: hands 1 and 2 are above the heart, hand 15 is below it.  Drawing all three on
+# top left a detached piece of the right hand floating on the heart (device report).
 HAND_INDICES = {1, 2, 15}
+FRONT_HAND_INDICES = {1, 2}
+BEHIND_HAND_INDICES = {15}
 #: Слой сердца: по нему считается, куда ставить надпись и какая его часть не закрыта руками.
 HEART_INDEX = 3
 
@@ -241,16 +245,19 @@ def render_frames(data: dict[str, Any], tgs: pathlib.Path, folder: pathlib.Path,
     from rlottie_python import LottieAnimation
 
     base_tgs = folder / "plush_pepe_base.tgs"
+    behind_tgs = folder / "plush_pepe_hand_behind.tgs"
     hands_tgs = folder / "plush_pepe_hands.tgs"
     heart_tgs = folder / "plush_pepe_heart.tgs"
     for target, payload in (
         (base_tgs, subset_shapes(data, drop=HAND_INDICES | {HEART_INDEX})),
-        (hands_tgs, subset_shapes(data, keep=HAND_INDICES)),
+        (behind_tgs, subset_shapes(data, keep=BEHIND_HAND_INDICES)),
+        (hands_tgs, subset_shapes(data, keep=FRONT_HAND_INDICES)),
         (heart_tgs, subset_shapes(data, keep={HEART_INDEX})),
     ):
         target.write_bytes(gzip.compress(
             json.dumps(payload, separators=(",", ":")).encode("utf-8"), mtime=0))
     animation = LottieAnimation.from_tgs(str(base_tgs))
+    behind_animation = LottieAnimation.from_tgs(str(behind_tgs))
     hands_animation = LottieAnimation.from_tgs(str(hands_tgs))
     heart_animation = LottieAnimation.from_tgs(str(heart_tgs))
 
@@ -261,6 +268,7 @@ def render_frames(data: dict[str, Any], tgs: pathlib.Path, folder: pathlib.Path,
         raise SystemExit("hand and body animations have different lengths")
     offset = int(data.get("ip", 0))
     logo = wordmark()
+    wordmark_inside = 1.0
 
     # Надпись крепится к сердцу в локальных координатах сердечного слоя: один раз
     # измеряем видимую рамку сердца, дальше каждый кадр только применяем трансформ
@@ -277,73 +285,31 @@ def render_frames(data: dict[str, Any], tgs: pathlib.Path, folder: pathlib.Path,
     logo_scale = min(first_w * 0.70 / logo.width, first_h * 0.34 / logo.height)
     logo_scaled = logo.resize((max(1, round(logo.width * logo_scale)),
                                max(1, round(logo.height * logo_scale))), Image.LANCZOS)
-    # Где именно на сердце ставить надпись: руки рисуются поверх сердца, поэтому ищем
-    # такое место, где ладони закрывают минимум букв — и сразу на нескольких кадрах,
-    # чтобы надпись не «пряталась» в середине анимации. Найденная точка постоянна,
-    # поэтому дёрганья нет.
-    def screen_point(local_x: float, local_y: float, rotation: float, scale: float,
-                     centre_x: float, centre_y: float) -> tuple[float, float]:
-        theta = math.radians(rotation)
-        dx = (local_x - heart_anchor[0]) * scale
-        dy = (local_y - heart_anchor[1]) * scale
-        return (centre_x + dx * math.cos(theta) - dy * math.sin(theta),
-                centre_y + dx * math.sin(theta) + dy * math.cos(theta))
-
-    sample_frames = sorted({min(count - 1, round(count * k / 8)) for k in range(8)})
-    samples = []
-    for sample in sample_frames:
-        centre_x, centre_y, rotation, scale = heart_transform(data, sample, offset)
-        samples.append((
-            centre_x, centre_y, rotation, scale,
-            heart_animation.render_pillow_frame(sample).convert("RGBA").getchannel("A"),
-            hands_animation.render_pillow_frame(sample).convert("RGBA").getchannel("A"),
-        ))
-
-    best = (-1.0, None)
-    for vertical in [0.14 + 0.02 * k for k in range(23)]:
-        for shift in [(-0.12 + 0.02 * k) for k in range(13)]:
-            local_x = heart_anchor[0] + ((first_box[0] + first_box[2]) / 2 - first_center_x) / first_scale \
-                + shift * first_w
-            local_y = heart_anchor[1] + (first_box[1] + first_h * vertical * first_scale - first_center_y) / first_scale
-            worst = 1.0
-            for centre_x, centre_y, rotation, scale, heart_mask, hand_mask in samples:
-                px, py = screen_point(local_x, local_y, rotation, scale, centre_x, centre_y)
-                text = logo_scaled if abs(scale - first_scale) < 1e-6 else logo_scaled.resize(
-                    (max(1, round(logo_scaled.width * scale / first_scale)),
-                     max(1, round(logo_scaled.height * scale / first_scale))), Image.LANCZOS)
-                text = text.rotate(rotation, resample=Image.BICUBIC, expand=True)
-                layer = Image.new("L", heart_mask.size, 0)
-                layer.paste(text.getchannel("A"),
-                            (round(px - text.width / 2), round(py - text.height / 2)))
-                total = ImageChops.multiply(layer, heart_mask.point(lambda v: 255 if v > 8 else 0))
-                covered = sum(1 for value in total.getdata() if value > 0)
-                hidden = sum(1 for value in ImageChops.multiply(total, hand_mask).getdata() if value > 0)
-                visible = 1.0 - (hidden / covered) if covered else 0.0
-                worst = min(worst, visible)
-                if worst <= best[0]:
-                    break
-            if worst > best[0]:
-                best = (worst, (local_x, local_y))
-    if best[1] is None:
-        raise SystemExit("could not place the wordmark on the heart")
-    local_center_x, local_center_y = best[1]
-    wordmark_visible = best[0]
+    # Надпись — ровно по центру сердца (и по горизонтали, и по вертикали), как просили
+    # с устройства. Место постоянное и считается от рамки сердца на первом кадре, поэтому
+    # буквы не дёргаются; по вертикали больше не перебираем — поиск «свободного места»
+    # загонял надпись под верхнюю кромку сердца, где она обрезалась.
+    local_center_x = heart_anchor[0] + ((first_box[0] + first_box[2]) / 2 - first_center_x) / first_scale
+    local_center_y = heart_anchor[1] + (first_box[1] + first_h * 0.50 * first_scale - first_center_y) / first_scale
 
     for index in range(count):
         body = animation.render_pillow_frame(index).convert("RGBA")
+        behind = behind_animation.render_pillow_frame(index).convert("RGBA")
         hands = hands_animation.render_pillow_frame(index).convert("RGBA")
         heart = heart_animation.render_pillow_frame(index).convert("RGBA")
         heart_center_x, heart_center_y, rotation, scale = heart_transform(data, index, offset)
-        # The contour follows the complete silhouette, including the hands.
-        solid = Image.alpha_composite(Image.alpha_composite(body, hands), heart).getchannel("A").point(
-            lambda value: 255 if value > 18 else 0)
+        # The contour follows the complete silhouette, including every hand.
+        solid = Image.alpha_composite(Image.alpha_composite(Image.alpha_composite(body, behind), hands),
+                                      heart).getchannel("A").point(lambda value: 255 if value > 18 else 0)
         contour_mask = solid.filter(ImageFilter.MaxFilter(9)).filter(ImageFilter.GaussianBlur(0.7))
         contour = Image.new("RGBA", body.size, (0, 0, 0, 0))
         contour.paste((6, 10, 5, 255), (0, 0), contour_mask)
         frame = Image.alpha_composite(contour, body)
 
-        # Порядок слоёв: контур → тело → сердце → надпись → руки. Руки рисуются
-        # последними: лягушка держит сердце, ладони лежат поверх него, как в оригинале.
+        # Порядок слоёв — как в исходном стикере: контур → тело → правая кисть (15)
+        # → сердце → надпись → левые кисти (1, 2). Правая кисть остаётся за сердцем,
+        # иначе на нём висел оторванный кусок руки (это и заметили на устройстве).
+        frame = Image.alpha_composite(frame, behind)
         frame = Image.alpha_composite(frame, heart)
 
         # Надпись «WaysGram» — на сердце и намертво: размер постоянный, положение и
@@ -361,17 +327,24 @@ def render_frames(data: dict[str, Any], tgs: pathlib.Path, folder: pathlib.Path,
         text = text.rotate(rotation, resample=Image.BICUBIC, expand=True)
         layer = Image.new("RGBA", frame.size, (0, 0, 0, 0))
         layer.paste(text, (round(centre_x - text.width / 2), round(centre_y - text.height / 2)), text)
-        # Обрезаем строго по сердцу: буквы не должны вылезать на тело.
-        layer.putalpha(ImageChops.multiply(layer.getchannel("A"),
-                                           heart_alpha.point(lambda v: 255 if v > 8 else 0)))
-        frame = Image.alpha_composite(frame, layer)
+        # Сколько букв попадает в силуэт сердца: единица значит, что надпись читается целиком.
+        raw_alpha = layer.getchannel("A")
+        letters = sum(1 for value in raw_alpha.getdata() if value > 8)
+        # Обрезаем строго по сердцу: буквы не должны вылезать на тело и на лапы.
+        layer.putalpha(ImageChops.multiply(raw_alpha, heart_alpha.point(lambda v: 255 if v > 8 else 0)))
+        if letters:
+            kept = sum(1 for value in layer.getchannel("A").getdata() if value > 8)
+            wordmark_inside = min(wordmark_inside, kept / letters)
+        # Передние кисти (1, 2) лежат на сердце, как в оригинале, а надпись идёт последней:
+        # она читается целиком и не прячется под рукой.
         frame = Image.alpha_composite(frame, hands)
+        frame = Image.alpha_composite(frame, layer)
 
         frame.save(folder / f"frame_{index:04d}.png", optimize=False)
         if want_preview is not None and index == 0:
             frame.save(want_preview)
 
-    return (width, height), fps, wordmark_visible
+    return (width, height), fps, wordmark_inside
 
 
 def normalize_webm(path: pathlib.Path) -> None:
@@ -438,7 +411,7 @@ def main() -> None:
     data = redraw_heart(load_composition(args.tgs))
     with tempfile.TemporaryDirectory(prefix="waysgram-model-") as tmp:
         folder = pathlib.Path(tmp)
-        size, fps, wordmark_visible = render_frames(data, args.tgs, folder, want_preview=args.preview)
+        size, fps, wordmark_inside = render_frames(data, args.tgs, folder, want_preview=args.preview)
         encode(ffmpeg_binary(args.ffmpeg), folder, args.out, fps)
 
     if args.raw:
@@ -449,7 +422,8 @@ def main() -> None:
     if args.manifest.is_file():
         info.update(update_manifest(args.out, args.manifest))
     print(f"{args.out}: {info['bytes']} bytes, sha256 {info['sha256']}")
-    print(f"{size[0]}x{size[1]}, {fps} fps, original 3 s Plush Pepe loop; wordmark visible on {wordmark_visible * 100:.0f}% of the worst sampled frame")
+    print(f"{size[0]}x{size[1]}, {fps} fps, original 3 s Plush Pepe loop; "
+          f"wordmark inside the heart on {wordmark_inside * 100:.1f}% of the worst frame")
 
 
 if __name__ == "__main__":
