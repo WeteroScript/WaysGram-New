@@ -196,8 +196,10 @@ class NativeMessagingSourceChecks(unittest.TestCase):
         transport = self.source('tgnet/WaysGramTransport.java')
         privacy = self.source('ui/PrivacySettingsActivity.java')
         helper = self.source('ui/WaysGramPaidDm.java')
-        self.assertIn('WaysGramPaidDm.settings(this, currentAccount)', privacy)
-        self.assertIn('new JSONArray(ids)', helper)
+        # Цена правится на штатном экране «Сообщения», своего диалога у WaysGram нет.
+        self.assertIn('new PrivacyControlActivity(ContactsController.PRIVACY_RULES_TYPE_MESSAGES)', privacy)
+        self.assertNotIn('WaysGramPaidDm.settings', privacy)
+        self.assertIn('.put("exempt_users", new JSONArray(ids))', helper)
         self.assertIn('AlertsCreator.showPayForMessageAlert(account, peer', helper)
         self.assertIn('putInt(slot, fee).putLong(slot + ":since", since).commit()', transport)
         self.assertIn('body.put("approved_fee_stars", approvedFee)', transport)

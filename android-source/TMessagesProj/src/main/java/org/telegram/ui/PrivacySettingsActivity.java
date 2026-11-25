@@ -441,10 +441,8 @@ public class PrivacySettingsActivity extends BaseFragment implements Notificatio
             } else if (position == voicesRow) {
                 presentFragment(new PrivacyControlActivity(ContactsController.PRIVACY_RULES_TYPE_VOICE_MESSAGES));
             } else if (position == noncontactsRow) {
-                if (WaysGramTransport.ENABLED) {
-                    WaysGramPaidDm.settings(this, currentAccount);
-                    return;
-                }
+                // Платные сообщения — опция внутри штатного экрана «Сообщения»: отдельный
+                // диалог прятал выбор «кто может писать» и терял сохранённую цену.
                 presentFragment(new PrivacyControlActivity(ContactsController.PRIVACY_RULES_TYPE_MESSAGES));
             } else if (position == emailLoginRow) {
                 if (currentPassword == null || currentPassword.login_email_pattern == null) {
@@ -1460,8 +1458,13 @@ public class PrivacySettingsActivity extends BaseFragment implements Notificatio
                         imageView.setColorFilter(new PorterDuffColorFilter(Theme.getColor(Theme.key_windowBackgroundWhiteGrayIcon), PorterDuff.Mode.MULTIPLY));
                     } else if (position == noncontactsRow) {
                         if (WaysGramTransport.ENABLED) {
-                            final boolean paid = WaysGramPaidDm.hasCachedFee(currentAccount) && WaysGramPaidDm.cachedFeeStars(currentAccount) > 0;
-                            textCell.setTextAndValue(getString(R.string.PrivacyMessages), getString(paid ? R.string.WaysGramPaidDmTitle : R.string.P2PEverybody), musicRow != -1);
+                            // Подпись строки — цена, которую увидит новый собеседник, или
+                            // «Everybody», если платные сообщения выключены.
+                            final int feeStars = WaysGramPaidDm.hasCachedFee(currentAccount) ? WaysGramPaidDm.cachedFeeStars(currentAccount) : 0;
+                            value = feeStars > 0
+                                    ? "⭐" + AndroidUtilities.formatWholeNumber(feeStars, 0)
+                                    : getString(R.string.P2PEverybody);
+                            textCell.setTextAndValue(getString(R.string.PrivacyMessages), value, musicRow != -1);
                         } else {
                             value = getString(feeValue ? R.string.ContactsAndFee : noncontactsValue ? R.string.ContactsAndPremium : R.string.P2PEverybody);
 

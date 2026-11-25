@@ -968,17 +968,40 @@ public class PrivacyControlActivity extends BaseFragment implements Notification
         }));
     }
 
+    /**
+     * Подтягивает сохранённую цену и исключения в уже открытый экран «Сообщения».
+     *
+     * <p>Пока данные едут, экран показывает «все могут писать»; как только они пришли,
+     * выбирается платный режим с прежней ценой, поэтому сохранение без правок ничего не
+     * стирает.</p>
+     */
+    private void loadWaysGramMessagesFee() {
+        WaysGramPaidDm.loadFee(currentAccount, (stars, users) -> {
+            if (isFinished || getParentActivity() == null || hasChanges()) {
+                return;
+            }
+            applyWaysGramFeeValues(stars, users);
+            updateRows(true);
+            if (listAdapter != null) {
+                listAdapter.notifyDataSetChanged();
+            }
+            updateDoneButton();
+        });
+    }
+
     private void applyWaysGramFeeValues(int stars, ArrayList<Long> users) {
-        currentPlus = new ArrayList<>(users);
-        initialPlus.clear();
-        initialPlus.addAll(currentPlus);
+        ArrayList<Long> loaded = users == null ? new ArrayList<>() : new ArrayList<>(users);
         if (stars > 0) {
-            initialStars = currentStars = Utilities.clamp(stars, getMessagesController().starsPaidMessageAmountMax, 1);
+            initialStars = currentStars = Math.max(1, Math.min(10000, stars));
             initialRulesType = currentType = TYPE_PAY;
+            currentPlus = loaded;
         } else {
             initialStars = currentStars = 10;
-            initialRulesType = currentType = TYPE_CONTACTS;
+            initialRulesType = currentType = TYPE_EVERYBODY;
+            currentPlus = new ArrayList<>();
         }
+        initialPlus.clear();
+        initialPlus.addAll(currentPlus);
     }
 
     /** Путь WaysGram: кто может присылать подарки (все / только контакты / никто). */
@@ -1420,13 +1443,14 @@ public class PrivacyControlActivity extends BaseFragment implements Notification
             return;
         }
         if (rulesType == PRIVACY_RULES_TYPE_MESSAGES && org.telegram.tgnet.WaysGramTransport.ENABLED) {
-            // Open the ordinary "Who can send me messages" screen first. The WaysGram fee is a
-            // separate opt-in below; applying a cached fee here made the screen start in the paid mode.
+            // Цена платных сообщений лежит на сервере WaysGram. Без подгрузки экран
+            // открывался как «все могут писать» и при сохранении обнулял назначенную цену.
             currentMinus = new ArrayList<>();
             currentPlus = new ArrayList<>();
             initialPlus.clear();
             initialStars = currentStars = 10;
             initialRulesType = currentType = TYPE_EVERYBODY;
+            loadWaysGramMessagesFee();
             return;
         }
         if (rulesType == PRIVACY_RULES_TYPE_MESSAGES) {

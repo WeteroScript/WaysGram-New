@@ -11834,16 +11834,7 @@
     <string name="WaysGramBoostBypassEnable">Allow bypass</string>
     <string name="WaysGramBoostBypassDisable">Turn off bypass</string>
     <string name="WaysGramBoostError">Could not load or change boosts. Check membership and the move cooldown.</string>
-    <string name="WaysGramPaidDmTitle">Paid direct messages</string>
-    <string name="WaysGramPaidDmPrice">Set a fee from 0 to 10000 Stars per incoming message. Use 0 to turn the fee off. Contacts and people you have already messaged are exempt.</string>
-    <string name="WaysGramPaidDmExceptions">Fee exceptions</string>
-    <string name="WaysGramPaidDmExceptionCount">Additional exceptions: %1$d.</string>
-    <string name="WaysGramPaidDmExceptionLimit">Choose up to 200 exceptions.</string>
     <string name="WaysGramPaidDmError">Could not load or save the message fee.</string>
-    <string name="WaysGramPaidDmSaved">Direct message fee saved.</string>
-    <string name="WaysGramPaidDmConfirm">Send this message for %1$d Stars? The amount will be deducted from your WaysGram balance.</string>
-    <string name="WaysGramPaidDmRetry">Check or retry the same message for %1$d Stars? If it was already sent, you will not be charged again.</string>
-    <string name="WaysGramPaidDmNowFree">The price changed to 0 Stars. Send this message for free?</string>
     <string name="WaysGramChannelReachSummary">Unique post views: %1$d\nAccounts reached: %2$d</string>
     <string name="WaysGramChannelDepartures">Voluntary departures: %1$d\nRemoved by moderation: %2$d</string>
     <string name="WaysGramProposalScheduled">Scheduled</string>

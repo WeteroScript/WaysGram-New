@@ -90,3 +90,90 @@ class PaidMessagesChecks(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PrivacyMessagesRowChecks(unittest.TestCase):
+    """Скриншот «Privacy and Security»: строка «Messages» открывала свой диалог
+    «Платные личные сообщения» (10000 / Cancel / Save) и подписывалась его
+    заголовком, а не ценой. Из-за этого не было видно ни штатного выбора «кто
+    может писать», ни сохранённой цены, и правка не проверялась глазом.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        data = b"".join((ROOT / f"WaysGram-Android.zip.part{i}").read_bytes() for i in range(1, 6))
+        cls.archive = zipfile.ZipFile(io.BytesIO(data))
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.archive.close()
+
+    def source(self, name):
+        return self.archive.read(BASE + name).decode("utf-8")
+
+    def res(self, name="values/strings.xml"):
+        return self.archive.read(f"WaysGram-Android/TMessagesProj/src/main/res/{name}").decode("utf-8")
+
+    def row_branch(self, needs: str) -> str:
+        """Кусок кода строки «Messages»: в файле две ветки — клик и отрисовка."""
+        settings = self.source("ui/PrivacySettingsActivity.java")
+        for chunk in settings.split("position == noncontactsRow) {")[1:]:
+            chunk = chunk.split("} else if (position ==")[0]
+            if needs in chunk:
+                return chunk
+        self.fail("не нашёл ветку строки «Messages»")
+
+    def test_row_opens_the_standard_messages_screen(self):
+        branch = self.row_branch("presentFragment")
+        self.assertNotIn("WaysGramPaidDm.settings", branch)
+        self.assertIn("new PrivacyControlActivity(ContactsController.PRIVACY_RULES_TYPE_MESSAGES)", branch)
+
+    def test_row_value_is_the_saved_price(self):
+        branch = self.row_branch("setTextAndValue")
+        self.assertIn("WaysGramPaidDm.cachedFeeStars(currentAccount)", branch)
+        self.assertIn("AndroidUtilities.formatWholeNumber(feeStars, 0)", branch)
+        self.assertIn("R.string.P2PEverybody", branch)
+        # Раньше в подписи стоял заголовок диалога — отсюда «Платные личные сообщения».
+        self.assertNotIn("WaysGramPaidDmTitle", branch)
+
+    def test_reopening_the_screen_keeps_the_price(self):
+        control = self.source("ui/PrivacyControlActivity.java")
+        self.assertIn("loadWaysGramMessagesFee();", control)
+        load = control.split("private void loadWaysGramMessagesFee() {")[1].split("private void ")[0]
+        self.assertIn("WaysGramPaidDm.loadFee(currentAccount", load)
+        self.assertIn("applyWaysGramFeeValues(stars, users)", load)
+        apply = control.split("private void applyWaysGramFeeValues(int stars, ArrayList<Long> users) {")[1]
+        self.assertIn("currentType = TYPE_PAY", apply)
+        self.assertIn("currentType = TYPE_EVERYBODY", apply)
+        # Без подгрузки экран стартовал как «все могут писать» и обнулял цену при Save.
+        self.assertIn(
+            "initialRulesType = currentType = TYPE_EVERYBODY;\n            loadWaysGramMessagesFee();",
+            control.replace("\r\n", "\n"))
+
+    def test_own_fee_dialog_is_gone(self):
+        paid = self.source("ui/WaysGramPaidDm.java")
+        for gone in ("public static void settings(", "private static void editor(", "private static void notice("):
+            self.assertNotIn(gone, paid, f"мёртвый диалог остался: {gone}")
+        # Отправка платного сообщения показывает стоковое подтверждение Telegram.
+        self.assertIn("AlertsCreator.showPayForMessageAlert(account, peer", paid)
+        self.assertIn("public static int peerFeeStars(int account, long peer)", paid)
+
+    def test_dead_dialog_strings_are_removed(self):
+        dead = ("WaysGramPaidDmTitle", "WaysGramPaidDmPrice", "WaysGramPaidDmExceptions",
+                "WaysGramPaidDmExceptionCount", "WaysGramPaidDmExceptionLimit", "WaysGramPaidDmSaved",
+                "WaysGramPaidDmConfirm", "WaysGramPaidDmRetry", "WaysGramPaidDmNowFree")
+        for name in ("values/strings.xml", "values-ru/strings.xml"):
+            text = self.res(name)
+            for key in dead:
+                self.assertNotIn(f'name="{key}"', text, f"{name}: остался {key}")
+            # Ошибка сохранения цены нужна экрану «Сообщения».
+            self.assertIn('name="WaysGramPaidDmError"', text)
+
+    def test_russian_strings_keep_the_paths_that_are_used(self):
+        ru = self.res("values-ru/strings.xml")
+        for key in ("WaysGramTransferChannel", "WaysGramChannelTopics", "WaysGramTopicsEnable"):
+            self.assertIn(f'name="{key}"', ru)
+
+
+if __name__ == "__main__":
+    unittest.main()

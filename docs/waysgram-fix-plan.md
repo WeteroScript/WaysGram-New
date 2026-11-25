@@ -651,3 +651,31 @@ Lottie нет, поэтому ни одна модель пула не попа�
 
 Проверки: `scripts/test_android_gift_upgrade_reel.py` (6), весь `scripts/` (334),
 `authbot/tests/` (489).
+
+### Сборка 334: строка «Messages» больше не открывает свой диалог цены
+
+**Симптом.** Privacy and Security → «Messages» открывала карточку «Платные личные
+сообщения» с полем `10000`, `Cancel` / `Save`, а в списке сама строка была подписана этим
+же заголовком вместо цены: было непонятно, сохранилось ли значение.
+
+**Причина.** В клиенте жили два независимых места правки цены. Строка списка вызывала
+`WaysGramPaidDm.settings()` — самодельный `AlertDialog` (10000 / Cancel / Save), который
+прятал штатный выбор «кто может писать» и правил только цену, без исключений. Стоковый экран
+`PrivacyControlActivity` для `PRIVACY_RULES_TYPE_MESSAGES` цены не знал: `checkPrivacy()`
+для WaysGram всегда стартовал с «все могут писать» и `10`, поэтому сохранённое значение не
+появлялось ни в списке, ни на экране, а `applyWaysGramFeeValues()` был объявлен и ни разу не
+вызван.
+
+**Правка.**
+- `PrivacySettingsActivity`: строка «Messages» открывает штатный экран
+  `PrivacyControlActivity(PRIVACY_RULES_TYPE_MESSAGES)`, а её подпись — сохранённая цена
+  (`⭐10000`) или «Everybody», когда цена `0`.
+- `PrivacyControlActivity`: `checkPrivacy()` догружает цену с сервера
+  (`loadWaysGramMessagesFee()` → `GET /api/me/message-fee`), и как только она пришла, экран
+  выбирает платный режим с прежней ценой и исключениями. `Save` без правок больше ничего не
+  обнуляет, потому что `applyWaysGramFeeValues()` теперь вызывается.
+- `WaysGramPaidDm`: удалён мёртвый диалог (`settings`/`editor`/`notice`) вместе с девятью
+  строками `WaysGramPaidDm*`, которые остались только от него; подтверждение отправки
+  показывает стоковое `AlertsCreator.showPayForMessageAlert`.
+
+Проверки: `scripts/test_android_paid_messages.py` (11).
