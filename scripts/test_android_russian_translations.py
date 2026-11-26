@@ -82,6 +82,18 @@ class RussianTranslations(unittest.TestCase):
                     problems.append((name, 'нужен formatted="false"'))
         self.assertEqual(problems, [])
 
+    def test_cdata_markers_are_not_escaped(self):
+        """Экранированные `&lt;![CDATA[` ломают aapt2, а не только перевод.
+
+        В values-ru три строки были записаны как `&lt;![CDATA[...]]&gt;` — после
+        разэкранирования в тексте появляется `]]>`, и сборка падает на
+        mergeResources: «The character sequence "]]>" must not appear in content».
+        """
+        self.assertNotIn('&lt;![CDATA[', self.ru, 'маркер CDATA экранирован')
+        self.assertNotIn(']]&gt;', self.ru, 'конец CDATA экранирован')
+        # Настоящие CDATA-секции должны быть парными.
+        self.assertEqual(self.ru.count('<![CDATA['), self.ru.count(']]>'))
+
     def test_russian_is_a_builtin_language_so_resources_are_the_only_source(self):
         # Если русского не будет в builtin-списке, клиент начнёт просить langpack с сервера,
         # которого у WaysGram нет, и снова останется без перевода.

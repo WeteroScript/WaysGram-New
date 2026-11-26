@@ -2450,7 +2450,7 @@
     <string name="LanguageUnsupportedError">Выбранный язык не найден.</string>
     <string name="LanguageSame">Вы уже используете этот язык (**%1$s**). Вы можете сменить язык в любое время в Настройках.</string>
     <string name="LanguageUnknownCustomAlert">К сожалению, в этом неофициальном переводе (**%1$s**) нет текстов приложения WaysGram для Android.</string>
-    <string name="AskAQuestionInfo">Пожалуйста, обратите внимание, что в поддержке WaysGram отвечают волонтеры. Мы постараемся помочь как можно быстрее, но ожидание может занять время.\n\nПожалуйста, ознакомьтесь с &lt;![CDATA[&lt;a href=\"https://telegram.org/faq#general\"&gt;частыми вопросами о WaysGram&lt;/a&gt;]]&gt;: там есть ответ на большинство вопросов и важные советы по &lt;![CDATA[&lt;a href=\"https://telegram.org/faq#troubleshooting\"&gt;устранению неполадок&lt;/a&gt;]]&gt;.</string>
+    <string name="AskAQuestionInfo">Пожалуйста, обратите внимание, что в поддержке WaysGram отвечают волонтеры. Мы постараемся помочь как можно быстрее, но ожидание может занять время.\n\nПожалуйста, ознакомьтесь с <![CDATA[<a href=\"https://telegram.org/faq#general\">частыми вопросами о WaysGram</a>]]>: там есть ответ на большинство вопросов и важные советы по <![CDATA[<a href=\"https://telegram.org/faq#troubleshooting\">устранению неполадок</a>]]>.</string>
     <string name="AskButton">Спросить волонтёров</string>
     <string name="TelegramFAQ">Вопросы о WaysGram</string>
     <string name="TelegramFaq">Вопросы о WaysGram</string>
@@ -5762,7 +5762,7 @@
     <string name="LimitReachedPinSavedDialogsPremium">К сожалению, закрепить можно не больше %1$d чатов. Сперва открепите ненужные.</string>
     <string name="LimitReachedPinSavedDialogsLocked">К сожалению, закрепить можно не больше %1$d чатов. Сперва открепите ненужные. Мы работаем над возможностью увеличения лимита в будущем.</string>
     <string name="LastActiveCommunities">Наименее активные группы и каналы</string>
-    <string name="ChatsLeaveAlert">&lt;![CDATA[Вы точно хотите покинуть выбранные чаты?]]&gt;</string>
+    <string name="ChatsLeaveAlert">Вы точно хотите покинуть выбранные чаты?</string>
     <string name="PremiumPreviewAdvancedChatManagementDescription">Папка по умолчанию. Автоархивирование и скрытие новых чатов с неконтактами.</string>
     <string name="PremiumPreviewAdvancedChatManagementDescription2">С подпиской WaysGram Premium можно выбрать папку по умолчанию, настроить автоархивирование и включить скрытие новых чатов с неконтактами.</string>
     <string name="TelegramPremiumUserDialogTitle">**%s** является обладателем подписки\nWaysGram Premium.</string>
@@ -6127,7 +6127,7 @@
     <string name="RestrictUserDeleteAllMessages">Удалить все сообщения</string>
     <string name="RestrictUserDeleteAllReactions">Удалить все реакции</string>
     <string name="SendMediaPermissionVideos">Видео</string>
-    <string name="SendMediaPermissionStickersGifs">&lt;![CDATA[Стикеров и GIF]]&gt;</string>
+    <string name="SendMediaPermissionStickersGifs">Стикеров и GIF</string>
     <string name="SendMediaPermissionMusic">Музыки</string>
     <string name="SendMediaPermissionFiles">Файлов</string>
     <string name="SendMediaPermissionVoice">Голосовых сообщений</string>
