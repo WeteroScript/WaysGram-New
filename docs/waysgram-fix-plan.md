@@ -955,3 +955,38 @@ Telegram, а не нам. NFT-обёртка (TEP-62), фиат и ончейн-
 Проверки: `authbot/tests/test_fragment_market.py` (14),
 `scripts/test_android_fragment_market.py` (9), `scripts/` (367), `authbot/tests` (510).
 На устройстве не проверено, APK не собирался.
+
+## 13. Сборка APK 337: две давние поломки, которые никто не видел
+
+Первый запуск сборки после моих правок упал **дважды**, и оба раза не из-за рынка
+юзернеймов: предыдущие коммиты (перевод интерфейса и обои чата) в архив попадали, но
+ни разу не компилировались.
+
+1. **`mergeAfatReleaseResources` → «The character sequence "]]>" must not appear in
+   content».** В `values-ru/strings.xml` три строки были записаны как
+   `&lt;![CDATA[...]]&gt;`. После разэкранирования в тексте появляется `]]>`, и aapt2
+   считает это неверным концом CDATA-секции. `AskAQuestionInfo` получила настоящие
+   CDATA-секции (внутри ссылки `<a href=…>`), у `ChatsLeaveAlert` и
+   `SendMediaPermissionStickersGifs` маркеры просто убраны. Тест
+   `scripts/test_android_russian_translations.py::test_cdata_markers_are_not_escaped`
+   теперь ловит такую запись до сборки.
+2. **`javac`: `WaysGramChats.java:227: incompatible types: WallPaper cannot be converted
+   to TL_wallPaper`.** `WaysGramWallpapers.fromJson` возвращает базовый `TLRPC.WallPaper`,
+   а переменная в `WaysGramChats.wallpaper` была объявлена конкретным `TL_wallPaper`.
+   Обои-градиент (`TL_wallPaperNoFile`) в неё не помещались.
+
+**Диагностика.** Логи GitHub Actions лежат в артефакте и редиректят на хранилище, которое
+из агентской песочницы закрыто, поэтому в `build-apk.yml` добавлен шаг: при падении строки
+компилятора публикуются комментарием к коммиту (`gh api .../commits/$SHA/comments`). Через
+`api.github.com` они читаются, и следующие итерации шли уже по реальным сообщениям javac.
+
+**Итог.** `Build Android APK` (run 45891518793, build 337, commit `4e6be85`) — зелёный:
+компиляция Java, `assembleAfatRelease`, проверка zip-CRC, публикация и повторное
+скачивание опубликованного файла со сверкой sha256.
+
+* APK: 119 168 464 B
+* SHA-256: `e875bfd321b80171bc27b3bdab4dee4a122ff155c99906211756914561817747`
+* релиз: https://github.com/WeteroScript/WaysGram-New/releases/download/apk-waysgram-337/WaysGram.apk
+* части: `WaysGram.apk.part00…part04` в том же релизе
+
+Проверки: `scripts` (368), `authbot/tests` (510). На устройстве ещё не проверено.
