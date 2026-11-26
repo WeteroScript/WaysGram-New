@@ -170,8 +170,9 @@ public class WaysGramChats {
         chat.version = 1;
         chat.creator = g.optLong("owner_telegram_id") == selfId;
         String role = g.optString("my_role", g.optString("role", ""));
-        if ("admin".equals(role)) {
-            chat.admin_rights = groupAdminRights(g.optInt("admin_rights", 63));
+        int groupMask = g.optInt("admin_rights", 0);
+        if (chat.creator || ("admin".equals(role) && groupMask > 0)) {
+            chat.admin_rights = groupAdminRights(groupMask);
             chat.flags |= TLObject.FLAG_14;
         }
         synchronized (WaysGramChats.class) {
@@ -430,8 +431,9 @@ public class WaysGramChats {
             chat.flags |= TLObject.FLAG_6;
         }
         String role = g.optString("my_role", g.optString("role", ""));
-        if (chat.creator || "admin".equals(role)) {
-            chat.admin_rights = groupAdminRights(g.optInt("admin_rights", 63));
+        int groupMask = g.optInt("admin_rights", 0);
+        if (chat.creator || ("admin".equals(role) && groupMask > 0)) {
+            chat.admin_rights = groupAdminRights(groupMask);
             chat.flags |= TLObject.FLAG_14;
         }
         applyChannelFlags(chat, g);
@@ -1489,7 +1491,7 @@ public class WaysGramChats {
             participant.banned_rights = normalized(memberBanned);
         } else if ("owner".equals(role) || "admin".equals(role)) {
             participant = "owner".equals(role) ? new TLRPC.TL_channelParticipantCreator() : new TLRPC.TL_channelParticipantAdmin();
-            participant.admin_rights = channelRights("owner".equals(role) ? 127 : row.optInt("admin_rights", 15));
+            participant.admin_rights = channelRights("owner".equals(role) ? 127 : row.optInt("admin_rights", 0));
             participant.can_edit = "admin".equals(role) && owner == selfId;
             participant.promoted_by = owner;
         } else {
@@ -1734,7 +1736,7 @@ public class WaysGramChats {
                 } else if ("admin".equals(memberRole)) {
                     participant = new TLRPC.TL_chatParticipantAdmin();
                     adminsCount++;
-                    participant.waysGramAdminRights = groupAdminRights(m.optInt("admin_rights", 63));
+                    participant.waysGramAdminRights = groupAdminRights(m.optInt("admin_rights", 0));
                 } else {
                     participant = new TLRPC.TL_chatParticipant();
                 }

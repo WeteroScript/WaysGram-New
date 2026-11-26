@@ -80,6 +80,19 @@ class ChatRightsFlags(unittest.TestCase):
         for field, bit in expected.items():
             self.assertIn(f'rights.{field} = (mask & {bit}) != 0;', body, field)
 
+    def test_participant_rights_are_never_invented(self):
+        """Участник без назначения не должен получать маску прав из воздуха.
+
+        Сервер отдавал `admin_rights: 63` обычному участнику (DEFAULT колонки), а клиент
+        подставлял 63 и 15 там, где поля не было вовсе. Из-за этого в приложении
+        появлялись «Редактировать» и админ-действия у людей, которых никто не назначал.
+        """
+        self.assertNotIn('optInt("admin_rights", 63)', self.chats)
+        self.assertNotIn('optInt("admin_rights", 15)', self.chats)
+        self.assertIn('int groupMask = g.optInt("admin_rights", 0);', self.chats)
+        self.assertIn('("admin".equals(role) && groupMask > 0)', self.chats)
+        self.assertIn('row.optInt("admin_rights", 0)', self.chats)
+
     def test_groups_no_longer_borrow_the_channel_mask(self):
         body = self.method_body(self.chats, 'public static TLRPC.TL_channel toMegagroup(int account, JSONObject g, long selfId)')
         self.assertIn('chat.admin_rights = groupAdminRights(', body)

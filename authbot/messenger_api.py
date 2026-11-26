@@ -2237,7 +2237,14 @@ async def init_messenger_storage(database_path: Path) -> None:
             )
         cur = await db.execute(f"PRAGMA {db_split.SCHEMA}.table_info(group_members)")
         if "admin_rights" not in {str(row[1]) for row in await cur.fetchall()}:
-            await db.execute(f"ALTER TABLE {db_split.SCHEMA}.group_members ADD COLUMN admin_rights INTEGER NOT NULL DEFAULT 63")
+            # DEFAULT 63 раздавал маску «все права админа группы» каждому участнику: строка
+            # членства создаётся без явного admin_rights, а клиент читает колонку как готовые права.
+            await db.execute(f"ALTER TABLE {db_split.SCHEMA}.group_members ADD COLUMN admin_rights INTEGER NOT NULL DEFAULT 0")
+        # Старые базы уже получили колонку с дефолтом 63 — гасим маску у всех, кого не назначали.
+        await db.execute(
+            f"UPDATE {db_split.SCHEMA}.group_members SET admin_rights=0 "
+            "WHERE role NOT IN ('owner','admin') AND admin_rights<>0"
+        )
         cur = await db.execute(f"PRAGMA main.table_info(group_mutes)")
         if "rights" not in {str(row[1]) for row in await cur.fetchall()}:
             await db.execute(f"ALTER TABLE main.group_mutes ADD COLUMN rights INTEGER NOT NULL DEFAULT 1")
@@ -9750,7 +9757,9 @@ def build_messenger_router(
                           CASE WHEN ch.is_public=1 THEN ch.username ELSE '' END AS username,
                           ch.title,ch.owner_telegram_id,ch.is_public,ch.created_at,ch.avatar_media_id,
                           owner.username AS owner_username,
-                          EXISTS(SELECT 1 FROM channel_admins ca WHERE ca.channel_id=ch.id AND ca.telegram_id=?) AS is_admin,
+                          (ch.owner_telegram_id=? OR EXISTS(
+                              SELECT 1 FROM channel_admins ca
+                              WHERE ca.channel_id=ch.id AND ca.telegram_id=?)) AS is_admin,
                           COALESCE((SELECT ca.rights FROM channel_admins ca WHERE ca.channel_id=ch.id AND ca.telegram_id=?),0) AS admin_rights,
                           EXISTS(SELECT 1 FROM active_channel_members cm WHERE cm.channel_id=ch.id AND cm.telegram_id=?) AS is_member,
                           COALESCE((SELECT rm.last_read_id FROM read_markers rm
@@ -9769,7 +9778,7 @@ def build_messenger_router(
                       OR EXISTS(SELECT 1 FROM active_channel_members cm
                                 WHERE cm.channel_id=ch.id AND cm.telegram_id=?)
                     ) ORDER BY ch.id DESC""",
-                (uid, uid, uid, uid, uid, uid, uid, uid, uid, uid),
+                (uid, uid, uid, uid, uid, uid, uid, uid, uid, uid, uid),
             )
             rows = await cur.fetchall()
         channels = []
@@ -13411,7 +13420,8 @@ def build_messenger_router(
             db.row_factory = aiosqlite.Row
             cur = await db.execute("""SELECT g.id,g.title,g.owner_telegram_id,g.avatar_media_id,
                        (SELECT COUNT(*) FROM group_members x WHERE x.group_id=g.id) AS member_count,
-                       gm.role AS my_role,gm.admin_rights AS admin_rights
+                       gm.role AS my_role,
+                       CASE WHEN gm.role='owner' THEN 63 WHEN gm.role='admin' THEN gm.admin_rights ELSE 0 END AS admin_rights
                 FROM chat_groups g
                 JOIN group_members gm ON gm.group_id=g.id AND gm.telegram_id=?
                 JOIN group_members other ON other.group_id=g.id AND other.telegram_id=?
@@ -17899,7 +17909,9 @@ def build_messenger_router(
             db.row_factory = aiosqlite.Row
             cur = await db.execute(
                 """SELECT g.id,g.username,g.title,g.description,g.owner_telegram_id,
-                          gm.role,gm.admin_rights,gm.joined_at,
+                          gm.role,
+                          CASE WHEN gm.role='owner' THEN 63 WHEN gm.role='admin' THEN gm.admin_rights ELSE 0 END AS admin_rights,
+                          gm.joined_at,
                           (SELECT COUNT(*) FROM group_members m WHERE m.group_id=g.id) AS member_count,
                           (SELECT COUNT(*) FROM group_messages x WHERE x.group_id=g.id) AS message_count,
                           COALESCE((SELECT rm.last_read_id FROM read_markers rm
@@ -18016,7 +18028,7 @@ def build_messenger_router(
             restricted_roster = bool(group["members_hidden"]) and membership["role"] == "member"
             cur = await db.execute(
                 """SELECT gm.telegram_id,gm.role,gm.joined_at,a.username,a.display_name,a.avatar_media_id,
-                          CASE WHEN gm.role IN ('owner','admin') THEN gm.admin_rights ELSE 0 END AS admin_rights
+                          CASE WHEN gm.role='owner' THEN 63 WHEN gm.role='admin' THEN gm.admin_rights ELSE 0 END AS admin_rights
                    FROM group_members gm LEFT JOIN accounts a ON a.telegram_id=gm.telegram_id
                    WHERE gm.group_id=? AND (?=0 OR gm.telegram_id=? OR gm.role IN ('owner','admin')) ORDER BY
                    CASE gm.role WHEN 'owner' THEN 0 WHEN 'admin' THEN 1 ELSE 2 END,
@@ -18047,7 +18059,8 @@ def build_messenger_router(
         result["forum_enabled"] = bool(result.get("forum_enabled") or 0)
         result["labels"] = await entity_labels("group", group_id)
         result["my_role"] = membership["role"]
-        result["admin_rights"] = membership["admin_rights"] if membership["role"] in ("owner", "admin") else 0
+        result["admin_rights"] = (63 if membership["role"] == "owner"
+                                 else membership["admin_rights"] if membership["role"] == "admin" else 0)
         result["location"] = chat_location_payload(result)
         result["can_set_location"] = group_has_right(membership, 1)
         result["my_telegram_id"] = uid
