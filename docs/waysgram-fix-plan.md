@@ -754,3 +754,50 @@ Lottie нет, поэтому ни одна модель пула не попа�
   118 925 325 байт, SHA-256
   `5258dfee8837e557a4ab9dbc8237189ba96fd4b2e5e9b73d1ba014d1af01c42c`.
   Сборка сама скачала опубликованный файл обратно и сверила байты и CRC.
+
+### Обои группы/канала пропадали после переоткрытия чата
+
+**Запрос.** Обои канала и группы применяются, но потом пропадают.
+
+**Причина.** Обои уходили на сервер (`messages.setChatWallPaper` →
+`PUT /api/chats/{scope}/{id}/wallpaper`), но клиент сохранял их только в одной ветке:
+ответ должен содержать `updateNewMessage` со служебным сообщением
+`messageActionSetChatWallPaper` — именно оттуда `ChatThemeController` берёт
+`chatFull.wallpaper` и пишет `chatWallpaper_<account>_<dialog>` в prefs. WaysGram
+служебных сообщений не заводит и отвечает пустым `TL_updates`, поэтому обои жили только
+на экране выбора: при следующем открытии чата `getDialogWallpaper` возвращал null и фон
+снова становился стандартным.
+
+**Правка.** `ChatThemeController.setWallpaperToPeer`: если в ответе не нашлось нужного
+обновления, обои применяются из самого запроса (`req.settings`) — `chatFull.wallpaper`
+(+`flags2 |= 128`), запись в prefs через `saveChatWallpaper` и `chatInfoDidLoad`;
+для личных чатов — `userFull.wallpaper` (+`flags |= 16777216`). Ветка работает только при
+`WaysGramTransport.ENABLED`, штатный путь Telegram не тронут.
+
+Ограничение: обои-картинки из галереи по-прежнему не поддерживаются — в клиенте нет
+`account.uploadWallPaper`, а каталога обоев (`account.getWallPapers`) у WaysGram нет,
+поэтому доступны цвета и градиенты.
+
+Проверки: `scripts/test_android_chat_wallpaper.py` (6).
+
+### Русский интерфейс: переводы в ресурсах
+
+**Запрос.** В приложении выбран русский, а всё на английском.
+
+**Причина.** Русский в клиенте — встроенный язык (`LocaleInfo.builtIn = true`,
+`pathToFile = null`), поэтому `LocaleController.applyRemoteLanguage` для него сразу
+выходит и перевод берётся только из ресурсов `values-ru` (в `.bin`-локализацию из
+`TelegramStringsTask`). Остальные языки Telegram догружает с сервера
+(`langpack.getLangPack`), но у WaysGram такого сервера нет. В сборке было переведено
+530 строк из 11 772 — всё остальное падало в английский.
+
+**Правка.** `scripts/build_russian_translations.py` собирает полный
+`values-ru/strings.xml`: свои (форк-специфичные) строки сохраняются, остальные берутся из
+официального Android-langpack-а Telegram (включая множественные формы
+`LangPackStringPluralized` → `Key_one`/`_few`/`_many`/`_other`), значения экранируются
+под aapt2 (апострофы, кавычки, `&`, `<`, `>`, `\n`, ведущие `@`/`?`,
+`formatted="false"` для нестандартных `%`), бренд «Telegram» заменяется на «WaysGram»
+там, где в английской базе он уже заменён. Итог: 11 739 строк, покрытие 99.7%
+(без перевода остались только имена поисковиков с URL и названия валюты Grams).
+
+Проверки: `scripts/test_android_russian_translations.py` (5), `scripts/` (348).

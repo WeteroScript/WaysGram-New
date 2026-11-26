@@ -23,6 +23,7 @@ class ChatWallpaper(unittest.TestCase):
         cls.extras = cls.archive.read(TGNET + 'WaysGramExtras.java').decode('utf-8')
         cls.chats = cls.archive.read(TGNET + 'WaysGramChats.java').decode('utf-8')
         cls.server = (ROOT / 'authbot' / 'messenger_api.py').read_text(encoding='utf-8')
+        cls.theme = cls.archive.read(BASE + 'messenger/ChatThemeController.java').decode('utf-8')
 
     @classmethod
     def tearDownClass(cls):
@@ -66,6 +67,19 @@ class ChatWallpaper(unittest.TestCase):
             body = self.body(self.chats, signature)
             self.assertIn('full.wallpaper = wallpaper(', body, signature)
             self.assertIn('if (full.wallpaper != null) full.flags2 |= 128;', body, signature)
+
+    def test_wallpaper_survives_reopening_the_chat(self):
+        # Настоящий Telegram отвечает updateNewMessage со служебным «обои изменены», и только
+        # из него клиент пишет chatFull.wallpaper и prefs. WaysGram отвечает пустым updates,
+        # поэтому обои применялись и пропадали при следующем открытии чата.
+        self.assertIn('final boolean[] wallpaperApplied = new boolean[1];', self.theme)
+        self.assertIn('if (!wallpaperApplied[0] && finalApplyOnRequest) {', self.theme)
+        self.assertIn('applyWaysGramWallpaper(dialogId, req, userFull, chatFull);', self.theme)
+        body = self.body(self.theme, 'private void applyWaysGramWallpaper(')
+        self.assertIn('org.telegram.tgnet.WaysGramTransport.ENABLED', body)
+        self.assertIn('saveChatWallpaper(dialogId, wallpaper);', body)
+        self.assertIn('chatFull.flags2 |= 128;', body)
+        self.assertIn('userFull.flags |= 16777216;', body)
 
     def test_server_stores_and_returns_the_wallpaper(self):
         self.assertIn('@router.put("/api/chats/{scope}/{chat_id}/wallpaper")', self.server)
