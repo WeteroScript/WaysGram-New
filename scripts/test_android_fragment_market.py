@@ -65,7 +65,8 @@ class FragmentMarketChecks(unittest.TestCase):
         self.assertIn("R.drawable.fragment", settings)
         market = self.source("ui/WaysGramFragmentActivity.java")
         card = self.source("ui/WaysGramCollectibleActivity.java")
-        self.assertIn("WaysGramFragment.market(account, WaysGramFragment.SECTION_MARKET)", market)
+        self.assertIn("WaysGramFragment.market(account,", market)
+        self.assertIn("WaysGramFragment.SECTION_MARKET).optJSONArray(\"items\")", market)
         self.assertIn("WaysGramFragment.buy(account, name)", card)
         self.assertIn("WaysGramFragment.bid(account, name, value)", card)
         self.assertIn("WaysGramFragment.list(account, name, value)", card)
@@ -76,7 +77,7 @@ class FragmentMarketChecks(unittest.TestCase):
     def test_market_screens_are_fragments_not_dialogs(self):
         # Пользователь дважды просил: разделы открываются как экраны приложения, а не
         # как всплывающие диалоги. Рынок и карточка имени — обычные фрагменты со своим
-        # ActionBar, кнопкой «назад» и строками настроек.
+        # ActionBar и кнопкой «назад».
         self.assertNotIn("WaysGram-Android/TMessagesProj/src/main/java/org/telegram/ui/"
                          "WaysGramFragmentMarket.java", self.names)
         self.assertFalse((ROOT / "android-source/TMessagesProj/src/main/java/org/telegram/ui/"
@@ -87,15 +88,13 @@ class FragmentMarketChecks(unittest.TestCase):
             self.assertIn("actionBar.setBackButtonImage(R.drawable.ic_ab_back)", screen, name)
             self.assertIn("actionBar.setTitle(", screen, name)
             self.assertIn("finishFragment()", screen, name)
-            self.assertIn("TextSettingsCell", screen, name)
-            self.assertIn("ShadowSectionCell", screen, name)
             self.assertNotIn("AlertDialog", screen, name)
             self.assertNotIn("showDialog(", screen, name)
         market = self.source("ui/WaysGramFragmentActivity.java")
         for section in ("SECTION_MARKET", "SECTION_AUCTIONS", "SECTION_MINE"):
             self.assertIn(f"WaysGramFragment.{section}", market)
-        self.assertIn("presentFragment(new WaysGramCollectibleActivity(account, name))", market)
-        self.assertIn("presentFragment(new WaysGramCollectibleActivity(account, \"\"))", market)
+        self.assertIn("new WaysGramCollectibleActivity(account, name)", market)
+        self.assertIn('new WaysGramCollectibleActivity(account, "")', market)
         card = self.source("ui/WaysGramCollectibleActivity.java")
         # Действия — строки списка; сумма вводится полем на том же экране.
         for action in ("WaysGramFragmentUnlist", "WaysGramFragmentCancelAuction",
@@ -103,6 +102,48 @@ class FragmentMarketChecks(unittest.TestCase):
                        "WaysGramFragmentBuy", "WaysGramFragmentClaimPrice"):
             self.assertIn(action, card)
         self.assertIn("setInputType(InputType.TYPE_CLASS_NUMBER)", card)
+
+    def test_fragment_screen_has_the_three_tabs_of_fragment(self):
+        # Пользователь: экран «в стиле Fragment», без Auction/Stars/Ads/Premium/Numbers,
+        # в конце — «Inventory».
+        market = self.source("ui/WaysGramFragmentActivity.java")
+        for tab in ("TAB_USERNAMES = 0", "TAB_GIFTS = 1", "TAB_INVENTORY = 2"):
+            self.assertIn(tab, market)
+        self.assertIn("R.string.WaysGramFragmentTabUsernames", market)
+        self.assertIn("R.string.WaysGramFragmentTabGifts", market)
+        self.assertIn("R.string.WaysGramFragmentTabInventory", market)
+        # Только эти три вкладки: ни номеров, ни звёзд, ни Premium, ни рекламы.
+        for removed in ("FragmentTabNumbers", "FragmentTabStars", "FragmentTabPremium",
+                        "FragmentTabAds", "FragmentTabAuctions"):
+            self.assertNotIn(removed, market)
+            self.assertNotIn(removed, self.resource("values/strings.xml"))
+        # Брендовая строка как на fragment.com и подчёркивание активной вкладки.
+        self.assertIn('"FRAGMENT"', market)
+        self.assertIn("tabUnderlines", market)
+        self.assertIn("switchTab(", market)
+
+    def test_gifts_and_inventory_use_the_market_endpoints(self):
+        market = self.source("ui/WaysGramFragmentActivity.java")
+        # Вкладка Gifts — объявления рынка подарков, вкладка Inventory — свой инвентарь.
+        self.assertIn('"/api/gift-market?limit=60"', market)
+        self.assertIn('"/api/me/gifts"', market)
+        self.assertIn('"/api/gift-market/" + listingId + "/purchase"', market)
+        self.assertIn('"/api/gifts/" + serial + "/list"', market)
+        self.assertIn('new JSONObject().put("price_grams", price)', market)
+        self.assertIn("WaysGramApi.delete(account, \"/api/gifts/\" + serial + \"/list\")", market)
+        # Инвентарь пополняется только подарком на @fragment, поэтому подсказка на экране.
+        self.assertIn("R.string.WaysGramFragmentInventoryHint", market)
+        self.assertIn("R.string.WaysGramFragmentInventoryCopy", market)
+        self.assertIn('AndroidUtilities.addToClipboard("@" + "fragment")', market)
+        server = (ROOT / "authbot" / "fragment_deposit.py").read_text(encoding="utf-8")
+        self.assertIn('FRAGMENT_USERNAME = "fragment"', server)
+        self.assertIn("fragment_gift_deposits", server)
+        self.assertIn("UNIQUE(telegram_id, serial_number)", server)
+        api = (ROOT / "authbot" / "messenger_api.py").read_text(encoding="utf-8")
+        self.assertIn("fragment_deposit.is_deposit_target(db, recipient_id)", api)
+        self.assertIn('await fragment_deposit.record(db, uid, serial', api)
+        self.assertIn('"fragment_deposit" if deposit else "chat_send"', api)
+        self.assertIn("await fragment_deposit.ensure_account(db)", api)
 
     def test_repack_can_delete_a_replaced_screen(self):
         # Экран-диалог заменён фрагментом: старый файл нужно уметь убрать из архива.

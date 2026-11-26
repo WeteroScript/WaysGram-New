@@ -26,6 +26,7 @@ import gift_names
 import gift_model_fallbacks
 import waysgram_gifts  # noqa: F401  # our own shop gifts
 import db_split  # noqa: F401  # two-file database layout
+import fragment_deposit  # noqa: F401  # приём подарков на @fragment
 import fragment_market  # noqa: F401  # рынок юзернеймов (наш Fragment)
 from star_rating import profile_rating
 import gift_upgrades  # noqa: F401  # official Telegram upgrade pools
@@ -2595,6 +2596,16 @@ async def init_messenger_storage(database_path: Path) -> None:
             await fragment_market.seed_from_accounts(db)
         except Exception:  # noqa: BLE001 - урезанные схемы (тесты, импорт) могут не иметь accounts
             LOGGER.warning("Fragment collectibles seeding skipped", exc_info=True)
+        # Приёмник подарков для инвентаря рынка: служебный аккаунт @fragment и
+        # журнал принятых подарков.
+        try:
+            await fragment_deposit.ensure_storage(db)
+            if await fragment_deposit.ensure_account(db):
+                # Служебное имя занято аккаунтом-приёмником: заселяем его в справочник,
+                # иначе его можно было бы «занять» на рынке.
+                await fragment_market.seed_from_accounts(db)
+        except Exception:  # noqa: BLE001 - урезанные схемы (тесты, импорт) могут не иметь accounts
+            LOGGER.warning("Fragment gift deposit storage skipped", exc_info=True)
         await db.commit()
 
 
@@ -15101,7 +15112,12 @@ def build_messenger_router(
             if recipient["is_banned"]:
                 await db.rollback()
                 raise HTTPException(status_code=403, detail="Получатель заблокирован")
-            await require_gift_delivery_allowed(db, uid, recipient_id)
+            # Подарок на @fragment не уходит другому человеку: он возвращается в
+            # инвентарь отправителя, поэтому правила доставки и приёма подарков
+            # получателя к служебному аккаунту не применяются.
+            deposit = await fragment_deposit.is_deposit_target(db, recipient_id)
+            if not deposit:
+                await require_gift_delivery_allowed(db, uid, recipient_id)
             cur = await db.execute(
                 """SELECT id,gift_name,telegram_gift_id,upgrade_level,attributes_json,
                           (SELECT unique_num FROM gift_unique_numbers n
@@ -15113,7 +15129,8 @@ def build_messenger_router(
             if gift is None:
                 await db.rollback()
                 raise HTTPException(status_code=404, detail="Подарок не найден в вашем инвентаре")
-            await require_gift_type(db, recipient_id, gift["upgrade_level"], gift["attributes_json"])
+            if not deposit:
+                await require_gift_type(db, recipient_id, gift["upgrade_level"], gift["attributes_json"])
             cur = await db.execute(
                 "SELECT 1 FROM gift_market_listings WHERE serial_number=? AND status='active'",
                 (serial,),
@@ -15142,15 +15159,20 @@ def build_messenger_router(
             if not isinstance(attributes, dict):
                 attributes = {}
             attributes_json = json.dumps(attributes, ensure_ascii=False, separators=(",", ":"))
-            cur = await db.execute(
-                "UPDATE user_gifts SET owner_telegram_id=? WHERE id=? AND owner_telegram_id=?",
-                (recipient_id, int(gift["id"]), uid),
-            )
-            if cur.rowcount != 1:
-                await db.rollback()
-                raise HTTPException(status_code=409, detail="Владение подарком уже изменилось")
-            await apply_gift_autosave(db, serial, recipient_id, uid)
-            await require_free_dm(db, uid, recipient_id)
+            if deposit:
+                # Владение не меняется: подарок остаётся у отправителя и попадает в
+                # его инвентарь как принятый Fragment.
+                await fragment_deposit.record(db, uid, serial, str(gift["gift_name"]), now)
+            else:
+                cur = await db.execute(
+                    "UPDATE user_gifts SET owner_telegram_id=? WHERE id=? AND owner_telegram_id=?",
+                    (recipient_id, int(gift["id"]), uid),
+                )
+                if cur.rowcount != 1:
+                    await db.rollback()
+                    raise HTTPException(status_code=409, detail="Владение подарком уже изменилось")
+                await apply_gift_autosave(db, serial, recipient_id, uid)
+                await require_free_dm(db, uid, recipient_id)
             cur = await db.execute(
                 """INSERT INTO messages
                    (sender_telegram_id,recipient_telegram_id,body,created_at)
@@ -15170,8 +15192,9 @@ def build_messenger_router(
             await db.execute(
                 """INSERT INTO gift_transactions
                    (event_type,serial_number,gift_name,from_telegram_id,to_telegram_id,created_at,message_id)
-                   VALUES('chat_send',?,?,?,?,?,?)""",
-                (serial, gift_name, uid, recipient_id, now, message_id),
+                   VALUES(?,?,?,?,?,?,?)""",
+                ("fragment_deposit" if deposit else "chat_send", serial, gift_name, uid,
+                 recipient_id, now, message_id),
             )
             await record_event(
                 db, "dm", message_id, "new_message", uid,
@@ -15191,6 +15214,7 @@ def build_messenger_router(
                 "gift_unique_num": int(gift["unique_num"] or 0),
                 "gift_instance_id": int(gift["id"]),
                 "gift_attributes": attributes,
+                "deposited": deposit,
                 "created_at": now,
             }
             await idempotency_store(db, uid, scope, descriptor, result, now)

@@ -10,7 +10,8 @@
 | фоновый расчёт аукционов | `process_due_username_auctions` в воркере |
 | вотчер TON | `authbot/scripts/ton_watcher.py` |
 | карточка профиля (`fragment.getCollectibleInfo`) | `tgnet/WaysGramFragment.java` |
-| экран рынка | `ui/WaysGramFragmentActivity.java` — фрагмент со своим `ActionBar` (Настройки → Коллекционные юзернеймы) |
+| экран рынка | `ui/WaysGramFragmentActivity.java` — фрагмент в стиле fragment.com: вкладки Usernames / Gifts / Inventory (Настройки → Fragment) |
+| приём подарков | `authbot/fragment_deposit.py` — служебный аккаунт `@fragment` и журнал `fragment_gift_deposits` |
 | карточка имени и действия | `ui/WaysGramCollectibleActivity.java` — тоже фрагмент: купить, занять, продать, аукцион, ставка |
 | тесты | `authbot/tests/test_fragment_market.py` (14), `scripts/test_android_fragment_market.py` (11) |
 

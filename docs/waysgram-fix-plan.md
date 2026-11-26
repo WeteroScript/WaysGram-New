@@ -1019,3 +1019,35 @@ Telegram, а не нам. NFT-обёртка (TEP-62), фиат и ончейн-
 Проверки: `scripts` — **370 passed** (+5 subtests), `authbot/tests` — 510. На устройстве
 не проверено, APK 338 не собирался.
 
+## 15. Экран Fragment: вкладки Usernames, Gifts, Inventory
+
+Просьба по скриншотам fragment.com: после нажатия «Fragment» должен открываться экран **в
+стиле Fragment** — с брендовой строкой, вкладками и таблицами, без Auction/Stars/Ads/
+Premium/Numbers, а в конце — Inventory.
+
+Что сделано:
+
+* `ui/WaysGramFragmentActivity.java` переписан: строка «FRAGMENT», три вкладки с
+  подчёркиванием активной (`Usernames`, `Gifts`, `Inventory`) и прокручиваемое
+  содержимое. Никаких диалогов — только `TextView`-строки и карточки.
+* **Usernames** — поиск юзернейма, таблица «Username / Price» (заголовок, `@name`,
+  `name.t.me`, ставка или цена, срок аукциона), «My usernames», «Занять свободное имя»,
+  и внизу пополнение за TON (адрес, memo, курс, вывод) — механика фазы 3 сохранена.
+* **Gifts** — объявления `/api/gift-market` карточками по три в ряд, фильтры
+  «All gifts / For sale» и сортировка «Price high to low / low to high / Recently
+  listed»; выбор карточки показывает «Buy for N Gram» (`/api/gift-market/{id}/purchase`).
+* **Inventory** — свой инвентарь `/api/me/gifts`: имя, серийный номер, статус
+  «В инвентаре / На рынке», продажа с ценой в Gram (`POST /api/gifts/{serial}/list`) и
+  снятие с продажи (`DELETE …/list`). Наверху — инструкция и копирование `@fragment`.
+* Сервер: `authbot/fragment_deposit.py` создаёт служебный аккаунт `@fragment`
+  (`telegram_id 777000777`) и таблицу `fragment_gift_deposits` с уникальным индексом
+  `telegram_id + serial_number`. В `POST /api/messages/gift` подарок, отправленный
+  `@fragment`, **не меняет владельца**: он регистрируется как принятый Fragment
+  (событие `fragment_deposit`), поэтому попадает в инвентарь отправителя, а повторная
+  отправка того же серийного номера не создаёт вторую запись.
+* `SettingsActivity`: пункт меню теперь называется «Fragment» (подзаголовок «Юзернеймы,
+  подарки и инвентарь»), экран открывается как фрагмент.
+
+Проверки: `scripts` — **372 passed** (+5 subtests), `authbot/tests` — 515 (510 + 5 новых
+`test_fragment_deposit.py`). На устройстве не проверено, APK 338 не собирался.
+

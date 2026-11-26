@@ -11772,9 +11772,9 @@
     <string name="WaysGramPaidHistoryChannel">Channel message</string>
     <string name="WaysGramPaidHistorySponsored">Sponsored post</string>
     <string name="WaysGramPaidHistoryRefund">Refund</string>
-    <string name="WaysGramFragmentMenu">Collectible usernames</string>
-    <string name="WaysGramFragmentMenuInfo">Buy, sell and auction usernames</string>
-    <string name="WaysGramFragmentTitle">Collectible usernames</string>
+    <string name="WaysGramFragmentMenu">Fragment</string>
+    <string name="WaysGramFragmentMenuInfo">Usernames, gifts and inventory</string>
+    <string name="WaysGramFragmentTitle">Fragment</string>
     <string name="WaysGramFragmentSectionMarket">For sale</string>
     <string name="WaysGramFragmentSectionAuctions">Auctions</string>
     <string name="WaysGramFragmentSectionMine">My usernames</string>
@@ -11818,6 +11818,31 @@
     <string name="WaysGramFragmentWithdrawStars">Stars to withdraw</string>
     <string name="WaysGramFragmentWithdrawAddress">TON address</string>
     <string name="WaysGramFragmentWithdrawQueued">Request for \u2b50%1$d queued</string>
+    <string name="WaysGramFragmentTabUsernames">Usernames</string>
+    <string name="WaysGramFragmentTabGifts">Gifts</string>
+    <string name="WaysGramFragmentTabInventory">Inventory</string>
+    <string name="WaysGramFragmentSearchHint">Enter a Telegram username\u2026</string>
+    <string name="WaysGramFragmentColumnUsername">Username</string>
+    <string name="WaysGramFragmentColumnPrice">Price</string>
+    <string name="WaysGramFragmentAllGifts">All gifts</string>
+    <string name="WaysGramFragmentSortPriceDesc">Price high to low</string>
+    <string name="WaysGramFragmentSortPriceAsc">Price low to high</string>
+    <string name="WaysGramFragmentSortNew">Recently listed</string>
+    <string name="WaysGramFragmentGram" formatted="false">%1$d Gram</string>
+    <string name="WaysGramFragmentDaysLeft" formatted="false">%1$d d left</string>
+    <string name="WaysGramFragmentAuctionShort">Auction</string>
+    <string name="WaysGramFragmentOnMarket">On the market</string>
+    <string name="WaysGramFragmentInInventory">In inventory</string>
+    <string name="WaysGramFragmentInventoryHint">Top up the inventory: send an NFT gift to \@fragment</string>
+    <string name="WaysGramFragmentInventoryCopy">Copy \@fragment</string>
+    <string name="WaysGramFragmentSellPriceHint">Price in Gram</string>
+    <string name="WaysGramFragmentSell">Sell</string>
+    <string name="WaysGramFragmentUnlistGift">Remove from the market</string>
+    <string name="WaysGramFragmentListedFor" formatted="false">On sale \u00b7 %1$d Gram</string>
+    <string name="WaysGramFragmentBuyGram" formatted="false">Buy for %1$d Gram</string>
+    <string name="WaysGramFragmentSellDone">Gift put on the market</string>
+    <string name="WaysGramFragmentUnlistDone">Gift removed from the market</string>
+    <string name="WaysGramFragmentBuyDone">Gift bought</string>
     <string name="WaysGramInboxWriteChannel">Message channel</string>
     <string name="WaysGramInboxSettings">Channel inbox settings</string>
     <string name="WaysGramInboxEnable">Accept incoming messages</string>

@@ -8,6 +8,7 @@ from cryptography.fernet import Fernet
 
 import bot as bot_module
 import db_split
+import fragment_deposit
 import messenger_api
 import waysgram_gifts
 from messenger_api import init_messenger_storage
@@ -103,6 +104,7 @@ def test_admin_creates_account_with_number_stars_and_grams(panel) -> None:
     type_text("0")
     type_text("0")
     ids = {r[0] for r in query(path, "SELECT telegram_id FROM accounts")}
+    ids.discard(fragment_deposit.FRAGMENT_TELEGRAM_ID)  # служебный @fragment
     assert len(ids) == 2
 
 
@@ -112,7 +114,8 @@ def test_account_range_is_validated(panel) -> None:
     type_text("5551110000")
     assert "диапазон" in type_text("-5").sent[-1][0].lower()
     assert "целое число" in type_text("abc").sent[-1][0]
-    assert query(path, "SELECT COUNT(*) FROM accounts")[0][0] == 0
+    assert query(path, "SELECT COUNT(*) FROM accounts WHERE telegram_id<>?",
+                 (fragment_deposit.FRAGMENT_TELEGRAM_ID,))[0][0] == 0
 
 
 def test_admin_creates_username_channel_for_an_account(panel) -> None:
@@ -154,7 +157,8 @@ def test_only_admin_can_use_the_new_functions(panel) -> None:
     run(bot_module.admin_callback(callback))
     assert bot_module.ADMIN_INPUT == {}
     run(bot_module.admin_text_input(Msg("5551234567", user_id=1)))
-    assert query(path, "SELECT COUNT(*) FROM accounts")[0][0] == 0
+    assert query(path, "SELECT COUNT(*) FROM accounts WHERE telegram_id<>?",
+                 (fragment_deposit.FRAGMENT_TELEGRAM_ID,))[0][0] == 0
 
 
 def test_admin_creates_reusable_labels_and_assigns_accounts_and_channels(panel) -> None:

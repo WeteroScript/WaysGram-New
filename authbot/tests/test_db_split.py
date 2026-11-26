@@ -7,6 +7,7 @@ from cryptography.fernet import Fernet
 
 import bot as bot_module
 import db_split
+import fragment_deposit
 from messenger_api import init_messenger_storage
 
 
@@ -74,7 +75,8 @@ def test_queries_without_schema_and_joins_work_across_files(tmp_path: Path, monk
     assert plain.execute("SELECT COUNT(*) FROM messages").fetchone()[0] == 1
     plain.close()
     plain = sqlite3.connect(path)
-    assert plain.execute("SELECT COUNT(*) FROM accounts").fetchone()[0] == 1
+    assert plain.execute("SELECT COUNT(*) FROM accounts WHERE telegram_id<>?",
+                         (fragment_deposit.FRAGMENT_TELEGRAM_ID,)).fetchone()[0] == 1
     plain.close()
 
 

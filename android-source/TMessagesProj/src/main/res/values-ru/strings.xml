@@ -11599,9 +11599,9 @@
     <string name="WaysGramPaidHistoryChannel">Сообщение в канале</string>
     <string name="WaysGramPaidHistorySponsored">Рекламный пост</string>
     <string name="WaysGramPaidHistoryRefund">Возврат</string>
-    <string name="WaysGramFragmentMenu">Коллекционные юзернеймы</string>
-    <string name="WaysGramFragmentMenuInfo">Купить, продать или выставить на аукцион</string>
-    <string name="WaysGramFragmentTitle">Коллекционные юзернеймы</string>
+    <string name="WaysGramFragmentMenu">Fragment</string>
+    <string name="WaysGramFragmentMenuInfo">Юзернеймы, подарки и инвентарь</string>
+    <string name="WaysGramFragmentTitle">Fragment</string>
     <string name="WaysGramFragmentSectionMarket">На продажу</string>
     <string name="WaysGramFragmentSectionAuctions">Аукционы</string>
     <string name="WaysGramFragmentSectionMine">Мои имена</string>
@@ -11645,6 +11645,31 @@
     <string name="WaysGramFragmentWithdrawStars">Сколько звёзд вывести</string>
     <string name="WaysGramFragmentWithdrawAddress">Адрес TON</string>
     <string name="WaysGramFragmentWithdrawQueued">Заявка на \u2b50%1$d создана</string>
+    <string name="WaysGramFragmentTabUsernames">Юзернеймы</string>
+    <string name="WaysGramFragmentTabGifts">Подарки</string>
+    <string name="WaysGramFragmentTabInventory">Инвентарь</string>
+    <string name="WaysGramFragmentSearchHint">Введите юзернейм Telegram\u2026</string>
+    <string name="WaysGramFragmentColumnUsername">Юзернейм</string>
+    <string name="WaysGramFragmentColumnPrice">Цена</string>
+    <string name="WaysGramFragmentAllGifts">Все подарки</string>
+    <string name="WaysGramFragmentSortPriceDesc">Цена: по убыванию</string>
+    <string name="WaysGramFragmentSortPriceAsc">Цена: по возрастанию</string>
+    <string name="WaysGramFragmentSortNew">Сначала новые</string>
+    <string name="WaysGramFragmentGram" formatted="false">%1$d Gram</string>
+    <string name="WaysGramFragmentDaysLeft" formatted="false">%1$d дн.</string>
+    <string name="WaysGramFragmentAuctionShort">Аукцион</string>
+    <string name="WaysGramFragmentOnMarket">На рынке</string>
+    <string name="WaysGramFragmentInInventory">В инвентаре</string>
+    <string name="WaysGramFragmentInventoryHint">Пополнить инвентарь: отправьте NFT-подарок на \@fragment</string>
+    <string name="WaysGramFragmentInventoryCopy">Скопировать \@fragment</string>
+    <string name="WaysGramFragmentSellPriceHint">Цена в Gram</string>
+    <string name="WaysGramFragmentSell">Продать</string>
+    <string name="WaysGramFragmentUnlistGift">Снять с продажи</string>
+    <string name="WaysGramFragmentListedFor" formatted="false">Продаётся \u00b7 %1$d Gram</string>
+    <string name="WaysGramFragmentBuyGram" formatted="false">Купить за %1$d Gram</string>
+    <string name="WaysGramFragmentSellDone">Подарок выставлен на рынок</string>
+    <string name="WaysGramFragmentUnlistDone">Подарок снят с продажи</string>
+    <string name="WaysGramFragmentBuyDone">Подарок куплен</string>
     <string name="WaysGramInboxWriteChannel">Написать каналу</string>
     <string name="WaysGramInboxSettings">Настройки входящих канала</string>
     <string name="WaysGramInboxEnable">Принимать входящие сообщения</string>
