@@ -953,5 +953,5 @@ Telegram, а не нам. NFT-обёртка (TEP-62), фиат и ончейн-
 подписанта и лимитов он превращает сервер в hot-wallet.
 
 Проверки: `authbot/tests/test_fragment_market.py` (14),
-`scripts/test_android_fragment_market.py` (9), `scripts/` (367), `authbot/tests` (509).
+`scripts/test_android_fragment_market.py` (9), `scripts/` (367), `authbot/tests` (510).
 На устройстве не проверено, APK не собирался.
