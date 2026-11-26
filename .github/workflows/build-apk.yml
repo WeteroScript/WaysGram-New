@@ -386,6 +386,32 @@ jobs:
             gh pr comment "$number" --body-file /tmp/report.md || true
           fi
 
+      - name: Publish build diagnostics as a commit comment
+        # Журнал сборки лежит в артефакте, а артефакты недоступны без GitHub-логина
+        # (и редиректят на хранилище, которое из агентской песочницы закрыто).
+        # Комментарий к коммиту читается через api.github.com, поэтому реальные
+        # строки компилятора видны сразу, без скачивания логов.
+        if: failure()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -uo pipefail
+          file=/tmp/javac.log
+          [ -s "$file" ] || file=/tmp/build.log
+          if [ ! -s "$file" ]; then
+            echo "no build log captured"
+            exit 0
+          fi
+          {
+            printf '### Диагностика сборки: run %s, commit %s\n\n```\n' "${{ github.run_number }}" "${GITHUB_SHA:0:7}"
+            grep -nE 'error:|^e: |FAILED|What went wrong|Could not|symbol:|location:|required:|found:' "$file" | head -80 || true
+            printf '\n--- хвост журнала ---\n'
+            tail -n 60 "$file"
+            printf '\n```\n'
+          } > /tmp/diagnostics.md
+          gh api "repos/${GITHUB_REPOSITORY}/commits/${GITHUB_SHA}/comments" \
+            -F body=@/tmp/diagnostics.md >/dev/null || echo "commit comment failed"
+
       - name: Upload build logs
         if: always()
         uses: actions/upload-artifact@v4
