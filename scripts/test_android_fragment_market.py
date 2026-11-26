@@ -60,16 +60,55 @@ class FragmentMarketChecks(unittest.TestCase):
 
     def test_market_screen_is_wired_into_settings(self):
         settings = self.source("ui/SettingsActivity.java")
-        self.assertIn("WaysGramFragmentMarket.open(this, currentAccount)", settings)
+        self.assertIn("presentSettingFragment(new WaysGramFragmentActivity(currentAccount))", settings)
         self.assertIn("R.string.WaysGramFragmentMenu", settings)
         self.assertIn("R.drawable.fragment", settings)
-        market = self.source("ui/WaysGramFragmentMarket.java")
-        self.assertIn("WaysGramFragment.market(account, section)", market)
-        self.assertIn("WaysGramFragment.buy(account, name)", market)
-        self.assertIn("WaysGramFragment.bid(account, name, value)", market)
-        self.assertIn("WaysGramFragment.list(account, name, value)", market)
-        self.assertIn("WaysGramFragment.startAuction(account, name, bid, duration)", market)
+        market = self.source("ui/WaysGramFragmentActivity.java")
+        card = self.source("ui/WaysGramCollectibleActivity.java")
+        self.assertIn("WaysGramFragment.market(account, WaysGramFragment.SECTION_MARKET)", market)
+        self.assertIn("WaysGramFragment.buy(account, name)", card)
+        self.assertIn("WaysGramFragment.bid(account, name, value)", card)
+        self.assertIn("WaysGramFragment.list(account, name, value)", card)
+        self.assertIn("WaysGramFragment.startAuction(account, name, value, duration)", card)
         self.assertIn("WaysGramFragment.ton(account)", market)
+        self.assertIn("WaysGramFragment.claim(account, name)", card)
+
+    def test_market_screens_are_fragments_not_dialogs(self):
+        # Пользователь дважды просил: разделы открываются как экраны приложения, а не
+        # как всплывающие диалоги. Рынок и карточка имени — обычные фрагменты со своим
+        # ActionBar, кнопкой «назад» и строками настроек.
+        self.assertNotIn("WaysGram-Android/TMessagesProj/src/main/java/org/telegram/ui/"
+                         "WaysGramFragmentMarket.java", self.names)
+        self.assertFalse((ROOT / "android-source/TMessagesProj/src/main/java/org/telegram/ui/"
+                          "WaysGramFragmentMarket.java").exists())
+        for name in ("ui/WaysGramFragmentActivity.java", "ui/WaysGramCollectibleActivity.java"):
+            screen = self.source(name)
+            self.assertIn("extends BaseFragment", screen, name)
+            self.assertIn("actionBar.setBackButtonImage(R.drawable.ic_ab_back)", screen, name)
+            self.assertIn("actionBar.setTitle(", screen, name)
+            self.assertIn("finishFragment()", screen, name)
+            self.assertIn("TextSettingsCell", screen, name)
+            self.assertIn("ShadowSectionCell", screen, name)
+            self.assertNotIn("AlertDialog", screen, name)
+            self.assertNotIn("showDialog(", screen, name)
+        market = self.source("ui/WaysGramFragmentActivity.java")
+        for section in ("SECTION_MARKET", "SECTION_AUCTIONS", "SECTION_MINE"):
+            self.assertIn(f"WaysGramFragment.{section}", market)
+        self.assertIn("presentFragment(new WaysGramCollectibleActivity(account, name))", market)
+        self.assertIn("presentFragment(new WaysGramCollectibleActivity(account, \"\"))", market)
+        card = self.source("ui/WaysGramCollectibleActivity.java")
+        # Действия — строки списка; сумма вводится полем на том же экране.
+        for action in ("WaysGramFragmentUnlist", "WaysGramFragmentCancelAuction",
+                       "WaysGramFragmentListing", "WaysGramFragmentStartAuction",
+                       "WaysGramFragmentBuy", "WaysGramFragmentClaimPrice"):
+            self.assertIn(action, card)
+        self.assertIn("setInputType(InputType.TYPE_CLASS_NUMBER)", card)
+
+    def test_repack_can_delete_a_replaced_screen(self):
+        # Экран-диалог заменён фрагментом: старый файл нужно уметь убрать из архива.
+        script = (ROOT / "scripts" / "repack_android_source.py").read_text(encoding="utf-8")
+        self.assertIn('"--remove"', script)
+        self.assertIn("removed_set", script)
 
     def test_money_operations_are_idempotent(self):
         # Двойной тап по «Купить» не должен списать звёзды дважды.
@@ -117,9 +156,9 @@ class FragmentMarketChecks(unittest.TestCase):
         # Имя группы/канала/бота принадлежит чату, а не рынку.
         self.assertIn('for table in ("chat_groups", "channels", "bots")', server)
         self.assertIn('"reserved": reserved,', server)
-        market = self.source("ui/WaysGramFragmentMarket.java")
-        self.assertIn('data.optBoolean("reserved")', market)
-        self.assertIn("R.string.WaysGramFragmentUnavailable", market)
+        card = self.source("ui/WaysGramCollectibleActivity.java")
+        self.assertIn('data.optBoolean("reserved")', card)
+        self.assertIn("R.string.WaysGramFragmentUnavailable", card)
 
     def test_every_new_string_is_translated(self):
         base = self.resource("values/strings.xml")
@@ -127,7 +166,8 @@ class FragmentMarketChecks(unittest.TestCase):
         base_names = set(re.findall(r'<string name="([^"]+)"', base))
         ru_names = set(re.findall(r'<string name="([^"]+)"', russian))
         used = set()
-        for name in ("ui/WaysGramFragmentMarket.java", "ui/SettingsActivity.java"):
+        for name in ("ui/WaysGramFragmentActivity.java", "ui/WaysGramCollectibleActivity.java",
+                     "ui/SettingsActivity.java"):
             used.update(re.findall(r"R\.string\.(WaysGramFragment\w+)", self.source(name)))
         self.assertTrue(used, "клиент не использует ни одной строки рынка")
         missing_base = sorted(used - base_names)
@@ -137,7 +177,8 @@ class FragmentMarketChecks(unittest.TestCase):
 
     def test_new_files_are_in_the_build(self):
         # Исходники собираются одним модулем: новые файлы в тех же пакетах.
-        for name in ("tgnet/WaysGramFragment.java", "ui/WaysGramFragmentMarket.java"):
+        for name in ("tgnet/WaysGramFragment.java", "ui/WaysGramFragmentActivity.java",
+                     "ui/WaysGramCollectibleActivity.java"):
             self.assertIn("WaysGram-Android/TMessagesProj/src/main/java/org/telegram/" + name,
                           self.names)
 

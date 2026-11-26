@@ -10,8 +10,9 @@
 | фоновый расчёт аукционов | `process_due_username_auctions` в воркере |
 | вотчер TON | `authbot/scripts/ton_watcher.py` |
 | карточка профиля (`fragment.getCollectibleInfo`) | `tgnet/WaysGramFragment.java` |
-| экран рынка | `ui/WaysGramFragmentMarket.java` (Настройки → Коллекционные юзернеймы) |
-| тесты | `authbot/tests/test_fragment_market.py` (14), `scripts/test_android_fragment_market.py` (9) |
+| экран рынка | `ui/WaysGramFragmentActivity.java` — фрагмент со своим `ActionBar` (Настройки → Коллекционные юзернеймы) |
+| карточка имени и действия | `ui/WaysGramCollectibleActivity.java` — тоже фрагмент: купить, занять, продать, аукцион, ставка |
+| тесты | `authbot/tests/test_fragment_market.py` (14), `scripts/test_android_fragment_market.py` (11) |
 
 Вариант C (NFT-обёртка TEP-62, ончейн-эскроу, фиат/KYC) остаётся планом: это
 отдельный проект со смарт-контрактом, аудитом и юридической частью.

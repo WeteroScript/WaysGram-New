@@ -18,6 +18,11 @@ APK, поэтому любая правка клиентского кода до
     python3 scripts/repack_android_source.py \\
         --set WaysGram-Android/TMessagesProj/config/release.keystore=/tmp/release.keystore
 
+Удалить запись (например, экран, который заменили другим):
+
+    python3 scripts/repack_android_source.py \\
+        --remove WaysGram-Android/TMessagesProj/src/main/java/org/telegram/ui/Old.java
+
 Перед записью частей скрипт проверяет, что изменились только перечисленные записи, а после
 записи перечитывает готовые части и сверяет контрольные суммы.
 """
@@ -82,7 +87,17 @@ def parse_add(values: list[str]) -> dict[str, bytes]:
     return added
 
 
-def repack(entries: list[str], extra: dict[str, bytes], added: dict[str, bytes] | None = None) -> bytes:
+def parse_remove(values: list[str]) -> list[str]:
+    removed: list[str] = []
+    for entry in values:
+        if not entry.startswith(ARCHIVE_PREFIX):
+            sys.exit(f"Путь внутри архива должен начинаться с {ARCHIVE_PREFIX}: {entry}")
+        removed.append(entry)
+    return removed
+
+
+def repack(entries: list[str], extra: dict[str, bytes], added: dict[str, bytes] | None = None,
+           removed: list[str] | None = None) -> bytes:
     original = read_archive()
     source = zipfile.ZipFile(io.BytesIO(original))
     names = source.namelist()
@@ -104,12 +119,22 @@ def repack(entries: list[str], extra: dict[str, bytes], added: dict[str, bytes] 
         if entry in names:
             sys.exit(f"Запись уже есть в архиве, нужен --set: {entry}")
         replacements[entry] = added[entry]
+    removed = removed or []
+    for entry in removed:
+        if entry not in names:
+            sys.exit(f"Записи нет в архиве, удалять нечего: {entry}")
+        if entry in replacements:
+            sys.exit(f"Запись нельзя одновременно обновить и удалить: {entry}")
+    removed_set = set(removed)
 
-    crc_before = {info.filename: info.CRC for info in source.infolist() if info.filename not in replacements}
+    crc_before = {info.filename: info.CRC for info in source.infolist()
+                  if info.filename not in replacements and info.filename not in removed_set}
 
     buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, "w", allowZip64=True) as target:
         for info in source.infolist():
+            if info.filename in removed_set:
+                continue
             cloned = zipfile.ZipInfo(info.filename, info.date_time)
             cloned.compress_type = info.compress_type
             cloned.external_attr = info.external_attr
@@ -131,7 +156,7 @@ def repack(entries: list[str], extra: dict[str, bytes], added: dict[str, bytes] 
     broken = check.testzip()
     if broken is not None:
         sys.exit(f"Архив не прошёл проверку CRC: {broken}")
-    expected = names + sorted(added)
+    expected = [name for name in names if name not in removed_set] + sorted(added)
     for name in expected:
         if name not in check.namelist():
             sys.exit(f"Запись потерялась при пересборке: {name}")
@@ -147,6 +172,8 @@ def repack(entries: list[str], extra: dict[str, bytes], added: dict[str, bytes] 
     for entry in sorted(replacements):
         action = "добавлено" if entry in added else "обновлено"
         print(f"{action}: {entry} ({len(replacements[entry])} B)")
+    for entry in sorted(removed_set):
+        print(f"удалено: {entry}")
     return result
 
 
@@ -174,13 +201,16 @@ def main() -> None:
                         help="подменить запись файлом вне зеркала (двоичные файлы)")
     parser.add_argument("--add", action="append", default=[], metavar="ПУТЬ=ФАЙЛ",
                         help="добавить новую запись, которой ещё нет в архиве")
+    parser.add_argument("--remove", action="append", default=[], metavar="ПУТЬ",
+                        help="удалить запись из архива (например, заменённый экран)")
     parser.add_argument("--dry-run", action="store_true", help="только собрать и проверить архив")
     options = parser.parse_args()
     extra = parse_set(options.set)
     added = parse_add(options.add)
-    if not options.entries and not extra and not added:
-        parser.error("укажите хотя бы одну запись, --set или --add")
-    result = repack(options.entries, extra, added)
+    removed = parse_remove(options.remove)
+    if not options.entries and not extra and not added and not removed:
+        parser.error("укажите хотя бы одну запись, --set, --add или --remove")
+    result = repack(options.entries, extra, added, removed)
     print(f"новый архив: {len(result)} B ({len(zipfile.ZipFile(io.BytesIO(result)).namelist())} записей)")
     if options.dry_run:
         print("dry-run: части не перезаписаны")

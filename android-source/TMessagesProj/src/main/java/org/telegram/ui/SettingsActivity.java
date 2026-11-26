@@ -873,7 +873,7 @@ public class SettingsActivity extends BaseFragment implements NotificationCenter
         }
         switch (item.id) {
             case 87: presentFragment(new WaysGramCustomizationActivity()); break;
-            case 88: WaysGramFragmentMarket.open(this, currentAccount); break;
+            case 88: presentSettingFragment(new WaysGramFragmentActivity(currentAccount)); break;
             case 1:
                 presentSettingFragment(new UserInfoActivity());
                 break;

@@ -990,3 +990,32 @@ Telegram, а не нам. NFT-обёртка (TEP-62), фиат и ончейн-
 * части: `WaysGram.apk.part00…part04` в том же релизе
 
 Проверки: `scripts` (368), `authbot/tests` (510). На устройстве ещё не проверено.
+
+## 14. Рынок юзернеймов: экраны вместо диалогов
+
+На скриншоте с устройства «Настройки → Коллекционные юзернеймы» открывались как
+`AlertDialog` со списком пунктов. Это не то, что просили: разделы должны открываться
+**внутри приложения**, как обычные фрагменты Telegram — со своим `ActionBar`, заголовком,
+кнопкой «назад» и строками настроек.
+
+Что сделано:
+
+* `ui/WaysGramFragmentMarket.java` (диалоговый экран) удалён из архива; вместо него
+  `ui/WaysGramFragmentActivity.java extends BaseFragment`: `ActionBar` с заголовком,
+  `ScrollView` + `HeaderCell`/`TextSettingsCell`/`ShadowSectionCell` (как в настройках),
+  разделы «На продажу», «Аукционы», «Мои имена», пополнение за TON (адрес, memo, курс,
+  вывод) и строка «Занять свободное имя».
+* `ui/WaysGramCollectibleActivity.java extends BaseFragment` — карточка имени: владелец,
+  цена, аукцион, заморозка, комиссия; действия — строки списка, суммы вводятся полем на
+  том же экране. Пустое имя открывает режим «Занять свободное имя» (поле + проверка).
+* `SettingsActivity` case 88 = `presentSettingFragment(new WaysGramFragmentActivity(currentAccount))`.
+* Ни в одном из двух экранов нет `AlertDialog`/`showDialog`: ошибки и подтверждения
+  показываются строкой в списке. Это закреплено тестом
+  `test_market_screens_are_fragments_not_dialogs`.
+* `scripts/repack_android_source.py` получил `--remove`, иначе удалённый файл остался бы
+  в zip-архиве, который и есть источник сборки. Скрипт проверяет, что запись есть, и что
+  её нельзя одновременно обновить и удалить.
+
+Проверки: `scripts` — **370 passed** (+5 subtests), `authbot/tests` — 510. На устройстве
+не проверено, APK 338 не собирался.
+
