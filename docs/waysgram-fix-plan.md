@@ -1051,3 +1051,41 @@ Premium/Numbers, а в конце — Inventory.
 Проверки: `scripts` — **372 passed** (+5 subtests), `authbot/tests` — 515 (510 + 5 новых
 `test_fragment_deposit.py`). На устройстве не проверено, APK 338 не собирался.
 
+## 16. «Обсуждение» в настройках канала и кнопка комментариев под постом
+
+С устройства пришло две жалобы:
+
+1. «Обсуждение» в настройках канала вместо перехода в привязанную группу открывает
+   `AlertDialog` «Привязана группа: Tester Group», а на попытку управления вылетает
+   «Не удалось загрузить или обновить обсуждение».
+2. Под постом канала нет кнопки «Прокомментировать».
+
+Причины:
+
+* `ChatEditActivity` на тап по строке вызывал `WaysGramDiscussions.settings(...)` —
+  диалог управления привязкой. Сам диалог требует прав владельца канала (сервер
+  отвечает `404 CHANNEL_NOT_FOUND` остальным), отсюда и ошибка у администратора.
+* Кнопка комментариев в Telegram рисуется только при трёх условиях:
+  `chat.has_link && !chat.megagroup`, `chatFull.linked_chat_id != 0` и
+  `message.replies.channel_id == linked_chat_id`. У нас выполнялось только второе:
+  `WaysGramChats.applyChannelFlags` не ставил `has_link` (`FLAG_20`), хотя
+  `linked_monoforum_id` уже заполнялся. `replies` в `channelMessage()` ставились, но
+  без `has_link` ячейка их не показывала.
+
+Что сделано:
+
+* Тап по «Обсуждение» теперь открывает саму группу: `WaysGramDiscussions.openGroup()`
+  сначала дёргает `GET /api/channels/{id}/discussion-group` (сервер попутно добавляет
+  в группу того, кому доступен канал) и делает `presentFragment(ChatActivity.of(-id))`;
+  если запрос не прошёл — открывает по `linked_chat_id` из профиля канала.
+* Управление привязкой (выбрать/создать/отвязать) перенесено на долгое нажатие, а
+  ошибка загрузки больше не тупик: в диалоге сразу есть «Выбрать группу».
+* `WaysGramChats.applyChannelFlags`: при связанной группе ставим
+  `channel.has_link = true` и `flags |= TLObject.FLAG_20` — этого не хватало кнопке.
+* Нажатие на кнопку комментариев открывает наш экран комментариев
+  (`WaysGramDiscussions.open`), а не MTProto-тред: `ChatActivity.didPressCommentButton`
+  получил ветку для `WaysGramTransport.ENABLED`.
+
+Проверки: `scripts` — **374 passed** (+5 subtests). На устройстве не проверено,
+APK 338 не собирался.
+

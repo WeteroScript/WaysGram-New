@@ -72,9 +72,25 @@ class CommentsAndReactions(unittest.TestCase):
         self.assertIn("WaysGramDiscussions.settings(this, currentAccount, chatId)", self.edit)
         self.assertIn("org.telegram.tgnet.WaysGramTransport.ENABLED", self.edit)
 
+    def test_linked_group_opens_as_a_screen(self):
+        self.assertIn("static void openGroup(BaseFragment fragment, int account, long channel, long group)", self.discussions)
+        self.assertIn("fragment.presentFragment(ChatActivity.of(-id))", self.discussions)
+
     def test_linking_refreshes_the_channel(self):
         self.assertIn("loadFullChat(channel, 0, true)", self.discussions)
         self.assertIn("NotificationCenter.dialogsNeedReload", self.discussions)
+
+    def test_posts_show_the_comment_button(self):
+        # Кнопка «Прокомментировать» под постом требует трёх вещей: has_link у канала,
+        # replies с channel_id связанной группы и переход в наши комментарии.
+        chats = self.read(JAVA + "tgnet/WaysGramChats.java")
+        self.assertIn("channel.has_link = true;", chats)
+        self.assertIn("channel.flags |= TLObject.FLAG_20;", chats)
+        self.assertIn("replies.channel_id = discussionGroup;", chats)
+        self.assertIn("message.replies = replies;", chats)
+        chat = self.read(JAVA + "ui/ChatActivity.java")
+        self.assertIn("WaysGramDiscussions.open(this, currentAccount, currentChat.id, message.getId())", chat)
+        self.assertIn("public void didPressCommentButton(ChatMessageCell cell)", chat)
 
     def test_strings_exist(self):
         for name in ("WaysGramDiscussionCreate", "WaysGramDiscussionEnabled"):

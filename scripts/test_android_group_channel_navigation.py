@@ -49,16 +49,20 @@ class GroupChannelNavigationChecks(unittest.TestCase):
         self.assertNotIn('String username = c.optString("username", "");', chats)
         self.assertNotIn('String username = g.optString("username", "");', chats)
 
-    def test_discussion_row_opens_the_waysgram_dialog_with_stock_fallback(self):
+    def test_discussion_row_opens_the_linked_group(self):
+        # С устройства: вместо диалога «Привязана группа» должна открываться сама
+        # группа обсуждений — как кнопка «Обсуждение» в Telegram.
         edit = self.source("ui/ChatEditActivity.java")
         self.assertNotIn("TextCell discussionCell = new TextCell(context);", edit)
         self.assertNotIn("TextCell inboxCell = new TextCell(context);", edit)
-        # В WaysGram штатный ChatLinkActivity умеет только выбирать уже существующие
-        # группы, поэтому «Обсуждение» открывает диалог с созданием группы.
+        self.assertIn("WaysGramDiscussions.openGroup(this, currentAccount, chatId, info.linked_chat_id)", edit)
+        self.assertIn("info != null && info.linked_chat_id != 0", edit)
+        # Управление привязкой осталось, но уже по долгому нажатию.
+        self.assertIn("linkedCell.setOnLongClickListener", edit)
         self.assertIn("WaysGramDiscussions.settings(this, currentAccount, chatId);", edit)
         self.assertIn("if (org.telegram.tgnet.WaysGramTransport.ENABLED) {", edit)
         self.assertIn("ChatLinkActivity fragment = new ChatLinkActivity(chatId);", edit)
-        self.assertLess(edit.index("WaysGramDiscussions.settings(this, currentAccount, chatId);"),
+        self.assertLess(edit.index("WaysGramDiscussions.openGroup(this, currentAccount, chatId"),
                         edit.rindex("ChatLinkActivity fragment = new ChatLinkActivity(chatId);"))
 
     def test_username_value_falls_back_to_chat_title(self):

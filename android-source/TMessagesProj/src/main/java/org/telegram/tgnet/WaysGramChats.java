@@ -878,7 +878,11 @@ public class WaysGramChats {
         if (linkedMonoforum != 0) {
             channel.linked_monoforum_id = linkedMonoforum;
             channel.flags2 |= TLObject.FLAG_18;
-            // A linked group is exactly when Telegram shows "Suggest a post"/Comments.
+            // Linked group is exactly when Telegram draws the "Leave a comment" bar under a
+            // post: ChatActivity checks has_link && !megagroup, and the cell checks that the
+            // message replies point at the same chat.
+            channel.has_link = true;
+            channel.flags |= TLObject.FLAG_20;
             channel.broadcast_messages_allowed = true;
             channel.flags2 |= TLObject.FLAG_16;
         }

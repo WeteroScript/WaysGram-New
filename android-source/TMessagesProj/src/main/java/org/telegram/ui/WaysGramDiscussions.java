@@ -74,7 +74,16 @@ final class WaysGramDiscussions {
                 });
             }
             fragment.showDialog(builder.setNegativeButton(LocaleController.getString(R.string.Close), null).create());
-        }, error -> notice(fragment, R.string.WaysGramDiscussionGroup, R.string.WaysGramDiscussionError));
+        }, error -> {
+            // Раньше это был тупик: «не удалось загрузить» и всё. Теперь ошибка сразу
+            // предлагает привязать группу — в том числе когда карточка канала недоступна
+            // не владельцу.
+            fragment.showDialog(dialog(fragment, R.string.WaysGramDiscussionGroup)
+                    .setMessage(LocaleController.getString(R.string.WaysGramDiscussionError))
+                    .setNegativeButton(LocaleController.getString(R.string.Close), null)
+                    .setPositiveButton(LocaleController.getString(R.string.WaysGramDiscussionChoose), (d, w) ->
+                            choose(fragment, account, token, path, channel)).create());
+        });
     }
 
     private static void choose(BaseFragment fragment, int account, String token, String path, long channel) {
@@ -141,6 +150,34 @@ final class WaysGramDiscussions {
         controller.loadFullChat(channel, 0, true);
         fragment.getNotificationCenter().postNotificationName(
                 org.telegram.messenger.NotificationCenter.dialogsNeedReload);
+    }
+
+    /**
+     * Открывает связанную группу обсуждений отдельным экраном.
+     *
+     * <p>Сначала спрашиваем сервер: он же добавляет в группу того, кому доступен канал
+     * (раньше у подписчиков был доступ к каналу, но не к обсуждению). Если запрос не
+     * прошёл — просто открываем группу по id из профиля канала.</p>
+     */
+    static void openGroup(BaseFragment fragment, int account, long channel, long group) {
+        String token = WaysGramApi.getToken(account);
+        if (group <= 0 || !active(fragment, account, token)) return;
+        String path = channelPath(channel) + "/discussion-group";
+        WaysGramApi.NETWORK.execute(() -> {
+            long target = group;
+            try {
+                JSONObject linked = WaysGramApi.request("GET", path, null, token, 10000);
+                if (linked.optLong("group_id") > 0) target = linked.optLong("group_id");
+            } catch (Exception ignore) {
+                // Нет прав владельца канала — открываем по данным профиля.
+            }
+            final long id = target;
+            AndroidUtilities.runOnUIThread(() -> {
+                if (id > 0 && active(fragment, account, token)) {
+                    fragment.presentFragment(ChatActivity.of(-id));
+                }
+            });
+        });
     }
 
     static void open(BaseFragment fragment, int account, long channel, int post) {
