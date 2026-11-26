@@ -12,7 +12,8 @@ APK, поэтому любая правка клиентского кода до
 
 Аргументы — пути внутри архива (как в `zipinfo`). Новое содержимое берётся из
 `android-source/<путь без префикса WaysGram-Android/>`. Для двоичных файлов, которых нет в
-зеркале, есть `--set <путь в архиве>=<локальный файл>`:
+зеркале, есть `--set <путь в архиве>=<локальный файл>`, а для совсем новых файлов —
+`--add <путь в архиве>=<локальный файл>` (добавляет запись, которой в архиве ещё нет):
 
     python3 scripts/repack_android_source.py \\
         --set WaysGram-Android/TMessagesProj/config/release.keystore=/tmp/release.keystore
@@ -66,7 +67,22 @@ def parse_set(values: list[str]) -> dict[str, bytes]:
     return replacements
 
 
-def repack(entries: list[str], extra: dict[str, bytes]) -> bytes:
+def parse_add(values: list[str]) -> dict[str, bytes]:
+    added: dict[str, bytes] = {}
+    for value in values:
+        entry, separator, local = value.partition("=")
+        if not separator or not entry or not local:
+            sys.exit(f"Ожидался формат --add <путь в архиве>=<файл>: {value}")
+        if not entry.startswith(ARCHIVE_PREFIX):
+            sys.exit(f"Путь внутри архива должен начинаться с {ARCHIVE_PREFIX}: {entry}")
+        path = Path(local)
+        if not path.is_file():
+            sys.exit(f"Нет локального файла для добавления: {path}")
+        added[entry] = path.read_bytes()
+    return added
+
+
+def repack(entries: list[str], extra: dict[str, bytes], added: dict[str, bytes] | None = None) -> bytes:
     original = read_archive()
     source = zipfile.ZipFile(io.BytesIO(original))
     names = source.namelist()
@@ -83,6 +99,11 @@ def repack(entries: list[str], extra: dict[str, bytes]) -> bytes:
     for entry in list(replacements):
         if entry not in names:
             sys.exit(f"Записи нет в архиве: {entry}")
+    added = added or {}
+    for entry in list(added):
+        if entry in names:
+            sys.exit(f"Запись уже есть в архиве, нужен --set: {entry}")
+        replacements[entry] = added[entry]
 
     crc_before = {info.filename: info.CRC for info in source.infolist() if info.filename not in replacements}
 
@@ -100,6 +121,8 @@ def repack(entries: list[str], extra: dict[str, bytes]) -> bytes:
             if data is None:
                 data = source.read(info.filename)
             target.writestr(cloned, data)
+        for entry, data in added.items():
+            target.writestr(zipfile.ZipInfo(entry, (1980, 1, 1, 0, 0, 0)), data)
 
     source.close()
     result = buffer.getvalue()
@@ -108,10 +131,11 @@ def repack(entries: list[str], extra: dict[str, bytes]) -> bytes:
     broken = check.testzip()
     if broken is not None:
         sys.exit(f"Архив не прошёл проверку CRC: {broken}")
-    for name in names:
+    expected = names + sorted(added)
+    for name in expected:
         if name not in check.namelist():
             sys.exit(f"Запись потерялась при пересборке: {name}")
-    if len(check.namelist()) != len(names):
+    if len(check.namelist()) != len(expected):
         sys.exit("Число записей изменилось при пересборке")
     for info in check.infolist():
         if info.filename in replacements:
@@ -121,7 +145,8 @@ def repack(entries: list[str], extra: dict[str, bytes]) -> bytes:
             sys.exit(f"Изменилась чужая запись: {info.filename}")
     check.close()
     for entry in sorted(replacements):
-        print(f"обновлено: {entry} ({len(replacements[entry])} B)")
+        action = "добавлено" if entry in added else "обновлено"
+        print(f"{action}: {entry} ({len(replacements[entry])} B)")
     return result
 
 
@@ -147,12 +172,15 @@ def main() -> None:
     parser.add_argument("entries", nargs="*", help="пути записей внутри архива (из зеркала)")
     parser.add_argument("--set", action="append", default=[], metavar="ПУТЬ=ФАЙЛ",
                         help="подменить запись файлом вне зеркала (двоичные файлы)")
+    parser.add_argument("--add", action="append", default=[], metavar="ПУТЬ=ФАЙЛ",
+                        help="добавить новую запись, которой ещё нет в архиве")
     parser.add_argument("--dry-run", action="store_true", help="только собрать и проверить архив")
     options = parser.parse_args()
     extra = parse_set(options.set)
-    if not options.entries and not extra:
-        parser.error("укажите хотя бы одну запись или --set")
-    result = repack(options.entries, extra)
+    added = parse_add(options.add)
+    if not options.entries and not extra and not added:
+        parser.error("укажите хотя бы одну запись, --set или --add")
+    result = repack(options.entries, extra, added)
     print(f"новый архив: {len(result)} B ({len(zipfile.ZipFile(io.BytesIO(result)).namelist())} записей)")
     if options.dry_run:
         print("dry-run: части не перезаписаны")

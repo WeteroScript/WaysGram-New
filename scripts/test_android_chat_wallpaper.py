@@ -6,6 +6,7 @@
 `ChatThemeController.getDialogWallpaper` всегда получал `null`.
 """
 import io
+import re
 import unittest
 import zipfile
 from pathlib import Path
@@ -24,6 +25,8 @@ class ChatWallpaper(unittest.TestCase):
         cls.chats = cls.archive.read(TGNET + 'WaysGramChats.java').decode('utf-8')
         cls.server = (ROOT / 'authbot' / 'messenger_api.py').read_text(encoding='utf-8')
         cls.theme = cls.archive.read(BASE + 'messenger/ChatThemeController.java').decode('utf-8')
+        cls.wallpapers = cls.archive.read(TGNET + 'WaysGramWallpapers.java').decode('utf-8')
+        cls.transport = cls.archive.read(TGNET + 'WaysGramTransport.java').decode('utf-8')
 
     @classmethod
     def tearDownClass(cls):
@@ -59,13 +62,15 @@ class ChatWallpaper(unittest.TestCase):
         self.assertNotIn('req.wallpaper.settings', body)
 
     def test_chat_card_carries_the_wallpaper(self):
-        builder = self.body(self.chats, 'static TLRPC.WallPaper wallpaper(JSONObject data)')
+        builder = self.body(self.chats, 'static TLRPC.WallPaper wallpaper(int account, JSONObject data)')
+        # Картинка из галереи отдаётся документом, цвет и градиент — `TL_wallPaperNoFile`.
+        self.assertIn('WaysGramWallpapers.fromJson(account, data)', builder)
         self.assertIn('TLRPC.TL_wallPaperNoFile paper = new TLRPC.TL_wallPaperNoFile();', builder)
-        self.assertIn('paper.settings = settings;', builder)
+        self.assertIn('paper.settings = WaysGramWallpapers.settings(data);', builder)
         for signature in ('public static TLRPC.TL_messages_chatFull fullChannel(',
                           'public static TLRPC.TL_messages_chatFull fullChat('):
             body = self.body(self.chats, signature)
-            self.assertIn('full.wallpaper = wallpaper(', body, signature)
+            self.assertIn('full.wallpaper = wallpaper(account,', body, signature)
             self.assertIn('if (full.wallpaper != null) full.flags2 |= 128;', body, signature)
 
     def test_wallpaper_survives_reopening_the_chat(self):
@@ -80,6 +85,54 @@ class ChatWallpaper(unittest.TestCase):
         self.assertIn('saveChatWallpaper(dialogId, wallpaper);', body)
         self.assertIn('chatFull.flags2 |= 128;', body)
         self.assertIn('userFull.flags |= 16777216;', body)
+
+    def test_photo_wallpaper_is_uploaded_as_a_media_file(self):
+        # Каталога обоев у WaysGram нет, поэтому обои-картинка приходят из галереи:
+        # `account.uploadWallPaper` должен загрузить файл и вернуть `TL_wallPaper`
+        # с документом, иначе выбранная картинка никуда не уходит.
+        self.assertIn('TLObject wallpaper = WaysGramWallpapers.handle(account, request);', self.transport)
+        handler = self.body(self.wallpapers, 'private static TLObject upload(')
+        self.assertIn('WaysGramMedia.uploadFile(account, req.file, true)', handler)
+        self.assertIn('fromMedia(account, mediaId, req.settings)', handler)
+        builder = self.body(self.wallpapers, 'public static TLRPC.TL_wallPaper fromMedia(')
+        self.assertIn('WaysGramMedia.buildMedia(', builder)
+        self.assertIn('paper.document = document;', builder)
+        self.assertIn('TLRPC.TL_documentAttributeImageSize', builder)
+
+    def test_slug_links_the_chosen_wallpaper_with_the_uploaded_file(self):
+        # Клиент запоминает обои как `slug`, а не как id: `messages.setChatWallPaper`
+        # присылает `TL_inputWallPaperSlug`, и по нему нужно найти загруженный файл,
+        # в том числе после перезапуска приложения.
+        slug = self.body(self.wallpapers, 'static String slug(String mediaId)')
+        self.assertIn('return SLUG_PREFIX + mediaId;', slug)
+        resolve = self.body(self.wallpapers, 'public static String mediaId(int account, TLRPC.InputWallPaper input)')
+        self.assertIn('TLRPC.TL_inputWallPaperSlug', resolve)
+        self.assertIn('slug.startsWith(SLUG_PREFIX) && slug.length() == SLUG_PREFIX.length() + 32', resolve)
+        self.assertIn('WaysGramMedia.mediaIdFor(((TLRPC.TL_inputWallPaper) input).id)', resolve)
+
+    def test_server_gets_document_id_for_a_photo_wallpaper(self):
+        body = self.body(self.extras, 'private static JSONObject wallpaperJson(')
+        self.assertIn('String documentId = WaysGramWallpapers.mediaId(account, req.wallpaper);', body)
+        self.assertIn('out.put("document_id", documentId);', body)
+        # Сервер сохраняет обои как произвольный JSON, поэтому `document_id` переживает
+        # перезапуск сервера и возвращается в карточке чата.
+        self.assertIn('wallpaper = {key: value for key, value in wallpaper.items() if value is not None}',
+                      self.server)
+
+    def test_applied_wallpaper_is_the_photo_when_a_file_was_uploaded(self):
+        body = self.body(self.theme, 'private void applyWaysGramWallpaper(')
+        self.assertIn('org.telegram.tgnet.WaysGramWallpapers.fromInput(currentAccount, req.wallpaper, req.settings)',
+                      body)
+
+    def test_every_used_wallpaper_helper_exists(self):
+        # Новый класс: сборка падает на любой опечатке в имени метода, а javac в тестах нет.
+        declared = set(re.findall(r'(?:public|private|static|static final)[^;{]*?\s(\w+)\(', self.wallpapers))
+        used = set()
+        for name in ('tgnet/WaysGramChats.java', 'tgnet/WaysGramExtras.java', 'tgnet/WaysGramTransport.java',
+                     'messenger/ChatThemeController.java'):
+            used |= set(re.findall(r'WaysGramWallpapers\.(\w+)\(', self.archive.read(BASE + name).decode('utf-8')))
+        self.assertTrue(used)
+        self.assertEqual(used - declared - {'ApiException'}, set())
 
     def test_server_stores_and_returns_the_wallpaper(self):
         self.assertIn('@router.put("/api/chats/{scope}/{chat_id}/wallpaper")', self.server)

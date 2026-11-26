@@ -414,6 +414,9 @@ public class WaysGramTransport {
         TLObject chatThemes = WaysGramChatThemes.handle(account, request);
         if (chatThemes != null) return chatThemes;
 
+        TLObject wallpaper = WaysGramWallpapers.handle(account, request);
+        if (wallpaper != null) return wallpaper;
+
         TLObject forum = WaysGramChannelTopics.handle(account, request, expectedToken);
         if (forum != null) return forum;
 

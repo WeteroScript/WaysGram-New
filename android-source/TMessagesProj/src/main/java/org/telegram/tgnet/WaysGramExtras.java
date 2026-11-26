@@ -232,7 +232,7 @@ public final class WaysGramExtras {
         }
         JSONObject body = new JSONObject();
         try {
-            body.put("wallpaper", wallpaperJson(req));
+            body.put("wallpaper", wallpaperJson(account, req));
         } catch (JSONException e) {
             throw new WaysGramApi.ApiException(400, "WALLPAPER_INVALID");
         }
@@ -241,12 +241,17 @@ public final class WaysGramExtras {
     }
 
     /** Настройки обоев в том же виде, в каком их вернёт карточка чата. */
-    private static JSONObject wallpaperJson(TLRPC.TL_messages_setChatWallPaper req) throws JSONException {
+    private static JSONObject wallpaperJson(int account, TLRPC.TL_messages_setChatWallPaper req) throws JSONException {
         // В messages.setChatWallPaper поле wallpaper — это InputWallPaper (без настроек),
         // поэтому градиент/узор берём только из req.settings.
         TLRPC.WallPaperSettings settings = req.settings;
         JSONObject out = new JSONObject();
         out.put("for_both", req.for_both);
+        // Обои-картинка: клиент прислал не цвет, а загруженный файл — серверу нужен его id.
+        String documentId = WaysGramWallpapers.mediaId(account, req.wallpaper);
+        if (documentId != null) {
+            out.put("document_id", documentId);
+        }
         if (settings == null) {
             return out;
         }

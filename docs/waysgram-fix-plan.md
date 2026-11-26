@@ -774,11 +774,35 @@ Lottie нет, поэтому ни одна модель пула не попа�
 для личных чатов — `userFull.wallpaper` (+`flags |= 16777216`). Ветка работает только при
 `WaysGramTransport.ENABLED`, штатный путь Telegram не тронут.
 
-Ограничение: обои-картинки из галереи по-прежнему не поддерживаются — в клиенте нет
-`account.uploadWallPaper`, а каталога обоев (`account.getWallPapers`) у WaysGram нет,
-поэтому доступны цвета и градиенты.
+Проверки: `scripts/test_android_chat_wallpaper.py` (11).
 
-Проверки: `scripts/test_android_chat_wallpaper.py` (6).
+#### Обои-картинки из галереи
+
+**Причина.** Картинка из галереи уходила в `account.uploadWallPaper`, а этот запрос никто
+не обслуживал: он падал в обработчике по умолчанию, `messages.setChatWallPaper` получал
+`TL_inputWallPaperSlug` без `document`, и обои-картинки не существовало ни на сервере, ни
+в карточке чата. Каталога обоев (`account.getWallPapers`) у WaysGram нет и не планируется —
+выбор идёт только из галереи.
+
+**Правка.** Новый `tgnet/WaysGramWallpapers.java`:
+* `account.uploadWallPaper` → файл загружается тем же путём, что и остальные медиа
+  (`WaysGramMedia.uploadFile` → `POST /api/media/images`), из него собирается `TL_wallPaper`
+  с документом (`WaysGramMedia.buildMedia`, `TL_documentAttributeImageSize`) и слагом
+  `wg_<media_id>`;
+* слаг разбирается обратно в `media_id` (`TL_inputWallPaperSlug`, `TL_inputWallPaper` →
+  prefs `m_<id>`), поэтому связка переживает перезапуск приложения;
+* `WaysGramExtras.wallpaperJson` дописывает в тело `document_id`;
+* `WaysGramChats.wallpaper(account, data)` отдаёт карточке чата `TL_wallPaper` с документом,
+  если сервер вернул `document_id`, иначе — прежний `TL_wallPaperNoFile` с градиентом;
+* `ChatThemeController.applyWaysGramWallpaper` применяет загруженный файл, а не только
+  настройки цвета.
+
+Сервер менять не понадобилось: `/api/chats/{scope}/{id}/wallpaper` хранит обои как
+произвольный JSON (`chat_wallpapers.settings`), поэтому `document_id` сохраняется и
+возвращается как есть.
+
+Пересборка архива: `scripts/repack_android_source.py` получил `--add` — правка добавила
+новый файл, а старый режим умел только заменять существующие записи.
 
 ### Русский интерфейс: переводы в ресурсах
 
@@ -800,4 +824,4 @@ Lottie нет, поэтому ни одна модель пула не попа�
 там, где в английской базе он уже заменён. Итог: 11 739 строк, покрытие 99.7%
 (без перевода остались только имена поисковиков с URL и названия валюты Grams).
 
-Проверки: `scripts/test_android_russian_translations.py` (5), `scripts/` (348).
+Проверки: `scripts/test_android_russian_translations.py` (5), `scripts/` (352).

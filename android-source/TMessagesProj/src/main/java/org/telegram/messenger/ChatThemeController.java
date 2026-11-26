@@ -874,14 +874,22 @@ public class ChatThemeController extends BaseController {
      */
     private void applyWaysGramWallpaper(long dialogId, TLRPC.TL_messages_setChatWallPaper req,
                                         TLRPC.UserFull userFull, TLRPC.ChatFull chatFull) {
-        if (!org.telegram.tgnet.WaysGramTransport.ENABLED || req.settings == null) {
+        if (!org.telegram.tgnet.WaysGramTransport.ENABLED) {
             return;
         }
-        TLRPC.TL_wallPaperNoFile wallpaper = new TLRPC.TL_wallPaperNoFile();
-        wallpaper.id = 0;
-        wallpaper.dark = Theme.isCurrentThemeDark();
-        wallpaper.settings = req.settings;
-        wallpaper.flags = TLObject.setFlag(wallpaper.flags, TLObject.FLAG_2, true);
+        // Обои-картинка: файл уже загружен на сервер, поэтому берём его, а не градиент.
+        TLRPC.WallPaper wallpaper = org.telegram.tgnet.WaysGramWallpapers.fromInput(currentAccount, req.wallpaper, req.settings);
+        if (wallpaper == null) {
+            if (req.settings == null) {
+                return;
+            }
+            TLRPC.TL_wallPaperNoFile noFile = new TLRPC.TL_wallPaperNoFile();
+            noFile.id = 0;
+            noFile.dark = Theme.isCurrentThemeDark();
+            noFile.settings = req.settings;
+            noFile.flags = TLObject.setFlag(noFile.flags, TLObject.FLAG_2, true);
+            wallpaper = noFile;
+        }
         // Prefs — резервный источник `getDialogWallpaper`, когда карточка чата ещё не загружена.
         saveChatWallpaper(dialogId, wallpaper);
         if (userFull != null) {
