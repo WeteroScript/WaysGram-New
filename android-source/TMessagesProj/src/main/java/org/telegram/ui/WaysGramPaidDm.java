@@ -13,6 +13,15 @@ import java.util.concurrent.atomic.AtomicBoolean;
 public final class WaysGramPaidDm {
     private WaysGramPaidDm() {}
 
+    /**
+     * Кэш цены сообщения в чат. Объявления полей потерялись при чистке мёртвого диалога
+     * (80dfaaf): сам {@link #peerFeeStars} и {@link #loadPeerFee} остались, а компиляция
+     * падала на «cannot find symbol: PEER_FEE_TTL / peerFees / peerFetched».
+     */
+    private static final long PEER_FEE_TTL = 60_000L;
+    private static final java.util.HashMap<String, Integer> peerFees = new java.util.HashMap<>();
+    private static final java.util.HashMap<String, Long> peerFetched = new java.util.HashMap<>();
+
     private static boolean active(BaseFragment fragment, int account, String token) {
         return fragment != null && fragment.getParentActivity() != null && fragment.getCurrentAccount() == account
                 && !TextUtils.isEmpty(token) && TextUtils.equals(token, WaysGramApi.getToken(account));

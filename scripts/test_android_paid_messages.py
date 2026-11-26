@@ -165,6 +165,11 @@ class PrivacyMessagesRowChecks(unittest.TestCase):
         # Отправка платного сообщения показывает стоковое подтверждение Telegram.
         self.assertIn("AlertsCreator.showPayForMessageAlert(account, peer", paid)
         self.assertIn("public static int peerFeeStars(int account, long peer)", paid)
+        # Кэш цены: без объявлений этих полей javac падал на «cannot find symbol»,
+        # потому что методы остались, а поля потерялись при чистке мёртвого диалога.
+        self.assertIn("private static final long PEER_FEE_TTL", paid)
+        self.assertIn("private static final java.util.HashMap<String, Integer> peerFees", paid)
+        self.assertIn("private static final java.util.HashMap<String, Long> peerFetched", paid)
         self.assertIn('/api/chats/" + peer + "/message-fee', paid)
 
     def test_dead_dialog_strings_are_removed(self):
