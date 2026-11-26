@@ -55,6 +55,8 @@ class FragmentMarketChecks(unittest.TestCase):
         # Дата покупки и цена — ровно те поля, которые читает FragmentUsernameBottomSheet.
         self.assertIn('info.purchase_date = card.optInt("purchase_date")', fragment)
         self.assertIn('info.amount = card.optLong("price_stars")', fragment)
+        # Свободное имя и имя группы карточкой не притворяются.
+        self.assertIn('card.optBoolean("reserved") || card.optBoolean("free")', fragment)
 
     def test_market_screen_is_wired_into_settings(self):
         settings = self.source("ui/SettingsActivity.java")

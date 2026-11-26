@@ -64,6 +64,11 @@ public final class WaysGramFragment {
      */
     public static TL_fragment.TL_collectibleInfo info(int account, String name) throws WaysGramApi.ApiException {
         JSONObject card = WaysGramApi.get(account, "/api/collectibles/" + path(name));
+        // Штатный лист рисует «коллекционный» юзернейм. Свободное имя, имя группы или
+        // канала рынок не продаёт — для них карточки нет, как и раньше в Telegram.
+        if (card.optBoolean("reserved") || card.optBoolean("free") || card.optInt("purchase_date") <= 0) {
+            throw new WaysGramApi.ApiException(404, "COLLECTIBLE_NOT_FOUND");
+        }
         TL_fragment.TL_collectibleInfo info = new TL_fragment.TL_collectibleInfo();
         info.purchase_date = card.optInt("purchase_date");
         info.currency = "STARS";
