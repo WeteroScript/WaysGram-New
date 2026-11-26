@@ -4,6 +4,9 @@ import android.text.TextUtils;
 
 import org.json.JSONArray;
 import org.json.JSONObject;
+import org.telegram.messenger.FileLog;
+import org.telegram.messenger.MessagesController;
+import org.telegram.messenger.UserConfig;
 import org.telegram.tgnet.tl.TL_fragment;
 
 import java.io.UnsupportedEncodingException;
@@ -185,6 +188,25 @@ public final class WaysGramFragment {
             return fallback;
         }
         return detail;
+    }
+
+    /**
+     * После покупки имя на аккаунте уже другое: обновляем свой профиль, иначе шапка
+     * и настройки показывают старое имя до следующей синхронизации. Вызывать вне UI-потока.
+     */
+    public static void refreshSelf(int account) {
+        try {
+            JSONObject me = WaysGramApi.me(account);
+            TLRPC.User user = WaysGramMapper.toSelfUser(me, null);
+            if (user == null) {
+                return;
+            }
+            user.self = true;
+            MessagesController.getInstance(account).putUser(user, false, true);
+            UserConfig.getInstance(account).setCurrentUser(user);
+        } catch (Exception e) {
+            FileLog.e(e);
+        }
     }
 
     public static JSONObject first(JSONArray rows, int index) {

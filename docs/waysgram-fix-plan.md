@@ -913,8 +913,8 @@ Telegram.
 * `collectible_listings` — фикс-цена; `collectible_auctions` + `collectible_auction_bids` —
   аукцион; `collectible_transfers` — журнал смен владельца (кто, кому, за сколько,
   какая комиссия).
-* Покупка — одна `BEGIN IMMEDIATE`: списание покупателю, выплата продавцу минус 5 %
-  комиссии, закрытие лота, смена владельца и проводки в `economy_transactions`
+* Покупка — одна `BEGIN IMMEDIATE`: списание покупателю, выплата продавцу минус комиссия
+  (`WAYSGRAM_FRAGMENT_COMMISSION_PERCENT`, по умолчанию 5 %), закрытие лота, смена владельца и проводки в `economy_transactions`
   (`username_purchase:<listing>` / `username_sale:<listing>`). Владение берётся
   только из базы, а не из тела запроса.
 * Имя реально переезжает на аккаунт покупателя, прежнее имя покупателя возвращается
@@ -952,6 +952,6 @@ Telegram, а не нам. NFT-обёртка (TEP-62), фиат и ончейн-
 отдельный проект с аудитом контракта. TON-вывод выключен по умолчанию: без
 подписанта и лимитов он превращает сервер в hot-wallet.
 
-Проверки: `authbot/tests/test_fragment_market.py` (13),
+Проверки: `authbot/tests/test_fragment_market.py` (14),
 `scripts/test_android_fragment_market.py` (9), `scripts/` (367), `authbot/tests` (509).
 На устройстве не проверено, APK не собирался.

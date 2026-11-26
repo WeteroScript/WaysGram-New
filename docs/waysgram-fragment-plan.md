@@ -11,7 +11,7 @@
 | вотчер TON | `authbot/scripts/ton_watcher.py` |
 | карточка профиля (`fragment.getCollectibleInfo`) | `tgnet/WaysGramFragment.java` |
 | экран рынка | `ui/WaysGramFragmentMarket.java` (Настройки → Коллекционные юзернеймы) |
-| тесты | `authbot/tests/test_fragment_market.py`, `scripts/test_android_fragment_market.py` |
+| тесты | `authbot/tests/test_fragment_market.py` (14), `scripts/test_android_fragment_market.py` (9) |
 
 Вариант C (NFT-обёртка TEP-62, ончейн-эскроу, фиат/KYC) остаётся планом: это
 отдельный проект со смарт-контрактом, аудитом и юридической частью.

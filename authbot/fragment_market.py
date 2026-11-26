@@ -356,8 +356,17 @@ async def _account_exists(db: Any, telegram_id: int) -> bool:
     return await cur.fetchone() is not None
 
 
+def commission_percent() -> int:
+    """Комиссия сервиса: процент по умолчанию, переопределяется окружением."""
+    try:
+        value = int(str(os.getenv("WAYSGRAM_FRAGMENT_COMMISSION_PERCENT", "")).strip())
+    except ValueError:
+        value = COMMISSION_PERCENT
+    return max(0, min(50, value))
+
+
 def _commission(price: int) -> int:
-    return max(0, int(price) * COMMISSION_PERCENT // 100)
+    return max(0, int(price) * commission_percent() // 100)
 
 
 async def _transfer_ownership(
@@ -452,7 +461,7 @@ async def card(db: Any, name: str, viewer_id: int | None = None,
         "purchase_date": int(row["acquired_at"] or 0),
         "source": str(row["source"]),
         "share_url": share_url or "",
-        "commission_percent": COMMISSION_PERCENT,
+        "commission_percent": commission_percent(),
         "history": await _history(db, collectible_id),
     }
     if auction is not None:
@@ -592,7 +601,7 @@ async def search(
         "query": prefix,
         "items": items,
         "stars_balance": await _balance(db, viewer_id),
-        "commission_percent": COMMISSION_PERCENT,
+        "commission_percent": commission_percent(),
         "freeze_seconds": TRANSFER_FREEZE_SECONDS,
     }
 

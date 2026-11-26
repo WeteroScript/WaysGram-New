@@ -103,6 +103,7 @@ python -c "import secrets; print(secrets.token_urlsafe(48))"
 | `WAYSGRAM_STARS_PER_TON` | Курс пополнения; по умолчанию 500 звёзд за 1 TON |
 | `WAYSGRAM_TON_WATCHER_SECRET` | Секрет вотчера: без него `POST /api/internal/ton/deposits` отвечает 503 |
 | `WAYSGRAM_TON_WITHDRAWALS` | `1` включает заявки на вывод TON; по умолчанию вывод выключен |
+| `WAYSGRAM_FRAGMENT_COMMISSION_PERCENT` | Комиссия рынка юзернеймов, проценты; по умолчанию 5, допустимо 0–50 |
 
 ## Начальные балансы
 
@@ -123,7 +124,7 @@ WaysGram. Владение хранится в `collectibles` и заселяе�
 - `PUT /api/collectibles/{name}/listing` — `{"price_stars":N}`; выставить может только владелец из базы.
 - `DELETE /api/collectibles/{name}/listing` — снять с продажи.
 - `POST /api/collectibles/{name}/buy` — покупка по фикс-цене (нужен `Idempotency-Key`). Одна транзакция:
-  списание покупателю, выплата продавцу минус 5 % комиссии, смена владельца и проводки
+  списание покупателю, выплата продавцу минус комиссия (`WAYSGRAM_FRAGMENT_COMMISSION_PERCENT`, по умолчанию 5 %), смена владельца и проводки
   `username_purchase:<listing>` / `username_sale:<listing>`. После покупки имя заморожено на сутки.
 - `POST /api/collectibles/{name}/claim` — купить свободное имя у сервиса (цена от длины, `system_price`).
 - `POST /api/collectibles/{name}/auction` — `{"min_bid_stars":N,"duration_hours":H}`; `DELETE` отменяет и

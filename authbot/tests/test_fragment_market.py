@@ -329,6 +329,25 @@ def test_ton_withdrawal_is_a_queued_request_behind_the_env_flag(env, monkeypatch
     run(scenario_enabled())
 
 
+def test_commission_can_be_changed_by_the_operator(env, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Комиссия по умолчанию 5 %, но администратор задаёт её окружением."""
+    path, app = env
+    monkeypatch.setenv("WAYSGRAM_FRAGMENT_COMMISSION_PERCENT", "10")
+    give_stars(path, 101, 0)
+    give_stars(path, 102, 1_000)
+
+    async def scenario() -> None:
+        async with await client_for(app) as client:
+            listed = await client.put("/api/collectibles/buyer/listing", headers=headers(101),
+                                      json={"price_stars": 100})
+            assert listed.json()["commission_percent"] == 10
+            bought = await client.post("/api/collectibles/buyer/buy", headers=headers(102), json={})
+            assert bought.status_code == 200, bought.text
+            assert await balances(path, 101) == {101: 90}
+
+    run(scenario())
+
+
 def test_group_username_is_not_sold_by_the_market(env) -> None:
     """Имя группы принадлежит чату, а не рынку: его нельзя ни занять, ни купить."""
     path, app = env

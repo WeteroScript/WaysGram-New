@@ -257,13 +257,17 @@ final class WaysGramFragmentMarket {
     }
 
     private static void buy(BaseFragment fragment, int account, String name) {
-        request(fragment, account, () -> WaysGramFragment.buy(account, name),
-                data -> notice(fragment, format(R.string.WaysGramFragmentBought, data.optString("name"))));
+        request(fragment, account, () -> WaysGramFragment.buy(account, name), data -> {
+            notice(fragment, format(R.string.WaysGramFragmentBought, data.optString("name")));
+            WaysGramApi.NETWORK.execute(() -> WaysGramFragment.refreshSelf(account));
+        });
     }
 
     private static void claim(BaseFragment fragment, int account, String name) {
-        request(fragment, account, () -> WaysGramFragment.claim(account, name),
-                data -> notice(fragment, format(R.string.WaysGramFragmentBought, data.optString("name"))));
+        request(fragment, account, () -> WaysGramFragment.claim(account, name), data -> {
+            notice(fragment, format(R.string.WaysGramFragmentBought, data.optString("name")));
+            WaysGramApi.NETWORK.execute(() -> WaysGramFragment.refreshSelf(account));
+        });
     }
 
     private static void unlist(BaseFragment fragment, int account, String name) {
