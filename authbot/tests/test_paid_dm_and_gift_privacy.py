@@ -92,6 +92,35 @@ def test_paid_dm_message_carries_the_amount_for_the_chat_banner(env) -> None:
     run(scenario())
 
 
+def test_paid_messages_from_before_the_update_get_their_amount_back(env) -> None:
+    """Старые платные сообщения: сумма берётся из экономики при миграции базы."""
+    path, app = env
+
+    async def scenario() -> None:
+        async with aiosqlite.connect(path) as db:
+            await db.execute("UPDATE accounts SET stars=50 WHERE telegram_id=101")
+            await db.execute(
+                "INSERT INTO messages(sender_telegram_id,recipient_telegram_id,body,created_at,paid_message_stars)"
+                " VALUES(101,102,'Старое платное',1,0)"
+            )
+            message_id = (await (await db.execute("SELECT MAX(id) FROM messages")).fetchone())[0]
+            await db.execute(
+                "INSERT INTO economy_transactions(telegram_id,asset,amount,balance_after,reason,created_at)"
+                " VALUES(101,'stars',-7,43,?,1)", (f"message_fee:{message_id}",)
+            )
+            # База «до обновления»: колонки ещё нет.
+            await db.execute("ALTER TABLE messages DROP COLUMN paid_message_stars")
+            await db.commit()
+
+        # Повторная инициализация проходит миграцию и достаёт сумму из экономики.
+        await init_messenger_storage(path)
+        async with aiosqlite.connect(path) as db:
+            cur = await db.execute("SELECT paid_message_stars FROM messages WHERE id=?", (message_id,))
+            assert (await cur.fetchone())[0] == 7
+
+    run(scenario())
+
+
 def test_gift_privacy_contacts_blocks_strangers(env) -> None:
     path, app = env
 

@@ -2362,6 +2362,17 @@ async def init_messenger_storage(database_path: Path) -> None:
             if table_name == "messages":
                 if "paid_message_stars" not in columns:
                     await db.execute(f"ALTER TABLE {db_split.SCHEMA}.messages ADD COLUMN paid_message_stars INTEGER NOT NULL DEFAULT 0")
+                    # Сообщения, оплаченные до обновления: сумма уже есть в экономике
+                    # (списание с reason `message_fee:<id>`), достаём её оттуда, чтобы
+                    # плашка «Вы оплатили ⭐N» появилась и в старой переписке.
+                    cur = await db.execute(
+                        f"SELECT 1 FROM {db_split.SCHEMA}.sqlite_master WHERE type='table' AND name='economy_transactions'")
+                    if await cur.fetchone():
+                        await db.execute("""UPDATE messages SET paid_message_stars=COALESCE((
+                                SELECT -e.amount FROM economy_transactions e
+                                WHERE e.reason='message_fee:'||messages.id AND e.asset='stars'
+                                  AND e.amount<0 LIMIT 1),0)
+                            WHERE paid_message_stars=0""")
                 if "auto_delete_at" not in columns:
                     await db.execute(f"ALTER TABLE {db_split.SCHEMA}.messages ADD COLUMN auto_delete_at INTEGER")
                 await db.execute(f"""CREATE INDEX IF NOT EXISTS {db_split.SCHEMA}.idx_dm_auto_delete

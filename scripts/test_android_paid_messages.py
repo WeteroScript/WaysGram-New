@@ -60,6 +60,8 @@ class PaidMessagesChecks(unittest.TestCase):
         self.assertIn('UPDATE messages SET paid_message_stars=? WHERE id=?', server)
         self.assertIn('"paid_message_stars": fee,', server)
         self.assertIn('created_at,paid_message_stars,', server)
+        # Уже оплаченные до обновления сообщения: сумма восстанавливается из экономики.
+        self.assertIn("reason='message_fee:'||messages.id", server)
 
         mapper = self.source("tgnet/WaysGramMapper.java")
         self.assertIn("public static void readPaidMessage(TLRPC.Message message, JSONObject json)", mapper)
