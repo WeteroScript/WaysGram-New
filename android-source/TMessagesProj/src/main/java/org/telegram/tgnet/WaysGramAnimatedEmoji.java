@@ -52,6 +52,8 @@ public final class WaysGramAnimatedEmoji {
     private static final TLRPC.Document[] EMOJI_DOCUMENTS = new TLRPC.Document[COUNT];
     private static final TLRPC.Document[] REACTION_DOCUMENTS = new TLRPC.Document[COUNT];
     private static final TLRPC.Document[] EFFECT_DOCUMENTS = new TLRPC.Document[COUNT];
+    /** Копии официальных документов Telegram: id → документ с атрибутом эмодзи. */
+    private static final HashMap<Long, TLRPC.Document> TELEGRAM_EMOJI = new HashMap<>();
 
     static {
         for (int i = 0; i < COUNT; i++) {
@@ -83,10 +85,54 @@ public final class WaysGramAnimatedEmoji {
         return index >= 0 && WaysGramEmojiTable.EFFECT[index] != null;
     }
 
-    /** Документ-рисунок для эмодзи-сообщения или {@code null}. */
+    /**
+     * Документ-рисунок для эмодзи-сообщения или {@code null}.
+     *
+     * <p>Отдаём официальный анимированный эмодзи Telegram — тот же набор документов, что и
+     * у реакций. Самодельный Twemoji-арт здесь больше не используется: именно из-за него
+     * отправленные эмодзи выглядели «старыми», не как в Telegram. Для эмодзи, которых в
+     * наборе нет, возвращаем {@code null} — клиент покажет обычный статичный эмодзи, как
+     * Telegram без анимированного пака, а не чужой рисунок.</p>
+     */
     public static synchronized TLRPC.Document find(String emoji) {
-        int index = indexOf(emoji);
-        return index < 0 ? null : document(index, EMOJI_ID, EMOJI_DOCUMENTS, true, true);
+        return telegramEmoji(emoji);
+    }
+
+    /** Официальный анимированный эмодзи Telegram (документ из набора реакций) или {@code null}. */
+    public static synchronized TLRPC.Document telegramEmoji(String emoji) {
+        int index = WaysGramReactionAssets.indexOf(WaysGramReactions.normalize(emoji));
+        if (index < 0) {
+            return null;
+        }
+        TLRPC.Document base = WaysGramReactionAssets.document(index, "appear_animation");
+        if (base == null) {
+            base = WaysGramReactionAssets.document(index, "select_animation");
+        }
+        if (base == null || !"application/x-tgsticker".equals(base.mime_type)) {
+            return null;
+        }
+        TLRPC.Document cached = TELEGRAM_EMOJI.get(base.id);
+        if (cached != null) {
+            return cached;
+        }
+        // Копия документа: клиент отличает анимированный эмодзи от стикера по
+        // `TL_documentAttributeCustomEmoji`, а общий документ каталога реакций трогать нельзя.
+        TLRPC.TL_document doc = new TLRPC.TL_document();
+        doc.id = base.id;
+        doc.access_hash = base.access_hash;
+        doc.dc_id = base.dc_id;
+        doc.file_reference = base.file_reference;
+        doc.date = base.date;
+        doc.mime_type = base.mime_type;
+        doc.size = base.size;
+        doc.attributes = new java.util.ArrayList<>(base.attributes);
+        TLRPC.TL_documentAttributeCustomEmoji attribute = new TLRPC.TL_documentAttributeCustomEmoji();
+        attribute.alt = WaysGramReactionAssets.EMOJI[index];
+        attribute.free = true;
+        attribute.stickerset = new TLRPC.TL_inputStickerSetEmpty();
+        doc.attributes.add(attribute);
+        TELEGRAM_EMOJI.put(doc.id, doc);
+        return doc;
     }
 
     /** Документ-рисунок для иконки/анимации реакции или {@code null}. */
@@ -165,6 +211,28 @@ public final class WaysGramAnimatedEmoji {
      */
     public static void fillInteractions(java.util.HashSet<String> supported,
                                         java.util.HashMap<String, java.util.ArrayList<TLRPC.Document>> map) {
+        for (int i = 0; i < WaysGramReactionAssets.count(); i++) {
+            String emoji = WaysGramReactionAssets.EMOJI[i];
+            if (map.containsKey(emoji)) {
+                continue;
+            }
+            TLRPC.Document doc = WaysGramReactionAssets.document(i, "effect_animation");
+            if (doc == null) {
+                doc = WaysGramReactionAssets.document(i, "around_animation");
+            }
+            if (doc == null || !"application/x-tgsticker".equals(doc.mime_type)) {
+                continue;
+            }
+            java.util.ArrayList<TLRPC.Document> list = new java.util.ArrayList<>(1);
+            list.add(doc);
+            map.put(emoji, list);
+            supported.add(emoji);
+            String alias = unwrap(emoji);
+            if (!alias.equals(emoji) && !map.containsKey(alias)) {
+                map.put(alias, list);
+                supported.add(alias);
+            }
+        }
         for (int i = 0; i < COUNT; i++) {
             String emoji = WaysGramEmojiTable.EMOJI[i];
             if (WaysGramEmojiTable.EFFECT[i] == null || map.containsKey(emoji)) {

@@ -9,6 +9,7 @@
 import gzip
 import io
 import json
+import re
 import struct
 import unittest
 import zipfile
@@ -132,6 +133,79 @@ class ReactionAnimation(unittest.TestCase):
         self.assertIn("TLRPC.Document effect = WaysGramAnimatedEmoji.reactionEffect(emoji);", self.reactions)
         self.assertIn("reaction.effect_animation = motion;", self.reactions)
         self.assertIn("reaction.around_animation = motion;", self.reactions)
+
+    def test_catalog_hash_follows_the_documents(self):
+        # Клиент кэширует каталог реакций в базе вместе с хешем и при совпадении
+        # просит notModified. Пока хеш был константой, после подмены самодельного
+        # арта на документы Telegram установленное приложение продолжало рисовать
+        # старый каталог: реакции оставались «старыми» и после обновления.
+        self.assertNotIn("REACTIONS_HASH = 0x5757_0001;", self.reactions)
+        self.assertIn("private static final int REACTIONS_HASH = catalogHash(0x5757_0000);", self.reactions)
+        body = self.reactions[self.reactions.index("private static int catalogHash("):]
+        body = body[:body.index("\n    }")]
+        self.assertIn("WaysGramReactionAssets.rawId(i, slot)", body)
+        table = self.archive.read(
+            BASE + "java/org/telegram/tgnet/WaysGramReactionAssets.java").decode("utf-8")
+        self.assertIn("static long rawId(int reaction, String slot)", table)
+        self.assertIn("return index < 0 ? -1 : DOC_ID[index];", table)
+
+    def test_catalog_hash_differs_from_the_legacy_one(self):
+        # Хеш считается по документам; проверяем тем же алгоритмом, что и в Java:
+        # установленное приложение прислало 0x57570001, получило notModified и
+        # осталось со старым каталогом. Новый хеш обязан отличаться.
+        table = self.archive.read(
+            BASE + "java/org/telegram/tgnet/WaysGramReactionAssets.java").decode("utf-8")
+
+        def table_block(name):
+            start = table.index(name)
+            return table[start:table.index("};", start)]
+
+        doc_ids = [int(value.rstrip("L"))
+                   for value in re.findall(r"-?\d+L", table_block("private static final long[] DOC_ID"))]
+        slot_doc = [[int(value) for value in row.split(",") if value.strip()]
+                    for row in re.findall(r"\{([-\d,\s]+)\}", table_block("private static final int[][] SLOT_DOC"))]
+        self.assertEqual(len(doc_ids), 516)
+        self.assertEqual(len(slot_doc), 74)
+
+        def to_int32(value):
+            value &= 0xFFFFFFFF
+            return value - 2 ** 32 if value >= 2 ** 31 else value
+
+        hash_value = to_int32(0x57570000)
+        for row in slot_doc:
+            for index in row:
+                document = -1 if index < 0 else doc_ids[index]
+                document &= 0xFFFFFFFFFFFFFFFF
+                hash_value = to_int32(hash_value * 31 + to_int32(to_int32(document) ^ to_int32(document >> 32)))
+        self.assertNotEqual(hash_value & 0xFFFFFFFF, 0x57570001)
+
+    def test_emoji_messages_use_telegram_artwork(self):
+        # В сообщениях эмодзи рисовались самодельным Twemoji-артом — «старые» эмодзи
+        # вместо телеграмных. Теперь берём официальный анимированный эмодзи из того же
+        # набора, что и реакции, а для остальных оставляем обычный статичный вид.
+        emoji = self.archive.read(
+            BASE + "java/org/telegram/tgnet/WaysGramAnimatedEmoji.java").decode("utf-8")
+        find = emoji[emoji.index("public static synchronized TLRPC.Document find(String emoji) {"):]
+        find = find[:find.index("\n    }")]
+        self.assertIn("return telegramEmoji(emoji);", find)
+        self.assertNotIn("EMOJI_ID", find)
+        telegram = emoji[emoji.index("public static synchronized TLRPC.Document telegramEmoji(String emoji) {"):]
+        telegram = telegram[:telegram.index("\n    }")]
+        self.assertIn('WaysGramReactionAssets.document(index, "appear_animation")', telegram)
+        self.assertIn('"application/x-tgsticker".equals(base.mime_type)', telegram)
+        # Клиент считает документ анимированным эмодзи только по этому атрибуту.
+        self.assertIn("TLRPC.TL_documentAttributeCustomEmoji attribute", telegram)
+        self.assertIn("attribute.alt = WaysGramReactionAssets.EMOJI[index];", telegram)
+
+    def test_emoji_effects_come_from_telegram_not_hand_made(self):
+        emoji = self.archive.read(
+            BASE + "java/org/telegram/tgnet/WaysGramAnimatedEmoji.java").decode("utf-8")
+        fill = emoji[emoji.index("public static void fillInteractions("):]
+        fill = fill[:fill.index("\n    }")]
+        self.assertIn('WaysGramReactionAssets.document(i, "effect_animation")', fill)
+        self.assertIn('WaysGramReactionAssets.document(i, "around_animation")', fill)
+        # Самодельные эффекты остаются только там, где Telegram ничего не отдал.
+        self.assertLess(fill.index('"effect_animation"'), fill.index("WaysGramEmojiTable.EFFECT[i]"))
 
     def test_reaction_textures_are_the_telegram_emoji_pack(self):
         names = [n for n in self.archive.namelist() if n.startswith(TEXTURES) and n.endswith(".webp")]

@@ -825,6 +825,19 @@ final class WaysGramReactionAssets {
         return -1;
     }
 
+    /** Идентификатор документа в слоте или -1. По нему считается хеш каталога. */
+    static long rawId(int reaction, String slot) {
+        if (reaction < 0 || reaction >= SLOT_DOC.length) {
+            return -1;
+        }
+        int slotIndex = slotIndex(slot);
+        if (slotIndex < 0) {
+            return -1;
+        }
+        int index = SLOT_DOC[reaction][slotIndex];
+        return index < 0 ? -1 : DOC_ID[index];
+    }
+
     /** Документ реакции по слоту или {@code null}, если Telegram его не отдал. */
     static synchronized TLRPC.Document document(int reaction, String slot) {
         if (reaction < 0 || reaction >= SLOT_DOC.length) {

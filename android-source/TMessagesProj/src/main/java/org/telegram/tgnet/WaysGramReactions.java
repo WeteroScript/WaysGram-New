@@ -25,10 +25,18 @@ import org.telegram.messenger.MessageObject;
  * и искры этого эмодзи: они проигрываются, когда реакцию ставят.
  */
 public final class WaysGramReactions {
-    /** Стабильный хеш каталога: клиент кэширует список и просит notModified. */
-    private static final int REACTIONS_HASH = 0x5757_0001;
-    private static final long TOP_HASH = 0x5757_0002L;
-    private static final long SAVED_HASH = 0x5757_0003L;
+    /**
+     * Хеш каталога: клиент кэширует список и просит notModified.
+     *
+     * <p>Считается по идентификаторам документов, а не берётся константой. Иначе после
+     * смены набора (например, перехода с самодельного арта на официальные документы
+     * Telegram) клиент присылал старый хеш, получал {@code availableReactionsNotModified}
+     * и до конца жизни установки рисовал реакции старым каталогом: старые документы
+     * продолжали раздаваться из {@code assets}, а в чипах и палитре оставался прежний арт.</p>
+     */
+    private static final int REACTIONS_HASH = catalogHash(0x5757_0000);
+    private static final long TOP_HASH = ((long) REACTIONS_HASH << 8) ^ 0x5AL;
+    private static final long SAVED_HASH = ((long) REACTIONS_HASH << 8) ^ 0xA5L;
     private static final int TOP_LIMIT = 8;
 
     /** Пары «эмодзи, название». Порядок — как в Telegram, затем популярные добавки. */
@@ -93,6 +101,18 @@ public final class WaysGramReactions {
         for (int i = 0; i < REACTIONS.length; i++) {
             EMOJI[i] = REACTIONS[i][0];
         }
+    }
+
+    /** Хеш набора документов каталога: меняется набор — меняется и хеш. */
+    private static int catalogHash(int seed) {
+        int hash = seed;
+        for (int i = 0; i < WaysGramReactionAssets.count(); i++) {
+            for (String slot : WaysGramReactionAssets.SLOTS) {
+                long id = WaysGramReactionAssets.rawId(i, slot);
+                hash = hash * 31 + (int) (id ^ (id >>> 32));
+            }
+        }
+        return hash;
     }
 
     private static ArrayList<TLRPC.TL_availableReaction> cached;
