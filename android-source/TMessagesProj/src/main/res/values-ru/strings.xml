@@ -9530,8 +9530,8 @@
     <string name="PrivateMessagesExceptionsInfo">Вы можете добавить пользователей или целые группы, которые смогут писать Вам бесплатно.</string>
     <string name="PaidMessageActionOut_one">Вы заплатили %d звезду за отправку сообщения</string>
     <string name="PaidMessageActionOut_other">Вы заплатили %d звезды за отправку сообщения</string>
-    <string name="PaidMessageActionIn_one">un1 заплатил(а) %1$d звезду за отправку сообщения</string>
-    <string name="PaidMessageActionIn_other">un1 заплатил(а) %1$d звезды за отправку сообщения</string>
+    <string name="PaidMessageActionIn_one">Вы получили %1$d звезду от un1</string>
+    <string name="PaidMessageActionIn_other">Вы получили %1$d звёзд от un1</string>
     <string name="PaidMessageAction_one">un1 заплатил(а) %1$d звезду за отправку сообщения</string>
     <string name="PaidMessageAction_other">un1 заплатил(а) %1$d звезды за отправку сообщения</string>
     <string name="PaidMessageActionMessages_one">%d сообщения</string>
@@ -9593,8 +9593,8 @@
     <string name="PaidMessagesSendErrorToast2_other">до ⭐️%d</string>
     <string name="PaidMessagesSendErrorState1_one">Стоимость возросла с ⭐️%d</string>
     <string name="PaidMessagesSendErrorState1_other">Стоимость возросла с ⭐️%d</string>
-    <string name="PaidMessagesSendErrorState2_one">до⭐️%d</string>
-    <string name="PaidMessagesSendErrorState2_other">до⭐️%d</string>
+    <string name="PaidMessagesSendErrorState2_one">до ⭐️%d</string>
+    <string name="PaidMessagesSendErrorState2_other">до ⭐️%d</string>
     <string name="ContactInfoUserUpdatedPhoto">Пользователь обновил фотографию %s</string>
     <string name="ContactInfoUserUpdatedName">Пользователь обновил имя %s</string>
     <string name="StarsTransactionPostsSearch">Поиск публичных постов</string>
