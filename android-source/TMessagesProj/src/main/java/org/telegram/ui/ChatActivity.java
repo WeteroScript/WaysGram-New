@@ -42622,7 +42622,7 @@ public class ChatActivity extends BaseFragment implements
             // WaysGram хранит комментарии сам: открываем их экран вместо MTProto-треда.
             if (org.telegram.tgnet.WaysGramTransport.ENABLED && currentChat != null
                     && ChatObject.isChannelAndNotMegaGroup(currentChat) && message != null) {
-                WaysGramDiscussions.open(this, currentAccount, currentChat.id, message.getId());
+                WaysGramDiscussions.open(ChatActivity.this, currentAccount, currentChat.id, message.getId());
                 return;
             }
             int maxReadId;

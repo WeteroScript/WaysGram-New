@@ -89,7 +89,7 @@ class CommentsAndReactions(unittest.TestCase):
         self.assertIn("replies.channel_id = discussionGroup;", chats)
         self.assertIn("message.replies = replies;", chats)
         chat = self.read(JAVA + "ui/ChatActivity.java")
-        self.assertIn("WaysGramDiscussions.open(this, currentAccount, currentChat.id, message.getId())", chat)
+        self.assertIn("WaysGramDiscussions.open(ChatActivity.this, currentAccount, currentChat.id, message.getId())", chat)
         self.assertIn("public void didPressCommentButton(ChatMessageCell cell)", chat)
 
     def test_strings_exist(self):
