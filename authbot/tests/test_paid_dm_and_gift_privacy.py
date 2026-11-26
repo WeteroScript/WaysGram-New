@@ -1,5 +1,7 @@
 """Платные ЛС и приватность подарков должны соблюдаться сервером на всех путях."""
 
+import aiosqlite
+
 from messenger_api import init_messenger_storage
 from test_messenger_api import client_for, run
 from test_star_gifts import ADMIN, env, headers  # noqa: F401  (env is a pytest fixture)
@@ -46,6 +48,46 @@ def test_paid_dm_blocks_scheduled_live_location_and_when_online(env) -> None:
             assert (await client.post("/api/contacts", headers=headers(102), json={"user_id": 101})).status_code in (200, 201)
             allowed = await client.post("/api/messages", headers=headers(101), json={"recipient_id": 102, "body": "hi"})
             assert allowed.status_code == 201
+
+    run(scenario())
+
+
+def test_paid_dm_message_carries_the_amount_for_the_chat_banner(env) -> None:
+    """В переписке после оплаты видно, сколько списали: сумма едет вместе с сообщением."""
+    path, app = env
+
+    async def scenario() -> None:
+        async with aiosqlite.connect(path) as db:
+            await db.execute("UPDATE accounts SET stars=50 WHERE telegram_id=101")
+            await db.commit()
+        async with await client_for(app) as client:
+            fee = await client.put("/api/me/message-fee", headers=headers(102),
+                                   json={"stars": 5, "exempt_users": []})
+            assert fee.status_code == 200
+
+            sent = await client.post(
+                "/api/messages",
+                headers={**headers(101), "Idempotency-Key": "paid-dm-banner-0001"},
+                json={"recipient_id": 102, "body": "С днём рождения", "approved_fee_stars": 5},
+            )
+            assert sent.status_code == 201
+            message = sent.json()
+            assert message["paid_message_stars"] == 5
+
+            # Историю видят обе стороны: по этой сумме клиент рисует плашку
+            # «Вы оплатили ⭐5» у отправителя и «получено ⭐5» у получателя.
+            owner = (await client.get("/api/messages?with=102", headers=headers(101))).json()["messages"]
+            peer = (await client.get("/api/messages?with=101", headers=headers(102))).json()["messages"]
+            assert [m["paid_message_stars"] for m in owner if m["id"] == message["id"]] == [5]
+            assert [m["paid_message_stars"] for m in peer if m["id"] == message["id"]] == [5]
+
+            # Бесплатное сообщение (ответ собеседника) плашки не получает.
+            free = await client.post(
+                "/api/messages",
+                headers={**headers(102), "Idempotency-Key": "paid-dm-banner-0002"},
+                json={"recipient_id": 101, "body": "Спасибо"},
+            )
+            assert free.status_code == 201 and free.json()["paid_message_stars"] == 0
 
     run(scenario())
 

@@ -8341,6 +8341,15 @@ public class SendMessagesHelper extends BaseController implements NotificationCe
                             existFlags = msgObj.getMediaExistanceFlags();
                             newMsgObj.local_id = newMsgObj.id = res.id;
                             newMsgObj.date = res.date;
+                            if (org.telegram.tgnet.WaysGramTransport.ENABLED && newMsgObj.paid_message_stars == 0) {
+                                // Платное сообщение в переписке: сумма списания пришла в ответе на
+                                // отправку, ячейка нарисует по ней плашку «Вы оплатили ⭐N».
+                                final long paidStars = org.telegram.tgnet.WaysGramPaidStars.take(currentAccount, res.id);
+                                if (paidStars > 0) {
+                                    newMsgObj.paid_message_stars = paidStars;
+                                    newMsgObj.flags2 |= 64;
+                                }
+                            }
                             newMsgObj.entities = res.entities;
                             newMsgObj.out = res.out;
                             if ((res.flags & 33554432) != 0) {

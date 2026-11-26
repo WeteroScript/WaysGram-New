@@ -927,7 +927,8 @@ async def init_messenger_storage(database_path: Path) -> None:
                 forwarded_from_message_id INTEGER,
                 media_album_id TEXT,
                 media_album_index INTEGER NOT NULL DEFAULT 0,
-                media_album_count INTEGER NOT NULL DEFAULT 0
+                media_album_count INTEGER NOT NULL DEFAULT 0,
+                paid_message_stars INTEGER NOT NULL DEFAULT 0
             );
             CREATE TABLE IF NOT EXISTS dm_auto_delete (
                 user_low INTEGER NOT NULL,
@@ -2359,6 +2360,8 @@ async def init_messenger_storage(database_path: Path) -> None:
             if "reply_to_id" not in columns:
                 await db.execute(f"ALTER TABLE {db_split.SCHEMA}.{table_name} ADD COLUMN reply_to_id INTEGER")
             if table_name == "messages":
+                if "paid_message_stars" not in columns:
+                    await db.execute(f"ALTER TABLE {db_split.SCHEMA}.messages ADD COLUMN paid_message_stars INTEGER NOT NULL DEFAULT 0")
                 if "auto_delete_at" not in columns:
                     await db.execute(f"ALTER TABLE {db_split.SCHEMA}.messages ADD COLUMN auto_delete_at INTEGER")
                 await db.execute(f"""CREATE INDEX IF NOT EXISTS {db_split.SCHEMA}.idx_dm_auto_delete
@@ -13067,7 +13070,7 @@ def build_messenger_router(
         params: tuple[Any, ...] = (uid, peer, peer, uid, uid)
         base = """
             SELECT id,sender_telegram_id AS sender_id,
-                   recipient_telegram_id AS recipient_id,body,entities_json,messages.silent AS silent,messages.quote_json AS quote_json,media_id,edited_at,reply_to_id,created_at,
+                   recipient_telegram_id AS recipient_id,body,entities_json,messages.silent AS silent,messages.quote_json AS quote_json,media_id,edited_at,reply_to_id,created_at,paid_message_stars,
                    media_album_id,media_album_index,media_album_count,
                    forwarded_from_telegram_id,forwarded_from_message_id,
                    (SELECT display_name FROM accounts WHERE telegram_id=messages.forwarded_from_telegram_id) AS forwarded_from_display_name,
@@ -14045,6 +14048,9 @@ def build_messenger_router(
             message_id = int(cur.lastrowid)
             if fee:
                 await charge_dm_fee(db, uid, recipient_id, fee, message_id, now)
+                # Сумма хранится у самого сообщения: клиент рисует по ней плашку
+                # «Вы оплатили ⭐N», как в Telegram, и после перезагрузки истории.
+                await db.execute("UPDATE messages SET paid_message_stars=? WHERE id=?", (fee, message_id))
             if quote is not None:
                 await db.execute("UPDATE messages SET quote_json=? WHERE id=?",
                                  (json.dumps(quote, ensure_ascii=True, separators=(",", ":")), message_id))
@@ -14099,6 +14105,7 @@ def build_messenger_router(
                 "contact": contact_payload,
                 "location": location_payload,
                 **media_fields,
+                "paid_message_stars": fee,
                 "created_at": now,
             }
             if quote is not None:

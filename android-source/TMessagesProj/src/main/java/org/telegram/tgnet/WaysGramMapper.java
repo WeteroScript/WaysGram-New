@@ -356,13 +356,34 @@ public class WaysGramMapper {
         if (waysGramGiftMessage != null) {
             return waysGramGiftMessage;
         }
-        return toMessage(
+        TLRPC.Message message = toMessage(
                 m.optLong("id"),
                 m.optLong("sender_id"),
                 m.optLong("recipient_id"),
                 m.optString("body", ""),
                 m.optInt("created_at"),
                 selfId);
+        readPaidMessage(message, m);
+        return message;
+    }
+
+    /**
+     * Платное сообщение: сколько звёзд списано за его отправку.
+     *
+     * <p>По этому полю штатная ячейка рисует плашку «Вы оплатили ⭐N» (или «Ⓝ от un1» у
+     * получателя). Раньше сервер сумму не хранил и не отдавал, поэтому сообщение после
+     * оплаты выглядело обычным: уведомления об оплате в переписке не было.</p>
+     */
+    public static void readPaidMessage(TLRPC.Message message, JSONObject json) {
+        if (message == null || json == null) {
+            return;
+        }
+        long stars = json.optLong("paid_message_stars", 0);
+        if (stars <= 0) {
+            return;
+        }
+        message.paid_message_stars = stars;
+        message.flags2 |= TLObject.FLAG_6;
     }
 
     /** Snapshot the selected text from the existing native reply composer. */

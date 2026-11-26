@@ -1737,6 +1737,7 @@ public class WaysGramTransport {
                 : WaysGramApi.request("POST", path, body, expectedToken, 30000, key);
         if (expectedToken != null && !TextUtils.equals(expectedToken, WaysGramApi.getToken(account)))
             throw new WaysGramApi.ApiException(401, "AUTH_KEY_UNREGISTERED");
+        WaysGramPaidStars.remember(account, result.optInt("id"), result.optLong("paid_message_stars", 0));
         WaysGramPoller.markDelivered(account, targetId, result.optInt("id"));
 
         TLRPC.TL_updateShortSentMessage sent = new TLRPC.TL_updateShortSentMessage();

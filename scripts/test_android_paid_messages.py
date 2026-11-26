@@ -50,6 +50,37 @@ class PaidMessagesChecks(unittest.TestCase):
         chat = self.source("ui/ChatActivity.java")
         self.assertNotIn("headerItem.lazilyAddSubItem(waysgram_paid_history", chat)
 
+    def test_paid_dm_shows_the_amount_in_the_chat(self):
+        # После оплаты в переписке должна быть плашка «Вы оплатили ⭐N», как в Telegram.
+        # Её рисует штатная ячейка по `paid_message_stars`, но поле терялось: сервер
+        # сумму не хранил, а ответ на отправку (`TL_updateShortSentMessage`) её не несёт.
+        server = (ROOT / "authbot" / "messenger_api.py").read_text(encoding="utf-8")
+        self.assertIn("paid_message_stars INTEGER NOT NULL DEFAULT 0", server)
+        self.assertIn('ALTER TABLE {db_split.SCHEMA}.messages ADD COLUMN paid_message_stars', server)
+        self.assertIn('UPDATE messages SET paid_message_stars=? WHERE id=?', server)
+        self.assertIn('"paid_message_stars": fee,', server)
+        self.assertIn('created_at,paid_message_stars,', server)
+
+        mapper = self.source("tgnet/WaysGramMapper.java")
+        self.assertIn("public static void readPaidMessage(TLRPC.Message message, JSONObject json)", mapper)
+        self.assertIn('long stars = json.optLong("paid_message_stars", 0);', mapper)
+        self.assertIn("message.paid_message_stars = stars;", mapper)
+        self.assertIn("message.flags2 |= TLObject.FLAG_6;", mapper)
+        self.assertIn("readPaidMessage(message, m);", mapper)
+
+        # Ответ на отправку — updateShortSentMessage без суммы: транспорт запоминает её,
+        # а SendMessagesHelper забирает, когда присваивает сообщению настоящий id.
+        transport = self.source("tgnet/WaysGramTransport.java")
+        self.assertIn('WaysGramPaidStars.remember(account, result.optInt("id"), result.optLong("paid_message_stars", 0));',
+                      transport)
+        helper = self.source("messenger/SendMessagesHelper.java")
+        self.assertIn("final long paidStars = org.telegram.tgnet.WaysGramPaidStars.take(currentAccount, res.id);", helper)
+        self.assertIn("newMsgObj.paid_message_stars = paidStars;", helper)
+        # Сама плашка — штатная: ячейка берёт цену из сообщения.
+        cell = self.source("ui/Cells/ChatMessageCell.java")
+        self.assertIn("PaidMessageActionOut", cell)
+        self.assertIn("messageOwner.paid_message_stars", cell)
+
     def test_deduction_requires_stock_confirmation(self):
         inbox = self.source("ui/WaysGramChannelInbox.java")
         # Без подтверждённой цены запрос уходит без approved_fee_stars, и сервер отвечает 402.
