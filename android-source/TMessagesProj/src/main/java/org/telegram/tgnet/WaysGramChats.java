@@ -224,7 +224,7 @@ public class WaysGramChats {
         if (data == null) {
             return null;
         }
-        TLRPC.TL_wallPaper photo = WaysGramWallpapers.fromJson(account, data);
+        TLRPC.WallPaper photo = WaysGramWallpapers.fromJson(account, data);
         if (photo != null) {
             return photo;
         }
