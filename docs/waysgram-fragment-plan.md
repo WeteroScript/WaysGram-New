@@ -1,8 +1,23 @@
 # Система Fragment в WaysGram: как это можно реализовать
 
-Документ описывает варианты, оценку и пошаговый план. Это план, а не отчёт о сделанном:
-в коде пока ничего из Fragment нет — есть только опоры, на которые можно опереться
-(юзернеймы и звёздный ledger).
+**Статус: варианты A и B реализованы** (фазы 0–3 из раздела 10). В коде:
+
+| Что | Где |
+|---|---|
+| справочник владения, лоты, аукционы, TON | `authbot/fragment_market.py` |
+| миграция и заселение из `accounts.username` | `messenger_api.init_messenger_storage` |
+| маршруты `/api/collectibles…`, `/api/me/ton…` | `fragment_market.register_routes` |
+| фоновый расчёт аукционов | `process_due_username_auctions` в воркере |
+| вотчер TON | `authbot/scripts/ton_watcher.py` |
+| карточка профиля (`fragment.getCollectibleInfo`) | `tgnet/WaysGramFragment.java` |
+| экран рынка | `ui/WaysGramFragmentMarket.java` (Настройки → Коллекционные юзернеймы) |
+| тесты | `authbot/tests/test_fragment_market.py`, `scripts/test_android_fragment_market.py` |
+
+Вариант C (NFT-обёртка TEP-62, ончейн-эскроу, фиат/KYC) остаётся планом: это
+отдельный проект со смарт-контрактом, аудитом и юридической частью.
+
+Ниже — исходный разбор: что такое Fragment, почему нельзя подключиться к нему
+напрямую, оценка вариантов и правила, по которым теперь работает рынок.
 
 ## 1. Что такое Fragment по факту
 

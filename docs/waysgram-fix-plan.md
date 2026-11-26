@@ -894,3 +894,64 @@ Telegram.
 Проверки: `authbot/tests/test_paid_dm_and_gift_privacy.py`
 (`test_paid_dm_message_carries_the_amount_for_the_chat_banner`),
 `scripts/test_android_paid_messages.py` (13), `scripts/` (358), `authbot/tests` (495).
+
+## 12. Коллекционные юзернеймы (свой Fragment) — сделано
+
+**Запрос.** «Как можно реализовать систему Fragment» → затем «делай всё по порядку».
+
+**Что понятно про Fragment.** Публичного API у fragment.com нет: внутренние
+эндпоинты веб-приложения требуют сессии Telegram и запрещены правилами, а сделки
+идут через смарт-контракты TON с аккаунтом, зарегистрированным в Fragment. Точный
+паритет без договора с Telegram невозможен, поэтому повторена продуктовая механика
+внутри WaysGram: свой рынок юзернеймов на звёздном ledger.
+
+**Сервер (`authbot/fragment_market.py`, подключён в `messenger_api.py`).**
+
+* `collectibles` — владелец имени (`owner_telegram_id`), дата получения и заморозка;
+  заселяется из `accounts.username` при миграции, поэтому имя, которое уже стоит на
+  аккаунте, нельзя «купить» у самого себя после обновления.
+* `collectible_listings` — фикс-цена; `collectible_auctions` + `collectible_auction_bids` —
+  аукцион; `collectible_transfers` — журнал смен владельца (кто, кому, за сколько,
+  какая комиссия).
+* Покупка — одна `BEGIN IMMEDIATE`: списание покупателю, выплата продавцу минус 5 %
+  комиссии, закрытие лота, смена владельца и проводки в `economy_transactions`
+  (`username_purchase:<listing>` / `username_sale:<listing>`). Владение берётся
+  только из базы, а не из тела запроса.
+* Имя реально переезжает на аккаунт покупателя, прежнее имя покупателя возвращается
+  в фонд как свободное; после смены владельца имя заморожено на 24 часа.
+* Свободное имя продаёт сервис по цене от длины (`system_price`), покупка —
+  `POST /api/collectibles/{name}/claim`.
+* Ставка холдит звёзды (`username_auction_hold`), перебитая возвращается
+  (`username_auction_outbid`), снайп-защита продлевает аукцион на 5 минут, расчёт
+  ленивый при чтении и в воркере `process_due_username_auctions`, поэтому рестарт
+  сервера ничего не теряет.
+* `Idempotency-Key` на всех мутациях: двойной тап «купить» не списывает дважды.
+* TON: `GET /api/me/ton` отдаёт адрес и `memo = wg:<telegram_id>`, курс;
+  `POST /api/internal/ton/deposits` (секрет `X-WaysGram-Ton-Secret`) зачисляет звёзды
+  строго один раз на `tx_hash`; `POST /api/me/ton-withdraw` создаёт заявку в
+  `ton_payouts` и списывает звёзды, включается флагом `WAYSGRAM_TON_WITHDRAWALS=1`.
+* `authbot/scripts/ton_watcher.py` опрашивает toncenter и пересылает переводы с
+  `memo`; состояние не хранит — повторная обработка безопасна благодаря уникальности
+  `tx_hash`.
+
+**Клиент.**
+
+* `tgnet/WaysGramFragment.java` — ветка транспорта: `fragment.getCollectibleInfo`
+  больше не падает с `METHOD_NOT_SUPPORTED`, а отвечает `TL_collectibleInfo` из
+  `/api/collectibles/{name}`, поэтому штатные карточка профиля и
+  `FragmentUsernameBottomSheet` начинают показывать дату и цену.
+* `ui/WaysGramFragmentMarket.java` — экран рынка: «На продажу», «Аукционы», «Мои имена»,
+  покупка, ставка, выставление по фикс-цене, аукцион, снятие с продажи, занятие
+  свободного имени, пополнение/вывод TON. Открывается из «Настройки» → «Коллекционные
+  юзернеймы».
+* Все денежные вызовы идут через `WaysGramApi.postIdempotent`; клиент не считает
+  баланс и не решает, кому принадлежит имя.
+
+**Ограничения.** Продаются только имена внутри WaysGram: `@durov` принадлежит
+Telegram, а не нам. NFT-обёртка (TEP-62), фиат и ончейн-эскроу не делались — это
+отдельный проект с аудитом контракта. TON-вывод выключен по умолчанию: без
+подписанта и лимитов он превращает сервер в hot-wallet.
+
+Проверки: `authbot/tests/test_fragment_market.py` (13),
+`scripts/test_android_fragment_market.py` (9), `scripts/` (367), `authbot/tests` (509).
+На устройстве не проверено, APK не собирался.

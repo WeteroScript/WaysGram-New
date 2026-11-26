@@ -431,6 +431,10 @@ public class WaysGramTransport {
             return WaysGramDrafts.load(account, selfId, expectedToken);
         }
 
+        // Коллекционные юзернеймы: карточка в профиле и рынок (наш Fragment).
+        TLObject fragment = WaysGramFragment.handle(account, request);
+        if (fragment != null) return fragment;
+
         if (request instanceof TL_stars.updatePaidMessagesPrice) {
             return paidMessagesPrice(account, (TL_stars.updatePaidMessagesPrice) request, selfId);
         }

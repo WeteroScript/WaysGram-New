@@ -172,6 +172,10 @@ public class WaysGramApi {
         return request("DELETE", path, null, getToken(account), 30000);
     }
 
+    public static JSONObject delete(int account, String path, JSONObject body) throws ApiException {
+        return request("DELETE", path, body, getToken(account), 30000);
+    }
+
     /** Synchronous. Must be called off the UI thread. Returns the parsed JSON object (arrays are wrapped as {"items": [...]}). */
     public static JSONObject request(String method, String path, JSONObject body, String token, int timeoutMs) throws ApiException {
         return request(method, path, body, token, timeoutMs, null);

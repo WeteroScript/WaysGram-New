@@ -26,6 +26,7 @@ import gift_names
 import gift_model_fallbacks
 import waysgram_gifts  # noqa: F401  # our own shop gifts
 import db_split  # noqa: F401  # two-file database layout
+import fragment_market  # noqa: F401  # рынок юзернеймов (наш Fragment)
 from star_rating import profile_rating
 import gift_upgrades  # noqa: F401  # official Telegram upgrade pools
 import httpx
@@ -2586,6 +2587,14 @@ async def init_messenger_storage(database_path: Path) -> None:
             await waysgram_gifts.ensure_catalog(db)
         except Exception:  # noqa: BLE001 - trimmed-down schemas have no gift catalogue
             LOGGER.warning("WaysGram gift catalogue seeding skipped", exc_info=True)
+        # Рынок коллекционных юзернеймов: справочник владения заселяется из
+        # accounts.username, чтобы имя, которое уже стоит на аккаунте, нельзя было
+        # «купить» у самого себя после обновления.
+        try:
+            await fragment_market.ensure_storage(db)
+            await fragment_market.seed_from_accounts(db)
+        except Exception:  # noqa: BLE001 - урезанные схемы (тесты, импорт) могут не иметь accounts
+            LOGGER.warning("Fragment collectibles seeding skipped", exc_info=True)
         await db.commit()
 
 
@@ -6312,11 +6321,32 @@ def build_messenger_router(
                 )
                 if await cur.fetchone():
                     raise HTTPException(status_code=409, detail="Username уже занят")
+                # Купленное на рынке имя нельзя занять в обход него: владелец в
+                # collectibles важнее свободного поля в accounts.
+                try:
+                    if await fragment_market.username_taken_elsewhere(
+                        db, int(user["telegram_id"]), username
+                    ):
+                        raise HTTPException(status_code=409, detail="Username уже занят")
+                except HTTPException:
+                    raise
+                except Exception:  # noqa: BLE001 - рынок может быть ещё не инициализирован
+                    LOGGER.warning("collectible ownership check skipped", exc_info=True)
             await db.execute(
                 "UPDATE accounts SET username=?,display_name=?,bio=?,updated_at=? WHERE telegram_id=?",
                 (username, display_name, bio, int(time.time()), int(user["telegram_id"])),
             )
             await db.commit()
+            if "username" in payload:
+                try:
+                    async with aiosqlite.connect(db_path()) as market_db:
+                        await fragment_market.on_username_changed(
+                            market_db, int(user["telegram_id"]),
+                            str(user["username"] or ""), username,
+                        )
+                        await market_db.commit()
+                except Exception:  # noqa: BLE001 - смена имени не должна падать из-за рынка
+                    LOGGER.warning("collectible ownership sync skipped", exc_info=True)
             db.row_factory = aiosqlite.Row
             cur = await db.execute("SELECT * FROM accounts WHERE telegram_id=?", (int(user["telegram_id"]),))
             row = await cur.fetchone()
@@ -15894,6 +15924,15 @@ def build_messenger_router(
 
     scheduled_worker_task: asyncio.Task | None = None
 
+    async def process_due_username_auctions() -> int:
+        """Закрывает истёкшие аукционы юзернеймов, не дожидаясь чтения карточки."""
+        now = int(time.time())
+        async with aiosqlite.connect(db_path()) as db:
+            await db.execute("BEGIN IMMEDIATE")
+            settled = await fragment_market.settle_due(db, now)
+            await db.commit()
+        return len(settled)
+
     async def scheduled_message_worker() -> None:
         last_auction_settlement = 0
         last_live_cleanup = -60.0
@@ -15907,6 +15946,7 @@ def build_messenger_router(
                 now = int(time.time())
                 if now - last_auction_settlement >= 5:
                     await process_due_collectible_auctions()
+                    await process_due_username_auctions()
                     last_auction_settlement = now
             except Exception as exc:
                 LOGGER.warning(
@@ -20811,5 +20851,15 @@ def build_messenger_router(
                 if await cur.fetchone() is not None:
                     return await preview_channel_invite(share_code)
         raise HTTPException(404, "Ссылка не найдена или отозвана")
+
+    # Рынок коллекционных юзернеймов: карточки, продажа, аукционы, TON.
+    fragment_market.register_routes(
+        router,
+        db_path=db_path,
+        current_user=current_user,
+        idempotency_descriptor=idempotency_descriptor,
+        idempotency_lookup=idempotency_lookup,
+        idempotency_store=idempotency_store,
+    )
 
     return router
