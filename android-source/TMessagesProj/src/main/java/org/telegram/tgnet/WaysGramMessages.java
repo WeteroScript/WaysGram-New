@@ -429,10 +429,18 @@ public class WaysGramMessages {
     }
 
     /** Send one native file group atomically and map every random ID back. */
-    public static TLObject sendAlbum(int account, TLRPC.TL_messages_sendMultiMedia req, long selfId) throws WaysGramApi.ApiException {
-        if (req.peer == null || req.multi_media.isEmpty() || req.multi_media.size() > 10
+    public static TLObject sendAlbum(int account, TLRPC.TL_messages_sendMultiMedia req, long selfId)
+            throws WaysGramApi.ApiException {
+        return sendAlbum(account, req, selfId, null);
+    }
+
+    public static TLObject sendAlbum(int account, TLRPC.TL_messages_sendMultiMedia req, long selfId,
+                                     Integer approvedPaidFee) throws WaysGramApi.ApiException {
+        boolean groupPeer = req != null && WaysGramChats.isGroup(req.peer);
+        if (req == null || req.peer == null || req.multi_media.isEmpty() || req.multi_media.size() > 10
                 || req.schedule_date != 0 || req.noforwards || req.send_as != null
-                || req.quick_reply_shortcut != null || req.effect != 0 || req.allow_paid_stars != 0) {
+                || req.quick_reply_shortcut != null || req.effect != 0
+                || req.allow_paid_stars != 0 && !groupPeer || approvedPaidFee != null && !groupPeer) {
             throw new WaysGramApi.ApiException(400, "ALBUM_NOT_SUPPORTED");
         }
         String scope = forwardScope(req.peer);
@@ -465,6 +473,7 @@ public class WaysGramMessages {
             body.put("captions", captions);
             if (hasCaptionEntities || quote != null) body.put("caption_entities", captionEntities);
             body.put("silent", req.silent);
+            if (approvedPaidFee != null) body.put("approved_fee_stars", approvedPaidFee);
             if (scope.equals("dm")) body.put("recipient_id", peerId);
             if (req.reply_to instanceof TLRPC.TL_inputReplyToMessage) {
                 int reply = req.reply_to.reply_to_msg_id;

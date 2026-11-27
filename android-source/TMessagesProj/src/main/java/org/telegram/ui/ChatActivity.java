@@ -2813,13 +2813,20 @@ public class ChatActivity extends BaseFragment implements
             dialog_id = -chatId;
             if (ChatObject.isChannel(currentChat)) {
                 if (ChatObject.isNotInChat(currentChat) && !ChatObject.isMonoForum(currentChat) && !isThreadChat() && !isInScheduleMode()) {
-                    waitingForGetDifference = true;
-                    getMessagesController().startShortPoll(currentChat, classGuid, false, isGettingDifference -> {
-                        waitingForGetDifference = isGettingDifference;
-                        if (!waitingForGetDifference) {
-                            firstLoadMessages();
-                        }
-                    });
+                    if (org.telegram.tgnet.WaysGramTransport.ENABLED && !TextUtils.isEmpty(currentChat.username)) {
+                        // WaysGram has no Telegram channel-difference state endpoint.
+                        // A public channel's history is available over GET /messages and
+                        // must not wait for an updateDifference request to establish channel pts.
+                        waitingForGetDifference = false;
+                    } else {
+                        waitingForGetDifference = true;
+                        getMessagesController().startShortPoll(currentChat, classGuid, false, isGettingDifference -> {
+                            waitingForGetDifference = isGettingDifference;
+                            if (!waitingForGetDifference) {
+                                firstLoadMessages();
+                            }
+                        });
+                    }
                 } else {
                     getMessagesController().startShortPoll(currentChat, classGuid, false);
                 }
@@ -33337,19 +33344,19 @@ public class ChatActivity extends BaseFragment implements
             && message.isReactionsAvailable() && !message.isSecretMedia();
     }
 
-    private void toggleWaysGramReaction(MessageObject message, String emoji) {
-        if (!canUseWaysGramReactions(message) || getParentActivity() == null) return;
+    private boolean toggleWaysGramReaction(MessageObject message, String emoji) {
+        if (!canUseWaysGramReactions(message) || getParentActivity() == null) return false;
         if (getMessagesController().isFrozen()) {
             AccountFrozenAlert.show(currentAccount);
-            return;
+            return false;
         }
         boolean supported = false;
         for (String allowed : WAYSGRAM_REACTIONS) if (allowed.equals(emoji)) supported = true;
-        if (!supported) return;
+        if (!supported) return false;
         String key = message.getDialogId() + ":" + message.getId();
         if (waysGramReactionRequests.contains(key)) {
             AlertsCreator.showSimpleAlert(this, getParentActivity().getString(R.string.WaysGramReactionPending));
-            return;
+            return false;
         }
         ArrayList<ReactionsLayoutInBubble.VisibleReaction> chosen = message.getChoosenReactions();
         boolean selected = false;
@@ -33358,21 +33365,21 @@ public class ChatActivity extends BaseFragment implements
             for (String value : WAYSGRAM_REACTIONS) if (value.equals(reaction.emojicon)) allowed = true;
             if (!allowed || reaction.isStar || reaction.documentId != 0) {
                 AlertsCreator.showSimpleAlert(this, getParentActivity().getString(R.string.WaysGramReactionUnsupported));
-                return;
+                return false;
             }
             if (emoji.equals(reaction.emojicon)) selected = true;
         }
         if (!selected && currentChat != null && !ChatObject.isChannelAndNotMegaGroup(currentChat)
                 && !ChatObject.canUserDoAction(currentChat, ChatObject.ACTION_SEND_REACTIONS)) {
             BulletinFactory.of(this).createSimpleBulletin(R.raw.e_hand_2, getString(R.string.SendReactionsIsRestrictedInThisChat)).show();
-            return;
+            return false;
         }
         if (selected) {
             for (int i = chosen.size() - 1; i >= 0; i--) if (emoji.equals(chosen.get(i).emojicon)) chosen.remove(i);
         } else {
             if (chosen.size() >= 3) {
                 AlertsCreator.showSimpleAlert(this, getParentActivity().getString(R.string.WaysGramReactionLimit));
-                return;
+                return false;
             }
             chosen.add(ReactionsLayoutInBubble.VisibleReaction.fromEmojicon(emoji));
         }
@@ -33380,6 +33387,26 @@ public class ChatActivity extends BaseFragment implements
         waysGramReactionRequests.add(key);
         getSendMessagesHelper().sendReaction(message, chosen, null, false, false, this,
             () -> waysGramReactionRequests.remove(key));
+        return !selected;
+    }
+
+    private void showWaysGramReactionAnimation(View cell, MessageObject message,
+                                                ReactionsContainerLayout reactionsLayout, View fromView,
+                                                float x, float y,
+                                                ReactionsLayoutInBubble.VisibleReaction visibleReaction,
+                                                boolean bigEmoji, boolean withoutAnimation) {
+        if (withoutAnimation || message == null || visibleReaction == null) return;
+        if (cell == null) cell = findMessageCell(message.getId(), true);
+        if (cell == null) return;
+        ReactionsEffectOverlay.removeCurrent(false);
+        // WaysGram's standard emoji have no Telegram reaction animation documents.
+        // The overlay's local-emoji path is available on LONG/ONLY_MOVE, not SHORT.
+        int animationType = bigEmoji
+                ? ReactionsEffectOverlay.LONG_ANIMATION
+                : ReactionsEffectOverlay.ONLY_MOVE_ANIMATION;
+        ReactionsEffectOverlay.show(ChatActivity.this, reactionsLayout, cell, fromView, x, y,
+                visibleReaction, currentAccount, animationType);
+        ReactionsEffectOverlay.startAnimation();
     }
 
     public void selectReaction(View cell, MessageObject primaryMessage, ReactionsContainerLayout reactionsLayout, View fromView, float x, float y, ReactionsLayoutInBubble.VisibleReaction visibleReaction, boolean fromDoubleTap, boolean bigEmoji, boolean addToRecent, boolean withoutAnimation) {
@@ -33407,8 +33434,12 @@ public class ChatActivity extends BaseFragment implements
                 return;
             }
             if (visibleReaction != null && visibleReaction.emojicon != null) {
+                boolean added = toggleWaysGramReaction(primaryMessage, visibleReaction.emojicon);
+                if (added) {
+                    showWaysGramReactionAnimation(cell, primaryMessage, reactionsLayout, fromView, x, y,
+                            visibleReaction, bigEmoji, withoutAnimation);
+                }
                 if (reactionsLayout != null) closeMenu();
-                toggleWaysGramReaction(primaryMessage, visibleReaction.emojicon);
             }
             return;
         }

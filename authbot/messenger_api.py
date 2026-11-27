@@ -1651,7 +1651,9 @@ async def init_messenger_storage(database_path: Path) -> None:
                 owner_telegram_id INTEGER NOT NULL,
                 created_at INTEGER NOT NULL,
                 slow_mode_seconds INTEGER NOT NULL DEFAULT 0
-                    CHECK(slow_mode_seconds IN (0,5,10,15,30,60,120,300))
+                    CHECK(slow_mode_seconds IN (0,5,10,15,30,60,120,300)),
+                default_change_info_restricted INTEGER NOT NULL DEFAULT 0,
+                paid_messages_stars INTEGER NOT NULL DEFAULT 0
             );
             CREATE TABLE IF NOT EXISTS group_stories (
                 id INTEGER PRIMARY KEY AUTOINCREMENT, channel_id INTEGER NOT NULL,
@@ -1812,7 +1814,8 @@ async def init_messenger_storage(database_path: Path) -> None:
                 created_at INTEGER NOT NULL,
                 media_album_id TEXT,
                 media_album_index INTEGER NOT NULL DEFAULT 0,
-                media_album_count INTEGER NOT NULL DEFAULT 0
+                media_album_count INTEGER NOT NULL DEFAULT 0,
+                paid_message_stars INTEGER NOT NULL DEFAULT 0
             );
             CREATE INDEX IF NOT EXISTS idx_group_messages_group
                 ON group_messages(group_id,id DESC);
@@ -2101,6 +2104,8 @@ async def init_messenger_storage(database_path: Path) -> None:
             await db.execute(f"ALTER TABLE {db_split.SCHEMA}.group_messages ADD COLUMN send_as_id INTEGER")
         if "topic_id" not in group_message_columns:
             await db.execute(f"ALTER TABLE {db_split.SCHEMA}.group_messages ADD COLUMN topic_id INTEGER")
+        if "paid_message_stars" not in group_message_columns:
+            await db.execute(f"ALTER TABLE {db_split.SCHEMA}.group_messages ADD COLUMN paid_message_stars INTEGER NOT NULL DEFAULT 0")
         await db.execute(f"CREATE INDEX IF NOT EXISTS {db_split.SCHEMA}.idx_group_topic_messages ON group_messages(group_id,topic_id,id DESC)")
         cur = await db.execute(f"PRAGMA {db_split.SCHEMA}.table_info(group_members)")
         if "anonymous_allowed" not in {row[1] for row in await cur.fetchall()}:
@@ -2225,6 +2230,10 @@ async def init_messenger_storage(database_path: Path) -> None:
             await db.execute(f"ALTER TABLE {db_split.SCHEMA}.chat_groups ADD COLUMN anti_spam_enabled INTEGER NOT NULL DEFAULT 0")
         if "default_send_restrictions" not in chat_group_columns:
             await db.execute(f"ALTER TABLE {db_split.SCHEMA}.chat_groups ADD COLUMN default_send_restrictions INTEGER NOT NULL DEFAULT 0")
+        if "default_change_info_restricted" not in chat_group_columns:
+            await db.execute(f"ALTER TABLE {db_split.SCHEMA}.chat_groups ADD COLUMN default_change_info_restricted INTEGER NOT NULL DEFAULT 0")
+        if "paid_messages_stars" not in chat_group_columns:
+            await db.execute(f"ALTER TABLE {db_split.SCHEMA}.chat_groups ADD COLUMN paid_messages_stars INTEGER NOT NULL DEFAULT 0")
         if "send_restrictions_version" not in chat_group_columns:
             # 0 — историческая шестибитовая маска (музыка и голосовые делят бит 8,
             # видео и кружочки — бит 4, текст и опросы — бит 1). 1 — текущая маска,
@@ -5336,6 +5345,19 @@ def build_messenger_router(
     # Group rights: change info, invite/review, remove members, pin, delete others' messages, slow mode.
     def group_has_right(member: dict[str, Any], bit: int) -> bool:
         return member["role"] == "owner" or (member["role"] == "admin" and bool(member["admin_rights"] & bit))
+
+    async def group_can_change_info(db: Any, group_id: int, member: dict[str, Any]) -> bool:
+        """Admin change-info rights and the default member ban are independent flags."""
+        if group_has_right(member, 1):
+            return True
+        if member["role"] != "member":
+            return False
+        cur = await db.execute(
+            "SELECT COALESCE(default_change_info_restricted,0) FROM chat_groups WHERE id=?",
+            (group_id,),
+        )
+        row = await cur.fetchone()
+        return row is not None and not bool(row[0])
 
     # Bits of chat_groups.default_send_restrictions. Mirrors WaysGramChats.bannedRightsFor
     # and sendRestrictionMask on the client: every switch of the "Permissions" screen has
@@ -10968,10 +10990,10 @@ def build_messenger_router(
         write = request.method == "PUT"
         async with aiosqlite.connect(db_path()) as db:
             await db.execute("BEGIN IMMEDIATE" if write else "BEGIN")
-            cur = await db.execute("SELECT 1 FROM channels WHERE id=? AND owner_telegram_id=?", (channel_id, uid))
-            if not await cur.fetchone():
-                raise HTTPException(404, "CHANNEL_NOT_FOUND")
             if write:
+                cur = await db.execute("SELECT 1 FROM channels WHERE id=? AND owner_telegram_id=?", (channel_id, uid))
+                if not await cur.fetchone():
+                    raise HTTPException(404, "CHANNEL_NOT_FOUND")
                 if payload is None or "group_id" not in payload:
                     raise HTTPException(400, "DISCUSSION_GROUP_REQUIRED")
                 group_id = payload["group_id"]
@@ -10992,13 +11014,24 @@ def build_messenger_router(
                                         {"group_id": group_id})
                 await db.commit()
                 return {"group_id": group_id}
-            cur = await db.execute("""SELECT g.id,g.title FROM channel_discussion_groups d JOIN chat_groups g ON g.id=d.group_id
-                                       WHERE d.channel_id=?""", (channel_id,))
+            cur = await db.execute(
+                """SELECT d.group_id,g.title FROM channels c
+                   LEFT JOIN channel_discussion_groups d ON d.channel_id=c.id
+                   LEFT JOIN chat_groups g ON g.id=d.group_id
+                   WHERE c.id=? AND """ + STORY_CHANNEL_ACCESS,
+                (channel_id, uid, uid, uid, uid),
+            )
             group = await cur.fetchone()
-            if group is not None:
-                await join_discussion_group_for_channel(db, channel_id, uid)
-                await db.commit()
-        return {"group_id": group[0], "title": group[1]} if group else {"group_id": None}
+            if group is None:
+                # A linked discussion is only discoverable to someone who can view
+                # its channel; this also prevents private-channel membership leaks.
+                raise HTTPException(404, "CHANNEL_NOT_FOUND")
+            if group[0] is not None:
+                joined_group = await join_discussion_group_for_channel(db, channel_id, uid)
+                if joined_group != int(group[0]):
+                    raise HTTPException(404, "DISCUSSION_NOT_AVAILABLE")
+            await db.commit()
+        return {"group_id": group[0], "title": group[1]} if group[0] is not None else {"group_id": None}
 
     @router.post("/api/channels/{channel_id}/discussion-group/create", status_code=201)
     async def create_channel_discussion(channel_id: int,
@@ -13977,7 +14010,34 @@ def build_messenger_router(
                 (telegram_id,asset,amount,balance_after,reason,admin_id,created_at) VALUES(?,'stars',?,?,?,NULL,?)""",
                 (uid, amount, row[0], f"message_fee:{message_id}", now))
 
-    PAID_MESSAGE_REASONS_SQL = ("reason LIKE 'message_fee:%' OR reason LIKE 'channel_inbox:%' "
+    async def group_message_fee(db: Any, group_id: int, membership: dict[str, Any]) -> int:
+        # Group owners and admins are never charged for their own moderation work.
+        if membership["role"] != "member":
+            return 0
+        cur = await db.execute("SELECT COALESCE(paid_messages_stars,0) FROM chat_groups WHERE id=?", (group_id,))
+        row = await cur.fetchone()
+        return max(0, min(10000, int(row[0] or 0))) if row is not None else 0
+
+    async def charge_group_message_fee(db: Any, sender: int, group_id: int, stars: int,
+                                       message_id: int, now: int) -> None:
+        if stars <= 0:
+            return
+        cur = await db.execute(
+            "UPDATE accounts SET stars=stars-? WHERE telegram_id=? AND stars>=? RETURNING stars",
+            (stars, sender, stars),
+        )
+        row = await cur.fetchone()
+        await cur.close()
+        if row is None:
+            raise HTTPException(409, "MESSAGE_FEE_INSUFFICIENT_STARS")
+        await db.execute("""INSERT INTO economy_transactions
+            (telegram_id,asset,amount,balance_after,reason,admin_id,created_at)
+            VALUES(?,'stars',?,?,?,NULL,?)""",
+            (sender, -stars, row[0], f"group_message_fee:{group_id}:{message_id}", now))
+        await credit_chat_stars(db, group_id, stars,
+                                f"group_message_fee:{group_id}:{message_id}", now)
+
+    PAID_MESSAGE_REASONS_SQL = ("reason LIKE 'message_fee:%' OR reason LIKE 'group_message_fee:%' OR reason LIKE 'channel_inbox:%' "
                                 "OR reason LIKE 'channel_inbox_refund:%' OR reason LIKE 'channel_sponsored_post:%'")
 
     @router.get("/api/me/paid-messages")
@@ -13986,8 +14046,8 @@ def build_messenger_router(
                                     authorization: str | None = Header(default=None)):
         """История платных сообщений так, как её показывает Telegram.
 
-        Одна лента на все платные отправки: личные сообщения, сообщения в канал и
-        возвраты за недоставленные. Суммы берутся из журнала, поэтому повторный
+        Одна лента на все платные отправки: личные сообщения, платные группы и каналы,
+        а также возвраты за недоставленные. Суммы берутся из журнала, поэтому повторный
         запрос с тем же Idempotency-Key не добавляет вторую строку.
         """
         uid = int((await current_user(authorization))["telegram_id"])
@@ -14021,6 +14081,12 @@ def build_messenger_router(
                         name = await cur.fetchone()
                         titles[reason] = (name[0] if name and name[0] else "")
                     title = titles[reason]
+                elif kind == "group_message_fee" and len(parts) > 1 and parts[1].isdigit():
+                    if parts[1] not in titles:
+                        cur = await db.execute("SELECT title FROM chat_groups WHERE id=?", (int(parts[1]),))
+                        group = await cur.fetchone()
+                        titles[parts[1]] = (group[0] if group and group[0] else "")
+                    title = titles[parts[1]]
                 elif len(parts) > 1 and parts[1].isdigit():
                     if parts[1] not in titles:
                         cur = await db.execute("SELECT title FROM channels WHERE id=?", (int(parts[1]),))
@@ -14029,7 +14095,7 @@ def build_messenger_router(
                     title = titles[parts[1]]
                 items.append({
                     "id": row["id"],
-                    "kind": {"message_fee": "direct", "channel_inbox": "channel",
+                    "kind": {"message_fee": "direct", "group_message_fee": "group", "channel_inbox": "channel",
                              "channel_inbox_refund": "refund", "channel_sponsored_post": "sponsored"}.get(kind, kind),
                     "title": title,
                     "stars": -row["amount"] if row["amount"] < 0 else row["amount"],
@@ -18045,7 +18111,9 @@ def build_messenger_router(
                 """SELECT g.id,g.username,g.title,g.description,g.owner_telegram_id,
                           gm.role,
                           CASE WHEN gm.role='owner' THEN 63 WHEN gm.role='admin' THEN gm.admin_rights ELSE 0 END AS admin_rights,
-                          gm.joined_at,
+                          gm.joined_at,g.default_send_restrictions,
+                          COALESCE(g.send_restrictions_version,0) AS send_restrictions_version,
+                          g.default_change_info_restricted,g.paid_messages_stars,
                           (SELECT COUNT(*) FROM group_members m WHERE m.group_id=g.id) AS member_count,
                           (SELECT COUNT(*) FROM group_messages x WHERE x.group_id=g.id) AS message_count,
                           COALESCE((SELECT rm.last_read_id FROM read_markers rm
@@ -18065,6 +18133,12 @@ def build_messenger_router(
         groups = []
         for row in rows:
             item = dict(row)
+            item["default_send_restrictions"] = send_restrictions(
+                int(item.get("default_send_restrictions") or 0),
+                int(item.pop("send_restrictions_version", 0) or 0),
+            )
+            item["default_change_info_restricted"] = bool(item["default_change_info_restricted"])
+            item["send_paid_messages_stars"] = int(item.get("paid_messages_stars") or 0)
             item["labels"] = await entity_labels("group", int(item["id"]))
             groups.append(item)
         return {"groups": groups}
@@ -18150,7 +18224,8 @@ def build_messenger_router(
                 """SELECT g.id,g.username,g.title,g.description,g.owner_telegram_id,g.created_at,
                           g.avatar_media_id,g.no_forwards,
                           g.slow_mode_seconds,g.members_hidden,g.default_send_restrictions,
-                          COALESCE(g.send_restrictions_version,0) AS send_restrictions_version,g.anti_spam_enabled,
+                          COALESCE(g.send_restrictions_version,0) AS send_restrictions_version,
+                          g.default_change_info_restricted,g.paid_messages_stars,g.anti_spam_enabled,
                           g.pre_history_hidden,g.join_request,COALESCE(g.forum_enabled,0) AS forum_enabled,
                           g.location_latitude,g.location_longitude,g.location_label,g.location_address,
                           g.color_id,g.background_emoji_id,g.profile_color_id,g.profile_background_emoji_id,
@@ -18159,6 +18234,7 @@ def build_messenger_router(
                 (group_id,),
             )
             group = await cur.fetchone()
+            can_change_info = await group_can_change_info(db, group_id, membership)
             restricted_roster = bool(group["members_hidden"]) and membership["role"] == "member"
             cur = await db.execute(
                 """SELECT gm.telegram_id,gm.role,gm.joined_at,a.username,a.display_name,a.avatar_media_id,
@@ -18187,6 +18263,9 @@ def build_messenger_router(
             int(result.pop("send_restrictions_version", 0) or 0),
         )
         result["members_hidden"] = bool(result["members_hidden"])
+        result["default_change_info_restricted"] = bool(result["default_change_info_restricted"])
+        result["send_paid_messages_stars"] = int(result.get("paid_messages_stars") or 0)
+        result["paid_messages_available"] = group_has_right(membership, 1)
         result["anti_spam_enabled"] = bool(result["anti_spam_enabled"])
         result["pre_history_hidden"] = bool(result["pre_history_hidden"])
         result["join_request"] = bool(result["join_request"])
@@ -18196,7 +18275,7 @@ def build_messenger_router(
         result["admin_rights"] = (63 if membership["role"] == "owner"
                                  else membership["admin_rights"] if membership["role"] == "admin" else 0)
         result["location"] = chat_location_payload(result)
-        result["can_set_location"] = group_has_right(membership, 1)
+        result["can_set_location"] = can_change_info
         result["my_telegram_id"] = uid
         result["requests_pending"] = pending
         result["recent_requesters"] = recent_requesters
@@ -18238,8 +18317,8 @@ def build_messenger_router(
         async with aiosqlite.connect(db_path()) as db:
             await db.execute("BEGIN IMMEDIATE")
             membership = await require_group_member(db, group_id, uid)
-            if not group_has_right(membership, 1):
-                raise HTTPException(403, "GROUP_ADMIN_REQUIRED")
+            if not await group_can_change_info(db, group_id, membership):
+                raise HTTPException(403, "GROUP_CHANGE_INFO_REQUIRED")
             table = f"{db_split.SCHEMA}.chat_groups"
             if clear:
                 await db.execute(f"UPDATE {table} SET location_latitude=NULL,location_longitude=NULL,"
@@ -18741,8 +18820,8 @@ def build_messenger_router(
             async with aiosqlite.connect(db_path()) as db:
                 await db.execute("BEGIN IMMEDIATE")
                 membership = await require_group_member(db, group_id, uid)
-                if not group_has_right(membership, 1):
-                    raise HTTPException(403, "Изменять группу может только владелец или администратор")
+                if not await group_can_change_info(db, group_id, membership):
+                    raise HTTPException(403, "Изменять информацию группы запрещено")
                 if fields.get("username"):
                     name = fields["username"]
                     for table in ("chat_groups", "channels", "accounts"):
@@ -18831,8 +18910,8 @@ def build_messenger_router(
         async with aiosqlite.connect(db_path()) as db:
             await db.execute("BEGIN IMMEDIATE")
             membership = await require_group_member(db, group_id, uid)
-            if not group_has_right(membership, 1):
-                raise HTTPException(403, "Изменять группу может только владелец или администратор")
+            if not await group_can_change_info(db, group_id, membership):
+                raise HTTPException(403, "Изменять информацию группы запрещено")
             if media_id:
                 await require_owned_image(db, media_id, uid)
             await db.execute("UPDATE chat_groups SET avatar_media_id=? WHERE id=?", (media_id, group_id))
@@ -18846,8 +18925,8 @@ def build_messenger_router(
         async with aiosqlite.connect(db_path()) as db:
             await db.execute("BEGIN IMMEDIATE")
             membership = await require_group_member(db, group_id, uid)
-            if not group_has_right(membership, 1):
-                raise HTTPException(403, "Изменять группу может только владелец или администратор")
+            if not await group_can_change_info(db, group_id, membership):
+                raise HTTPException(403, "Изменять информацию группы запрещено")
             await db.execute("UPDATE chat_groups SET avatar_media_id='' WHERE id=?", (group_id,))
             await record_event(db, "group", 0, "chat_changed", uid, chat_id=group_id)
             await db.commit()
@@ -18862,19 +18941,43 @@ def build_messenger_router(
             raise HTTPException(400, "INVALID_GROUP_SEND_RESTRICTIONS")
         if "anti_spam_enabled" in payload and type(payload["anti_spam_enabled"]) is not bool:
             raise HTTPException(400, "INVALID_GROUP_ANTI_SPAM_SETTING")
+        if "change_info_restricted" in payload and type(payload["change_info_restricted"]) is not bool:
+            raise HTTPException(400, "INVALID_GROUP_CHANGE_INFO_SETTING")
         async with aiosqlite.connect(db_path()) as db:
             await db.execute("BEGIN IMMEDIATE")
             membership = await require_group_member(db, group_id, uid)
             if not group_has_right(membership, 1):
                 raise HTTPException(403, "GROUP_CHANGE_INFO_REQUIRED")
             await db.execute("""UPDATE chat_groups SET default_send_restrictions=?,send_restrictions_version=1,
+                                default_change_info_restricted=COALESCE(?,default_change_info_restricted),
                                 anti_spam_enabled=COALESCE(?,anti_spam_enabled) WHERE id=?""",
-                             (mask, payload.get("anti_spam_enabled"), group_id))
+                             (mask,
+                              int(payload["change_info_restricted"]) if "change_info_restricted" in payload else None,
+                              payload.get("anti_spam_enabled"), group_id))
             await record_event(db, "group", 0, "chat_changed", uid, chat_id=group_id)
-            cur = await db.execute("SELECT anti_spam_enabled FROM chat_groups WHERE id=?", (group_id,))
-            enabled = bool((await cur.fetchone())[0])
+            cur = await db.execute("SELECT anti_spam_enabled,default_change_info_restricted FROM chat_groups WHERE id=?", (group_id,))
+            enabled, change_info_restricted = await cur.fetchone()
             await db.commit()
-        return {"default_send_restrictions": mask, "anti_spam_enabled": enabled}
+        return {"default_send_restrictions": mask, "anti_spam_enabled": bool(enabled),
+                "change_info_restricted": bool(change_info_restricted)}
+
+    @router.put("/api/groups/{group_id}/paid-messages")
+    async def set_group_paid_messages(group_id: int, payload: dict[str, Any],
+                                      authorization: str | None = Header(default=None)):
+        uid = int((await current_user(authorization))["telegram_id"])
+        enabled, stars = payload.get("enabled"), payload.get("stars")
+        if (type(enabled) is not bool or type(stars) is not int or not 0 <= stars <= 10000
+                or enabled != (stars > 0)):
+            raise HTTPException(400, "INVALID_GROUP_PAID_MESSAGES_SETTING")
+        async with aiosqlite.connect(db_path()) as db:
+            await db.execute("BEGIN IMMEDIATE")
+            membership = await require_group_member(db, group_id, uid)
+            if not group_has_right(membership, 1):
+                raise HTTPException(403, "GROUP_CHANGE_INFO_REQUIRED")
+            await db.execute("UPDATE chat_groups SET paid_messages_stars=? WHERE id=?", (stars, group_id))
+            await record_event(db, "group", 0, "chat_changed", uid, chat_id=group_id)
+            await db.commit()
+        return {"enabled": enabled, "stars": stars}
 
     @router.put("/api/groups/{group_id}/member-visibility")
     async def set_group_member_visibility(group_id: int, payload: dict[str, Any],
@@ -19809,7 +19912,8 @@ def build_messenger_router(
                                   (SELECT mime_type FROM media_assets WHERE id=group_messages.media_id) AS media_type,
                                   (SELECT original_name FROM media_assets WHERE id=group_messages.media_id) AS media_name,
                                   (SELECT media_kind FROM media_assets WHERE id=group_messages.media_id) AS media_kind,
-                                  (SELECT media_metadata FROM media_assets WHERE id=group_messages.media_id) AS media_metadata
+                                  (SELECT media_metadata FROM media_assets WHERE id=group_messages.media_id) AS media_metadata,
+                                  group_messages.paid_message_stars AS paid_message_stars
                            FROM group_messages WHERE group_id=? AND topic_id IS NULL AND id>? AND id>? AND NOT EXISTS (SELECT 1 FROM channel_post_discussions d WHERE d.group_id=group_messages.group_id AND d.root_message_id=group_messages.id) ORDER BY id ASC LIMIT ?""",
                         (group_id, after_id, history_floor, limit),
                     )
@@ -19831,7 +19935,8 @@ def build_messenger_router(
                                   (SELECT mime_type FROM media_assets WHERE id=group_messages.media_id) AS media_type,
                                   (SELECT original_name FROM media_assets WHERE id=group_messages.media_id) AS media_name,
                                   (SELECT media_kind FROM media_assets WHERE id=group_messages.media_id) AS media_kind,
-                                  (SELECT media_metadata FROM media_assets WHERE id=group_messages.media_id) AS media_metadata
+                                  (SELECT media_metadata FROM media_assets WHERE id=group_messages.media_id) AS media_metadata,
+                                  group_messages.paid_message_stars AS paid_message_stars
                            FROM group_messages WHERE group_id=? AND topic_id IS NULL AND (?=0 OR id<?) AND id>? AND NOT EXISTS (SELECT 1 FROM channel_post_discussions d WHERE d.group_id=group_messages.group_id AND d.root_message_id=group_messages.id)""" + id_filter + " ORDER BY id DESC LIMIT ?",
                         (group_id, before_id, before_id, history_floor) + tuple(selected_ids or ()) + (selected_limit,),
                     )
@@ -19873,7 +19978,8 @@ def build_messenger_router(
                                   (SELECT mime_type FROM media_assets WHERE id=group_messages.media_id) AS media_type,
                           (SELECT original_name FROM media_assets WHERE id=group_messages.media_id) AS media_name,
                                   (SELECT media_kind FROM media_assets WHERE id=group_messages.media_id) AS media_kind,
-                                  (SELECT media_metadata FROM media_assets WHERE id=group_messages.media_id) AS media_metadata
+                                  (SELECT media_metadata FROM media_assets WHERE id=group_messages.media_id) AS media_metadata,
+                                  group_messages.paid_message_stars AS paid_message_stars
                    FROM group_messages
                    WHERE group_id=? AND topic_id IS NULL AND body LIKE ? COLLATE NOCASE
                    ORDER BY id DESC LIMIT 100""",
@@ -20183,6 +20289,14 @@ def build_messenger_router(
             if previous is not None:
                 await db.rollback()
                 return previous
+            paid_fee = await group_message_fee(db, group_id, membership)
+            approved_fee = payload.get("approved_fee_stars")
+            if approved_fee is not None and (type(approved_fee) is not int or not 0 <= approved_fee <= 10000):
+                raise HTTPException(400, "INVALID_GROUP_MESSAGE_FEE")
+            if paid_fee > 0 and descriptor is None:
+                raise HTTPException(400, "GROUP_MESSAGE_FEE_IDEMPOTENCY_REQUIRED")
+            if (paid_fee > 0 or approved_fee is not None) and approved_fee != paid_fee:
+                raise HTTPException(402, {"code": "GROUP_MESSAGE_FEE_REQUIRED", "stars": paid_fee})
             await require_group_anti_spam(db, group_id, uid, membership, now, body=body if not media_id else "")
             identity_title = None
             if identity == 0:
@@ -20258,6 +20372,9 @@ def build_messenger_router(
                 (group_id, uid, body, media_id, reply_to_id, now, topic_id, identity),
             )
             message_id = int(cur.lastrowid)
+            if paid_fee > 0:
+                await db.execute("UPDATE group_messages SET paid_message_stars=? WHERE id=?", (paid_fee, message_id))
+                await charge_group_message_fee(db, uid, group_id, paid_fee, message_id, now)
             if discussion:
                 await db.execute("INSERT INTO channel_post_comments VALUES(?,?,?,?)", (message_id, group_id, *discussion))
             if quote is not None:
@@ -20290,7 +20407,7 @@ def build_messenger_router(
             result = {
                 "id": message_id, "group_id": group_id, "sender_id": uid if identity is None else 0,
                 "body": body, "media_id": media_id, "reply_to_id": reply_to_id,
-                **media_fields, "created_at": now,
+                "paid_message_stars": paid_fee, **media_fields, "created_at": now,
             }
             if identity is not None:
                 result.update(send_as_id=identity, identity_title=identity_title, is_mine=True)
@@ -20385,6 +20502,17 @@ def build_messenger_router(
                 await db.rollback()
                 return previous
 
+            paid_fee_each = await group_message_fee(db, group_id, membership)
+            paid_fee_total = paid_fee_each * len(media_ids)
+            approved_fee = payload.get("approved_fee_stars")
+            if paid_fee_total > 100000 or approved_fee is not None and (
+                    type(approved_fee) is not int or not 0 <= approved_fee <= 100000):
+                raise HTTPException(400, "INVALID_GROUP_MESSAGE_FEE")
+            if paid_fee_total > 0 and descriptor is None:
+                raise HTTPException(400, "GROUP_MESSAGE_FEE_IDEMPOTENCY_REQUIRED")
+            if (paid_fee_total > 0 or approved_fee is not None) and approved_fee != paid_fee_total:
+                raise HTTPException(402, {"code": "GROUP_MESSAGE_FEE_REQUIRED", "stars": paid_fee_total})
+
             await require_group_anti_spam(db, group_id, uid, membership, now)
             cur = await db.execute("SELECT slow_mode_seconds FROM chat_groups WHERE id=?", (group_id,))
             group_settings = await cur.fetchone()
@@ -20452,14 +20580,16 @@ def build_messenger_router(
                 cur = await db.execute(
                     """INSERT INTO group_messages
                        (group_id,sender_telegram_id,body,media_id,reply_to_id,
-                        media_album_id,media_album_index,media_album_count,created_at)
-                       VALUES(?,?,?,?,?,?,?,?,?)""",
+                        media_album_id,media_album_index,media_album_count,paid_message_stars,created_at)
+                       VALUES(?,?,?,?,?,?,?,?,?,?)""",
                     (
                         group_id, uid, item_body, media_id, reply_to_id,
-                        album_id, index, len(checked_media), now,
+                        album_id, index, len(checked_media), paid_fee_each, now,
                     ),
                 )
                 message_id = int(cur.lastrowid)
+                if paid_fee_each > 0:
+                    await charge_group_message_fee(db, uid, group_id, paid_fee_each, message_id, now)
                 if quote is not None:
                     await db.execute("UPDATE group_messages SET quote_json=? WHERE id=?",
                                      (json.dumps(quote, ensure_ascii=True, separators=(",", ":")), message_id))
@@ -20480,6 +20610,7 @@ def build_messenger_router(
                     "media_album_id": album_id,
                     "media_album_index": index,
                     "media_album_count": len(checked_media),
+                    "paid_message_stars": paid_fee_each,
                     **media_fields,
                     "created_at": now,
                 })

@@ -158,6 +158,55 @@ public class WaysGramTransport {
         return value;
     }
 
+    private static long paidDialogId(int account, TLRPC.InputPeer peer) {
+        if (peer instanceof TLRPC.TL_inputPeerUser) return peer.user_id;
+        if (peer instanceof TLRPC.TL_inputPeerSelf) return UserConfig.getInstance(account).getClientUserId();
+        if (peer instanceof TLRPC.TL_inputPeerChat) return -peer.chat_id;
+        if (peer instanceof TLRPC.TL_inputPeerChannel) return -peer.channel_id;
+        return 0;
+    }
+
+    private static boolean groupPaidMessageRequest(TLObject request) {
+        if (request instanceof TLRPC.TL_messages_sendMessage) {
+            TLRPC.TL_messages_sendMessage send = (TLRPC.TL_messages_sendMessage) request;
+            return send.schedule_date == 0 && send.schedule_repeat_period == 0
+                    && send.peer != null && WaysGramChats.isGroup(send.peer);
+        }
+        if (request instanceof TLRPC.TL_messages_sendMedia) {
+            TLRPC.TL_messages_sendMedia send = (TLRPC.TL_messages_sendMedia) request;
+            return send.schedule_date == 0 && send.schedule_repeat_period == 0
+                    && send.peer != null && WaysGramChats.isGroup(send.peer);
+        }
+        if (request instanceof TLRPC.TL_messages_sendMultiMedia) {
+            TLRPC.TL_messages_sendMultiMedia send = (TLRPC.TL_messages_sendMultiMedia) request;
+            return send.schedule_date == 0 && send.peer != null && WaysGramChats.isGroup(send.peer);
+        }
+        return false;
+    }
+
+    private static String groupPaidRequestSlot(int account, TLObject request) {
+        long dialogId = 0;
+        String nonce = "";
+        if (request instanceof TLRPC.TL_messages_sendMessage) {
+            TLRPC.TL_messages_sendMessage send = (TLRPC.TL_messages_sendMessage) request;
+            dialogId = paidDialogId(account, send.peer);
+            nonce = Long.toHexString(send.random_id);
+        } else if (request instanceof TLRPC.TL_messages_sendMedia) {
+            TLRPC.TL_messages_sendMedia send = (TLRPC.TL_messages_sendMedia) request;
+            dialogId = paidDialogId(account, send.peer);
+            nonce = Long.toHexString(send.random_id);
+        } else if (request instanceof TLRPC.TL_messages_sendMultiMedia) {
+            TLRPC.TL_messages_sendMultiMedia send = (TLRPC.TL_messages_sendMultiMedia) request;
+            dialogId = paidDialogId(account, send.peer);
+            StringBuilder ids = new StringBuilder();
+            for (TLRPC.TL_inputSingleMedia item : send.multi_media) {
+                if (item != null) ids.append(Long.toHexString(item.random_id)).append('_');
+            }
+            nonce = ids.toString();
+        }
+        return UserConfig.getInstance(account).getClientUserId() + ":" + dialogId + ":" + nonce;
+    }
+
     public static void execute(final int account, final TLObject request, final RequestDelegate delegate) {
         boolean reactionRequest = request instanceof TLRPC.TL_messages_sendReaction
                 || request instanceof TLRPC.TL_messages_getMessagesReactions
@@ -185,7 +234,9 @@ public class WaysGramTransport {
         final boolean directText = textSend != null && textSend.schedule_date == 0 && textSend.schedule_repeat_period == 0
                 && textSend.random_id != 0 && textSend.peer instanceof TLRPC.TL_inputPeerUser && textSend.peer.user_id > 0
                 && !WaysGramBotFather.is(textSend.peer.user_id);
-        final String reactionToken = reactionRequest || typingRequest || pinRequest || pinReadRequest || mediaReadRequest || transcriptionRequest || draftRequest || scheduledRequest || directText ? WaysGramApi.getToken(account) : null;
+        final boolean groupPaidRequest = groupPaidMessageRequest(request);
+        final boolean paidMessageRequest = directText || groupPaidRequest;
+        final String reactionToken = reactionRequest || typingRequest || pinRequest || pinReadRequest || mediaReadRequest || transcriptionRequest || draftRequest || scheduledRequest || paidMessageRequest ? WaysGramApi.getToken(account) : null;
         final long queuedAt = android.os.SystemClock.elapsedRealtime();
         java.util.concurrent.Executor executor = reactionRequest ? reactionQueue(account)
                 : typingRequest ? typingQueue(account) : pinRequest ? pinQueue(account) : draftRequest ? draftQueue(account) : WaysGramApi.NETWORK;
@@ -193,33 +244,42 @@ public class WaysGramTransport {
             TLObject response = null;
             TLRPC.TL_error error = null;
             try {
-                if ((reactionRequest || typingRequest || pinRequest || pinReadRequest || mediaReadRequest || transcriptionRequest || draftRequest || scheduledRequest || directText) && !TextUtils.equals(reactionToken, WaysGramApi.getToken(account)))
+                if ((reactionRequest || typingRequest || pinRequest || pinReadRequest || mediaReadRequest || transcriptionRequest || draftRequest || scheduledRequest || paidMessageRequest) && !TextUtils.equals(reactionToken, WaysGramApi.getToken(account)))
                     throw new WaysGramApi.ApiException(401, "AUTH_KEY_UNREGISTERED");
-                if (directText) {
-                    String slot = paidTextSlot(account, textSend);
+                if (paidMessageRequest) {
+                    String slot = directText ? paidTextSlot(account, textSend) : groupPaidRequestSlot(account, request);
                     int oldPrice = paidTextPrefs().getInt(slot, -1);
                     if (oldPrice >= 0) {
                         long since = paidTextPrefs().getLong(slot + ":since", 0);
                         if (since <= 0 || System.currentTimeMillis() - since > 24 * 60 * 60 * 1000L) {
                             throw new WaysGramApi.ApiException(409, "MESSAGE_FEE_RETRY_EXPIRED");
                         }
-                        confirmPaidText(account, textSend, reactionToken, oldPrice, true, since, delegate);
+                        if (directText) {
+                            confirmPaidText(account, textSend, reactionToken, oldPrice, true, since, delegate);
+                        } else {
+                            confirmPaidGroupMessage(account, request, reactionToken, oldPrice, true, since, delegate);
+                        }
                         return;
                     }
                 }
                 // A delayed activity indication must not outlive its eight-second server TTL.
                 response = typingRequest && android.os.SystemClock.elapsedRealtime() - queuedAt > 8000
-                        ? new TLRPC.TL_boolTrue() : handle(account, request, reactionToken);
-                if ((reactionRequest || pinRequest || pinReadRequest || mediaReadRequest || transcriptionRequest || draftRequest || scheduledRequest || directText) && !TextUtils.equals(reactionToken, WaysGramApi.getToken(account)))
+                        ? new TLRPC.TL_boolTrue() : handle(account, request, reactionToken, null);
+                if ((reactionRequest || pinRequest || pinReadRequest || mediaReadRequest || transcriptionRequest || draftRequest || scheduledRequest || paidMessageRequest) && !TextUtils.equals(reactionToken, WaysGramApi.getToken(account)))
                     throw new WaysGramApi.ApiException(401, "AUTH_KEY_UNREGISTERED");
                 if (response == null) {
                     error = unsupportedRequest(request);
                 }
             } catch (WaysGramApi.ApiException e) {
                 response = null;
-                int fee = directText ? requiredMessageFee(e) : -1;
+                int fee = paidMessageRequest ? requiredMessageFee(e) : -1;
                 if (fee >= 0) {
-                    confirmPaidText(account, textSend, reactionToken, fee, false, System.currentTimeMillis(), delegate);
+                    if (directText) {
+                        confirmPaidText(account, textSend, reactionToken, fee, false, System.currentTimeMillis(), delegate);
+                    } else {
+                        confirmPaidGroupMessage(account, request, reactionToken, fee, false,
+                                System.currentTimeMillis(), delegate);
+                    }
                     return;
                 }
                 boolean authRequest = request instanceof TLRPC.TL_auth_sendCode
@@ -257,7 +317,8 @@ public class WaysGramTransport {
     }
 
     private static String paidTextSlot(int account, TLRPC.TL_messages_sendMessage send) {
-        return UserConfig.getInstance(account).getClientUserId() + ":" + send.peer.user_id + ":" + send.random_id;
+        return UserConfig.getInstance(account).getClientUserId() + ":"
+                + paidDialogId(account, send.peer) + ":" + send.random_id;
     }
 
     private static int requiredMessageFee(WaysGramApi.ApiException e) {
@@ -265,7 +326,9 @@ public class WaysGramTransport {
         try {
             JSONObject detail = new JSONObject(e.detail);
             int fee = detail.optInt("stars", -1);
-            return "MESSAGE_FEE_REQUIRED".equals(detail.optString("code")) && fee >= 0 && fee <= 10000 ? fee : -1;
+            String code = detail.optString("code");
+            return ("MESSAGE_FEE_REQUIRED".equals(code) || "GROUP_MESSAGE_FEE_REQUIRED".equals(code))
+                    && fee >= 0 && fee <= 100000 ? fee : -1;
         } catch (Exception ignored) {
             return -1;
         }
@@ -274,7 +337,7 @@ public class WaysGramTransport {
     private static void confirmPaidText(int account, TLRPC.TL_messages_sendMessage send, String token, int fee,
                                         boolean retry, long since, RequestDelegate delegate) {
         final String slot = paidTextSlot(account, send);
-        org.telegram.ui.WaysGramPaidDm.confirm(account, send.peer.user_id, token, fee, retry, () -> WaysGramApi.NETWORK.execute(() -> {
+        org.telegram.ui.WaysGramPaidDm.confirm(account, paidDialogId(account, send.peer), token, fee, retry, () -> WaysGramApi.NETWORK.execute(() -> {
             TLObject result = null;
             TLRPC.TL_error failure = null;
             try {
@@ -307,6 +370,65 @@ public class WaysGramTransport {
         }), () -> WaysGramApi.NETWORK.execute(() -> {
             deliver(delegate, null, error(400, "MESSAGE_FEE_NOT_CONFIRMED"));
         }));
+    }
+
+    private static void confirmPaidGroupMessage(int account, TLObject request, String token, int fee,
+                                                boolean retry, long since, RequestDelegate delegate) {
+        final String slot = groupPaidRequestSlot(account, request);
+        final long dialogId;
+        if (request instanceof TLRPC.TL_messages_sendMessage) {
+            dialogId = paidDialogId(account, ((TLRPC.TL_messages_sendMessage) request).peer);
+        } else if (request instanceof TLRPC.TL_messages_sendMedia) {
+            dialogId = paidDialogId(account, ((TLRPC.TL_messages_sendMedia) request).peer);
+        } else if (request instanceof TLRPC.TL_messages_sendMultiMedia) {
+            dialogId = paidDialogId(account, ((TLRPC.TL_messages_sendMultiMedia) request).peer);
+        } else {
+            deliver(delegate, null, error(400, "PAID_MESSAGE_PEER_INVALID"));
+            return;
+        }
+        int messagesCount = request instanceof TLRPC.TL_messages_sendMultiMedia
+                ? Math.max(1, ((TLRPC.TL_messages_sendMultiMedia) request).multi_media.size()) : 1;
+        if (fee < 0 || fee % messagesCount != 0) {
+            deliver(delegate, null, error(400, "GROUP_MESSAGE_FEE_INVALID"));
+            return;
+        }
+        int feePerMessage = fee / messagesCount;
+        org.telegram.ui.WaysGramPaidDm.confirm(account, dialogId, token, feePerMessage, messagesCount, retry,
+                () -> WaysGramApi.NETWORK.execute(() -> {
+                    TLObject result = null;
+                    TLRPC.TL_error failure = null;
+                    try {
+                        if (TextUtils.isEmpty(token) || !TextUtils.equals(token, WaysGramApi.getToken(account))) {
+                            throw new WaysGramApi.ApiException(401, "AUTH_KEY_UNREGISTERED");
+                        }
+                        if (!paidTextPrefs().edit().putInt(slot, fee).putLong(slot + ":since", since).commit()) {
+                            throw new WaysGramApi.ApiException(400, "MESSAGE_FEE_RETRY_STORAGE_FAILED");
+                        }
+                        result = handle(account, request, token, fee);
+                        if (!TextUtils.equals(token, WaysGramApi.getToken(account))) {
+                            throw new WaysGramApi.ApiException(401, "AUTH_KEY_UNREGISTERED");
+                        }
+                        paidTextPrefs().edit().remove(slot).remove(slot + ":since").apply();
+                    } catch (WaysGramApi.ApiException e) {
+                        int changed = requiredMessageFee(e);
+                        if (changed >= 0) {
+                            paidTextPrefs().edit().remove(slot).remove(slot + ":since").apply();
+                            confirmPaidGroupMessage(account, request, token, changed, false,
+                                    System.currentTimeMillis(), delegate);
+                            return;
+                        }
+                        if ("MESSAGE_FEE_INSUFFICIENT_STARS".equals(e.detail)) {
+                            paidTextPrefs().edit().remove(slot).remove(slot + ":since").apply();
+                        }
+                        failure = mapError(e, false);
+                    } catch (Throwable e) {
+                        FileLog.e(e);
+                        failure = error(500, "INTERNAL");
+                    }
+                    deliver(delegate, result, failure);
+                }), () -> WaysGramApi.NETWORK.execute(() -> {
+                    deliver(delegate, null, error(400, "MESSAGE_FEE_NOT_CONFIRMED"));
+                }));
     }
 
     /**
@@ -346,12 +468,12 @@ public class WaysGramTransport {
             throw new WaysGramApi.ApiException(400, "PEER_ID_INVALID");
         }
         long tg = ((TLRPC.TL_inputChannel) price.channel).channel_id;
-        if (WaysGramChats.isGroupChannel(tg)) {
-            throw new WaysGramApi.ApiException(400, "PAID_MESSAGES_NOT_SUPPORTED");
-        }
-        long serverId = WaysGramChats.channelServer(tg);
         long stars = Math.max(0, Math.min(10000, price.send_paid_messages_stars));
         boolean enabled = price.suggestions_allowed && stars > 0;
+        if (WaysGramChats.isGroupChannel(tg)) {
+            return WaysGramChats.setGroupPaidMessagesPrice(account, tg, enabled ? stars : 0, selfId);
+        }
+        long serverId = WaysGramChats.channelServer(tg);
         JSONObject body = new JSONObject();
         try {
             body.put("enabled", enabled);
@@ -373,7 +495,8 @@ public class WaysGramTransport {
         return error(400, "METHOD_NOT_SUPPORTED:" + method);
     }
 
-    private static TLObject handle(int account, TLObject request, String expectedToken) throws WaysGramApi.ApiException {
+    private static TLObject handle(int account, TLObject request, String expectedToken, Integer approvedPaidFee)
+            throws WaysGramApi.ApiException {
         // ---- authorization ----
         if (request instanceof TLRPC.TL_auth_sendCode) {
             return requestCode(account, ((TLRPC.TL_auth_sendCode) request).phone_number);
@@ -1051,7 +1174,8 @@ public class WaysGramTransport {
             JSONArray entities = WaysGramMapper.writeTextEntities(send.entities);
             String token = WaysGramApi.getToken(account);
             TLObject sent = sendTo(account, send.peer, send.message, send.random_id, null, send.reply_to, selfId,
-                    null, null, send.silent, entities, null, expectedToken, null, sendAsIdentity(send.send_as, send.peer));
+                    null, null, send.silent, entities, null, expectedToken, approvedPaidFee,
+                    sendAsIdentity(send.send_as, send.peer));
             if (send.clear_draft) clearSentDraft(account, send.peer, send.reply_to, selfId, send.message, entities, token);
             return sent;
 
@@ -1084,7 +1208,7 @@ public class WaysGramTransport {
                 if (!(send.peer instanceof TLRPC.TL_inputPeerUser || send.peer instanceof TLRPC.TL_inputPeerSelf
                         || send.peer instanceof TLRPC.TL_inputPeerChat || send.peer instanceof TLRPC.TL_inputPeerChannel)
                         || send.noforwards || send.send_as != null || send.quick_reply_shortcut != null
-                        || send.effect != 0 || send.allow_paid_stars != 0 || send.suggested_post != null
+                        || send.effect != 0 || send.allow_paid_stars != 0 && !WaysGramChats.isGroup(send.peer) || send.suggested_post != null
                         || send.reply_markup != null || !send.entities.isEmpty() || send.ephemeralReceiverBotId != 0
                         || (send.reply_to != null && !(send.reply_to instanceof TLRPC.TL_inputReplyToMessage))) {
                     throw new WaysGramApi.ApiException(400, "CONTACT_NOT_SUPPORTED");
@@ -1100,7 +1224,8 @@ public class WaysGramTransport {
                     throw new WaysGramApi.ApiException(400, "CONTACT_INVALID");
                 }
                 return sendTo(account, send.peer, send.message, send.random_id, null,
-                        send.reply_to, selfId, null, contact, send.silent, sendAsIdentity(send.send_as, send.peer));
+                        send.reply_to, selfId, null, contact, send.silent, null, null, expectedToken,
+                        approvedPaidFee, sendAsIdentity(send.send_as, send.peer));
             }
             if (send.media instanceof TLRPC.TL_inputMediaGeoPoint || send.media instanceof TLRPC.TL_inputMediaVenue) {
                 if (!(send.peer instanceof TLRPC.TL_inputPeerUser || send.peer instanceof TLRPC.TL_inputPeerSelf
@@ -1108,7 +1233,7 @@ public class WaysGramTransport {
                         || !(send.media.geo_point instanceof TLRPC.TL_inputGeoPoint)
                         || send.schedule_date != 0 || send.schedule_repeat_period != 0 || send.noforwards
                         || !usesDefaultLocationSender(send.send_as, send.peer, selfId) || send.quick_reply_shortcut != null || send.effect != 0
-                        || send.allow_paid_stars != 0 || send.suggested_post != null || send.reply_markup != null
+                        || send.allow_paid_stars != 0 && !WaysGramChats.isGroup(send.peer) || send.suggested_post != null || send.reply_markup != null
                         || !send.entities.isEmpty() || send.ephemeralReceiverBotId != 0
                         || (send.reply_to != null && !(send.reply_to instanceof TLRPC.TL_inputReplyToMessage))) {
                     throw new WaysGramApi.ApiException(400, "LOCATION_NOT_SUPPORTED");
@@ -1131,17 +1256,20 @@ public class WaysGramTransport {
                     throw new WaysGramApi.ApiException(400, "LOCATION_INVALID");
                 }
                 return sendTo(account, send.peer, send.message, send.random_id, null,
-                        send.reply_to, selfId, location, send.silent);
+                        send.reply_to, selfId, location, null, send.silent, null, null, expectedToken,
+                        approvedPaidFee, -1L);
             }
             if (send.media instanceof TLRPC.TL_inputMediaPoll || send.media instanceof TLRPC.TL_inputMediaTodo) {
                 if (!usesDefaultLocationSender(send.send_as, send.peer, selfId) || send.noforwards
-                        || send.quick_reply_shortcut != null || send.effect != 0 || send.allow_paid_stars != 0
+                        || send.quick_reply_shortcut != null || send.effect != 0
+                        || send.allow_paid_stars != 0 && !WaysGramChats.isGroup(send.peer)
                         || send.suggested_post != null || send.reply_markup != null || send.ephemeralReceiverBotId != 0
                         || (send.reply_to != null && !(send.reply_to instanceof TLRPC.TL_inputReplyToMessage))) {
                     throw new WaysGramApi.ApiException(400, "CARD_OPTIONS_NOT_SUPPORTED");
                 }
                 JSONObject card = WaysGramCards.encode(send.media);
-                return sendTo(account, send.peer, "", send.random_id, null, send.reply_to, selfId, null, null, send.silent, null, card);
+                return sendTo(account, send.peer, "", send.random_id, null, send.reply_to, selfId,
+                        null, null, send.silent, null, card, expectedToken, approvedPaidFee, -1L);
             }
             JSONArray captionEntities = WaysGramMapper.writeTextEntities(send.entities);
             JSONObject uploaded = WaysGramMedia.uploadFor(account, send.media);
@@ -1150,7 +1278,9 @@ public class WaysGramTransport {
                 throw new WaysGramApi.ApiException(400, "MEDIA_NOT_SUPPORTED");
             }
             String token = WaysGramApi.getToken(account);
-            TLObject sent = sendTo(account, send.peer, send.message, send.random_id, mediaId, send.reply_to, selfId, null, null, send.silent, captionEntities, sendAsIdentity(send.send_as, send.peer));
+            TLObject sent = sendTo(account, send.peer, send.message, send.random_id, mediaId, send.reply_to, selfId,
+                    null, null, send.silent, captionEntities, null, expectedToken, approvedPaidFee,
+                    sendAsIdentity(send.send_as, send.peer));
             if (send.clear_draft) clearSentDraft(account, send.peer, send.reply_to, selfId, send.message, captionEntities, token);
             return sent;
         } else if (request instanceof TLRPC.TL_messages_uploadMedia) {
@@ -1159,7 +1289,7 @@ public class WaysGramTransport {
         } else if (request instanceof TLRPC.TL_messages_sendMultiMedia) {
             TLRPC.TL_messages_sendMultiMedia album = (TLRPC.TL_messages_sendMultiMedia) request;
             String token = WaysGramApi.getToken(account);
-            TLObject sent = WaysGramMessages.sendAlbum(account, album, selfId);
+            TLObject sent = WaysGramMessages.sendAlbum(account, album, selfId, approvedPaidFee);
             if (album.clear_draft) {
                 // A single caption can represent the composer draft; do not guess
                 // when an album contains multiple independently authored captions.
@@ -1685,12 +1815,8 @@ public class WaysGramTransport {
         int replyTo = replyIdOf(reply);
         JSONObject quote = WaysGramMapper.quoteFor(reply);
         if (peer instanceof TLRPC.TL_inputPeerChat || peer instanceof TLRPC.TL_inputPeerChannel) {
-            if (card == null) {
-                return identity < 0
-                        ? WaysGramChats.send(account, peer, text, randomId, mediaId, replyTo, selfId, nextPts(account), silent, location, contact, entities, quote)
-                        : WaysGramChats.send(account, peer, text, randomId, mediaId, replyTo, selfId, nextPts(account), silent, location, contact, entities, quote, null, identity);
-            }
-            return WaysGramChats.send(account, peer, text, randomId, mediaId, replyTo, selfId, nextPts(account), silent, location, contact, entities, quote, card, identity);
+            return WaysGramChats.send(account, peer, text, randomId, mediaId, replyTo, selfId,
+                    nextPts(account), silent, location, contact, entities, quote, card, identity, approvedFee);
         }
         // WaysGram saved messages: the recipient is the account itself.
         if (!(peer instanceof TLRPC.TL_inputPeerUser) && !(peer instanceof TLRPC.TL_inputPeerSelf)) {

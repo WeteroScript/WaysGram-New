@@ -104,6 +104,39 @@ class PaidMessagesChecks(unittest.TestCase):
         self.assertIn("sendTo(account, send.peer, send.message, send.random_id", transport)
         self.assertIn("token, fee, -1L);", transport)
 
+    def test_group_paid_messages_are_confirmed_and_carried_for_text_media_and_albums(self):
+        transport = self.source("tgnet/WaysGramTransport.java")
+        for marker in (
+            "private static boolean groupPaidMessageRequest(TLObject request)",
+            "request instanceof TLRPC.TL_messages_sendMessage",
+            "request instanceof TLRPC.TL_messages_sendMedia",
+            "request instanceof TLRPC.TL_messages_sendMultiMedia",
+            "private static void confirmPaidGroupMessage(",
+            '"GROUP_MESSAGE_FEE_REQUIRED".equals(code)',
+            "result = handle(account, request, token, fee);",
+            "approvedPaidFee,\n                    sendAsIdentity(send.send_as, send.peer));",
+            "WaysGramMessages.sendAlbum(account, album, selfId, approvedPaidFee)",
+        ):
+            self.assertIn(marker, transport, marker)
+        self.assertIn("WaysGramChats.send(account, peer, text, randomId, mediaId, replyTo, selfId,", transport)
+        self.assertIn("paidMessageRequest = directText || groupPaidRequest", transport)
+        self.assertIn("paidTextPrefs().edit().putInt(slot, fee)", transport)
+
+        chats = self.source("tgnet/WaysGramChats.java")
+        self.assertIn('body.put("approved_fee_stars", approvedPaidFee);', chats)
+        self.assertIn("WaysGramMapper.readPaidMessage(message, m);", chats)
+        self.assertIn('"paid_messages_available"', chats)
+        self.assertIn('"send_paid_messages_stars"', chats)
+        self.assertIn('"/api/groups/" + groupId + "/paid-messages"', chats)
+
+        messages = self.source("tgnet/WaysGramMessages.java")
+        self.assertIn("sendAlbum(int account, TLRPC.TL_messages_sendMultiMedia req, long selfId,", messages)
+        self.assertIn('body.put("approved_fee_stars", approvedPaidFee);', messages)
+        paid = self.source("ui/WaysGramPaidDm.java")
+        self.assertIn("int fee, int messagesCount,", paid)
+        self.assertIn("Math.max(1, messagesCount)", paid)
+        self.assertIn("AlertsCreator.showPayForMessageAlert(account, peer", paid)
+
     def test_stock_paid_message_alert_is_available(self):
         alerts = self.source("ui/Components/AlertsCreator.java")
         self.assertIn("public static void showPayForMessageAlert(int currentAccount, long dialogId, long stars", alerts)

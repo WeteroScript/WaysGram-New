@@ -164,7 +164,8 @@ public class WaysGramChats {
         chat.id = g.optLong("id");
         chat.title = g.optString("title", "");
         chat.photo = WaysGramMapper.chatPhoto(g.optString("avatar_media_id", ""));
-        chat.default_banned_rights = bannedRightsFor(g.optInt("default_send_restrictions"));
+        chat.default_banned_rights = bannedRightsFor(g.optInt("default_send_restrictions"),
+                g.optBoolean("default_change_info_restricted"));
         chat.participants_count = Math.max(1, g.optInt("member_count", 1));
         chat.date = g.optInt("joined_at", g.optInt("created_at", (int) (System.currentTimeMillis() / 1000)));
         chat.version = 1;
@@ -345,6 +346,7 @@ public class WaysGramChats {
         message.message = m.optString("body", "");
         message.media = new TLRPC.TL_messageMediaEmpty();
         message.flags = TLRPC.MESSAGE_FLAG_HAS_FROM_ID | TLObject.FLAG_9 | (message.out ? TLObject.FLAG_1 : 0);
+        WaysGramMapper.readPaidMessage(message, m);
         return message;
     }
 
@@ -389,7 +391,8 @@ public class WaysGramChats {
         chat.flags |= TLObject.FLAG_13;
         chat.title = g.optString("title", "");
         chat.photo = WaysGramMapper.chatPhoto(g.optString("avatar_media_id", ""));
-        chat.default_banned_rights = bannedRightsFor(g.optInt("default_send_restrictions"));
+        chat.default_banned_rights = bannedRightsFor(g.optInt("default_send_restrictions"),
+                g.optBoolean("default_change_info_restricted"));
         chat.participants_count = Math.max(1, g.optInt("member_count", 1));
         chat.date = g.optInt("joined_at", g.optInt("created_at", (int) (System.currentTimeMillis() / 1000)));
         chat.megagroup = true;
@@ -666,12 +669,24 @@ public class WaysGramChats {
      *                 (анонимный админ); &gt; 0 — серверный id публичного канала пользователя.
      */
     public static TLObject send(int account, TLRPC.InputPeer peer, String text, long randomId, String mediaId, int replyTo, long selfId, int globalPts, boolean silent, JSONObject location, JSONObject contact, JSONArray entities, JSONObject quote, JSONObject card, long identity) throws WaysGramApi.ApiException {
+        return send(account, peer, text, randomId, mediaId, replyTo, selfId, globalPts, silent,
+                location, contact, entities, quote, card, identity, null);
+    }
+
+    public static TLObject send(int account, TLRPC.InputPeer peer, String text, long randomId, String mediaId,
+                                int replyTo, long selfId, int globalPts, boolean silent, JSONObject location,
+                                JSONObject contact, JSONArray entities, JSONObject quote, JSONObject card,
+                                long identity, Integer approvedPaidFee) throws WaysGramApi.ApiException {
+        if (approvedPaidFee != null && !isGroup(peer)) {
+            throw new WaysGramApi.ApiException(400, "PAID_MESSAGES_NOT_SUPPORTED");
+        }
         JSONObject body = new JSONObject();
         try {
             if (card != null) body.put("card", card);
             body.put("body", text == null ? "" : text);
             if (entities != null && entities.length() != 0) body.put("entities", entities);
             body.put("silent", silent);
+            if (approvedPaidFee != null) body.put("approved_fee_stars", approvedPaidFee);
             if (quote != null) body.put("quote", quote);
             if (location != null) {
                 body.put("location", location);
@@ -1109,7 +1124,12 @@ public class WaysGramChats {
 
     /** WaysGram stores what members may send as a bitmask; the UI works with denied flags. */
     static TLRPC.TL_chatBannedRights bannedRightsFor(int mask) {
+        return bannedRightsFor(mask, false);
+    }
+
+    static TLRPC.TL_chatBannedRights bannedRightsFor(int mask, boolean changeInfoRestricted) {
         TLRPC.TL_chatBannedRights rights = new TLRPC.TL_chatBannedRights();
+        rights.change_info = changeInfoRestricted;
         rights.send_messages = (mask & 1) != 0;
         rights.send_plain = (mask & 1) != 0;
         rights.send_inline = (mask & 1) != 0;
@@ -1156,7 +1176,8 @@ public class WaysGramChats {
     }
 
     public static TLObject setGroupDefaultRights(int account, long chatId, TLRPC.TL_chatBannedRights rights) throws WaysGramApi.ApiException {
-        JSONObject body = settings("default_send_restrictions", sendRestrictionMask(rights));
+        JSONObject body = settings("default_send_restrictions", sendRestrictionMask(rights),
+                "change_info_restricted", rights != null && rights.change_info);
         try {
             WaysGramApi.put(account, "/api/groups/" + chatId + "/send-permissions", body);
         } catch (WaysGramApi.ApiException e) {
@@ -1757,6 +1778,13 @@ public class WaysGramChats {
         full.flags2 |= TLObject.FLAG_13;
         full.wallpaper = wallpaper(account, group.optJSONObject("wallpaper"));
         if (full.wallpaper != null) full.flags2 |= 128;
+        full.paid_messages_available = group.optBoolean("paid_messages_available");
+        if (full.paid_messages_available) full.flags2 |= TLObject.FLAG_20;
+        long paidMessagesStars = group.optLong("send_paid_messages_stars", group.optLong("paid_messages_stars", 0));
+        if (paidMessagesStars > 0) {
+            full.send_paid_messages_stars = paidMessagesStars;
+            full.flags2 |= TLObject.FLAG_21;
+        }
         boolean canViewStats = group.optBoolean("can_view_stats", admin);
         full.can_view_stats = canViewStats;
         if (canViewStats) full.flags |= TLObject.FLAG_20;
@@ -2264,6 +2292,23 @@ public class WaysGramChats {
         }
         refreshChatProfile(account, groupId);
         return new TLRPC.TL_updates();
+    }
+
+    public static TLRPC.TL_updates setGroupPaidMessagesPrice(int account, long groupId, long stars, long selfId)
+            throws WaysGramApi.ApiException {
+        JSONObject body = settings("enabled", stars > 0, "stars", Math.max(0, Math.min(10000, stars)));
+        try {
+            WaysGramApi.put(account, "/api/groups/" + groupId + "/paid-messages", body);
+        } catch (WaysGramApi.ApiException e) {
+            if (e.status == 403) throw new WaysGramApi.ApiException(400, "CHAT_ADMIN_REQUIRED");
+            throw e;
+        }
+        JSONObject group = WaysGramApi.get(account, "/api/groups/" + groupId);
+        TLRPC.TL_updates updates = new TLRPC.TL_updates();
+        updates.date = (int) (System.currentTimeMillis() / 1000);
+        updates.chats.add(toMegagroup(account, group, selfId));
+        refreshChatProfile(account, groupId);
+        return updates;
     }
 
     static TLObject groupGetChannels(int account, TLRPC.TL_channels_getChannels req, long selfId) throws WaysGramApi.ApiException {

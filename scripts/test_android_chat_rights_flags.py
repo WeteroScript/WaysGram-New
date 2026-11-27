@@ -61,7 +61,7 @@ class ChatRightsFlags(unittest.TestCase):
             self.assertIn('normalized(rights)', self.method_body(self.chats, signature), signature)
 
     def test_ban_restrictions_keep_both_flags_and_send_decisions(self):
-        body = self.method_body(self.chats, 'static TLRPC.TL_chatBannedRights bannedRightsFor(int mask)')
+        body = self.method_body(self.chats, 'static TLRPC.TL_chatBannedRights bannedRightsFor(int mask, boolean changeInfoRestricted)')
         self.assertIn('TLRPC.TL_chatBannedRights stable = normalized(rights);', body)
         self.assertIn('stable.send_messages |= (mask & 1) != 0;', body)
         self.assertIn('stable.send_media |= (mask & 2) != 0;', body)
@@ -79,6 +79,23 @@ class ChatRightsFlags(unittest.TestCase):
         }
         for field, bit in expected.items():
             self.assertIn(f'rights.{field} = (mask & {bit}) != 0;', body, field)
+
+    def test_default_change_info_is_mapped_and_saved_separately(self):
+        self.assertIn("bannedRightsFor(int mask, boolean changeInfoRestricted)", self.chats)
+        self.assertIn("rights.change_info = changeInfoRestricted;", self.chats)
+        for signature in (
+            "public static TLRPC.TL_chat toChat(int account, JSONObject g, long selfId)",
+            "public static TLRPC.TL_channel toMegagroup(int account, JSONObject g, long selfId)",
+        ):
+            body = self.method_body(self.chats, signature)
+            self.assertIn('g.optBoolean("default_change_info_restricted")', body, signature)
+            self.assertIn("bannedRightsFor(g.optInt(\"default_send_restrictions\")", body, signature)
+        setter = self.method_body(
+            self.chats,
+            "public static TLObject setGroupDefaultRights(int account, long chatId, TLRPC.TL_chatBannedRights rights)",
+        )
+        self.assertIn('"change_info_restricted", rights != null && rights.change_info', setter)
+        self.assertIn('"/send-permissions"', setter)
 
     def test_participant_rights_are_never_invented(self):
         """Участник без назначения не должен получать маску прав из воздуха.

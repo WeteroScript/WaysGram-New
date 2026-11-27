@@ -76,8 +76,8 @@ class GroupHistoryCrashChecks(unittest.TestCase):
                          'колбэк вызывается только из deliver()')
         self.assertIn('try {\n            delegate.run(response, error);\n        } catch (Throwable t) {\n'
                       '            FileLog.e(t);', self.transport)
-        self.assertEqual(self.transport.count('deliver(delegate'), 3,
-                         'execute() и оба ответа платного сообщения идут через deliver()')
+        self.assertEqual(self.transport.count('deliver(delegate'), 7,
+                         'execute() и оба direct/group paid-message ответных пути идут через deliver()')
 
 
 if __name__ == '__main__':

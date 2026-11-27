@@ -46,6 +46,49 @@ class ReactionRegressionChecks(unittest.TestCase):
         self.assertIn("currentChat == null", line)
         self.assertNotIn("waysGramReactionMenu = true", chat)
 
+    def test_waysgram_add_plays_overlay_but_removal_does_not(self):
+        chat = self.source("ui/ChatActivity.java")
+        toggle_start = chat.index("    private boolean toggleWaysGramReaction(")
+        toggle_end = chat.index("    private void showWaysGramReactionAnimation(", toggle_start)
+        toggle = chat[toggle_start:toggle_end]
+        self.assertIn("return !selected;", toggle)
+
+        animation_start = toggle_end
+        animation_end = chat.index("    public void selectReaction(", animation_start)
+        animation = chat[animation_start:animation_end]
+        self.assertIn("ReactionsEffectOverlay.show(ChatActivity.this", animation)
+        self.assertIn("ReactionsEffectOverlay.startAnimation();", animation)
+        self.assertIn("ReactionsEffectOverlay.ONLY_MOVE_ANIMATION", animation)
+
+        select_start = animation_end
+        select_end = chat.index("    private void updateMessageAnimated(", select_start)
+        select = chat[select_start:select_end]
+        waysgram = select[:select.index("        if (isInScheduleMode()")]
+        self.assertIn("boolean added = toggleWaysGramReaction(", waysgram)
+        self.assertIn("if (added) {\n                    showWaysGramReactionAnimation(", waysgram)
+
+    def test_regular_reaction_uses_the_local_animation_fallback(self):
+        chat = self.source("ui/ChatActivity.java")
+        select_start = chat.index("    public void selectReaction(")
+        select_end = chat.index("    private void updateMessageAnimated(", select_start)
+        select = chat[select_start:select_end]
+        self.assertNotIn("return false;", select,
+                         "void selectReaction must exit with return, not a boolean")
+        self.assertIn("if (primaryMessage == null || getParentActivity() == null) return;", select)
+        self.assertIn("if (added) {\n                    showWaysGramReactionAnimation(", select)
+
+        animation_start = chat.index("    private void showWaysGramReactionAnimation(")
+        animation_end = chat.index("    public void selectReaction(", animation_start)
+        animation = chat[animation_start:animation_end]
+        self.assertIn("bigEmoji\n                ? ReactionsEffectOverlay.LONG_ANIMATION\n                : ReactionsEffectOverlay.ONLY_MOVE_ANIMATION", animation)
+        self.assertIn("ReactionsEffectOverlay.startAnimation();", animation)
+
+        overlay = self.source("ui/Components/Reactions/ReactionsEffectOverlay.java")
+        self.assertIn("animationType != SHORT_ANIMATION", overlay)
+        self.assertIn("if (localEmojiFallback) {", overlay)
+        self.assertIn("Emoji.getEmojiDrawable(reaction.emojicon)", overlay)
+        self.assertIn("if (missingNativeReaction && animationType == SHORT_ANIMATION) return;", overlay)
+
     def test_unsupported_operation_does_not_show_a_bulletin(self):
         bulletin = self.source("ui/Components/BulletinFactory.java")
         self.assertIn("private static boolean unsupportedWaysGramOperation(String code)", bulletin)

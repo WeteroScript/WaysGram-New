@@ -879,8 +879,12 @@ class NativeMessagingSourceChecks(unittest.TestCase):
     def test_single_sends_keep_silent_and_reject_unsupported_schedule(self):
         transport = self.source('tgnet/WaysGramTransport.java')
         chats = self.source('tgnet/WaysGramChats.java')
-        text = transport[transport.index('request instanceof TLRPC.TL_messages_sendMessage'):transport.index('request instanceof TLRPC.TL_messages_sendMedia')]
-        media = transport[transport.index('request instanceof TLRPC.TL_messages_sendMedia'):transport.index('request instanceof TLRPC.TL_messages_sendMultiMedia')]
+        handle_start = transport.index('private static TLObject handle(')
+        text_start = transport.index('} else if (request instanceof TLRPC.TL_messages_sendMessage) {', handle_start)
+        media_start = transport.index('} else if (request instanceof TLRPC.TL_messages_sendMedia) {', text_start)
+        album_start = transport.index('} else if (request instanceof TLRPC.TL_messages_sendMultiMedia) {', media_start)
+        text = transport[text_start:media_start]
+        media = transport[media_start:album_start]
         self.assertIn('WaysGramScheduled.send(account, send, selfId, expectedToken)', text)
         self.assertIn('if (send.schedule_repeat_period != 0)', text)
         self.assertIn('send.schedule_date != 0 || send.schedule_repeat_period != 0', media)
@@ -889,7 +893,7 @@ class NativeMessagingSourceChecks(unittest.TestCase):
             self.assertIn('send.silent', section)
         self.assertLess(media.index('SCHEDULE_NOT_SUPPORTED'), media.index('WaysGramMedia.uploadFor'))
         direct = transport[transport.index('private static TLObject sendTo('):transport.index('private static TLRPC.TL_error mapError')]
-        self.assertIn('nextPts(account), silent, location, contact, entities, quote)', direct)
+        self.assertIn('nextPts(account), silent, location, contact, entities, quote, card, identity, approvedFee)', direct)
         self.assertIn('body.put("silent", silent)', direct)
         self.assertGreater(direct.index('body.put("silent", silent)'), direct.index('body.put("location", location)'))
         group = chats[chats.index('public static TLObject send('):chats.index('// ----------------------------------------------------------------', chats.index('public static TLObject send('))]

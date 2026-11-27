@@ -29,10 +29,16 @@ public final class WaysGramPaidDm {
 
     /**
      * Stock Telegram paid-message confirmation. WaysGram only appends the internal
-     * debit to the confirmed callback (see WaysGramTransport.confirmPaidText); all
-     * UI strings, balance checks and "don't ask again" behaviour are Telegram's own.
+     * debit to the confirmed callback (see WaysGramTransport); UI strings, balance
+     * checks and "don't ask again" behaviour stay in Telegram's native alert.
      */
-    public static void confirm(int account, long peer, String token, int fee, boolean retry, Runnable approved, Runnable cancelled) {
+    public static void confirm(int account, long peer, String token, int fee, boolean retry,
+                               Runnable approved, Runnable cancelled) {
+        confirm(account, peer, token, fee, 1, retry, approved, cancelled);
+    }
+
+    public static void confirm(int account, long peer, String token, int fee, int messagesCount,
+                               boolean retry, Runnable approved, Runnable cancelled) {
         AndroidUtilities.runOnUIThread(() -> {
             BaseFragment fragment = LaunchActivity.getLastFragment();
             if (!active(fragment, account, token) || UserConfig.selectedAccount != account
@@ -42,7 +48,8 @@ public final class WaysGramPaidDm {
             }
             AtomicBoolean finished = new AtomicBoolean();
             Runnable reject = () -> { if (finished.compareAndSet(false, true)) cancelled.run(); };
-            org.telegram.ui.Components.AlertsCreator.showPayForMessageAlert(account, peer, Math.max(0, fee), 1, () -> {
+            org.telegram.ui.Components.AlertsCreator.showPayForMessageAlert(account, peer, Math.max(0, fee),
+                    Math.max(1, messagesCount), () -> {
                 if (!active(fragment, account, token) || UserConfig.selectedAccount != account
                         || LaunchActivity.getLastFragment() != fragment) {
                     reject.run();

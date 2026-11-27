@@ -97,7 +97,7 @@ class P0RegressionChecks(unittest.TestCase):
     def test_paid_reaction_carries_the_session_token_at_any_time(self):
         transport = self.source("tgnet/WaysGramTransport.java")
         self.assertIn("|| request instanceof TLRPC.TL_messages_sendPaidReaction;", transport)
-        self.assertIn("handle(account, request, reactionToken)", transport)
+        self.assertIn("handle(account, request, reactionToken, null)", transport)
         messages = self.source("tgnet/WaysGramMessages.java")
         self.assertIn('"/api/channels/" + serverId + "/messages/" + messageId + "/paid-reactions"', messages)
         self.assertIn("body, token, 30000, key);", messages)
