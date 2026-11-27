@@ -7555,6 +7555,42 @@ public class StarGiftSheet extends BottomSheetWithRecyclerListView implements No
                 && !(roller != null && roller.isRolling());
     }
 
+    /** Starts the existing idempotent WaysGram transfer flow for a recipient already chosen by GiftSheet. */
+    public void openWaysGramTransferTo(long recipient, Runnable onSuccess) {
+        final String serial = waysGramGiftSerial();
+        final long ownerId = UserConfig.getInstance(currentAccount).getClientUserId();
+        if (!canTransferWaysGramGift() || serial == null || recipient <= 0 || recipient == ownerId
+                || waysGramTransferInFlight || waysGramPinInFlight || waysGramWearInFlight) {
+            return;
+        }
+        final android.content.SharedPreferences pending = getContext().getSharedPreferences(
+                "waysgram_gift_transfer_" + currentAccount + "_" + ownerId, Context.MODE_PRIVATE);
+        final String prefix = serial + ":";
+        final String pendingKey = pending.getString(prefix + "key", "");
+        if (!TextUtils.isEmpty(pendingKey)) {
+            long pendingRecipient = pending.getLong(prefix + "recipient", 0);
+            long created = pending.getLong(prefix + "created", 0);
+            if (pendingRecipient != recipient) {
+                new AlertDialog.Builder(getContext(), resourcesProvider)
+                        .setTitle("Проверьте передачу")
+                        .setMessage("Для этого подарка уже есть незавершённый запрос другому получателю. Проверьте инвентарь и переписку перед новой передачей.")
+                        .setPositiveButton(getString(R.string.OK), null).show();
+                return;
+            }
+            if (pendingRecipient <= 0 || created <= 0 || System.currentTimeMillis() - created >= 6L * 24 * 60 * 60 * 1000) {
+                new AlertDialog.Builder(getContext(), resourcesProvider)
+                        .setTitle("Проверьте передачу")
+                        .setMessage("Ответ на предыдущую передачу не получен. Проверьте инвентарь и переписку; автоматический повтор по старому ключу больше недоступен.")
+                        .setPositiveButton(getString(R.string.OK), null).show();
+                return;
+            }
+            confirmWaysGramTransfer(serial, recipient, pendingKey, pending, prefix, true, onSuccess);
+            return;
+        }
+        String key = "wg-nft-transfer-" + java.util.UUID.randomUUID().toString();
+        confirmWaysGramTransfer(serial, recipient, key, pending, prefix, false, onSuccess);
+    }
+
     private void openWaysGramTransfer() {
         final String serial = waysGramGiftSerial();
         if (!canTransferWaysGramGift() || serial == null || waysGramTransferInFlight || waysGramPinInFlight || waysGramWearInFlight) return;
@@ -7596,6 +7632,11 @@ public class StarGiftSheet extends BottomSheetWithRecyclerListView implements No
 
     private void confirmWaysGramTransfer(String serial, long recipient, String key,
             android.content.SharedPreferences pending, String prefix, boolean retry) {
+        confirmWaysGramTransfer(serial, recipient, key, pending, prefix, retry, null);
+    }
+
+    private void confirmWaysGramTransfer(String serial, long recipient, String key,
+            android.content.SharedPreferences pending, String prefix, boolean retry, Runnable onSuccess) {
         String name = DialogObject.getShortName(currentAccount, recipient);
         new AlertDialog.Builder(getContext(), resourcesProvider)
                 .setTitle(retry ? "Повторить передачу?" : "Передать подарок?")
@@ -7634,6 +7675,13 @@ public class StarGiftSheet extends BottomSheetWithRecyclerListView implements No
                                 waysGramTransferInFlight = false;
                                 org.telegram.messenger.waysgram.WaysGramGiftUpgrade.notifyDataChanged();
                                 android.widget.Toast.makeText(getContext(), "Подарок передан", android.widget.Toast.LENGTH_LONG).show();
+                                if (onSuccess != null) {
+                                    try {
+                                        onSuccess.run();
+                                    } catch (Exception callbackError) {
+                                        org.telegram.messenger.FileLog.e(callbackError);
+                                    }
+                                }
                                 dismiss();
                             });
                         } catch (Exception error) {

@@ -200,6 +200,51 @@ class AndroidGiftSourceChecks(unittest.TestCase):
         self.assertIn('WaysGramGiftUpgrade.notifyDataChanged()', block)
         self.assertIn('не транзакция в блокчейне', block)
 
+    def test_gift_shop_mine_tab_shows_transferable_waysgram_nfts_and_sends_them(self):
+        sheet = self.source("ui/Gifts/GiftSheet.java")
+        loader_start = sheet.index("private void loadWaysGramMyGifts()")
+        loader_end = sheet.index("private void updatePremiumTiers()", loader_start)
+        loader = sheet[loader_start:loader_end]
+        self.assertIn("WaysGramSessionStore.getInstance", loader)
+        self.assertIn("client.loadMyGifts", loader)
+        self.assertIn("WaysGramProfileGiftsController.toNativeGifts(inventory, currentAccount)", loader)
+        self.assertIn('gift.gift instanceof TL_stars.TL_starGiftUnique', loader)
+        self.assertIn('jsonBoolean(item, "is_listed")', loader)
+        self.assertIn('jsonBoolean(item, "is_auctioned")', loader)
+        self.assertIn('item.has("can_transfer")', loader)
+        self.assertIn('item.optLong("owner_id", currentUserId) != currentUserId', loader)
+
+        fill = sheet[sheet.index("public void fillItems("):sheet.index("private static long shopPrice(")]
+        self.assertIn("waysGramMyGiftsLoading || !waysGramMyGifts.isEmpty()", fill)
+        self.assertIn("tabs.add(getString(R.string.Gift2TabMine))", fill)
+        self.assertIn("tabs.add(getString(R.string.Gift2TabCollectibles))", fill)
+        self.assertLess(fill.index('tabs.add(getString(R.string.Gift2TabMine))'),
+                        fill.index('tabs.add(getString(R.string.Gift2TabCollectibles))'))
+        self.assertIn("waysGramMyGifts", fill)
+        self.assertIn("myGifts.gifts", fill)  # Existing Telegram gift-transfer entries remain in the same tab.
+        self.assertIn("TextUtils.equals(ag.slug, bg.slug)", sheet)  # Distinguish native and WaysGram ids in the diff.
+
+        click = sheet[sheet.index("recyclerListView.setOnItemClickListener"):sheet.index("loadWaysGramMyGifts();")]
+        gift_click = click[click.index("else if (item.object instanceof TL_stars.StarGift)"):]
+        self.assertIn("waysGramGiftSerial(gift)", gift_click)
+        self.assertIn("openWaysGramTransfer(waysGramGift)", gift_click)
+        self.assertLess(gift_click.index("openWaysGramTransfer(waysGramGift)"), gift_click.index("new SendGiftSheet"))
+        self.assertIn("sheet.openWaysGramTransferTo(dialogId", sheet)
+
+        strings_en = self.archive.read("WaysGram-Android/TMessagesProj/src/main/res/values/strings.xml").decode("utf-8")
+        strings_ru = self.archive.read("WaysGram-Android/TMessagesProj/src/main/res/values-ru/strings.xml").decode("utf-8")
+        self.assertIn('<string name="Gift2TabMine">My Gifts</string>', strings_en)
+        self.assertIn('<string name="Gift2TabMine">Мои</string>', strings_ru)
+
+        transfer = self.source("ui/Stars/StarGiftSheet.java")
+        transfer_start = transfer.index("public void openWaysGramTransferTo(")
+        transfer_end = transfer.index("public void onTransferClick", transfer_start)
+        flow = transfer[transfer_start:transfer_end]
+        self.assertIn('"/api/messages/gift", body, key', flow)
+        self.assertIn("confirmWaysGramTransfer(serial, recipient, key, pending, prefix, false, onSuccess)", flow)
+        self.assertIn("if (onSuccess != null)", flow)
+        self.assertIn("WaysGramGiftUpgrade.notifyDataChanged()", flow)
+
     def test_catalog_does_not_wait_for_all_artwork(self):
         bridge = self.source("tgnet/WaysGramGifts.java")
         start = bridge.index("public static TL_stars.StarGifts catalog(")
@@ -381,12 +426,38 @@ class AndroidGiftSourceChecks(unittest.TestCase):
         self.assertIn("waysGramGiftsController.hasVisibleGifts()", tabs)
         controller = self.source("messenger/waysgram/WaysGramProfileGiftsController.java")
         self.assertIn("boolean visible = !nativeGifts.isEmpty()", controller)
-        self.assertIn("if (hasVisibleGifts != visible)", controller)
+        self.assertIn("boolean visibilityChanged = hasVisibleGifts != visible", controller)
+        self.assertIn("hasVisibleGifts = visible", controller)
         self.assertIn("waysGramProfileOwner > 0 && org.telegram.tgnet.WaysGramTransport.ENABLED", tabs)
         self.assertIn("hasPhotoVideoTab != scrollSlidingTextTabStrip.hasTab(TAB_PHOTOVIDEO)", tabs)
         self.assertIn("if (hasPhotoVideoTab)", tabs)
         self.assertLess(tabs.index("tabs.add(new Pair(TAB_PHOTOVIDEO"),
                         tabs.index("tabs.add(new Pair(TAB_WAYSGRAM_GIFTS"))
+
+    def test_profile_gift_tabs_show_three_animated_previews_and_refresh_them(self):
+        layout = self.source("ui/Components/SharedMediaLayout.java")
+        tabs = layout.split("public void updateTabs(boolean animated)", 1)[1].split(
+            "private void startStopVisibleGifs", 1)[0]
+        self.assertIn('giftsContainer.getLastEmojis(null)', tabs)
+        self.assertIn('TextUtils.concat(getString(titleRes), previews)', tabs)
+        self.assertIn('waysGramGiftsContainer.getLastEmojis(null)', tabs)
+        self.assertIn('waysGramGiftsLastHash != waysGramGiftsContainer.getLastEmojisHash()', tabs)
+        self.assertIn('waysGramGiftsLastHash = waysGramGiftsContainer != null', tabs)
+
+        gifts = self.source("ui/Gifts/ProfileGiftsContainer.java")
+        self.assertIn('gifts.size() < 3', gifts)
+        self.assertIn('new AnimatedEmojiSpan(sticker, .9f, fontMetricsInt)', gifts)
+        self.assertIn('Pair<Pair<Integer, Long>, Boolean>', gifts)
+
+        strip = self.source("ui/Components/ScrollSlidingTextTabStrip.java")
+        self.assertIn('new AnimatedEmojiSpan.TextViewEmojis(getContext())', strip)
+        emoji = self.source("ui/Components/AnimatedEmojiSpan.java")
+        self.assertIn('AnimatedEmojiSpan.drawAnimatedEmojis(canvas, getLayout(), stack', emoji)
+
+        controller = self.source("messenger/waysgram/WaysGramProfileGiftsController.java")
+        self.assertIn('if (changed || visibilityChanged)', controller)
+        self.assertIn('notifyInventoryUpdated();', controller)
+        self.assertIn('setInventoryUpdatedListener', layout)
 
     def test_profile_labels_refresh_does_not_reload_gifts(self):
         profile = self.source("messenger/waysgram/WaysGramUserProfileFragment.java")

@@ -228,6 +228,9 @@ public final class WaysGramExtras {
         String path = "/api/chats/" + peer.scope + "/" + peer.chatId + "/wallpaper";
         if (req.revert) {
             WaysGramApi.delete(account, path);
+            // Clearing a personal override may reveal the shared group/channel wallpaper.
+            // Refresh this session because the local revert happened before the REST reply.
+            WaysGramChats.chatChanged(account, peer.scope, peer.chatId);
             return updates;
         }
         JSONObject body = new JSONObject();

@@ -106,15 +106,21 @@ public final class WaysGramProfileGiftsController {
         }
     }
 
-    private Runnable inventoryVisibilityChanged;
+    private Runnable inventoryUpdatedListener;
     private boolean hasVisibleGifts;
 
     public boolean hasVisibleGifts() {
         return hasVisibleGifts;
     }
 
-    public void setInventoryVisibilityChanged(Runnable listener) {
-        inventoryVisibilityChanged = listener;
+    public void setInventoryUpdatedListener(Runnable listener) {
+        inventoryUpdatedListener = listener;
+    }
+
+    private void notifyInventoryUpdated() {
+        if (inventoryUpdatedListener != null) {
+            inventoryUpdatedListener.run();
+        }
     }
 
     public void dispose() {
@@ -166,9 +172,13 @@ public final class WaysGramProfileGiftsController {
                         container.replaceWaysGramInventory(nativeGifts);
                     }
                     boolean visible = !nativeGifts.isEmpty();
-                    if (hasVisibleGifts != visible) {
-                        hasVisibleGifts = visible;
-                        if (inventoryVisibilityChanged != null) inventoryVisibilityChanged.run();
+                    boolean visibilityChanged = hasVisibleGifts != visible;
+                    hasVisibleGifts = visible;
+                    // The tab previews can change while the tab remains visible (gift order,
+                    // new gifts, or an animation document becoming available), so publish data
+                    // updates as well as visibility changes.
+                    if (changed || visibilityChanged) {
+                        notifyInventoryUpdated();
                     }
                     downloadGiftAnimations(inventory);
                     if (pendingRefresh) {
@@ -865,6 +875,9 @@ public final class WaysGramProfileGiftsController {
         restoreLivePinState(nativeGifts);
         container.replaceWaysGramInventory(nativeGifts);
         updateProfileCover(nativeGifts);
+        // The first three usable animation documents may have appeared without any inventory
+        // JSON change; refresh the profile tab label after rebuilding the native gift objects.
+        notifyInventoryUpdated();
     }
 
     /**

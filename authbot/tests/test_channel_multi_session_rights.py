@@ -64,6 +64,47 @@ def test_three_sessions_do_not_grant_channel_rights(env) -> None:
     run(scenario())
 
 
+def test_admin_without_post_right_cannot_publish_through_any_channel_route(env) -> None:
+    _, app = env
+
+    async def scenario() -> None:
+        async with await client_for(app) as client:
+            owner, admin = headers(101), headers(102)
+            channel = await client.post(
+                "/api/channels", headers=owner,
+                json={"title": "No post right", "username": "no_post_right", "is_public": True},
+            )
+            cid = channel.json()["id"]
+            root = f"/api/channels/{cid}"
+            assert (await client.post(root + "/admins", headers=owner,
+                                      json={"telegram_id": 102, "rights": 64})).status_code == 201
+            profile = (await client.get(root, headers=admin)).json()
+            assert profile["admin_rights"] == 64
+            assert profile["can_post"] is False
+
+            source = await client.post(root + "/messages", headers=owner, json={"body": "forward source"})
+            assert source.status_code == 201, source.text
+            denied_post = await client.post(root + "/messages", headers=admin, json={"body": "not allowed"})
+            assert denied_post.status_code == 403, denied_post.text
+            denied_album = await client.post(
+                root + "/messages/album", headers=admin,
+                json={"media_ids": ["0" * 32, "1" * 32], "caption": ""},
+            )
+            assert denied_album.status_code == 403, denied_album.text
+            denied_forward = await client.post("/api/forward", headers=admin, json={
+                "source_scope": "channel", "source_peer_id": cid,
+                "target_scope": "channel", "target_peer_id": cid,
+                "message_ids": [source.json()["id"]],
+            })
+            assert denied_forward.status_code == 403, denied_forward.text
+            denied_topic = await client.post(
+                root + "/topics/1/messages", headers=admin, json={"body": "not allowed in a topic"},
+            )
+            assert denied_topic.status_code == 403, denied_topic.text
+
+    run(scenario())
+
+
 def test_admin_rights_are_per_session_owner_not_per_authorization(env) -> None:
     path, app = env
 

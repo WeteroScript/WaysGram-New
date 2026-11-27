@@ -45,6 +45,7 @@ class ChatWallpaper(unittest.TestCase):
         self.assertIn('WaysGramApi.put(account, path, body);', handler)
         self.assertIn('if (req.revert) {', handler)
         self.assertIn('WaysGramApi.delete(account, path);', handler)
+        self.assertIn('WaysGramChats.chatChanged(account, peer.scope, peer.chatId);', handler)
         self.assertIn('if ("dm".equals(peer.scope)) {', handler)
 
     def test_settings_are_serialised_field_by_field(self):
@@ -116,8 +117,9 @@ class ChatWallpaper(unittest.TestCase):
         self.assertIn('out.put("document_id", documentId);', body)
         # Сервер сохраняет обои как произвольный JSON, поэтому `document_id` переживает
         # перезапуск сервера и возвращается в карточке чата.
-        self.assertIn('wallpaper = {key: value for key, value in wallpaper.items() if value is not None}',
+        self.assertIn('wallpaper = {key: value for key, value in (wallpaper or {}).items() if value is not None}',
                       self.server)
+        self.assertIn('out.put("for_both", req.for_both);', body)
 
     def test_applied_wallpaper_is_the_photo_when_a_file_was_uploaded(self):
         body = self.body(self.theme, 'private void applyWaysGramWallpaper(')
@@ -133,6 +135,14 @@ class ChatWallpaper(unittest.TestCase):
             used |= set(re.findall(r'WaysGramWallpapers\.(\w+)\(', self.archive.read(BASE + name).decode('utf-8')))
         self.assertTrue(used)
         self.assertEqual(used - declared - {'ApiException'}, set())
+
+    def test_chat_wallpaper_is_shared_for_chat_admins_and_notified_to_members(self):
+        self.assertIn('for telegram_id in (uid, 0):', self.server)
+        self.assertIn('can_share = await group_can_change_info(db, chat_id, membership)', self.server)
+        self.assertIn('can_share = await channel_has_right(db, chat_id, uid, 64)', self.server)
+        self.assertIn('target_uid = 0 if shared else uid', self.server)
+        self.assertIn('record_event(db, scope, 0, "chat_changed", uid, chat_id=chat_id)', self.server)
+        self.assertIn('CREATE TABLE IF NOT EXISTS main.chat_wallpaper_migrations', self.server)
 
     def test_server_stores_and_returns_the_wallpaper(self):
         self.assertIn('@router.put("/api/chats/{scope}/{chat_id}/wallpaper")', self.server)

@@ -2168,10 +2168,13 @@ public class ProfileGiftsContainer extends FrameLayout implements NotificationCe
         }
     }
 
-    private final static HashMap<Pair<Integer, Long>, CharSequence> cachedLastEmojis = new HashMap<>();
+    private final static HashMap<Pair<Pair<Integer, Long>, Boolean>, CharSequence> cachedLastEmojis = new HashMap<>();
     public CharSequence getLastEmojis(Paint.FontMetricsInt fontMetricsInt) {
         if (list == null) return "";
-        final Pair<Integer, Long> key = new Pair<>(UserConfig.selectedAccount, dialogId);
+        // Native Telegram gifts and the WaysGram inventory can both be shown for the same
+        // profile. Keep their animated previews separate even though they share an owner id.
+        final Pair<Pair<Integer, Long>, Boolean> key = new Pair<>(
+                new Pair<>(currentAccount, dialogId), waysGramInventory);
         if (list.gifts.isEmpty()) {
             if (list.loading) {
                 final CharSequence cached = cachedLastEmojis.get(key);

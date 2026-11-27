@@ -2272,6 +2272,34 @@ async def init_messenger_storage(database_path: Path) -> None:
             updated_at INTEGER NOT NULL,
             PRIMARY KEY(scope, chat_id, telegram_id)
         )""")
+        # Before shared chat wallpapers existed, every account had its own row. Promote the
+        # owner's wallpaper to the shared row (telegram_id=0) once, then discard personal
+        # overrides for chats that now have a shared wallpaper so every member sees it.
+        await db.execute("""CREATE TABLE IF NOT EXISTS main.chat_wallpaper_migrations (
+            version INTEGER PRIMARY KEY,
+            migrated_at INTEGER NOT NULL
+        )""")
+        cur = await db.execute("SELECT 1 FROM main.chat_wallpaper_migrations WHERE version=1")
+        if await cur.fetchone() is None:
+            await db.execute("""INSERT OR IGNORE INTO main.chat_wallpapers
+                (scope,chat_id,telegram_id,settings,updated_at)
+                SELECT 'group',g.id,0,w.settings,w.updated_at
+                FROM main.chat_wallpapers w JOIN messenger.chat_groups g ON g.id=w.chat_id
+                WHERE w.scope='group' AND w.telegram_id=g.owner_telegram_id AND w.telegram_id<>0""")
+            await db.execute("""INSERT OR IGNORE INTO main.chat_wallpapers
+                (scope,chat_id,telegram_id,settings,updated_at)
+                SELECT 'channel',c.id,0,w.settings,w.updated_at
+                FROM main.chat_wallpapers w JOIN messenger.channels c ON c.id=w.chat_id
+                WHERE w.scope='channel' AND w.telegram_id=c.owner_telegram_id AND w.telegram_id<>0""")
+            await db.execute("""DELETE FROM main.chat_wallpapers
+                WHERE telegram_id<>0 AND EXISTS (
+                    SELECT 1 FROM main.chat_wallpapers shared
+                    WHERE shared.scope=main.chat_wallpapers.scope
+                      AND shared.chat_id=main.chat_wallpapers.chat_id
+                      AND shared.telegram_id=0
+                )""")
+            await db.execute("INSERT OR IGNORE INTO main.chat_wallpaper_migrations(version,migrated_at) VALUES(1,?)",
+                             (int(time.time()),))
         await db.execute("""CREATE TABLE IF NOT EXISTS channel_admin_log (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             channel_id INTEGER NOT NULL,
@@ -12608,18 +12636,21 @@ def build_messenger_router(
         return {"channel_id": channel_id, "user_ids": targets}
 
     async def chat_wallpaper(db: Any, scope: str, chat_id: int, uid: int) -> dict[str, Any] | None:
-        """Обои, выбранные этим аккаунтом для чата («Внешний вид и эмодзи»)."""
-        cur = await db.execute(
-            "SELECT settings FROM main.chat_wallpapers WHERE scope=? AND chat_id=? AND telegram_id=?",
-            (scope, chat_id, uid))
-        row = await cur.fetchone()
-        if not row:
-            return None
-        try:
-            stored = json.loads(row[0] or "{}")
-        except (TypeError, ValueError):
-            return None
-        return stored if isinstance(stored, dict) and stored else None
+        """Личные обои участника, если они есть; иначе общие обои группы/канала."""
+        for telegram_id in (uid, 0):
+            cur = await db.execute(
+                "SELECT settings FROM main.chat_wallpapers WHERE scope=? AND chat_id=? AND telegram_id=?",
+                (scope, chat_id, telegram_id))
+            row = await cur.fetchone()
+            if row is None:
+                continue
+            try:
+                stored = json.loads(row[0] or "{}")
+            except (TypeError, ValueError):
+                continue
+            if isinstance(stored, dict) and stored:
+                return stored
+        return None
 
     STORY_CHANNEL_ACCESS = """NOT EXISTS(SELECT 1 FROM channel_bans b WHERE b.channel_id=c.id AND b.telegram_id=?
         AND (b.until_date=0 OR b.until_date>CAST(strftime('%s','now') AS INTEGER)))
@@ -12890,32 +12921,50 @@ def build_messenger_router(
     @router.put("/api/chats/{scope}/{chat_id}/wallpaper")
     async def set_chat_wallpaper(scope: Literal["group", "channel"], chat_id: int, payload: dict[str, Any],
                                  authorization: str | None = Header(default=None)) -> dict[str, Any]:
-        """Обои чата: клиент присылает настройки градиента/узора из «Внешний вид и эмодзи».
+        """Сохраняет личный вариант участника или общие обои чата.
 
-        Раньше `messages.setChatWallPaper` уходил в обработчик по умолчанию, то есть никуда:
-        выбранные обои не сохранялись и не возвращались в карточке чата, поэтому после
-        переоткрытия настроек фон снова был стандартным.
+        Обои, выбранные владельцем или участником с правом менять информацию, общие
+        для группы/канала. Остальные участники по-прежнему могут настроить свой личный фон.
+        Раньше любое изменение записывалось только под telegram_id автора, поэтому выбранные
+        владельцем обои никогда не попадали в карточки других участников.
         """
         uid = int((await current_user(authorization))["telegram_id"])
         wallpaper = payload.get("wallpaper")
         if wallpaper is not None and not isinstance(wallpaper, dict):
             raise HTTPException(400, "WALLPAPER_INVALID")
-        if wallpaper is not None:
-            wallpaper = {key: value for key, value in wallpaper.items() if value is not None}
+        wallpaper = {key: value for key, value in (wallpaper or {}).items() if value is not None}
+        share_requested = wallpaper.get("for_both", False)
+        if type(share_requested) is not bool:
+            raise HTTPException(400, "WALLPAPER_INVALID")
         async with aiosqlite.connect(db_path()) as db:
             db.row_factory = aiosqlite.Row
             await db.execute("BEGIN IMMEDIATE")
             if scope == "group":
-                await require_group_member(db, chat_id, uid)
+                membership = await require_group_member(db, chat_id, uid)
+                can_share = await group_can_change_info(db, chat_id, membership)
             else:
                 await require_channel_not_banned(db, chat_id, uid)
                 cur = await db.execute("SELECT 1 FROM channels WHERE id=?", (chat_id,))
                 if not await cur.fetchone():
                     raise HTTPException(404, "CHANNEL_NOT_FOUND")
+                can_share = await channel_has_right(db, chat_id, uid, 64)
+            if share_requested and not can_share:
+                raise HTTPException(403, "CHAT_WALLPAPER_SHARE_FORBIDDEN")
+
+            shared = can_share
+            target_uid = 0 if shared else uid
+            now = int(time.time())
+            if shared:
+                # A shared update supersedes old per-account selections. Later personal
+                # overrides remain possible and take precedence only for that one account.
+                await db.execute("DELETE FROM main.chat_wallpapers WHERE scope=? AND chat_id=? AND telegram_id<>0",
+                                 (scope, chat_id))
             await db.execute("""INSERT INTO main.chat_wallpapers(scope,chat_id,telegram_id,settings,updated_at)
                 VALUES(?,?,?,?,?) ON CONFLICT(scope,chat_id,telegram_id)
                 DO UPDATE SET settings=excluded.settings, updated_at=excluded.updated_at""",
-                (scope, chat_id, uid, json.dumps(wallpaper or {}, ensure_ascii=False), int(time.time())))
+                (scope, chat_id, target_uid, json.dumps(wallpaper, ensure_ascii=False), now))
+            if shared:
+                await record_event(db, scope, 0, "chat_changed", uid, chat_id=chat_id)
             await db.commit()
         return {"scope": scope, "chat_id": chat_id, "wallpaper": wallpaper}
 
@@ -12924,10 +12973,30 @@ def build_messenger_router(
                                    authorization: str | None = Header(default=None)) -> dict[str, Any]:
         uid = int((await current_user(authorization))["telegram_id"])
         async with aiosqlite.connect(db_path()) as db:
-            await db.execute("DELETE FROM main.chat_wallpapers WHERE scope=? AND chat_id=? AND telegram_id=?",
-                             (scope, chat_id, uid))
+            db.row_factory = aiosqlite.Row
+            await db.execute("BEGIN IMMEDIATE")
+            if scope == "group":
+                membership = await require_group_member(db, chat_id, uid)
+                can_share = await group_can_change_info(db, chat_id, membership)
+            else:
+                await require_channel_not_banned(db, chat_id, uid)
+                cur = await db.execute("SELECT 1 FROM channels WHERE id=?", (chat_id,))
+                if not await cur.fetchone():
+                    raise HTTPException(404, "CHANNEL_NOT_FOUND")
+                can_share = await channel_has_right(db, chat_id, uid, 64)
+            if can_share:
+                cur = await db.execute("DELETE FROM main.chat_wallpapers WHERE scope=? AND chat_id=? AND telegram_id=0",
+                                       (scope, chat_id))
+                await db.execute("DELETE FROM main.chat_wallpapers WHERE scope=? AND chat_id=? AND telegram_id=?",
+                                 (scope, chat_id, uid))
+                if cur.rowcount:
+                    await record_event(db, scope, 0, "chat_changed", uid, chat_id=chat_id)
+            else:
+                await db.execute("DELETE FROM main.chat_wallpapers WHERE scope=? AND chat_id=? AND telegram_id=?",
+                                 (scope, chat_id, uid))
+            wallpaper = await chat_wallpaper(db, scope, chat_id, uid)
             await db.commit()
-        return {"scope": scope, "chat_id": chat_id, "wallpaper": None}
+        return {"scope": scope, "chat_id": chat_id, "wallpaper": wallpaper}
 
     @router.get("/api/stories/all")
     async def list_all_stories(limit: int = Query(default=100, ge=1, le=100),

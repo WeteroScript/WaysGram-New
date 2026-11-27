@@ -28521,7 +28521,20 @@ public class ChatActivity extends BaseFragment implements
             chatActivityEnterView.setBotInfo(botInfo);
         }
 
-
+        // Keep the posting composer hidden even if another overlay branch made it visible.
+        // A broadcast-channel admin needs the dedicated post_messages right; an admin with
+        // other rights (or a stale cached Chat object) must not get a usable "Публикация" field.
+        // Mono-forum suggestion mode is intentionally separate: it submits a proposal, not a post.
+        boolean channelPostForbidden = currentChat != null
+                && ChatObject.isChannel(currentChat)
+                && !currentChat.megagroup
+                && !ChatObject.canPost(currentChat)
+                && !(ChatObject.isMonoForum(currentChat) && isSubscriberSuggestions);
+        if (channelPostForbidden && chatActivityEnterView != null && !chatActivityEnterView.isEditingMessage()) {
+            chatActivityEnterView.setFieldFocused(false);
+            chatActivityEnterView.setVisibility(View.INVISIBLE);
+            chatActivityEnterView.closeKeyboard();
+        }
 
         bottomOverlayChatText.setTextColorKey(accentTextButton ? Theme.key_featuredStickers_buttonText : Theme.key_glass_defaultText);
 
