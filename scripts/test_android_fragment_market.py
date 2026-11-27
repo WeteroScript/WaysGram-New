@@ -66,7 +66,8 @@ class FragmentMarketChecks(unittest.TestCase):
         market = self.source("ui/WaysGramFragmentActivity.java")
         card = self.source("ui/WaysGramCollectibleActivity.java")
         self.assertIn("WaysGramFragment.market(account,", market)
-        self.assertIn("WaysGramFragment.SECTION_MARKET).optJSONArray(\"items\")", market)
+        self.assertIn("WaysGramFragment.SECTION_MARKET", market)
+        self.assertIn('.optJSONArray("items")', market)
         self.assertIn("WaysGramFragment.buy(account, name)", card)
         self.assertIn("WaysGramFragment.bid(account, name, value)", card)
         self.assertIn("WaysGramFragment.list(account, name, value)", card)
@@ -82,7 +83,8 @@ class FragmentMarketChecks(unittest.TestCase):
                          "WaysGramFragmentMarket.java", self.names)
         self.assertFalse((ROOT / "android-source/TMessagesProj/src/main/java/org/telegram/ui/"
                           "WaysGramFragmentMarket.java").exists())
-        for name in ("ui/WaysGramFragmentActivity.java", "ui/WaysGramCollectibleActivity.java"):
+        for name in ("ui/WaysGramFragmentActivity.java", "ui/WaysGramCollectibleActivity.java",
+                     "ui/WaysGramFragmentGiftActivity.java"):
             screen = self.source(name)
             self.assertIn("extends BaseFragment", screen, name)
             self.assertIn("actionBar.setBackButtonImage(R.drawable.ic_ab_back)", screen, name)
@@ -124,13 +126,15 @@ class FragmentMarketChecks(unittest.TestCase):
 
     def test_gifts_and_inventory_use_the_market_endpoints(self):
         market = self.source("ui/WaysGramFragmentActivity.java")
+        gift = self.source("ui/WaysGramFragmentGiftActivity.java")
         # Вкладка Gifts — объявления рынка подарков, вкладка Inventory — свой инвентарь.
         self.assertIn('"/api/gift-market?limit=60"', market)
         self.assertIn('"/api/me/gifts"', market)
-        self.assertIn('"/api/gift-market/" + listingId + "/purchase"', market)
-        self.assertIn('"/api/gifts/" + serial + "/list"', market)
-        self.assertIn('new JSONObject().put("price_grams", price)', market)
-        self.assertIn("WaysGramApi.delete(account, \"/api/gifts/\" + serial + \"/list\")", market)
+        # Покупка, продажа и снятие — на карточке подарка.
+        self.assertIn('"/api/gift-market/" + item.optLong("listing_id") + "/purchase"', gift)
+        self.assertIn('"/api/gifts/" + serial + "/list"', gift)
+        self.assertIn('new JSONObject().put("price_grams", amount)', gift)
+        self.assertIn('WaysGramApi.delete(account, "/api/gifts/" + serial + "/list")', gift)
         # Инвентарь пополняется только подарком на @fragment, поэтому подсказка на экране.
         self.assertIn("R.string.WaysGramFragmentInventoryHint", market)
         self.assertIn("R.string.WaysGramFragmentInventoryCopy", market)
@@ -144,6 +148,27 @@ class FragmentMarketChecks(unittest.TestCase):
         self.assertIn('await fragment_deposit.record(db, uid, serial', api)
         self.assertIn('"fragment_deposit" if deposit else "chat_send"', api)
         self.assertIn("await fragment_deposit.ensure_account(db)", api)
+
+    def test_layout_follows_the_fragment_site(self):
+        # Скриншоты с устройства: шапка с логотипом и кнопкой TON, вкладки с
+        # подчёркиванием, крупный заголовок и поиск, таблица с колонками, сетка
+        # карточек подарков и отдельный экран лота.
+        market = self.source("ui/WaysGramFragmentActivity.java")
+        self.assertIn("R.drawable.fragment", market)
+        self.assertIn("R.string.WaysGramFragmentConnectTon", market)
+        self.assertIn("R.string.WaysGramFragmentHeroTitle", market)
+        self.assertIn("R.string.WaysGramFragmentMinBid", market)
+        self.assertIn("R.string.WaysGramFragmentColumnUsername", market)
+        self.assertIn("R.string.WaysGramFragmentTopGifts", market)
+        self.assertIn("R.drawable.msg_search", market)
+        self.assertIn("CARD_COLORS", market)
+        self.assertIn("downloadTelegramGiftSticker", market)
+        self.assertIn("new WaysGramFragmentGiftActivity(", market)
+        gift = self.source("ui/WaysGramFragmentGiftActivity.java")
+        self.assertIn("collectible_traits", gift)
+        self.assertIn("R.string.WaysGramFragmentGiftModel", gift)
+        self.assertIn("R.string.WaysGramFragmentBuyGram", gift)
+        self.assertIn("R.string.WaysGramFragmentSell", gift)
 
     def test_repack_can_delete_a_replaced_screen(self):
         # Экран-диалог заменён фрагментом: старый файл нужно уметь убрать из архива.
@@ -208,7 +233,7 @@ class FragmentMarketChecks(unittest.TestCase):
         ru_names = set(re.findall(r'<string name="([^"]+)"', russian))
         used = set()
         for name in ("ui/WaysGramFragmentActivity.java", "ui/WaysGramCollectibleActivity.java",
-                     "ui/SettingsActivity.java"):
+                     "ui/WaysGramFragmentGiftActivity.java", "ui/SettingsActivity.java"):
             used.update(re.findall(r"R\.string\.(WaysGramFragment\w+)", self.source(name)))
         self.assertTrue(used, "клиент не использует ни одной строки рынка")
         missing_base = sorted(used - base_names)
@@ -219,7 +244,8 @@ class FragmentMarketChecks(unittest.TestCase):
     def test_new_files_are_in_the_build(self):
         # Исходники собираются одним модулем: новые файлы в тех же пакетах.
         for name in ("tgnet/WaysGramFragment.java", "ui/WaysGramFragmentActivity.java",
-                     "ui/WaysGramCollectibleActivity.java"):
+                     "ui/WaysGramCollectibleActivity.java",
+                     "ui/WaysGramFragmentGiftActivity.java"):
             self.assertIn("WaysGram-Android/TMessagesProj/src/main/java/org/telegram/" + name,
                           self.names)
 
