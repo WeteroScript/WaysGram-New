@@ -1089,3 +1089,16 @@ Premium/Numbers, а в конце — Inventory.
 Проверки: `scripts` — **374 passed** (+5 subtests). На устройстве не проверено,
 APK 338 не собирался.
 
+### Сборка APK 339
+
+* **338** (run 45909370474, коммит `a8c46fb`) — упала на javac: в анонимном
+  `ChatMessageCellDelegate` вызов `WaysGramDiscussions.open(this, …)` передавал делегат
+  вместо фрагмента — `incompatible types: ChatMessageCellDelegate cannot be converted to
+  BaseFragment`. Исправлено на `ChatActivity.this` (`acf807d`).
+* **339** (run 45910276667, коммит `acf807d`) — зелёная: компиляция, `assembleAfatRelease`,
+  проверка zip-CRC, публикация и повторное скачивание со сверкой sha256.
+  APK 119 176 648 B,
+  sha256 `7f5465250fd4d85eb8c69f27998695bf15d7d97e2db8e8dd9ca49c636558291b`,
+  https://github.com/WeteroScript/WaysGram-New/releases/download/apk-waysgram-339/WaysGram.apk
+  (+ `part00…part04`, `.sha256`).
+
