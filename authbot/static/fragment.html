@@ -1,0 +1,1025 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="dark light">
+<title>Fragment</title>
+<style>
+  :root {
+    --bg: #17212b;
+    --bg-soft: #1e2a36;
+    --card: #212d3a;
+    --card-soft: #26333f;
+    --text: #f4f7fa;
+    --muted: #7f8f9d;
+    --line: #293644;
+    --blue: #2e82dd;
+    --green: #4fbf67;
+    --red: #e2686a;
+    --radius: 12px;
+  }
+  body.light {
+    --bg: #f2f4f7;
+    --bg-soft: #e9edf2;
+    --card: #ffffff;
+    --card-soft: #f1f4f8;
+    --text: #13202b;
+    --muted: #798694;
+    --line: #e2e8ee;
+  }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { margin: 0; padding: 0; background: var(--bg); color: var(--text); }
+  body {
+    font-family: -apple-system, "Roboto", "Segoe UI", system-ui, sans-serif;
+    font-size: 15px;
+    line-height: 1.35;
+    padding-bottom: 28px;
+  }
+  main { max-width: 760px; margin: 0 auto; }
+  h1, h2, h3 { margin: 0; font-weight: 700; }
+  button { font: inherit; color: inherit; background: none; border: 0; padding: 0; cursor: pointer; }
+  input { font: inherit; color: inherit; }
+  [hidden] { display: none !important; }
+
+  /* Шапка сайта */
+  .brand {
+    display: flex; align-items: center; gap: 9px;
+    padding: 10px 16px 6px;
+    max-width: 760px; margin: 0 auto;
+  }
+  .brand svg { width: 24px; height: 24px; fill: var(--text); flex: 0 0 auto; }
+  .brand .wordmark { font-weight: 700; font-size: 19px; letter-spacing: 1.6px; }
+  .brand .spacer { flex: 1; }
+  .ton-button {
+    display: inline-flex; align-items: center; gap: 6px;
+    background: var(--blue); color: #fff;
+    border-radius: 18px; padding: 9px 16px;
+    font-size: 14px; font-weight: 600;
+  }
+
+  /* Вкладки */
+  .tabs {
+    display: flex; gap: 22px; overflow-x: auto; scrollbar-width: none;
+    padding: 4px 16px 0; border-bottom: 1px solid var(--line);
+    max-width: 760px; margin: 0 auto;
+  }
+  .tabs::-webkit-scrollbar { display: none; }
+  .tabs button {
+    padding: 10px 2px 8px; color: var(--muted); font-size: 16px; white-space: nowrap;
+    border-bottom: 3px solid transparent; margin-bottom: -1px;
+  }
+  .tabs button.active { color: var(--text); font-weight: 700; border-bottom-color: var(--blue); }
+
+  .view { padding: 6px 0 20px; }
+  .pad { padding: 0 12px; }
+  .hero { padding: 12px 24px 2px; text-align: center; }
+  .hero h1 { font-size: 23px; }
+  .hero p { margin: 6px 0 0; color: var(--muted); font-size: 13px; }
+
+  /* Поиск */
+  .search {
+    display: flex; align-items: center; gap: 9px;
+    background: var(--card-soft); border-radius: 11px;
+    padding: 0 12px; height: 44px; margin: 8px 12px 2px;
+  }
+  .search svg { width: 18px; height: 18px; stroke: var(--muted); fill: none; stroke-width: 2; }
+  .search input {
+    flex: 1; min-width: 0; border: 0; background: transparent; outline: none;
+    font-size: 14px; color: var(--text);
+  }
+  .search input::placeholder { color: var(--muted); }
+
+  .row { display: flex; align-items: center; gap: 8px; }
+  .section-head { display: flex; align-items: center; gap: 6px; padding: 14px 12px 6px; }
+  .section-head h2 { font-size: 19px; flex: 1; }
+  .chip {
+    display: inline-flex; align-items: center; gap: 4px;
+    background: var(--card-soft); color: var(--text);
+    border-radius: 8px; padding: 7px 10px; font-size: 13px; font-weight: 600;
+    white-space: nowrap;
+  }
+  .chip.on { background: var(--blue); color: #fff; }
+
+  /* Таблица юзернеймов */
+  .table { background: var(--card); border-radius: var(--radius); margin: 2px 12px; overflow: hidden; }
+  .thead {
+    display: flex; justify-content: space-between; padding: 8px 14px;
+    font-size: 12px; color: var(--muted);
+  }
+  .trow {
+    display: flex; align-items: center; gap: 10px;
+    padding: 10px 14px; border-top: 1px solid var(--line);
+  }
+  .trow:first-child { border-top: 0; }
+  .trow .name { font-size: 15px; font-weight: 700; }
+  .trow .sub { font-size: 12px; color: var(--blue); margin-top: 1px; }
+  .trow .side { margin-left: auto; text-align: right; }
+  .trow .amount { font-size: 15px; font-weight: 700; }
+  .trow .state { font-size: 12px; color: var(--muted); margin-top: 1px; }
+  .trow .state.green { color: var(--green); }
+  .chev { color: var(--muted); font-size: 20px; line-height: 1; margin-left: 4px; }
+  .badge {
+    display: inline-block; border-radius: 5px; padding: 1px 5px;
+    font-size: 11px; font-weight: 600; margin-left: 6px; vertical-align: 1px;
+  }
+  .badge.green { color: var(--green); background: rgba(79, 191, 103, .18); }
+  .badge.blue { color: var(--blue); background: rgba(46, 130, 221, .18); }
+  .badge.muted { color: var(--muted); background: rgba(127, 143, 157, .18); }
+
+  .card { background: var(--card); border-radius: var(--radius); margin: 4px 12px; padding: 12px 14px; }
+  .card + .card { margin-top: 8px; }
+  .card .label { font-size: 12px; color: var(--muted); }
+  .card .value { font-size: 14px; font-weight: 600; word-break: break-all; }
+  .card .value.big { font-size: 18px; }
+  .card .note { font-size: 12px; color: var(--muted); margin-top: 4px; }
+  .kv { display: flex; align-items: center; gap: 10px; padding: 8px 0; border-top: 1px solid var(--line); }
+  .kv:first-of-type { border-top: 0; }
+  .kv .k { color: var(--muted); font-size: 13px; flex: 1; }
+  .kv .v { font-weight: 600; font-size: 14px; }
+  .link { color: var(--blue); font-weight: 600; font-size: 14px; }
+  input.field {
+    width: 100%; height: 42px; border-radius: 10px; border: 1px solid var(--line);
+    background: var(--bg-soft); color: var(--text); padding: 0 12px; outline: none;
+    margin-top: 8px; font-size: 15px;
+  }
+  .primary {
+    display: block; width: 100%; height: 46px; border-radius: 10px;
+    background: var(--blue); color: #fff; font-weight: 600; font-size: 15px;
+    margin: 10px 12px 0; width: calc(100% - 24px);
+  }
+  .primary[disabled] { opacity: .5; }
+
+  /* Сетка подарков */
+  .grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; padding: 4px 12px; }
+  .tile { display: flex; flex-direction: column; gap: 5px; text-align: left; }
+  .tile .art {
+    position: relative; border-radius: 10px; aspect-ratio: 1 / 1; overflow: hidden;
+    display: flex; align-items: center; justify-content: center;
+  }
+  .tile .art .emoji { font-size: 34px; }
+  .tile .art img {
+    position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain;
+    padding: 10%; image-rendering: auto;
+  }
+  .tile .serial {
+    position: absolute; left: 6px; bottom: 6px;
+    background: rgba(0, 0, 0, .35); color: #fff;
+    border-radius: 5px; padding: 1px 5px; font-size: 11px; font-weight: 600;
+  }
+  .tile .price { display: flex; align-items: center; gap: 4px; font-size: 12px; font-weight: 700; }
+  .tile .price .grow { flex: 1; }
+  .tile .price .state { font-size: 11px; font-weight: 600; }
+  .tile .price .state.green { color: var(--green); }
+  .tile .price .state.blue { color: var(--blue); }
+  .tile .price .state.muted { color: var(--muted); }
+
+  .hint { margin: 6px 12px; }
+
+  /* Страница лота */
+  .detail-head { display: flex; align-items: center; gap: 10px; padding: 10px 14px 2px; }
+  .detail-head .back { font-size: 24px; line-height: 1; color: var(--text); padding: 2px 6px 2px 0; }
+  .detail-head h2 { font-size: 20px; }
+  .big-art {
+    margin: 8px 12px; height: 200px; border-radius: 14px;
+    display: flex; align-items: center; justify-content: center; position: relative; overflow: hidden;
+  }
+  .big-art .emoji { font-size: 64px; }
+  .big-art img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; padding: 12%; }
+
+  .toast {
+    position: fixed; left: 12px; right: 12px; bottom: 16px;
+    background: var(--card-soft); color: var(--text);
+    border-radius: 10px; padding: 11px 14px; font-size: 14px;
+    box-shadow: 0 6px 24px rgba(0, 0, 0, .35);
+  }
+  .empty { color: var(--muted); font-size: 13px; padding: 14px 16px; }
+  .skeleton { color: var(--muted); font-size: 13px; padding: 14px 16px; }
+</style>
+</head>
+<body>
+<header class="brand">
+  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2.4 2.2l19.4 9.1c.5.2.5.9 0 1.1l-8 3.4-3.4 8c-.2.5-.9.5-1.1 0L2.4 3.3c-.2-.5.3-1 .8-.9z"/></svg>
+  <span class="wordmark">FRAGMENT</span>
+  <span class="spacer"></span>
+  <button class="ton-button" id="ton-button">💎 Подключить TON</button>
+</header>
+
+<nav class="tabs" id="tabs">
+  <button data-tab="usernames" class="active">Юзернеймы</button>
+  <button data-tab="gifts">Подарки</button>
+  <button data-tab="inventory">Инвентарь</button>
+</nav>
+
+<main>
+  <section class="view" id="view-usernames">
+    <div class="hero">
+      <h1>Купить и продать юзернеймы</h1>
+      <p>Имя на блокчейне для аккаунта, канала или группы.</p>
+    </div>
+    <div class="search">
+      <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="M16.5 16.5L21 21"/></svg>
+      <input id="name-search" placeholder="Введите юзернейм…" autocomplete="off" autocapitalize="off" spellcheck="false">
+    </div>
+    <div class="section-head">
+      <h2 id="names-title">Аукционы</h2>
+      <button class="chip" id="names-filter">Аукцион ▾</button>
+      <button class="chip" id="names-sort">Цена ↓</button>
+    </div>
+    <div class="table" id="names-table"></div>
+    <div class="section-head"><h2>Мои имена</h2></div>
+    <div id="my-names"></div>
+    <div class="section-head"><h2>Пополнить за TON</h2></div>
+    <div id="ton-block"></div>
+  </section>
+
+  <section class="view" id="view-gifts" hidden>
+    <div class="row" style="padding: 6px 12px 0;">
+      <div class="search" style="margin: 0; flex: 1;">
+        <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="M16.5 16.5L21 21"/></svg>
+        <input id="gift-search" placeholder="Поиск по названию…" autocomplete="off">
+      </div>
+      <button class="chip" id="collections" style="height: 34px; margin-top: 6px;">Коллекции ▾</button>
+    </div>
+    <div class="section-head">
+      <h2>Топ подарков</h2>
+      <button class="chip on" id="gift-filter">Все подарки ▾</button>
+      <button class="chip" id="gift-sort">Цена ↓</button>
+    </div>
+    <div class="grid" id="gift-grid"></div>
+  </section>
+
+  <section class="view" id="view-inventory" hidden>
+    <div class="card hint">
+      <div class="label">Пополнить инвентарь: отправьте NFT-подарок на @fragment</div>
+      <div class="link" id="copy-fragment" style="margin-top: 6px;">Скопировать @fragment</div>
+    </div>
+    <div class="grid" id="inventory-grid"></div>
+  </section>
+
+  <section class="view" id="view-detail" hidden></section>
+</main>
+
+<div class="toast" id="toast" hidden></div>
+
+<script>
+(function () {
+  "use strict";
+
+  var bridge = window.WaysGram || null;
+  var token = "";
+  var state = {
+    tab: "usernames",
+    namesFilter: "auction",
+    namesSort: "desc",
+    giftFilter: "all",
+    giftSort: "desc",
+    collection: "",
+    giftQuery: "",
+    auctions: null,
+    market: null,
+    mine: null,
+    ton: null,
+    gifts: null,
+    inventory: null,
+    busy: false,
+    detail: null
+  };
+
+  var COLORS = ["#6e7d63", "#4f7f53", "#7c6bb0", "#b0865a", "#4f7e96", "#a06a88"];
+  var artCache = {};
+
+  function $(id) { return document.getElementById(id); }
+
+  function esc(value) {
+    return String(value == null ? "" : value)
+      .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;");
+  }
+
+  function num(value) {
+    var n = Number(value || 0);
+    return n.toLocaleString("ru-RU");
+  }
+
+  function toast(message) {
+    var node = $("toast");
+    node.textContent = message;
+    node.hidden = false;
+    clearTimeout(toast.timer);
+    toast.timer = setTimeout(function () { node.hidden = true; }, 2600);
+  }
+
+  function headers(extra) {
+    var result = { "Accept": "application/json" };
+    if (token) { result["Authorization"] = "Bearer " + token; }
+    if (extra) { Object.keys(extra).forEach(function (key) { result[key] = extra[key]; }); }
+    return result;
+  }
+
+  function idem(action, name) {
+    var clean = String(name || "x").replace(/[^a-zA-Z0-9_-]/g, "").toLowerCase();
+    return "wg-" + action + "-" + clean + "-" + Date.now();
+  }
+
+  function api(path, options) {
+    options = options || {};
+    var init = {
+      method: options.method || "GET",
+      headers: headers(options.idempotency ? { "Idempotency-Key": options.idempotency } : null)
+    };
+    if (options.body !== undefined) {
+      init.headers["Content-Type"] = "application/json; charset=utf-8";
+      init.body = JSON.stringify(options.body);
+    }
+    return fetch(path, init).then(function (response) {
+      return response.text().then(function (text) {
+        var data = {};
+        if (text) {
+          try { data = JSON.parse(text); } catch (error) { data = {}; }
+        }
+        if (!response.ok) {
+          var detail = data && data.detail;
+          var message = "";
+          if (detail && typeof detail === "object") { message = detail.message || detail.code || ""; }
+          if (!message && typeof detail === "string") { message = detail; }
+          if (!message) { message = "Не удалось выполнить действие"; }
+          var failure = new Error(message);
+          failure.status = response.status;
+          throw failure;
+        }
+        return data;
+      });
+    });
+  }
+
+  function timeLeft(secondsEnd) {
+    var left = Number(secondsEnd || 0) - Math.floor(Date.now() / 1000);
+    if (left <= 0) { return "завершён"; }
+    var days = Math.floor(left / 86400);
+    var hours = Math.floor((left % 86400) / 3600);
+    if (days > 0) { return days + " дн. " + hours + " ч"; }
+    return Math.max(1, hours) + " ч";
+  }
+
+  function priceOf(item) {
+    var auction = item.auction;
+    if (auction && auction.ends_at) {
+      return Number(auction.current_bid_stars || 0) > 0
+        ? auction.current_bid_stars : auction.min_bid_stars;
+    }
+    return Number(item.price_stars || 0);
+  }
+
+  function serialOf(item) {
+    if (Number(item.unique_num || 0) > 0) { return "#" + item.unique_num; }
+    var serial = String(item.serial_number || "");
+    return serial ? "#" + serial : "";
+  }
+
+  function colorFor(item) {
+    var key = String(item.telegram_gift_id || "") + String(item.serial_number || item.name || "");
+    var hash = 0;
+    for (var i = 0; i < key.length; i++) { hash = (hash * 31 + key.charCodeAt(i)) | 0; }
+    return COLORS[Math.abs(hash) % COLORS.length];
+  }
+
+  /* Картинка подарка: обычный <img> не может передать Authorization, поэтому качаем blob. */
+  function artwork(giftId, img, emojiNode) {
+    if (!giftId) { return; }
+    var key = String(giftId);
+    if (artCache[key]) {
+      img.src = artCache[key];
+      img.hidden = false;
+      if (emojiNode) { emojiNode.hidden = true; }
+      return;
+    }
+    fetch("/api/telegram/gifts/" + encodeURIComponent(key) + "/sticker",
+      { headers: { "Authorization": "Bearer " + token } })
+      .then(function (response) {
+        if (!response.ok) { throw new Error("no art"); }
+        return response.blob();
+      })
+      .then(function (blob) {
+        if (!/^image\//.test(blob.type)) { throw new Error("not an image"); }
+        var url = URL.createObjectURL(blob);
+        artCache[key] = url;
+        img.src = url;
+        img.hidden = false;
+        if (emojiNode) { emojiNode.hidden = true; }
+      })
+      .catch(function () { /* остаётся эмодзи */ });
+  }
+
+  /* ------------------------------------------------------------- вкладки */
+
+  function showTab(tab) {
+    state.tab = tab;
+    state.detail = null;
+    Array.prototype.forEach.call($("tabs").children, function (button) {
+      button.classList.toggle("active", button.dataset.tab === tab);
+    });
+    $("view-usernames").hidden = tab !== "usernames";
+    $("view-gifts").hidden = tab !== "gifts";
+    $("view-inventory").hidden = tab !== "inventory";
+    $("view-detail").hidden = true;
+    if (tab === "usernames") { loadUsernames(); }
+    if (tab === "gifts") { loadGifts(); }
+    if (tab === "inventory") { loadInventory(); }
+    window.scrollTo(0, 0);
+  }
+
+  function openDetail(html) {
+    var view = $("view-detail");
+    view.innerHTML = html;
+    view.hidden = false;
+    $("view-usernames").hidden = true;
+    $("view-gifts").hidden = true;
+    $("view-inventory").hidden = true;
+    window.scrollTo(0, 0);
+  }
+
+  function closeDetail() {
+    $("view-detail").hidden = true;
+    state.detail = null;
+    showTab(state.tab);
+  }
+
+  /* ----------------------------------------------------------- юзернеймы */
+
+  function loadUsernames() {
+    if (state.auctions && state.market && state.mine) { renderUsernames(); return; }
+    $("names-table").innerHTML = '<div class="skeleton">Загружаем рынок…</div>';
+    Promise.all([
+      api("/api/collectibles?section=auctions"),
+      api("/api/collectibles?section=market"),
+      api("/api/collectibles?section=mine")
+    ]).then(function (result) {
+      state.auctions = (result[0] && result[0].items) || [];
+      state.market = (result[1] && result[1].items) || [];
+      state.mine = (result[2] && result[2].items) || [];
+      renderUsernames();
+      loadTon();
+    }).catch(function (error) {
+      $("names-table").innerHTML = '<div class="empty">' + esc(error.message) + "</div>";
+    });
+  }
+
+  function loadTon() {
+    api("/api/me/ton").then(function (data) {
+      state.ton = data;
+      renderTon();
+    }).catch(function () {
+      $("ton-block").innerHTML = '<div class="empty">TON недоступен.</div>';
+    });
+  }
+
+  function renderUsernames() {
+    var auction = state.namesFilter === "auction";
+    $("names-title").textContent = auction ? "Аукционы" : "На продажу";
+    $("names-filter").textContent = auction ? "Аукцион ▾" : "Продажа ▾";
+    $("names-sort").textContent = state.namesSort === "asc" ? "Цена ↑" : "Цена ↓";
+
+    var source = (auction ? state.auctions : state.market) || [];
+    var query = ($("name-search").value || "").trim().replace(/^@/, "").toLowerCase();
+    var items = source.filter(function (item) {
+      return !query || String(item.name || "").toLowerCase().indexOf(query) === 0;
+    }).sort(function (a, b) {
+      return state.namesSort === "asc" ? priceOf(a) - priceOf(b) : priceOf(b) - priceOf(a);
+    });
+
+    var html = '<div class="thead"><span>Юзернейм</span><span>Минимальная ставка</span></div>';
+    if (!items.length) {
+      html += '<div class="empty">' + (query ? "Ничего не найдено." : "Пока пусто.") + "</div>";
+    }
+    items.forEach(function (item) {
+      var name = String(item.name || "");
+      if (!name) { return; }
+      var amount = priceOf(item);
+      var stateText = item.auction && item.auction.ends_at
+        ? timeLeft(item.auction.ends_at)
+        : "Продаётся";
+      html += '<div class="trow" data-name="' + esc(name) + '">'
+        + '<div><div class="name">@' + esc(name)
+        + (item.price_stars ? '<span class="badge green">Продажа</span>' : "")
+        + '</div><div class="sub">' + esc(name) + '.t.me</div></div>'
+        + '<div class="side"><div class="amount">⭐ ' + num(amount) + '</div>'
+        + '<div class="state' + (item.auction && item.auction.ends_at ? "" : " green") + '">'
+        + esc(stateText) + "</div></div>"
+        + '<div class="chev">›</div></div>';
+    });
+    $("names-table").innerHTML = html;
+    Array.prototype.forEach.call($("names-table").querySelectorAll(".trow"), function (row) {
+      row.addEventListener("click", function () { openName(row.dataset.name); });
+    });
+
+    var mine = state.mine || [];
+    var mineHtml = "";
+    if (!mine.length) {
+      mineHtml = '<div class="card"><div class="label">Своих имён пока нет.</div>'
+        + '<div class="link" style="margin-top:6px;" id="claim-link">Занять свободное имя</div></div>';
+    } else {
+      mine.forEach(function (item) {
+        var subtitle = item.auction && item.auction.ends_at
+          ? "Аукцион · до " + timeLeft(item.auction.ends_at)
+          : (item.price_stars ? "Продаётся · ⭐ " + num(item.price_stars) : "В инвентаре");
+        mineHtml += '<div class="card" data-name="' + esc(item.name) + '" style="cursor:pointer;">'
+          + '<div class="value">@' + esc(item.name) + "</div>"
+          + '<div class="note">' + esc(subtitle) + "</div></div>";
+      });
+    }
+    $("my-names").innerHTML = mineHtml;
+    var claim = $("claim-link");
+    if (claim) { claim.addEventListener("click", function () { openName(""); }); }
+    Array.prototype.forEach.call($("my-names").querySelectorAll("[data-name]"), function (card) {
+      card.addEventListener("click", function () { openName(card.dataset.name); });
+    });
+  }
+
+  function renderTon() {
+    var ton = state.ton || {};
+    var address = String(ton.address || "");
+    if (!address) {
+      $("ton-block").innerHTML = '<div class="card"><div class="label">Приём TON ещё не настроен.</div></div>';
+      return;
+    }
+    var html = '<div class="card">'
+      + '<div class="label">Адрес для перевода</div>'
+      + '<div class="value" data-copy="' + esc(address) + '">' + esc(address) + "</div>"
+      + (ton.memo ? '<div class="label" style="margin-top:8px;">Комментарий</div>'
+        + '<div class="value" data-copy="' + esc(ton.memo) + '">' + esc(ton.memo) + "</div>" : "")
+      + '<div class="note">Курс: ⭐ ' + num(ton.stars_per_ton) + " за TON · Баланс: ⭐ "
+      + num(ton.stars_balance) + "</div>";
+    if (ton.withdraw_enabled) {
+      html += '<input class="field" id="withdraw-stars" inputmode="numeric" placeholder="Сколько звёзд вывести" value="'
+        + Math.max(500, Number(ton.stars_balance || 0)) + '">'
+        + '<input class="field" id="withdraw-address" placeholder="Адрес TON">'
+        + '<div class="link" id="withdraw" style="margin-top:10px;">Вывести TON</div>';
+    }
+    html += "</div>";
+    $("ton-block").innerHTML = html;
+    Array.prototype.forEach.call($("ton-block").querySelectorAll("[data-copy]"), function (node) {
+      node.addEventListener("click", function () { copy(node.dataset.copy); });
+    });
+    var withdraw = $("withdraw");
+    if (withdraw) { withdraw.addEventListener("click", sendWithdraw); }
+  }
+
+  function copy(value) {
+    try {
+      var area = document.createElement("textarea");
+      area.value = value;
+      document.body.appendChild(area);
+      area.select();
+      document.execCommand("copy");
+      document.body.removeChild(area);
+      toast("Скопировано");
+    } catch (error) {
+      toast("Не удалось скопировать");
+    }
+  }
+
+  function sendWithdraw() {
+    var stars = Number(($("withdraw-stars").value || "").trim());
+    var address = ($("withdraw-address").value || "").trim();
+    if (!(stars > 0) || !address) { toast("Укажите количество и адрес"); return; }
+    api("/api/me/ton-withdraw", { method: "POST", body: { stars: stars, address: address } })
+      .then(function () { toast("Заявка на ⭐ " + num(stars) + " создана"); state.ton = null; loadTon(); })
+      .catch(function (error) { toast(error.message); });
+  }
+
+  /* ------------------------------------------------------ карточка имени */
+
+  function openName(name) {
+    var clean = String(name || "").replace(/^@/, "").toLowerCase();
+    if (!clean) { openClaim(); return; }
+    openDetail('<div class="skeleton">Загружаем @' + esc(clean) + "…</div>");
+    api("/api/collectibles/" + encodeURIComponent(clean)).then(function (card) {
+      renderNameCard(clean, card);
+    }).catch(function (error) {
+      openDetail(detailHead("@" + clean, null) + '<div class="empty">' + esc(error.message) + "</div>");
+    });
+  }
+
+  function detailHead(title, badge) {
+    return '<div class="detail-head"><button class="back" id="detail-back">‹</button>'
+      + "<h2>" + esc(title) + "</h2>" + (badge || "") + "</div>";
+  }
+
+  function renderNameCard(name, card) {
+    var mine = !!card.mine;
+    var auction = card.auction;
+    var price = Number(card.price_stars || 0);
+    var badge = auction && auction.ends_at
+      ? '<span class="badge blue">Аукцион</span>'
+      : (price > 0 ? '<span class="badge green">Продаётся</span>' : '<span class="badge muted">Свободно</span>');
+
+    var html = detailHead("@" + name, badge);
+    html += '<div class="card">'
+      + '<div class="kv"><span class="k">Владелец</span><span class="v">'
+      + esc(card.owner && (card.owner.username ? "@" + card.owner.username
+        : card.owner.display_name || "—") || (mine ? "Вы" : "—")) + "</span></div>"
+      + '<div class="kv"><span class="k">Ссылка</span><span class="v">' + esc(name) + ".t.me</span></div>";
+    if (card.purchase_date) {
+      html += '<div class="kv"><span class="k">Куплено</span><span class="v">'
+        + new Date(card.purchase_date * 1000).toLocaleDateString("ru-RU") + "</span></div>";
+    }
+    if (auction && auction.ends_at) {
+      html += '<div class="kv"><span class="k">Текущая ставка</span><span class="v">⭐ '
+        + num(auction.current_bid_stars || auction.min_bid_stars) + "</span></div>"
+        + '<div class="kv"><span class="k">До конца</span><span class="v">'
+        + esc(timeLeft(auction.ends_at)) + "</span></div>";
+    }
+    if (price > 0) {
+      html += '<div class="kv"><span class="k">Цена</span><span class="v">⭐ ' + num(price) + "</span></div>";
+    }
+    if (card.frozen && card.frozen_until) {
+      html += '<div class="kv"><span class="k">Перепродажа</span><span class="v">с '
+        + new Date(card.frozen_until * 1000).toLocaleDateString("ru-RU") + "</span></div>";
+    }
+    html += "</div>";
+
+    if (!mine && auction && auction.ends_at) {
+      html += '<div class="card"><div class="label">Ставка</div>'
+        + '<input class="field" id="bid-amount" inputmode="numeric" placeholder="⭐ '
+        + num(auction.minimum_next_bid_stars || auction.min_bid_stars || 0) + '">'
+        + '<button class="primary" id="bid">Сделать ставку</button></div>';
+    } else if (!mine && price > 0) {
+      html += '<button class="primary" id="buy">Купить за ⭐ ' + num(price) + "</button>";
+    } else if (!mine) {
+      html += '<button class="primary" id="claim">Занять за ⭐ ' + num(card.claim_price_stars || price) + "</button>";
+    }
+
+    if (mine) {
+      html += '<div class="card"><div class="label">Продажа</div>';
+      if (price > 0) {
+        html += '<div class="link" id="unlist" style="margin-top:8px;">Снять с продажи</div>';
+      } else {
+        html += '<input class="field" id="list-price" inputmode="numeric" placeholder="Цена в звёздах">'
+          + '<div class="link" id="list" style="margin-top:10px;">Продать по фикс-цене</div>';
+      }
+      if (auction && auction.ends_at) {
+        html += '<div class="link" id="cancel-auction" style="margin-top:10px;">Отменить аукцион</div>';
+      } else {
+        html += '<input class="field" id="auction-bid" inputmode="numeric" placeholder="Минимальная ставка">'
+          + '<input class="field" id="auction-hours" inputmode="numeric" placeholder="Длительность, часы" value="24">'
+          + '<div class="link" id="start-auction" style="margin-top:10px;">Начать аукцион</div>';
+      }
+      html += '<div class="note">Комиссия сервиса: ' + num(card.commission_percent || 5) + "%</div></div>";
+    }
+    html += '<button class="link" id="detail-back-2" style="display:block;margin:14px 14px 0;">Назад</button>';
+
+    openDetail(html);
+    bindDetailBack();
+    var back2 = $("detail-back-2");
+    if (back2) { back2.addEventListener("click", closeDetail); }
+
+    if ($("buy")) { $("buy").addEventListener("click", function () { nameAction("buy", "Куплено", "/buy", {}); }); }
+    if ($("claim")) { $("claim").addEventListener("click", function () { nameAction("claim", "Имя ваше", "/claim", {}); }); }
+    if ($("bid")) {
+      $("bid").addEventListener("click", function () {
+        var amount = Number(($("bid-amount").value || "").trim());
+        if (!(amount > 0)) { toast("Укажите ставку"); return; }
+        nameAction("bid", "Ставка принята", "/bid", { amount_stars: amount });
+      });
+    }
+    if ($("list")) {
+      $("list").addEventListener("click", function () {
+        var value = Number(($("list-price").value || "").trim());
+        if (!(value > 0)) { toast("Укажите цену"); return; }
+        nameAction("listing", "Выставлено на продажу", "/listing", { price_stars: value }, "PUT");
+      });
+    }
+    if ($("unlist")) {
+      $("unlist").addEventListener("click", function () {
+        nameAction("unlist", "Снято с продажи", "/listing", null, "DELETE");
+      });
+    }
+    if ($("start-auction")) {
+      $("start-auction").addEventListener("click", function () {
+        var minBid = Number(($("auction-bid").value || "").trim());
+        var hours = Number(($("auction-hours").value || "").trim());
+        if (!(minBid > 0) || !(hours > 0)) { toast("Укажите ставку и часы"); return; }
+        nameAction("auction", "Аукцион начат", "/auction",
+          { min_bid_stars: minBid, duration_hours: hours });
+      });
+    }
+    if ($("cancel-auction")) {
+      $("cancel-auction").addEventListener("click", function () {
+        nameAction("cancel", "Аукцион отменён", "/auction", null, "DELETE");
+      });
+    }
+
+    state.detail = name;
+
+    function nameAction(action, success, path, body, method) {
+      if (state.busy) { return; }
+      state.busy = true;
+      var options = {
+        method: method || "POST",
+        idempotency: method ? null : idem(action, name)
+      };
+      if (body) { options.body = body; }
+      api("/api/collectibles/" + encodeURIComponent(name) + path, options)
+        .then(function () {
+          state.busy = false;
+          state.auctions = state.market = state.mine = null;
+          toast(success);
+          openName(name);
+        })
+        .catch(function (error) {
+          state.busy = false;
+          toast(error.message);
+        });
+    }
+  }
+
+  function openClaim() {
+    openDetail(detailHead("Занять свободное имя", null)
+      + '<div class="card"><div class="label">Свободное имя стоит звёзд и принадлежит вам после оплаты.</div>'
+      + '<input class="field" id="claim-name" placeholder="юзернейм" autocapitalize="off" spellcheck="false">'
+      + '<button class="primary" id="claim-go">Продолжить</button></div>');
+    bindDetailBack();
+    $("claim-go").addEventListener("click", function () {
+      var value = ($("claim-name").value || "").trim().replace(/^@/, "").toLowerCase();
+      if (!value) { toast("Введите имя"); return; }
+      openName(value);
+    });
+  }
+
+  function bindDetailBack() {
+    var back = $("detail-back");
+    if (back) { back.addEventListener("click", closeDetail); }
+  }
+
+  /* ------------------------------------------------------------- подарки */
+
+  function loadGifts() {
+    if (state.gifts) { renderGifts(); return; }
+    $("gift-grid").innerHTML = '<div class="skeleton">Загружаем подарки…</div>';
+    api("/api/gift-market?limit=60").then(function (data) {
+      state.gifts = (data && data.listings) || [];
+      renderGifts();
+    }).catch(function (error) {
+      $("gift-grid").innerHTML = '<div class="empty">' + esc(error.message) + "</div>";
+    });
+  }
+
+  function sortGifts(items) {
+    var sorted = items.slice();
+    if (state.giftSort === "asc") {
+      sorted.sort(function (a, b) { return Number(a.price_grams || 0) - Number(b.price_grams || 0); });
+    } else if (state.giftSort === "new") {
+      sorted.sort(function (a, b) { return Number(b.created_at || 0) - Number(a.created_at || 0); });
+    } else {
+      sorted.sort(function (a, b) { return Number(b.price_grams || 0) - Number(a.price_grams || 0); });
+    }
+    return sorted;
+  }
+
+  function renderGifts() {
+    $("gift-filter").textContent = state.giftFilter === "sale" ? "Продажа ▾" : "Все подарки ▾";
+    $("gift-filter").classList.toggle("on", state.giftFilter === "sale");
+    $("gift-sort").textContent = state.giftSort === "asc" ? "Цена ↑"
+      : (state.giftSort === "new" ? "Новые" : "Цена ↓");
+    $("collections").textContent = state.collection ? state.collection + " ▾" : "Коллекции ▾";
+    $("collections").classList.toggle("on", !!state.collection);
+
+    var query = (state.giftQuery || "").trim().toLowerCase();
+    var items = (state.gifts || []).filter(function (item) {
+      if (state.giftFilter === "sale" && Number(item.price_grams || 0) <= 0) { return false; }
+      if (state.collection && String(item.gift_name || "") !== state.collection) { return false; }
+      if (query && String(item.gift_name || "").toLowerCase().indexOf(query) < 0) { return false; }
+      return true;
+    });
+    drawGrid($("gift-grid"), sortGifts(items), false);
+  }
+
+  function drawGrid(container, items, owned) {
+    if (!items.length) {
+      container.innerHTML = '<div class="empty">Пока пусто.</div>';
+      return;
+    }
+    container.innerHTML = items.map(function (item, index) {
+      var emoji = String(item.gift_emoji || "🎁");
+      var price = owned ? "" : "💎 " + num(item.price_grams);
+      var stateText = owned
+        ? (item.is_listed ? "На рынке" : "В инвентаре")
+        : "Продаётся";
+      var stateClass = owned ? (item.is_listed ? "blue" : "muted") : "green";
+      return '<button class="tile" data-index="' + index + '">'
+        + '<span class="art" style="background:' + colorFor(item) + '">'
+        + '<span class="emoji">' + esc(emoji) + "</span>"
+        + '<img alt="" hidden>'
+        + '<span class="serial">' + esc(serialOf(item)) + "</span></span>"
+        + '<span class="price"><span class="grow">' + esc(price) + "</span>"
+        + '<span class="state ' + stateClass + '">' + esc(stateText) + "</span></span>"
+        + "</button>";
+    }).join("");
+
+    Array.prototype.forEach.call(container.querySelectorAll(".tile"), function (tile) {
+      var item = items[Number(tile.dataset.index)];
+      var img = tile.querySelector("img");
+      var emoji = tile.querySelector(".emoji");
+      artwork(item.telegram_gift_id, img, emoji);
+      tile.addEventListener("click", function () { openGift(item, owned); });
+    });
+  }
+
+  function openGift(item, owned) {
+    var title = String(item.gift_name || "Подарок") + " " + serialOf(item);
+    var badge = owned
+      ? (item.is_listed ? '<span class="badge blue">На рынке</span>'
+        : '<span class="badge muted">В инвентаре</span>')
+      : '<span class="badge green">Продаётся</span>';
+
+    var html = detailHead(title, badge);
+    html += '<div class="big-art" style="background:' + colorFor(item) + '">'
+      + '<span class="emoji">' + esc(item.gift_emoji || "🎁") + "</span>"
+      + '<img alt="" hidden></div>';
+
+    var traits = (item.attributes && item.attributes.collectible_traits) || null;
+    var rows = "";
+    if (item.seller_username) {
+      rows += kv("Владелец", "@" + item.seller_username, null);
+    } else if (owned) {
+      rows += kv("Владелец", "Вы", null);
+    }
+    if (traits) {
+      rows += kv("Модель", trait(traits, "model"));
+      rows += kv("Узор", trait(traits, "pattern"));
+      rows += kv("Фон", trait(traits, "backdrop"));
+    }
+    if (item.serial_number) { rows += kv("Серийный номер", item.serial_number, null); }
+    if (Number(item.unique_num || 0) > 0) { rows += kv("Номер", "#" + item.unique_num, null); }
+    if (rows) { html += '<div class="card">' + rows + "</div>"; }
+
+    if (!owned) {
+      html += '<div class="card"><div class="label">Цена продажи</div>'
+        + '<div class="value big">💎 ' + num(item.price_grams) + " Gram</div>"
+        + '<div class="note">* Владелец готов продать по этой цене без аукциона.</div></div>'
+        + '<button class="primary" id="buy-gift">Купить за 💎 ' + num(item.price_grams) + "</button>";
+    } else if (item.is_listed) {
+      html += '<div class="card"><div class="label">Подарок уже выставлен на рынок.</div></div>'
+        + '<button class="primary" id="unlist-gift">Снять с продажи</button>';
+    } else {
+      html += '<div class="card"><div class="label">Цена продажи</div>'
+        + '<input class="field" id="sell-price" inputmode="numeric" placeholder="Цена в Gram"></div>'
+        + '<button class="primary" id="sell-gift">Продать</button>';
+    }
+    html += '<button class="link" id="detail-back-2" style="display:block;margin:14px 14px 0;">Назад</button>';
+
+    openDetail(html);
+    bindDetailBack();
+    artwork(item.telegram_gift_id, $("view-detail").querySelector(".big-art img"),
+      $("view-detail").querySelector(".big-art .emoji"));
+    $("detail-back-2").addEventListener("click", closeDetail);
+
+    if ($("buy-gift")) {
+      $("buy-gift").addEventListener("click", function () {
+        api("/api/gift-market/" + Number(item.listing_id) + "/purchase", { method: "POST", body: {} })
+          .then(function () {
+            state.gifts = null;
+            state.inventory = null;
+            toast("Подарок куплен");
+            closeDetail();
+          })
+          .catch(function (error) { toast(error.message); });
+      });
+    }
+    if ($("unlist-gift")) {
+      $("unlist-gift").addEventListener("click", function () {
+        api("/api/gifts/" + encodeURIComponent(item.serial_number) + "/list", { method: "DELETE" })
+          .then(function () {
+            state.inventory = null;
+            state.gifts = null;
+            toast("Подарок снят с продажи");
+            closeDetail();
+          })
+          .catch(function (error) { toast(error.message); });
+      });
+    }
+    if ($("sell-gift")) {
+      $("sell-gift").addEventListener("click", function () {
+        var price = Number(($("sell-price").value || "").trim());
+        if (!(price > 0)) { toast("Укажите цену в Gram"); return; }
+        api("/api/gifts/" + encodeURIComponent(item.serial_number) + "/list",
+          { method: "POST", body: { price_grams: price } })
+          .then(function () {
+            state.inventory = null;
+            state.gifts = null;
+            toast("Подарок выставлен на рынок");
+            closeDetail();
+          })
+          .catch(function (error) { toast(error.message); });
+      });
+    }
+  }
+
+  function kv(label, value, percent) {
+    if (value == null || value === "") { return ""; }
+    return '<div class="kv"><span class="k">' + esc(label) + '</span><span class="v">'
+      + esc(value) + "</span>" + (percent ? '<span class="badge blue">' + esc(percent) + "</span>" : "")
+      + "</div>";
+  }
+
+  function trait(traits, key) {
+    var entry = traits[key];
+    if (!entry) { return ""; }
+    return typeof entry === "string" ? entry : (entry.name || "");
+  }
+
+  /* ----------------------------------------------------------- инвентарь */
+
+  function loadInventory() {
+    if (state.inventory) { renderInventory(); return; }
+    $("inventory-grid").innerHTML = '<div class="skeleton">Загружаем инвентарь…</div>';
+    api("/api/me/gifts").then(function (data) {
+      state.inventory = (data && data.gifts) || [];
+      renderInventory();
+    }).catch(function (error) {
+      $("inventory-grid").innerHTML = '<div class="empty">' + esc(error.message) + "</div>";
+    });
+  }
+
+  function renderInventory() {
+    drawGrid($("inventory-grid"), state.inventory || [], true);
+  }
+
+  /* -------------------------------------------------------------- запуск */
+
+  function collections() {
+    var names = [];
+    (state.gifts || []).forEach(function (item) {
+      var name = String(item.gift_name || "");
+      if (name && names.indexOf(name) < 0) { names.push(name); }
+    });
+    names.sort();
+    if (!names.length) { return; }
+    var index = names.indexOf(state.collection);
+    state.collection = index < 0 || index + 1 >= names.length ? "" : names[index + 1];
+    renderGifts();
+  }
+
+  function bindStatic() {
+    Array.prototype.forEach.call($("tabs").children, function (button) {
+      button.addEventListener("click", function () { showTab(button.dataset.tab); });
+    });
+
+    $("ton-button").addEventListener("click", function () {
+      showTab("usernames");
+      var block = $("ton-block");
+      if (block) { block.scrollIntoView({ behavior: "smooth", block: "center" }); }
+    });
+
+    $("names-filter").addEventListener("click", function () {
+      state.namesFilter = state.namesFilter === "auction" ? "market" : "auction";
+      renderUsernames();
+    });
+    $("names-sort").addEventListener("click", function () {
+      state.namesSort = state.namesSort === "asc" ? "desc" : "asc";
+      renderUsernames();
+    });
+    $("name-search").addEventListener("input", function () {
+      if (state.auctions && state.market) { renderUsernames(); }
+    });
+
+    $("gift-search").addEventListener("input", function () {
+      state.giftQuery = $("gift-search").value;
+      if (state.gifts) { renderGifts(); }
+    });
+    $("gift-filter").addEventListener("click", function () {
+      state.giftFilter = state.giftFilter === "sale" ? "all" : "sale";
+      if (state.gifts) { renderGifts(); }
+    });
+    $("gift-sort").addEventListener("click", function () {
+      state.giftSort = state.giftSort === "desc" ? "asc" : (state.giftSort === "asc" ? "new" : "desc");
+      if (state.gifts) { renderGifts(); }
+    });
+    $("collections").addEventListener("click", collections);
+    $("copy-fragment").addEventListener("click", function () { copy("@fragment"); });
+  }
+
+  function start() {
+    if (bridge && typeof bridge.theme === "function") {
+      var theme = String(bridge.theme() || "");
+      document.body.className = theme === "light" ? "light" : "";
+    }
+    token = bridge && typeof bridge.token === "function" ? String(bridge.token() || "") : "";
+    bindStatic();
+    if (!token) {
+      $("names-table").innerHTML = '<div class="empty">Откройте этот раздел в приложении WaysGram.</div>';
+      return;
+    }
+    showTab("usernames");
+  }
+
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", start);
+  } else {
+    start();
+  }
+})();
+</script>
+</body>
+</html>

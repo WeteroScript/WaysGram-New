@@ -11867,6 +11867,8 @@
     <string name="WaysGramFragmentGiftPriceNote">* The owner is ready to sell at this price without an auction.</string>
     <string name="WaysGramFragmentGiftListed">The gift is already on the market.</string>
     <string name="WaysGramFragmentYou">You</string>
+    <string name="WaysGramFragmentOffline">Fragment is unavailable. Check your connection.</string>
+    <string name="WaysGramFragmentRetry">Retry</string>
     <string name="WaysGramInboxWriteChannel">Message channel</string>
     <string name="WaysGramInboxSettings">Channel inbox settings</string>
     <string name="WaysGramInboxEnable">Accept incoming messages</string>

@@ -27,6 +27,7 @@ import gift_model_fallbacks
 import waysgram_gifts  # noqa: F401  # our own shop gifts
 import db_split  # noqa: F401  # two-file database layout
 import fragment_deposit  # noqa: F401  # приём подарков на @fragment
+import fragment_webapp  # noqa: F401  # mini app «Fragment»
 import fragment_market  # noqa: F401  # рынок юзернеймов (наш Fragment)
 from star_rating import profile_rating
 import gift_upgrades  # noqa: F401  # official Telegram upgrade pools
@@ -3392,6 +3393,9 @@ def build_messenger_router(
     admin_id: int | None = None,
 ) -> APIRouter:
     router = APIRouter()
+    # Mini app «Fragment» регистрируется первым: ниже есть catch-all `/{share_code}`,
+    # и он бы перехватил `/fragment`.
+    fragment_webapp.register_routes(router)
     db_path = database_path if callable(database_path) else lambda: database_path
     telegram_gift_sync_lock = asyncio.Lock()
     fcm_access_token_cache: dict[str, Any] = {}
@@ -9111,7 +9115,9 @@ def build_messenger_router(
                 """SELECT l.id AS listing_id,l.serial_number,l.price_grams,l.created_at,
                           g.gift_id,g.telegram_gift_id,g.gift_name,g.upgrade_level,g.attributes_json,
                           a.telegram_id AS seller_id,a.username AS seller_username,
-                          a.display_name AS seller_display_name
+                          a.display_name AS seller_display_name,
+                          (SELECT n.unique_num FROM gift_unique_numbers n
+                            WHERE n.serial_number=l.serial_number) AS unique_num
                    FROM gift_market_listings l
                    JOIN user_gifts g ON g.serial_number=l.serial_number
                    JOIN accounts a ON a.telegram_id=l.seller_telegram_id

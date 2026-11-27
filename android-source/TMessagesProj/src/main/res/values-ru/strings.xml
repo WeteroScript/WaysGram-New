@@ -11694,6 +11694,8 @@
     <string name="WaysGramFragmentGiftPriceNote">* Владелец готов продать по этой цене без аукциона.</string>
     <string name="WaysGramFragmentGiftListed">Подарок уже выставлен на рынок.</string>
     <string name="WaysGramFragmentYou">Вы</string>
+    <string name="WaysGramFragmentOffline">Fragment недоступен. Проверьте соединение.</string>
+    <string name="WaysGramFragmentRetry">Повторить</string>
     <string name="WaysGramInboxWriteChannel">Написать каналу</string>
     <string name="WaysGramInboxSettings">Настройки входящих канала</string>
     <string name="WaysGramInboxEnable">Принимать входящие сообщения</string>
