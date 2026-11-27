@@ -17,7 +17,12 @@ from pathlib import Path
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import FileResponse
 
-PAGE_PATH = Path(__file__).resolve().parent / "static" / "fragment.html"
+STATIC_DIR = Path(__file__).resolve().parent / "static"
+PAGE_PATH = STATIC_DIR / "fragment.html"
+ASSETS = {
+    "lottie_light.min.js": "application/javascript",
+    "pako_inflate.min.js": "application/javascript",
+}
 
 
 def register_routes(router: APIRouter) -> None:
@@ -32,6 +37,23 @@ def register_routes(router: APIRouter) -> None:
             media_type="text/html; charset=utf-8",
             # Правки вёрстки должны приезжать сразу, без ожидания кэша WebView.
             headers={"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"},
+        )
+
+    @router.get("/fragment/assets/{asset_name}", include_in_schema=False)
+    async def fragment_asset(asset_name: str) -> FileResponse:
+        media_type = ASSETS.get(asset_name)
+        if media_type is None:
+            raise HTTPException(status_code=404, detail="Ресурс Fragment не найден")
+        path = STATIC_DIR / asset_name
+        if not path.is_file():
+            raise HTTPException(status_code=404, detail="Ресурс Fragment не собран")
+        return FileResponse(
+            path,
+            media_type=media_type,
+            headers={
+                "Cache-Control": "public, max-age=604800",
+                "X-Content-Type-Options": "nosniff",
+            },
         )
 
     @router.get("/fragment/health", include_in_schema=False)

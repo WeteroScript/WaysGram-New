@@ -255,7 +255,8 @@ python authbot/scripts/create_gift_user_session.py --output /private/path/gift-u
 
 - `GET /api/me/wallet`, `GET /api/me/wallet/transactions` — балансы и история операций.
 - `GET /api/gifts` — каталог доступных подарков.
-- `GET /api/me/gifts`, `GET /api/me/gifts/transactions` — инвентарь и история передач.
+- `GET /api/me/gifts`, `GET /api/me/gifts/transactions` — общий инвентарь и история передач.
+- `GET /api/me/fragment/gifts` — инвентарь мини-приложения Fragment: только подарки, которые текущий владелец отправил служебному `@fragment` и которые всё ещё принадлежат ему.
 - `POST /api/gifts/{id}/purchase` — покупка за Gram. Для защиты от повторного списания поддерживается заголовок `Idempotency-Key` длиной 16–128 символов.
 - `POST /api/gifts/transfer` — передача принадлежащего пользователю подарка по серийному номеру и Telegram ID или username получателя. Поддерживает `Idempotency-Key`.
 - `POST /api/messages/gift` — атомарно передаёт собственный подарок пользователю и создаёт сообщение в ЛС со снимком атрибутов. Проверяются блокировки и запрет передачи выставленного подарка; `Idempotency-Key` предотвращает повторную передачу и создание сообщения. Передача бесплатна внутри WaysGram и не является операцией Telegram или on-chain NFT. Нативная карточка коллекционного подарка в своём профиле подключена к этому маршруту; Android runtime не проверен.

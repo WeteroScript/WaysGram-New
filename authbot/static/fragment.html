@@ -162,8 +162,18 @@
     position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain;
     padding: 10%; image-rendering: auto;
   }
+  .tile .model-art, .big-art .model-art {
+    position: absolute; inset: 5%; display: flex; align-items: center; justify-content: center;
+    visibility: hidden; opacity: 0; transition: opacity .15s ease; z-index: 1;
+  }
+  .tile .model-art.active, .big-art .model-art.active { visibility: visible; opacity: 1; }
+  .tile .model-art svg, .tile .model-art video,
+  .big-art .model-art svg, .big-art .model-art video,
+  .tile .model-art img, .big-art .model-art img {
+    display: block; width: 100%; height: 100%; object-fit: contain;
+  }
   .tile .serial {
-    position: absolute; left: 6px; bottom: 6px;
+    position: absolute; left: 6px; bottom: 6px; z-index: 2;
     background: rgba(0, 0, 0, .35); color: #fff;
     border-radius: 5px; padding: 1px 5px; font-size: 11px; font-weight: 600;
   }
@@ -196,6 +206,8 @@
   .empty { color: var(--muted); font-size: 13px; padding: 14px 16px; }
   .skeleton { color: var(--muted); font-size: 13px; padding: 14px 16px; }
 </style>
+<script defer src="/fragment/assets/pako_inflate.min.js"></script>
+<script defer src="/fragment/assets/lottie_light.min.js"></script>
 </head>
 <body>
 <header class="brand">
@@ -288,6 +300,10 @@
 
   var COLORS = ["#6e7d63", "#4f7f53", "#7c6bb0", "#b0865a", "#4f7e96", "#a06a88"];
   var artCache = {};
+  var modelAssetCache = {};
+  var activeModelPlayers = [];
+  var activeModelObservers = [];
+  var modelRenderGeneration = 0;
 
   function $(id) { return document.getElementById(id); }
 
@@ -411,9 +427,176 @@
       .catch(function () { /* остаётся эмодзи */ });
   }
 
+  function modelDocumentId(item) {
+    var value = item && item.model_document_id;
+    if (!value) {
+      var traits = item && item.attributes && item.attributes.collectible_traits;
+      var model = traits && traits.model;
+      value = model && typeof model === "object" ? model.document_id : "";
+    }
+    if (value === null || value === undefined || value === "" || value === 0 || value === "0") {
+      return "";
+    }
+    return String(value).trim();
+  }
+
+  function inflateModelJson(bytes) {
+    if (bytes.length >= 2 && bytes[0] === 31 && bytes[1] === 139) {
+      if (window.pako && typeof window.pako.ungzip === "function") {
+        return Promise.resolve(window.pako.ungzip(bytes, { to: "string" }));
+      }
+      if (window.DecompressionStream && window.Blob && Blob.prototype.stream) {
+        var stream = new Blob([bytes]).stream().pipeThrough(new DecompressionStream("gzip"));
+        return new Response(stream).text();
+      }
+      return Promise.reject(new Error("gzip decoder unavailable"));
+    }
+    return Promise.resolve(new TextDecoder("utf-8").decode(bytes));
+  }
+
+  function modelAsset(item, documentId) {
+    var giftId = String(item.telegram_gift_id || "").trim();
+    if (!giftId || !documentId) { return Promise.reject(new Error("model id missing")); }
+    var key = giftId + "|" + documentId;
+    if (modelAssetCache[key]) { return modelAssetCache[key]; }
+    var promise = fetch("/api/telegram/gifts/" + encodeURIComponent(giftId)
+      + "/attributes/" + encodeURIComponent(documentId),
+      { headers: { "Authorization": "Bearer " + token } })
+      .then(function (response) {
+        if (!response.ok) { throw new Error("model unavailable"); }
+        var mediaType = String(response.headers.get("content-type") || "")
+          .split(";")[0].toLowerCase();
+        return response.arrayBuffer().then(function (buffer) {
+          var bytes = new Uint8Array(buffer);
+          var webm = bytes.length >= 4 && bytes[0] === 26 && bytes[1] === 69
+            && bytes[2] === 223 && bytes[3] === 163;
+          if (mediaType.indexOf("video/") === 0 || webm) {
+            return { type: "video", url: URL.createObjectURL(
+              new Blob([bytes], { type: mediaType || "video/webm" })) };
+          }
+          if (mediaType.indexOf("image/") === 0) {
+            return { type: "image", url: URL.createObjectURL(
+              new Blob([bytes], { type: mediaType })) };
+          }
+          return inflateModelJson(bytes).then(function (text) {
+            JSON.parse(text); // неизвестный формат безопасно оставляем на обычном арте
+            return { type: "lottie", text: text };
+          });
+        });
+      });
+    modelAssetCache[key] = promise;
+    promise.catch(function () {
+      if (modelAssetCache[key] === promise) { delete modelAssetCache[key]; }
+    });
+    return promise;
+  }
+
+  function stopGiftModelPlayers() {
+    modelRenderGeneration++;
+    activeModelObservers.forEach(function (observer) {
+      try { observer.disconnect(); } catch (error) { /* ignored */ }
+    });
+    activeModelObservers = [];
+    activeModelPlayers.forEach(function (entry) {
+      try {
+        if (entry.type === "video") {
+          entry.player.pause();
+          entry.player.removeAttribute("src");
+        } else if (entry.player && typeof entry.player.destroy === "function") {
+          entry.player.destroy();
+        }
+      } catch (error) { /* detached previews must not block navigation */ }
+    });
+    activeModelPlayers = [];
+  }
+
+  function renderGiftModel(item, node, img, emojiNode) {
+    var documentId = modelDocumentId(item);
+    var generation = modelRenderGeneration;
+    if (!documentId || !node) { return; }
+    function reveal() {
+      if (generation !== modelRenderGeneration
+          || !document.documentElement.contains(node)) { return; }
+      node.classList.add("active");
+      if (img) { img.hidden = true; }
+      if (emojiNode) { emojiNode.hidden = true; }
+    }
+    function fallback() {
+      if (!node || generation !== modelRenderGeneration) { return; }
+      node.classList.remove("active");
+      node.innerHTML = "";
+      if (img && img.getAttribute("src")) {
+        img.hidden = false;
+        if (emojiNode) { emojiNode.hidden = true; }
+      } else if (emojiNode) {
+        emojiNode.hidden = false;
+      }
+    }
+    modelAsset(item, documentId).then(function (asset) {
+      if (generation !== modelRenderGeneration
+          || !document.documentElement.contains(node)) { return; }
+      node.innerHTML = "";
+      if (asset.type === "video") {
+        var video = document.createElement("video");
+        video.autoplay = true;
+        video.loop = true;
+        video.muted = true;
+        video.playsInline = true;
+        video.setAttribute("playsinline", "");
+        video.addEventListener("loadeddata", reveal);
+        video.addEventListener("error", fallback);
+        node.appendChild(video);
+        activeModelPlayers.push({ type: "video", player: video });
+        video.src = asset.url;
+        video.load();
+        var playback = video.play();
+        if (playback && typeof playback.catch === "function") {
+          playback.catch(function () { /* first frame can still be shown */ });
+        }
+        if (video.readyState >= 2) { reveal(); }
+      } else if (asset.type === "image") {
+        var image = document.createElement("img");
+        image.alt = "";
+        image.addEventListener("load", reveal);
+        image.addEventListener("error", fallback);
+        node.appendChild(image);
+        image.src = asset.url;
+      } else if (window.lottie && typeof window.lottie.loadAnimation === "function") {
+        var animation = window.lottie.loadAnimation({
+          container: node,
+          renderer: "svg",
+          loop: true,
+          autoplay: true,
+          animationData: JSON.parse(asset.text)
+        });
+        animation.addEventListener("DOMLoaded", reveal);
+        animation.addEventListener("data_failed", fallback);
+        activeModelPlayers.push({ type: "lottie", player: animation });
+      } else {
+        fallback();
+      }
+    }).catch(function () { fallback(); });
+  }
+
+  function requestModelArtwork(item, node, img, emojiNode, eager) {
+    if (!modelDocumentId(item)) { return; }
+    if (!eager && window.IntersectionObserver) {
+      var observer = new IntersectionObserver(function (entries) {
+        if (!entries.some(function (entry) { return entry.isIntersecting; })) { return; }
+        observer.disconnect();
+        renderGiftModel(item, node, img, emojiNode);
+      }, { rootMargin: "120px" });
+      activeModelObservers.push(observer);
+      observer.observe(node);
+    } else {
+      renderGiftModel(item, node, img, emojiNode);
+    }
+  }
+
   /* ------------------------------------------------------------- вкладки */
 
   function showTab(tab) {
+    stopGiftModelPlayers();
     state.tab = tab;
     state.detail = null;
     Array.prototype.forEach.call($("tabs").children, function (button) {
@@ -430,6 +613,7 @@
   }
 
   function openDetail(html) {
+    stopGiftModelPlayers();
     var view = $("view-detail");
     view.innerHTML = html;
     view.hidden = false;
@@ -795,9 +979,10 @@
     drawGrid($("gift-grid"), sortGifts(items), false);
   }
 
-  function drawGrid(container, items, owned) {
+  function drawGrid(container, items, owned, emptyMessage) {
+    stopGiftModelPlayers();
     if (!items.length) {
-      container.innerHTML = '<div class="empty">Пока пусто.</div>';
+      container.innerHTML = '<div class="empty">' + esc(emptyMessage || "Пока пусто.") + "</div>";
       return;
     }
     container.innerHTML = items.map(function (item, index) {
@@ -810,7 +995,7 @@
       return '<button class="tile" data-index="' + index + '">'
         + '<span class="art" style="background:' + colorFor(item) + '">'
         + '<span class="emoji">' + esc(emoji) + "</span>"
-        + '<img alt="" hidden>'
+        + '<img alt="" hidden><span class="model-art" aria-hidden="true"></span>'
         + '<span class="serial">' + esc(serialOf(item)) + "</span></span>"
         + '<span class="price"><span class="grow">' + esc(price) + "</span>"
         + '<span class="state ' + stateClass + '">' + esc(stateText) + "</span></span>"
@@ -821,7 +1006,9 @@
       var item = items[Number(tile.dataset.index)];
       var img = tile.querySelector("img");
       var emoji = tile.querySelector(".emoji");
+      var modelNode = tile.querySelector(".model-art");
       artwork(item.telegram_gift_id, img, emoji);
+      requestModelArtwork(item, modelNode, img, emoji, false);
       tile.addEventListener("click", function () { openGift(item, owned); });
     });
   }
@@ -836,7 +1023,7 @@
     var html = detailHead(title, badge);
     html += '<div class="big-art" style="background:' + colorFor(item) + '">'
       + '<span class="emoji">' + esc(item.gift_emoji || "🎁") + "</span>"
-      + '<img alt="" hidden></div>';
+      + '<img alt="" hidden><div class="model-art" aria-hidden="true"></div></div>';
 
     var traits = (item.attributes && item.attributes.collectible_traits) || null;
     var rows = "";
@@ -871,8 +1058,12 @@
 
     openDetail(html);
     bindDetailBack();
-    artwork(item.telegram_gift_id, $("view-detail").querySelector(".big-art img"),
-      $("view-detail").querySelector(".big-art .emoji"));
+    var detailArt = $("view-detail").querySelector(".big-art");
+    var detailImg = detailArt.querySelector("img");
+    var detailEmoji = detailArt.querySelector(".emoji");
+    var detailModel = detailArt.querySelector(".model-art");
+    artwork(item.telegram_gift_id, detailImg, detailEmoji);
+    requestModelArtwork(item, detailModel, detailImg, detailEmoji, true);
     $("detail-back-2").addEventListener("click", closeDetail);
 
     if ($("buy-gift")) {
@@ -934,7 +1125,7 @@
   function loadInventory() {
     if (state.inventory) { renderInventory(); return; }
     $("inventory-grid").innerHTML = '<div class="skeleton">Загружаем инвентарь…</div>';
-    api("/api/me/gifts").then(function (data) {
+    api("/api/me/fragment/gifts").then(function (data) {
       state.inventory = (data && data.gifts) || [];
       renderInventory();
     }).catch(function (error) {
@@ -943,7 +1134,12 @@
   }
 
   function renderInventory() {
-    drawGrid($("inventory-grid"), state.inventory || [], true);
+    drawGrid(
+      $("inventory-grid"),
+      state.inventory || [],
+      true,
+      "Здесь появятся только подарки, которые вы отправили на @fragment."
+    );
   }
 
   /* -------------------------------------------------------------- запуск */

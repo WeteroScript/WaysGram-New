@@ -108,6 +108,7 @@ MESSENGER_TABLES = frozenset(
         "telegram_mtproto_gift_attributes",
         "telegram_mtproto_gift_attribute_sync",
         "telegram_auction_gift_registry",
+        "fragment_gift_deposits",
         # Рынок коллекционных юзернеймов (fragment_market.py).
         "collectibles",
         "collectible_listings",

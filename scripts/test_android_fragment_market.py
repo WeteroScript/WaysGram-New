@@ -84,10 +84,13 @@ class FragmentMiniAppChecks(unittest.TestCase):
         self.assertNotIn("localStorage", self.page)
 
     def test_page_uses_only_our_api(self):
-        for path in ("/api/collectibles", "/api/gift-market", "/api/me/gifts",
+        for path in ("/api/collectibles", "/api/gift-market", "/api/me/fragment/gifts",
                      "/api/me/ton", "/api/gifts/"):
             self.assertIn(path, self.page, path)
-        # Никаких внешних домов: страница не тянет сторонние скрипты.
+        self.assertIn("requestModelArtwork", self.page)
+        self.assertIn("model_document_id", self.page)
+        self.assertIn("lottie.loadAnimation", self.page)
+        # Никаких запросов к сторонним доменам: рендерер модели поставляется локально.
         self.assertNotIn("http://", self.page)
         self.assertNotIn("https://", self.page)
 
@@ -165,6 +168,7 @@ class FragmentMiniAppChecks(unittest.TestCase):
         self.assertIn("fragment_market.ensure_storage(db)", api)
         self.assertIn("process_due_username_auctions()", api)
         for route in ('@router.get("/api/gift-market"', '@router.get("/api/me/gifts")',
+                      '@router.get("/api/me/fragment/gifts")',
                       '@router.post("/api/gifts/{serial_number}/list"',
                       '@router.get("/api/telegram/gifts/{gift_id}/sticker"'):
             self.assertIn(route, api, route)

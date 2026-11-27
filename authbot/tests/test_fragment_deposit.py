@@ -105,6 +105,45 @@ def test_deposit_keeps_the_gift_and_records_it(env) -> None:
     assert query(path, """SELECT event_type FROM gift_transactions ORDER BY id DESC LIMIT 1""")[0][0] == "fragment_deposit"
 
 
+def test_fragment_inventory_filters_out_gifts_not_sent_to_fragment(env) -> None:
+    _path, app = env
+    run(bot_module.set_telegram_gift_values("g1", price=40, supply=5))
+
+    async def scenario() -> None:
+        async with await client_for(app) as client:
+            serials = []
+            for _ in range(2):
+                bought = await client.post(
+                    "/api/telegram/gifts/g1/purchase", headers=headers(101), json={}
+                )
+                assert bought.status_code == 201, bought.text
+                serials.append(bought.json()["gift"]["serial_number"])
+
+            sent = await client.post(
+                "/api/messages/gift",
+                headers=headers(101),
+                json={"recipient_id": fragment_deposit.FRAGMENT_TELEGRAM_ID, "serial_number": serials[0]},
+            )
+            assert sent.status_code == 201, sent.text
+            assert sent.json()["deposited"] is True
+
+            fragment = await client.get(
+                "/api/me/fragment/gifts?limit=1&offset=0", headers=headers(101)
+            )
+            assert fragment.status_code == 200, fragment.text
+            payload = fragment.json()
+            assert [gift["serial_number"] for gift in payload["gifts"]] == [serials[0]]
+            assert payload["total"] == 1
+            assert payload["has_more"] is False
+
+            # The shared account inventory still contains both gifts; only Fragment is filtered.
+            full = await client.get("/api/me/gifts", headers=headers(101))
+            assert full.status_code == 200, full.text
+            assert {gift["serial_number"] for gift in full.json()["gifts"]} == set(serials)
+
+    run(scenario())
+
+
 def test_repeated_deposit_of_the_same_gift_is_recorded_once(env) -> None:
     path, app = env
     run(bot_module.set_telegram_gift_values("g1", price=40, supply=5))
@@ -135,6 +174,15 @@ def test_deposit_targets_include_only_the_service_account(env) -> None:
             assert not await fragment_deposit.is_deposit_target(db, 102)
 
     run(scenario())
+
+
+def test_collectible_model_document_id_is_safe_for_webviews() -> None:
+    attributes = {
+        "collectible_traits": {
+            "model": {"name": "Mirror", "document_id": 9_007_199_254_741_099_123}
+        }
+    }
+    assert messenger_api._collectible_model_document_id(attributes) == "9007199254741099123"
 
 
 def test_sending_to_a_person_still_transfers_ownership(env) -> None:

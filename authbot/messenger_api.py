@@ -514,6 +514,27 @@ def _has_collectible_traits(attributes: Any) -> bool:
     return True
 
 
+def _collectible_model_document_id(attributes: Any) -> str:
+    """Exact string form of a model document ID for JavaScript clients.
+
+    Telegram document IDs are 64-bit integers and many exceed JavaScript's
+    ``Number.MAX_SAFE_INTEGER``. Keep the original value in ``attributes`` for native
+    clients, and expose this copy so a WebView can build the exact media URL.
+    """
+    traits = gift_upgrades.traits_of(attributes)
+    model = traits.get("model") if isinstance(traits, dict) else None
+    if not isinstance(model, dict):
+        return ""
+    raw = model.get("document_id")
+    if isinstance(raw, bool):
+        return ""
+    try:
+        document_id = int(str(raw or "").strip())
+    except (TypeError, ValueError, OverflowError):
+        return ""
+    return str(document_id) if document_id else ""
+
+
 #: Quotation marks Telegram and the catalog dump spell differently in attribute names.
 _APOSTROPHES = "\u2019\u2018\u02bc\u00b4`\u2032"
 _DASHES = "\u2010\u2011\u2012\u2013\u2014\u2015\u2212\u2043"
@@ -6390,13 +6411,22 @@ def build_messenger_router(
             rows = await cur.fetchall()
         return {"transactions": [dict(row) for row in rows]}
 
-    async def gift_inventory(owner_id: int, limit: int | None, offset: int, *, public: bool, viewer_id: int | None = None) -> dict[str, Any]:
-        """The same paginated inventory for the owner and for a profile visitor."""
+    async def gift_inventory(
+        owner_id: int, limit: int | None, offset: int, *, public: bool,
+        viewer_id: int | None = None, fragment_only: bool = False,
+    ) -> dict[str, Any]:
+        """The same paginated inventory for an owner, profile visitor or Fragment tab."""
         async with aiosqlite.connect(db_path()) as db:
             db.row_factory = aiosqlite.Row
             visible = " AND profile_hidden=0" if public else ""
+            deposited = (
+                " AND EXISTS(SELECT 1 FROM fragment_gift_deposits d"
+                " WHERE d.telegram_id=user_gifts.owner_telegram_id"
+                " AND d.serial_number=user_gifts.serial_number)"
+                if fragment_only else ""
+            )
             cur = await db.execute(
-                "SELECT COUNT(*) FROM user_gifts WHERE owner_telegram_id=?" + visible,
+                "SELECT COUNT(*) FROM user_gifts WHERE owner_telegram_id=?" + visible + deposited,
                 (owner_id,),
             )
             total = int((await cur.fetchone())[0] or 0)
@@ -6424,7 +6454,7 @@ def build_messenger_router(
                                  WHERE r.gift_id=user_gifts.telegram_gift_id) AS auction_eligible,
                           (SELECT n.unique_num FROM gift_unique_numbers n
                             WHERE n.serial_number=user_gifts.serial_number) AS unique_num
-                   FROM user_gifts WHERE owner_telegram_id=?{visible}
+                   FROM user_gifts WHERE owner_telegram_id=?{visible}{deposited}
                    ORDER BY profile_pinned DESC, profile_order IS NOT NULL, profile_order ASC, id DESC"""
             query_params: tuple[Any, ...] = (owner_id,)
             if limit is not None:
@@ -6544,6 +6574,9 @@ def build_messenger_router(
                                 model_trait = {"name": model_name}
                                 collectible["model"] = model_trait
                             model_trait["document_id"] = fallback_id
+                # WebViews cannot preserve Telegram's 64-bit IDs as JSON numbers. The native
+                # API field remains unchanged; this exact string is for authenticated media URLs.
+                item["model_document_id"] = _collectible_model_document_id(item["attributes"])
                 if telegram_gift and str(telegram_gift.get("title") or "").strip():
                     item["gift_name"] = str(telegram_gift["title"]).strip()
                 item["gift_emoji"] = (
@@ -6782,6 +6815,18 @@ def build_messenger_router(
     ) -> dict[str, Any]:
         user = await current_user(authorization)
         return await gift_inventory(int(user["telegram_id"]), limit, offset, public=False)
+
+    @router.get("/api/me/fragment/gifts")
+    async def my_fragment_gifts(
+        authorization: str | None = Header(default=None),
+        limit: int | None = Query(default=None, ge=1, le=200),
+        offset: int = Query(default=0, ge=0),
+    ) -> dict[str, Any]:
+        """Only gifts the current owner explicitly deposited by sending to @fragment."""
+        user = await current_user(authorization)
+        return await gift_inventory(
+            int(user["telegram_id"]), limit, offset, public=False, fragment_only=True
+        )
 
     @router.get("/api/users/{user_id}/gifts")
     async def user_gifts(
@@ -9134,6 +9179,7 @@ def build_messenger_router(
                 item["attributes"] = json.loads(item.pop("attributes_json") or "{}")
             except (TypeError, ValueError):
                 item["attributes"] = {}
+            item["model_document_id"] = _collectible_model_document_id(item["attributes"])
             items.append(item)
         return {"currency": "grams", "listings": items, "count": len(items)}
 

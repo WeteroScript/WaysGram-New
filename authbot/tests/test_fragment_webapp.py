@@ -72,12 +72,31 @@ def test_page_calls_only_our_api(env) -> None:
     async def scenario() -> None:
         async with await client_for(app) as client:
             body = (await client.get("/fragment")).text
-            for route in ("/api/collectibles", "/api/gift-market", "/api/me/gifts",
+            for route in ("/api/collectibles", "/api/gift-market", "/api/me/fragment/gifts",
                           "/api/me/ton", "/api/telegram/gifts/"):
                 assert route in body, route
+            assert "requestModelArtwork" in body
+            assert "lottie.loadAnimation" in body
+            assert "model_document_id" in body
             # Ключ идемпотентности строится по тому же шаблону, что и в клиенте.
             assert '"wg-" + action + "-" + clean' in body
             assert '"Idempotency-Key"' in body
+
+    run(scenario())
+
+
+def test_model_renderer_assets_are_served_locally(env) -> None:
+    _path, app = env
+
+    async def scenario() -> None:
+        async with await client_for(app) as client:
+            for name in ("pako_inflate.min.js", "lottie_light.min.js"):
+                response = await client.get("/fragment/assets/" + name)
+                assert response.status_code == 200, response.text
+                assert response.headers["content-type"].startswith("application/javascript")
+                assert len(response.content) > 1_000
+            missing = await client.get("/fragment/assets/unknown.js")
+            assert missing.status_code == 404
 
     run(scenario())
 

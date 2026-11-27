@@ -2849,6 +2849,7 @@ def test_heart_locket_offline_models_match_exact_traits_without_changing_databas
             by_serial = lambda i: items[f'WG-{i:012X}']['attributes']['collectible_traits']['model']
             model = by_serial(0)
             assert model['name'] == 'Mirror' and model['document_id'] < 0
+            assert items['WG-000000000000']['model_document_id'] == str(model['document_id'])
             assert by_serial(1)['name'] == 'Queen Bee' and by_serial(1)['document_id'] < 0
             assert by_serial(2)['document_id'] == 123456
             assert 'document_id' not in by_serial(3)

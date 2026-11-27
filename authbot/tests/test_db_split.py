@@ -115,6 +115,10 @@ def make_legacy_single_file(path: Path) -> None:
         "VALUES(7,52.1,5.1,'Legacy Location')"
     )
     legacy.execute("INSERT INTO gift_catalog(id,name,price_grams,supply,created_at) VALUES(3,'Old Gift',5,2,1)")
+    legacy.execute(
+        "INSERT INTO fragment_gift_deposits(serial_number,telegram_id,gift_name,deposited_at) "
+        "VALUES('WG-LEGACY',101,'Legacy Gift',11)"
+    )
     legacy.commit()
     legacy.close()
     messenger.unlink()
@@ -143,6 +147,9 @@ def test_legacy_single_file_database_is_migrated(tmp_path: Path, monkeypatch: py
         "SELECT latitude,longitude,label FROM message_locations WHERE message_id=7"
     ).fetchall() == [(52.1, 5.1, "Legacy Location")]
     assert conn.execute("SELECT name,price_grams,supply FROM gift_catalog").fetchall() == [("Old Gift", 5, 2)]
+    assert conn.execute(
+        "SELECT serial_number,telegram_id,gift_name,deposited_at FROM fragment_gift_deposits"
+    ).fetchall() == [("WG-LEGACY", 101, "Legacy Gift", 11)]
     # AUTOINCREMENT keeps counting after the migrated ids.
     conn.execute("INSERT INTO messages(sender_telegram_id,recipient_telegram_id,body,created_at) VALUES(1,2,'new',10)")
     assert conn.execute("SELECT MAX(id) FROM messages").fetchone()[0] == 8
