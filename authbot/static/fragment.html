@@ -51,13 +51,6 @@
   .brand svg { width: 24px; height: 24px; fill: var(--text); flex: 0 0 auto; }
   .brand .wordmark { font-weight: 700; font-size: 19px; letter-spacing: 1.6px; }
   .brand .spacer { flex: 1; }
-  .ton-button {
-    display: inline-flex; align-items: center; gap: 6px;
-    background: var(--blue); color: #fff;
-    border-radius: 18px; padding: 9px 16px;
-    font-size: 14px; font-weight: 600;
-  }
-
   /* Вкладки */
   .tabs {
     display: flex; gap: 22px; overflow-x: auto; scrollbar-width: none;
@@ -172,10 +165,15 @@
   .tile .model-art img, .big-art .model-art img {
     display: block; width: 100%; height: 100%; object-fit: contain;
   }
-  .tile .serial {
-    position: absolute; left: 6px; bottom: 6px; z-index: 2;
-    background: rgba(0, 0, 0, .35); color: #fff;
-    border-radius: 5px; padding: 1px 5px; font-size: 11px; font-weight: 600;
+  .tile .pattern-art, .big-art .pattern-art {
+    position: absolute; inset: 5%; display: flex; align-items: center; justify-content: center;
+    visibility: hidden; opacity: 0; transition: opacity .15s ease; z-index: 2; pointer-events: none;
+  }
+  .tile .pattern-art.active, .big-art .pattern-art.active { visibility: visible; opacity: 1; }
+  .tile .pattern-art svg, .tile .pattern-art video,
+  .big-art .pattern-art svg, .big-art .pattern-art video,
+  .tile .pattern-art img, .big-art .pattern-art img {
+    display: block; width: 100%; height: 100%; object-fit: contain;
   }
   .tile .price { display: flex; align-items: center; gap: 4px; font-size: 12px; font-weight: 700; }
   .tile .price .grow { flex: 1; }
@@ -197,6 +195,17 @@
   .big-art .emoji { font-size: 64px; }
   .big-art img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; padding: 12%; }
 
+  .choice-menu {
+    position: fixed; z-index: 1000; min-width: 168px; max-width: calc(100vw - 24px);
+    max-height: min(60vh, 360px); overflow-y: auto; background: var(--card);
+    border: 1px solid var(--line); border-radius: 11px; padding: 5px;
+    box-shadow: 0 8px 28px rgba(0, 0, 0, .38);
+  }
+  .choice-menu button {
+    display: block; width: 100%; text-align: left; padding: 10px 12px;
+    border-radius: 7px; font-size: 14px; white-space: nowrap;
+  }
+  .choice-menu button:active, .choice-menu button.selected { background: var(--card-soft); }
   .toast {
     position: fixed; left: 12px; right: 12px; bottom: 16px;
     background: var(--card-soft); color: var(--text);
@@ -214,7 +223,6 @@
   <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2.4 2.2l19.4 9.1c.5.2.5.9 0 1.1l-8 3.4-3.4 8c-.2.5-.9.5-1.1 0L2.4 3.3c-.2-.5.3-1 .8-.9z"/></svg>
   <span class="wordmark">FRAGMENT</span>
   <span class="spacer"></span>
-  <button class="ton-button" id="ton-button">💎 Подключить TON</button>
 </header>
 
 <nav class="tabs" id="tabs">
@@ -227,22 +235,22 @@
   <section class="view" id="view-usernames">
     <div class="hero">
       <h1>Купить и продать юзернеймы</h1>
-      <p>Имя на блокчейне для аккаунта, канала или группы.</p>
+      <p>Имя для аккаунта, канала или группы.</p>
     </div>
     <div class="search">
       <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="M16.5 16.5L21 21"/></svg>
       <input id="name-search" placeholder="Введите юзернейм…" autocomplete="off" autocapitalize="off" spellcheck="false">
     </div>
     <div class="section-head">
-      <h2 id="names-title">Аукционы</h2>
-      <button class="chip" id="names-filter">Аукцион ▾</button>
+      <h2 id="names-title">Юзернеймы на продаже</h2>
       <button class="chip" id="names-sort">Цена ↓</button>
     </div>
+    <div class="row" style="padding: 0 12px 5px;">
+      <button class="chip" id="user-autorefresh">Авто-обновление: выкл</button>
+    </div>
     <div class="table" id="names-table"></div>
-    <div class="section-head"><h2>Мои имена</h2></div>
+    <div class="section-head"><h2>Мои юзернеймы</h2></div>
     <div id="my-names"></div>
-    <div class="section-head"><h2>Пополнить за TON</h2></div>
-    <div id="ton-block"></div>
   </section>
 
   <section class="view" id="view-gifts" hidden>
@@ -253,17 +261,22 @@
       </div>
       <button class="chip" id="collections" style="height: 34px; margin-top: 6px;">Коллекции ▾</button>
     </div>
+    <div class="section-head"><h2>Мои лоты</h2></div>
+    <div class="grid" id="my-gift-grid"></div>
     <div class="section-head">
-      <h2>Топ подарков</h2>
+      <h2>Подарки</h2>
       <button class="chip on" id="gift-filter">Все подарки ▾</button>
       <button class="chip" id="gift-sort">Цена ↓</button>
+    </div>
+    <div class="row" style="padding: 0 12px 5px;">
+      <button class="chip" id="gift-autorefresh">Авто-обновление: выкл</button>
     </div>
     <div class="grid" id="gift-grid"></div>
   </section>
 
   <section class="view" id="view-inventory" hidden>
     <div class="card hint">
-      <div class="label">Пополнить инвентарь: отправьте NFT-подарок на @fragment</div>
+      <div class="label">Переданный подарок переходит во владение @fragment. Свои депозиты можно выставить на продажу здесь.</div>
       <div class="link" id="copy-fragment" style="margin-top: 6px;">Скопировать @fragment</div>
     </div>
     <div class="grid" id="inventory-grid"></div>
@@ -282,21 +295,22 @@
   var token = "";
   var state = {
     tab: "usernames",
-    namesFilter: "auction",
     namesSort: "desc",
     giftFilter: "all",
     giftSort: "desc",
     collection: "",
     giftQuery: "",
-    auctions: null,
     market: null,
     mine: null,
-    ton: null,
     gifts: null,
+    ownListings: null,
     inventory: null,
+    autoRefresh: { usernames: 0, gifts: 0 },
     busy: false,
     detail: null
   };
+  var autoRefreshTimers = { usernames: null, gifts: null };
+  var openMenu = null;
 
   var COLORS = ["#6e7d63", "#4f7f53", "#7c6bb0", "#b0865a", "#4f7e96", "#a06a88"];
   var artCache = {};
@@ -379,18 +393,7 @@
   }
 
   function priceOf(item) {
-    var auction = item.auction;
-    if (auction && auction.ends_at) {
-      return Number(auction.current_bid_stars || 0) > 0
-        ? auction.current_bid_stars : auction.min_bid_stars;
-    }
     return Number(item.price_stars || 0);
-  }
-
-  function serialOf(item) {
-    if (Number(item.unique_num || 0) > 0) { return "#" + item.unique_num; }
-    var serial = String(item.serial_number || "");
-    return serial ? "#" + serial : "";
   }
 
   function colorFor(item) {
@@ -433,6 +436,19 @@
       var traits = item && item.attributes && item.attributes.collectible_traits;
       var model = traits && traits.model;
       value = model && typeof model === "object" ? model.document_id : "";
+    }
+    if (value === null || value === undefined || value === "" || value === 0 || value === "0") {
+      return "";
+    }
+    return String(value).trim();
+  }
+
+  function patternDocumentId(item) {
+    var value = item && item.pattern_document_id;
+    if (!value) {
+      var traits = item && item.attributes && item.attributes.collectible_traits;
+      var pattern = traits && traits.pattern;
+      value = pattern && typeof pattern === "object" ? pattern.document_id : "";
     }
     if (value === null || value === undefined || value === "" || value === 0 || value === "0") {
       return "";
@@ -593,6 +609,81 @@
     }
   }
 
+  function renderGiftPattern(item, node) {
+    var documentId = patternDocumentId(item);
+    var generation = modelRenderGeneration;
+    if (!documentId || !node) { return; }
+    function reveal() {
+      if (generation === modelRenderGeneration && document.documentElement.contains(node)) {
+        node.classList.add("active");
+      }
+    }
+    function fallback() {
+      if (generation !== modelRenderGeneration) { return; }
+      node.classList.remove("active");
+      node.innerHTML = "";
+    }
+    modelAsset(item, documentId).then(function (asset) {
+      if (generation !== modelRenderGeneration
+          || !document.documentElement.contains(node)) { return; }
+      node.innerHTML = "";
+      if (asset.type === "video") {
+        var video = document.createElement("video");
+        video.autoplay = true;
+        video.loop = true;
+        video.muted = true;
+        video.playsInline = true;
+        video.setAttribute("playsinline", "");
+        video.addEventListener("loadeddata", reveal);
+        video.addEventListener("error", fallback);
+        node.appendChild(video);
+        activeModelPlayers.push({ type: "video", player: video });
+        video.src = asset.url;
+        video.load();
+        var playback = video.play();
+        if (playback && typeof playback.catch === "function") {
+          playback.catch(function () { /* first frame can still be shown */ });
+        }
+        if (video.readyState >= 2) { reveal(); }
+      } else if (asset.type === "image") {
+        var image = document.createElement("img");
+        image.alt = "";
+        image.addEventListener("load", reveal);
+        image.addEventListener("error", fallback);
+        node.appendChild(image);
+        image.src = asset.url;
+      } else if (window.lottie && typeof window.lottie.loadAnimation === "function") {
+        var animation = window.lottie.loadAnimation({
+          container: node,
+          renderer: "svg",
+          loop: true,
+          autoplay: true,
+          animationData: JSON.parse(asset.text)
+        });
+        animation.addEventListener("DOMLoaded", reveal);
+        animation.addEventListener("data_failed", fallback);
+        activeModelPlayers.push({ type: "lottie", player: animation });
+      } else {
+        fallback();
+      }
+    }).catch(function () { fallback(); });
+  }
+
+  function requestPatternArtwork(item, node, eager) {
+    if (!patternDocumentId(item)) { return; }
+    if (!eager && window.IntersectionObserver) {
+      var observer = new IntersectionObserver(function (entries) {
+        if (!entries.some(function (entry) { return entry.isIntersecting; })) { return; }
+        observer.disconnect();
+        renderGiftPattern(item, node);
+      }, { rootMargin: "120px" });
+      activeModelObservers.push(observer);
+      observer.observe(node);
+    } else {
+      renderGiftPattern(item, node);
+    }
+  }
+
   /* ------------------------------------------------------------- вкладки */
 
   function showTab(tab) {
@@ -631,65 +722,43 @@
 
   /* ----------------------------------------------------------- юзернеймы */
 
-  function loadUsernames() {
-    if (state.auctions && state.market && state.mine) { renderUsernames(); return; }
-    $("names-table").innerHTML = '<div class="skeleton">Загружаем рынок…</div>';
+  function loadUsernames(force) {
+    if (!force && state.market && state.mine) { renderUsernames(); return; }
+    if (!state.market) { $("names-table").innerHTML = '<div class="skeleton">Загружаем рынок…</div>'; }
     Promise.all([
-      api("/api/collectibles?section=auctions"),
-      api("/api/collectibles?section=market"),
+      api("/api/collectibles?section=for_sale"),
       api("/api/collectibles?section=mine")
     ]).then(function (result) {
-      state.auctions = (result[0] && result[0].items) || [];
-      state.market = (result[1] && result[1].items) || [];
-      state.mine = (result[2] && result[2].items) || [];
+      state.market = (result[0] && result[0].items) || [];
+      state.mine = (result[1] && result[1].items) || [];
       renderUsernames();
-      loadTon();
     }).catch(function (error) {
       $("names-table").innerHTML = '<div class="empty">' + esc(error.message) + "</div>";
     });
   }
 
-  function loadTon() {
-    api("/api/me/ton").then(function (data) {
-      state.ton = data;
-      renderTon();
-    }).catch(function () {
-      $("ton-block").innerHTML = '<div class="empty">TON недоступен.</div>';
-    });
-  }
-
   function renderUsernames() {
-    var auction = state.namesFilter === "auction";
-    $("names-title").textContent = auction ? "Аукционы" : "На продажу";
-    $("names-filter").textContent = auction ? "Аукцион ▾" : "Продажа ▾";
+    $("names-title").textContent = "Юзернеймы на продаже";
     $("names-sort").textContent = state.namesSort === "asc" ? "Цена ↑" : "Цена ↓";
-
-    var source = (auction ? state.auctions : state.market) || [];
     var query = ($("name-search").value || "").trim().replace(/^@/, "").toLowerCase();
-    var items = source.filter(function (item) {
+    var items = (state.market || []).filter(function (item) {
       return !query || String(item.name || "").toLowerCase().indexOf(query) === 0;
     }).sort(function (a, b) {
       return state.namesSort === "asc" ? priceOf(a) - priceOf(b) : priceOf(b) - priceOf(a);
     });
 
-    var html = '<div class="thead"><span>Юзернейм</span><span>Минимальная ставка</span></div>';
+    var html = '<div class="thead"><span>Юзернейм</span><span>Цена</span></div>';
     if (!items.length) {
-      html += '<div class="empty">' + (query ? "Ничего не найдено." : "Пока пусто.") + "</div>";
+      html += '<div class="empty">' + (query ? "Ничего не найдено." : "Пока нет имён на продаже.") + "</div>";
     }
     items.forEach(function (item) {
       var name = String(item.name || "");
       if (!name) { return; }
-      var amount = priceOf(item);
-      var stateText = item.auction && item.auction.ends_at
-        ? timeLeft(item.auction.ends_at)
-        : "Продаётся";
       html += '<div class="trow" data-name="' + esc(name) + '">'
-        + '<div><div class="name">@' + esc(name)
-        + (item.price_stars ? '<span class="badge green">Продажа</span>' : "")
+        + '<div><div class="name">@' + esc(name) + '<span class="badge green">Продажа</span>'
         + '</div><div class="sub">' + esc(name) + '.t.me</div></div>'
-        + '<div class="side"><div class="amount">⭐ ' + num(amount) + '</div>'
-        + '<div class="state' + (item.auction && item.auction.ends_at ? "" : " green") + '">'
-        + esc(stateText) + "</div></div>"
+        + '<div class="side"><div class="amount">⭐ ' + num(priceOf(item)) + '</div>'
+        + '<div class="state green">Фиксированная цена</div></div>'
         + '<div class="chev">›</div></div>';
     });
     $("names-table").innerHTML = html;
@@ -700,13 +769,19 @@
     var mine = state.mine || [];
     var mineHtml = "";
     if (!mine.length) {
-      mineHtml = '<div class="card"><div class="label">Своих имён пока нет.</div>'
+      mineHtml = '<div class="card"><div class="label">У вас пока нет дополнительных юзернеймов.</div>'
         + '<div class="link" style="margin-top:6px;" id="claim-link">Занять свободное имя</div></div>';
     } else {
       mine.forEach(function (item) {
-        var subtitle = item.auction && item.auction.ends_at
-          ? "Аукцион · до " + timeLeft(item.auction.ends_at)
-          : (item.price_stars ? "Продаётся · ⭐ " + num(item.price_stars) : "В инвентаре");
+        var entityLabel = item.entity_type === "channel" ? "Канал"
+          : (item.entity_type === "group" ? "Группа"
+            : (item.entity_type === "account" ? "Аккаунт" : "Юзернейм"));
+        var subtitle = item.price_stars
+          ? "На продаже · ⭐ " + num(item.price_stars)
+          : (item.frozen ? "В вашем профиле · временно нельзя перепродать" : "В вашем профиле");
+        if (item.entity_type) {
+          subtitle = entityLabel + (item.entity_title ? " · " + item.entity_title : "") + " · " + subtitle;
+        }
         mineHtml += '<div class="card" data-name="' + esc(item.name) + '" style="cursor:pointer;">'
           + '<div class="value">@' + esc(item.name) + "</div>"
           + '<div class="note">' + esc(subtitle) + "</div></div>";
@@ -718,35 +793,6 @@
     Array.prototype.forEach.call($("my-names").querySelectorAll("[data-name]"), function (card) {
       card.addEventListener("click", function () { openName(card.dataset.name); });
     });
-  }
-
-  function renderTon() {
-    var ton = state.ton || {};
-    var address = String(ton.address || "");
-    if (!address) {
-      $("ton-block").innerHTML = '<div class="card"><div class="label">Приём TON ещё не настроен.</div></div>';
-      return;
-    }
-    var html = '<div class="card">'
-      + '<div class="label">Адрес для перевода</div>'
-      + '<div class="value" data-copy="' + esc(address) + '">' + esc(address) + "</div>"
-      + (ton.memo ? '<div class="label" style="margin-top:8px;">Комментарий</div>'
-        + '<div class="value" data-copy="' + esc(ton.memo) + '">' + esc(ton.memo) + "</div>" : "")
-      + '<div class="note">Курс: ⭐ ' + num(ton.stars_per_ton) + " за TON · Баланс: ⭐ "
-      + num(ton.stars_balance) + "</div>";
-    if (ton.withdraw_enabled) {
-      html += '<input class="field" id="withdraw-stars" inputmode="numeric" placeholder="Сколько звёзд вывести" value="'
-        + Math.max(500, Number(ton.stars_balance || 0)) + '">'
-        + '<input class="field" id="withdraw-address" placeholder="Адрес TON">'
-        + '<div class="link" id="withdraw" style="margin-top:10px;">Вывести TON</div>';
-    }
-    html += "</div>";
-    $("ton-block").innerHTML = html;
-    Array.prototype.forEach.call($("ton-block").querySelectorAll("[data-copy]"), function (node) {
-      node.addEventListener("click", function () { copy(node.dataset.copy); });
-    });
-    var withdraw = $("withdraw");
-    if (withdraw) { withdraw.addEventListener("click", sendWithdraw); }
   }
 
   function copy(value) {
@@ -761,15 +807,6 @@
     } catch (error) {
       toast("Не удалось скопировать");
     }
-  }
-
-  function sendWithdraw() {
-    var stars = Number(($("withdraw-stars").value || "").trim());
-    var address = ($("withdraw-address").value || "").trim();
-    if (!(stars > 0) || !address) { toast("Укажите количество и адрес"); return; }
-    api("/api/me/ton-withdraw", { method: "POST", body: { stars: stars, address: address } })
-      .then(function () { toast("Заявка на ⭐ " + num(stars) + " создана"); state.ton = null; loadTon(); })
-      .catch(function (error) { toast(error.message); });
   }
 
   /* ------------------------------------------------------ карточка имени */
@@ -792,79 +829,65 @@
 
   function renderNameCard(name, card) {
     var mine = !!card.mine;
-    var auction = card.auction;
     var price = Number(card.price_stars || 0);
-    var badge = auction && auction.ends_at
-      ? '<span class="badge blue">Аукцион</span>'
-      : (price > 0 ? '<span class="badge green">Продаётся</span>' : '<span class="badge muted">Свободно</span>');
-
+    var badge = price > 0 ? '<span class="badge green">Продаётся</span>'
+      : (mine ? '<span class="badge muted">Ваше имя</span>'
+        : '<span class="badge muted">Свободно</span>');
     var html = detailHead("@" + name, badge);
     html += '<div class="card">'
       + '<div class="kv"><span class="k">Владелец</span><span class="v">'
       + esc(card.owner && (card.owner.username ? "@" + card.owner.username
         : card.owner.display_name || "—") || (mine ? "Вы" : "—")) + "</span></div>"
       + '<div class="kv"><span class="k">Ссылка</span><span class="v">' + esc(name) + ".t.me</span></div>";
-    if (card.purchase_date) {
-      html += '<div class="kv"><span class="k">Куплено</span><span class="v">'
-        + new Date(card.purchase_date * 1000).toLocaleDateString("ru-RU") + "</span></div>";
+    var entityType = card.entity_type === "channel" ? "Канал"
+      : (card.entity_type === "group" ? "Группа"
+        : (card.entity_type === "account" ? "Аккаунт" : ""));
+    if (entityType) {
+      html += '<div class="kv"><span class="k">Имя используется</span><span class="v">'
+        + esc(entityType + (card.entity_title ? " · " + card.entity_title : "")) + "</span></div>";
     }
-    if (auction && auction.ends_at) {
-      html += '<div class="kv"><span class="k">Текущая ставка</span><span class="v">⭐ '
-        + num(auction.current_bid_stars || auction.min_bid_stars) + "</span></div>"
-        + '<div class="kv"><span class="k">До конца</span><span class="v">'
-        + esc(timeLeft(auction.ends_at)) + "</span></div>";
+    if (card.purchase_date) {
+      html += '<div class="kv"><span class="k">Во владении с</span><span class="v">'
+        + new Date(card.purchase_date * 1000).toLocaleDateString("ru-RU") + "</span></div>";
     }
     if (price > 0) {
       html += '<div class="kv"><span class="k">Цена</span><span class="v">⭐ ' + num(price) + "</span></div>";
     }
     if (card.frozen && card.frozen_until) {
-      html += '<div class="kv"><span class="k">Перепродажа</span><span class="v">с '
+      html += '<div class="kv"><span class="k">Повторная продажа</span><span class="v">после '
         + new Date(card.frozen_until * 1000).toLocaleDateString("ru-RU") + "</span></div>";
     }
     html += "</div>";
 
-    if (!mine && auction && auction.ends_at) {
-      html += '<div class="card"><div class="label">Ставка</div>'
-        + '<input class="field" id="bid-amount" inputmode="numeric" placeholder="⭐ '
-        + num(auction.minimum_next_bid_stars || auction.min_bid_stars || 0) + '">'
-        + '<button class="primary" id="bid">Сделать ставку</button></div>';
-    } else if (!mine && price > 0) {
+    if (!mine && price > 0) {
       html += '<button class="primary" id="buy">Купить за ⭐ ' + num(price) + "</button>";
-    } else if (!mine) {
-      html += '<button class="primary" id="claim">Занять за ⭐ ' + num(card.claim_price_stars || price) + "</button>";
+    } else if (!mine && card.free) {
+      html += '<button class="primary" id="claim">Занять за ⭐ '
+        + num(card.system_price_stars || card.claim_price_stars || 0) + "</button>";
     }
-
     if (mine) {
-      html += '<div class="card"><div class="label">Продажа</div>';
       if (price > 0) {
-        html += '<div class="link" id="unlist" style="margin-top:8px;">Снять с продажи</div>';
+        html += '<button class="primary" id="unlist">Снять с продажи</button>';
+      } else if (card.frozen) {
+        html += '<div class="card"><div class="label">После покупки имя можно будет перепродать через сутки.</div></div>';
       } else {
-        html += '<input class="field" id="list-price" inputmode="numeric" placeholder="Цена в звёздах">'
-          + '<div class="link" id="list" style="margin-top:10px;">Продать по фикс-цене</div>';
+        html += '<div class="card"><div class="label">Цена продажи в звёздах</div>'
+          + '<input class="field" id="list-price" inputmode="numeric" placeholder="Цена в звёздах">'
+          + '<button class="primary" id="list">Выставить на продажу</button>'
+          + '<div class="note">Комиссия сервиса: ' + num(card.commission_percent || 5) + "%</div></div>";
       }
-      if (auction && auction.ends_at) {
-        html += '<div class="link" id="cancel-auction" style="margin-top:10px;">Отменить аукцион</div>';
-      } else {
-        html += '<input class="field" id="auction-bid" inputmode="numeric" placeholder="Минимальная ставка">'
-          + '<input class="field" id="auction-hours" inputmode="numeric" placeholder="Длительность, часы" value="24">'
-          + '<div class="link" id="start-auction" style="margin-top:10px;">Начать аукцион</div>';
-      }
-      html += '<div class="note">Комиссия сервиса: ' + num(card.commission_percent || 5) + "%</div></div>";
     }
-    html += '<button class="link" id="detail-back-2" style="display:block;margin:14px 14px 0;">Назад</button>';
 
     openDetail(html);
     bindDetailBack();
-    var back2 = $("detail-back-2");
-    if (back2) { back2.addEventListener("click", closeDetail); }
-
-    if ($("buy")) { $("buy").addEventListener("click", function () { nameAction("buy", "Куплено", "/buy", {}); }); }
-    if ($("claim")) { $("claim").addEventListener("click", function () { nameAction("claim", "Имя ваше", "/claim", {}); }); }
-    if ($("bid")) {
-      $("bid").addEventListener("click", function () {
-        var amount = Number(($("bid-amount").value || "").trim());
-        if (!(amount > 0)) { toast("Укажите ставку"); return; }
-        nameAction("bid", "Ставка принята", "/bid", { amount_stars: amount });
+    if ($("buy")) {
+      $("buy").addEventListener("click", function () {
+        nameAction("buy", "Куплено и добавлено в ваш профиль", "/buy", {});
+      });
+    }
+    if ($("claim")) {
+      $("claim").addEventListener("click", function () {
+        nameAction("claim", "Имя добавлено в ваш профиль", "/claim", {});
       });
     }
     if ($("list")) {
@@ -877,20 +900,6 @@
     if ($("unlist")) {
       $("unlist").addEventListener("click", function () {
         nameAction("unlist", "Снято с продажи", "/listing", null, "DELETE");
-      });
-    }
-    if ($("start-auction")) {
-      $("start-auction").addEventListener("click", function () {
-        var minBid = Number(($("auction-bid").value || "").trim());
-        var hours = Number(($("auction-hours").value || "").trim());
-        if (!(minBid > 0) || !(hours > 0)) { toast("Укажите ставку и часы"); return; }
-        nameAction("auction", "Аукцион начат", "/auction",
-          { min_bid_stars: minBid, duration_hours: hours });
-      });
-    }
-    if ($("cancel-auction")) {
-      $("cancel-auction").addEventListener("click", function () {
-        nameAction("cancel", "Аукцион отменён", "/auction", null, "DELETE");
       });
     }
 
@@ -907,7 +916,7 @@
       api("/api/collectibles/" + encodeURIComponent(name) + path, options)
         .then(function () {
           state.busy = false;
-          state.auctions = state.market = state.mine = null;
+          state.market = state.mine = null;
           toast(success);
           openName(name);
         })
@@ -920,7 +929,7 @@
 
   function openClaim() {
     openDetail(detailHead("Занять свободное имя", null)
-      + '<div class="card"><div class="label">Свободное имя стоит звёзд и принадлежит вам после оплаты.</div>'
+      + '<div class="card"><div class="label">После оплаты имя появится в вашем профиле как дополнительное.</div>'
       + '<input class="field" id="claim-name" placeholder="юзернейм" autocapitalize="off" spellcheck="false">'
       + '<button class="primary" id="claim-go">Продолжить</button></div>');
     bindDetailBack();
@@ -938,11 +947,15 @@
 
   /* ------------------------------------------------------------- подарки */
 
-  function loadGifts() {
-    if (state.gifts) { renderGifts(); return; }
-    $("gift-grid").innerHTML = '<div class="skeleton">Загружаем подарки…</div>';
-    api("/api/gift-market?limit=60").then(function (data) {
-      state.gifts = (data && data.listings) || [];
+  function loadGifts(force) {
+    if (!force && state.gifts && state.ownListings) { renderGifts(); return; }
+    if (!state.gifts) { $("gift-grid").innerHTML = '<div class="skeleton">Загружаем подарки…</div>'; }
+    Promise.all([
+      api("/api/gift-market?limit=60"),
+      api("/api/gift-market?mine=true&limit=60")
+    ]).then(function (result) {
+      state.gifts = (result[0] && result[0].listings) || [];
+      state.ownListings = (result[1] && result[1].listings) || [];
       renderGifts();
     }).catch(function (error) {
       $("gift-grid").innerHTML = '<div class="empty">' + esc(error.message) + "</div>";
@@ -951,52 +964,63 @@
 
   function sortGifts(items) {
     var sorted = items.slice();
-    if (state.giftSort === "asc") {
-      sorted.sort(function (a, b) { return Number(a.price_grams || 0) - Number(b.price_grams || 0); });
-    } else if (state.giftSort === "new") {
-      sorted.sort(function (a, b) { return Number(b.created_at || 0) - Number(a.created_at || 0); });
-    } else {
-      sorted.sort(function (a, b) { return Number(b.price_grams || 0) - Number(a.price_grams || 0); });
-    }
+    sorted.sort(function (a, b) {
+      var difference = Number(a.price_grams || 0) - Number(b.price_grams || 0);
+      return state.giftSort === "asc" ? difference : -difference;
+    });
     return sorted;
   }
 
-  function renderGifts() {
-    $("gift-filter").textContent = state.giftFilter === "sale" ? "Продажа ▾" : "Все подарки ▾";
-    $("gift-filter").classList.toggle("on", state.giftFilter === "sale");
-    $("gift-sort").textContent = state.giftSort === "asc" ? "Цена ↑"
-      : (state.giftSort === "new" ? "Новые" : "Цена ↓");
-    $("collections").textContent = state.collection ? state.collection + " ▾" : "Коллекции ▾";
-    $("collections").classList.toggle("on", !!state.collection);
+  function giftHasCategory(item, category) {
+    if (category === "all") { return true; }
+    if (category === "gift") { return !!(item.telegram_gift_id || item.gift_name); }
+    var traits = item.attributes && item.attributes.collectible_traits;
+    var entry = traits && traits[category];
+    return !!entry;
+  }
 
+  function filteredGifts(source) {
     var query = (state.giftQuery || "").trim().toLowerCase();
-    var items = (state.gifts || []).filter(function (item) {
-      if (state.giftFilter === "sale" && Number(item.price_grams || 0) <= 0) { return false; }
+    return (source || []).filter(function (item) {
+      if (!giftHasCategory(item, state.giftFilter)) { return false; }
       if (state.collection && String(item.gift_name || "") !== state.collection) { return false; }
       if (query && String(item.gift_name || "").toLowerCase().indexOf(query) < 0) { return false; }
       return true;
     });
-    drawGrid($("gift-grid"), sortGifts(items), false);
+  }
+
+  function renderGifts() {
+    var filterLabels = { all: "Все подарки", backdrop: "Фон", pattern: "Узор", gift: "Подарок" };
+    $("gift-filter").textContent = (filterLabels[state.giftFilter] || "Все подарки") + " ▾";
+    $("gift-filter").classList.toggle("on", state.giftFilter !== "all");
+    $("gift-sort").textContent = state.giftSort === "asc" ? "Цена ↑" : "Цена ↓";
+    $("collections").textContent = state.collection ? state.collection + " ▾" : "Коллекции ▾";
+    $("collections").classList.toggle("on", !!state.collection);
+
+    stopGiftModelPlayers();
+    drawGrid($("my-gift-grid"), sortGifts(filteredGifts(state.ownListings)), true,
+      "У вас пока нет своих подарков на продаже.");
+    drawGrid($("gift-grid"), sortGifts(filteredGifts(state.gifts)), false,
+      "Подарков по выбранным фильтрам не найдено.");
   }
 
   function drawGrid(container, items, owned, emptyMessage) {
-    stopGiftModelPlayers();
     if (!items.length) {
       container.innerHTML = '<div class="empty">' + esc(emptyMessage || "Пока пусто.") + "</div>";
       return;
     }
     container.innerHTML = items.map(function (item, index) {
       var emoji = String(item.gift_emoji || "🎁");
-      var price = owned ? "" : "💎 " + num(item.price_grams);
+      var price = Number(item.price_grams || 0) > 0 ? "💎 " + num(item.price_grams) : "";
       var stateText = owned
-        ? (item.is_listed ? "На рынке" : "В инвентаре")
+        ? (item.is_listed ? "На продаже" : "В инвентаре")
         : "Продаётся";
       var stateClass = owned ? (item.is_listed ? "blue" : "muted") : "green";
       return '<button class="tile" data-index="' + index + '">'
         + '<span class="art" style="background:' + colorFor(item) + '">'
         + '<span class="emoji">' + esc(emoji) + "</span>"
         + '<img alt="" hidden><span class="model-art" aria-hidden="true"></span>'
-        + '<span class="serial">' + esc(serialOf(item)) + "</span></span>"
+        + '<span class="pattern-art" aria-hidden="true"></span></span>'
         + '<span class="price"><span class="grow">' + esc(price) + "</span>"
         + '<span class="state ' + stateClass + '">' + esc(stateText) + "</span></span>"
         + "</button>";
@@ -1006,71 +1030,69 @@
       var item = items[Number(tile.dataset.index)];
       var img = tile.querySelector("img");
       var emoji = tile.querySelector(".emoji");
-      var modelNode = tile.querySelector(".model-art");
       artwork(item.telegram_gift_id, img, emoji);
-      requestModelArtwork(item, modelNode, img, emoji, false);
+      requestModelArtwork(item, tile.querySelector(".model-art"), img, emoji, false);
+      requestPatternArtwork(item, tile.querySelector(".pattern-art"), false);
       tile.addEventListener("click", function () { openGift(item, owned); });
     });
   }
 
   function openGift(item, owned) {
-    var title = String(item.gift_name || "Подарок") + " " + serialOf(item);
+    var title = String(item.gift_name || "Подарок");
     var badge = owned
-      ? (item.is_listed ? '<span class="badge blue">На рынке</span>'
+      ? (item.is_listed ? '<span class="badge blue">На продаже</span>'
         : '<span class="badge muted">В инвентаре</span>')
       : '<span class="badge green">Продаётся</span>';
 
     var html = detailHead(title, badge);
     html += '<div class="big-art" style="background:' + colorFor(item) + '">'
       + '<span class="emoji">' + esc(item.gift_emoji || "🎁") + "</span>"
-      + '<img alt="" hidden><div class="model-art" aria-hidden="true"></div></div>';
+      + '<img alt="" hidden><div class="model-art" aria-hidden="true"></div>'
+      + '<div class="pattern-art" aria-hidden="true"></div></div>';
 
     var traits = (item.attributes && item.attributes.collectible_traits) || null;
     var rows = "";
-    if (item.seller_username) {
-      rows += kv("Владелец", "@" + item.seller_username, null);
-    } else if (owned) {
+    if (owned) {
       rows += kv("Владелец", "Вы", null);
+    } else if (item.seller_username) {
+      rows += kv("Владелец", "@" + item.seller_username, null);
     }
     if (traits) {
       rows += kv("Модель", trait(traits, "model"));
       rows += kv("Узор", trait(traits, "pattern"));
       rows += kv("Фон", trait(traits, "backdrop"));
     }
-    if (item.serial_number) { rows += kv("Серийный номер", item.serial_number, null); }
-    if (Number(item.unique_num || 0) > 0) { rows += kv("Номер", "#" + item.unique_num, null); }
     if (rows) { html += '<div class="card">' + rows + "</div>"; }
 
     if (!owned) {
       html += '<div class="card"><div class="label">Цена продажи</div>'
-        + '<div class="value big">💎 ' + num(item.price_grams) + " Gram</div>"
-        + '<div class="note">* Владелец готов продать по этой цене без аукциона.</div></div>'
+        + '<div class="value big">💎 ' + num(item.price_grams) + " Gram</div></div>"
         + '<button class="primary" id="buy-gift">Купить за 💎 ' + num(item.price_grams) + "</button>";
     } else if (item.is_listed) {
-      html += '<div class="card"><div class="label">Подарок уже выставлен на рынок.</div></div>'
+      html += '<div class="card"><div class="label">Цена лота</div><div class="value big">💎 '
+        + num(item.price_grams) + " Gram</div></div>"
         + '<button class="primary" id="unlist-gift">Снять с продажи</button>';
     } else {
       html += '<div class="card"><div class="label">Цена продажи</div>'
         + '<input class="field" id="sell-price" inputmode="numeric" placeholder="Цена в Gram"></div>'
         + '<button class="primary" id="sell-gift">Продать</button>';
     }
-    html += '<button class="link" id="detail-back-2" style="display:block;margin:14px 14px 0;">Назад</button>';
 
     openDetail(html);
     bindDetailBack();
     var detailArt = $("view-detail").querySelector(".big-art");
     var detailImg = detailArt.querySelector("img");
     var detailEmoji = detailArt.querySelector(".emoji");
-    var detailModel = detailArt.querySelector(".model-art");
     artwork(item.telegram_gift_id, detailImg, detailEmoji);
-    requestModelArtwork(item, detailModel, detailImg, detailEmoji, true);
-    $("detail-back-2").addEventListener("click", closeDetail);
+    requestModelArtwork(item, detailArt.querySelector(".model-art"), detailImg, detailEmoji, true);
+    requestPatternArtwork(item, detailArt.querySelector(".pattern-art"), true);
 
     if ($("buy-gift")) {
       $("buy-gift").addEventListener("click", function () {
         api("/api/gift-market/" + Number(item.listing_id) + "/purchase", { method: "POST", body: {} })
           .then(function () {
             state.gifts = null;
+            state.ownListings = null;
             state.inventory = null;
             toast("Подарок куплен");
             closeDetail();
@@ -1084,6 +1106,7 @@
           .then(function () {
             state.inventory = null;
             state.gifts = null;
+            state.ownListings = null;
             toast("Подарок снят с продажи");
             closeDetail();
           })
@@ -1099,6 +1122,7 @@
           .then(function () {
             state.inventory = null;
             state.gifts = null;
+            state.ownListings = null;
             toast("Подарок выставлен на рынок");
             closeDetail();
           })
@@ -1134,27 +1158,109 @@
   }
 
   function renderInventory() {
+    stopGiftModelPlayers();
     drawGrid(
       $("inventory-grid"),
       state.inventory || [],
       true,
-      "Здесь появятся только подарки, которые вы отправили на @fragment."
+      "Здесь появятся подарки, которые вы передали во владение @fragment."
     );
   }
 
   /* -------------------------------------------------------------- запуск */
 
+  function closeChoiceMenu() {
+    if (!openMenu) { return; }
+    document.removeEventListener("click", openMenu.outside, true);
+    document.removeEventListener("keydown", openMenu.escape, true);
+    if (openMenu.node.parentNode) { openMenu.node.parentNode.removeChild(openMenu.node); }
+    openMenu = null;
+  }
+
+  function showChoiceMenu(anchor, options, selected, onSelect) {
+    closeChoiceMenu();
+    var menu = document.createElement("div");
+    menu.className = "choice-menu";
+    menu.setAttribute("role", "menu");
+    options.forEach(function (option) {
+      var button = document.createElement("button");
+      button.type = "button";
+      button.textContent = option.label;
+      button.setAttribute("role", "menuitem");
+      if (String(option.value) === String(selected)) { button.classList.add("selected"); }
+      button.addEventListener("click", function () {
+        closeChoiceMenu();
+        onSelect(option.value);
+      });
+      menu.appendChild(button);
+    });
+    document.body.appendChild(menu);
+    var rect = anchor.getBoundingClientRect();
+    var menuRect = menu.getBoundingClientRect();
+    var left = Math.max(8, Math.min(rect.left, window.innerWidth - menuRect.width - 8));
+    var top = rect.bottom + 4;
+    if (top + menuRect.height > window.innerHeight - 8) {
+      top = Math.max(8, rect.top - menuRect.height - 4);
+    }
+    menu.style.left = left + "px";
+    menu.style.top = top + "px";
+    var outside = function (event) {
+      if (!menu.contains(event.target) && event.target !== anchor) { closeChoiceMenu(); }
+    };
+    var escape = function (event) {
+      if (event.key === "Escape") { closeChoiceMenu(); }
+    };
+    openMenu = { node: menu, outside: outside, escape: escape };
+    document.addEventListener("click", outside, true);
+    document.addEventListener("keydown", escape, true);
+  }
+
   function collections() {
     var names = [];
-    (state.gifts || []).forEach(function (item) {
-      var name = String(item.gift_name || "");
+    (state.gifts || []).concat(state.ownListings || []).forEach(function (item) {
+      var name = String(item.gift_name || "").trim();
       if (name && names.indexOf(name) < 0) { names.push(name); }
     });
-    names.sort();
-    if (!names.length) { return; }
-    var index = names.indexOf(state.collection);
-    state.collection = index < 0 || index + 1 >= names.length ? "" : names[index + 1];
-    renderGifts();
+    names.sort(function (a, b) { return a.localeCompare(b, "ru"); });
+    var options = [{ value: "", label: "Все коллекции" }];
+    names.forEach(function (name) { options.push({ value: name, label: name }); });
+    showChoiceMenu($("collections"), options, state.collection, function (value) {
+      state.collection = value;
+      renderGifts();
+    });
+  }
+
+  function setAutoRefresh(tab, value) {
+    var interval = Number(value) || 0;
+    if (interval > 0 && interval < 10000) { interval = 10000; }
+    if (autoRefreshTimers[tab]) { clearInterval(autoRefreshTimers[tab]); }
+    autoRefreshTimers[tab] = null;
+    state.autoRefresh[tab] = interval;
+    var button = $(tab === "usernames" ? "user-autorefresh" : "gift-autorefresh");
+    button.textContent = interval
+      ? "Авто-обновление: " + Math.round(interval / 1000) + " с"
+      : "Авто-обновление: выкл";
+    if (interval >= 10000) {
+      autoRefreshTimers[tab] = setInterval(function () {
+        if (state.tab !== tab || !$('view-detail').hidden) { return; }
+        if (tab === "usernames") { loadUsernames(true); }
+        else { loadGifts(true); }
+      }, interval);
+    }
+  }
+
+  function chooseAutoRefresh(tab) {
+    var button = $(tab === "usernames" ? "user-autorefresh" : "gift-autorefresh");
+    var options = [
+      { value: 0, label: "Выключено" },
+      { value: 10000, label: "Каждые 10 секунд" },
+      { value: 15000, label: "Каждые 15 секунд" },
+      { value: 30000, label: "Каждые 30 секунд" },
+      { value: 60000, label: "Каждую минуту" }
+    ];
+    showChoiceMenu(button, options, state.autoRefresh[tab], function (value) {
+      setAutoRefresh(tab, value);
+    });
   }
 
   function bindStatic() {
@@ -1162,36 +1268,41 @@
       button.addEventListener("click", function () { showTab(button.dataset.tab); });
     });
 
-    $("ton-button").addEventListener("click", function () {
-      showTab("usernames");
-      var block = $("ton-block");
-      if (block) { block.scrollIntoView({ behavior: "smooth", block: "center" }); }
-    });
-
-    $("names-filter").addEventListener("click", function () {
-      state.namesFilter = state.namesFilter === "auction" ? "market" : "auction";
-      renderUsernames();
-    });
     $("names-sort").addEventListener("click", function () {
       state.namesSort = state.namesSort === "asc" ? "desc" : "asc";
       renderUsernames();
     });
     $("name-search").addEventListener("input", function () {
-      if (state.auctions && state.market) { renderUsernames(); }
+      if (state.market) { renderUsernames(); }
     });
+    $("user-autorefresh").addEventListener("click", function () { chooseAutoRefresh("usernames"); });
 
     $("gift-search").addEventListener("input", function () {
       state.giftQuery = $("gift-search").value;
-      if (state.gifts) { renderGifts(); }
+      if (state.gifts || state.ownListings) { renderGifts(); }
     });
     $("gift-filter").addEventListener("click", function () {
-      state.giftFilter = state.giftFilter === "sale" ? "all" : "sale";
-      if (state.gifts) { renderGifts(); }
+      var options = [
+        { value: "all", label: "Все подарки" },
+        { value: "backdrop", label: "Фон" },
+        { value: "pattern", label: "Узор" },
+        { value: "gift", label: "Подарок" }
+      ];
+      showChoiceMenu($("gift-filter"), options, state.giftFilter, function (value) {
+        state.giftFilter = value;
+        if (state.gifts || state.ownListings) { renderGifts(); }
+      });
     });
     $("gift-sort").addEventListener("click", function () {
-      state.giftSort = state.giftSort === "desc" ? "asc" : (state.giftSort === "asc" ? "new" : "desc");
-      if (state.gifts) { renderGifts(); }
+      showChoiceMenu($("gift-sort"), [
+        { value: "asc", label: "Цена по возрастанию" },
+        { value: "desc", label: "Цена по убыванию" }
+      ], state.giftSort, function (value) {
+        state.giftSort = value;
+        if (state.gifts || state.ownListings) { renderGifts(); }
+      });
     });
+    $("gift-autorefresh").addEventListener("click", function () { chooseAutoRefresh("gifts"); });
     $("collections").addEventListener("click", collections);
     $("copy-fragment").addEventListener("click", function () { copy("@fragment"); });
   }

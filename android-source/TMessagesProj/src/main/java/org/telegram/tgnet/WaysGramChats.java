@@ -102,19 +102,52 @@ public class WaysGramChats {
      * заново запрашивается профиль чата вместе с объектом {@code TLRPC.Chat}.</p>
      */
     public static void chatChanged(int account, String scope, long id) {
-        if (id <= 0) {
+        if (id <= 0 || !("channel".equals(scope) || "group".equals(scope))) {
             return;
         }
-        final long tgId = "channel".equals(scope) ? channelTg(id) : id;
+        final boolean channelScope = "channel".equals(scope);
+        final long tgId = channelScope ? channelTg(id) : id;
         synchronized (WaysGramChats.class) {
             chatCache.remove(cacheKey(account, tgId));
         }
-        org.telegram.messenger.AndroidUtilities.runOnUIThread(() -> {
-            org.telegram.messenger.MessagesController controller =
-                    org.telegram.messenger.MessagesController.getInstance(account);
-            controller.loadFullChat(tgId, 0, true);
-            org.telegram.messenger.NotificationCenter.getInstance(account)
-                    .postNotificationName(org.telegram.messenger.NotificationCenter.dialogsNeedReload);
+        final String token = WaysGramApi.getToken(account);
+        if (TextUtils.isEmpty(token)) {
+            return;
+        }
+        // A full-chat refresh alone updates ChatFull, not the cached Chat rights used by
+        // ChatActivity. Reload the peer profile too so demoted admins lose the composer
+        // and send-as/publish rights in this session without restarting the app.
+        WaysGramApi.NETWORK.execute(() -> {
+            TLRPC.Chat refreshed = null;
+            try {
+                JSONObject profile = WaysGramApi.get(account,
+                        channelScope ? "/api/channels/" + id : "/api/groups/" + id);
+                if (!TextUtils.equals(token, WaysGramApi.getToken(account))) {
+                    return;
+                }
+                long selfId = org.telegram.messenger.UserConfig.getInstance(account).getClientUserId();
+                refreshed = channelScope
+                        ? toChannel(account, profile, selfId, joinedChannels(account).contains(id))
+                        : toMegagroup(account, profile, selfId);
+            } catch (WaysGramApi.ApiException e) {
+                if (e.status != 401 && e.status != 403 && e.status != 404) {
+                    org.telegram.messenger.FileLog.e(e);
+                }
+            }
+            final TLRPC.Chat updated = refreshed;
+            org.telegram.messenger.AndroidUtilities.runOnUIThread(() -> {
+                if (!TextUtils.equals(token, WaysGramApi.getToken(account))) {
+                    return;
+                }
+                org.telegram.messenger.MessagesController controller =
+                        org.telegram.messenger.MessagesController.getInstance(account);
+                if (updated != null) {
+                    controller.putChat(updated, true);
+                }
+                controller.loadFullChat(tgId, 0, true);
+                org.telegram.messenger.NotificationCenter.getInstance(account)
+                        .postNotificationName(org.telegram.messenger.NotificationCenter.dialogsNeedReload);
+            });
         });
     }
 
@@ -346,6 +379,21 @@ public class WaysGramChats {
         message.message = m.optString("body", "");
         message.media = new TLRPC.TL_messageMediaEmpty();
         message.flags = TLRPC.MESSAGE_FLAG_HAS_FROM_ID | TLObject.FLAG_9 | (message.out ? TLObject.FLAG_1 : 0);
+        long discussionChannel = m.optLong("discussion_channel_id", 0);
+        int discussionPost = m.optInt("discussion_post_id", 0);
+        if (discussionChannel > 0 && discussionPost > 0) {
+            TLRPC.TL_messageFwdHeader forwarded = new TLRPC.TL_messageFwdHeader();
+            TLRPC.TL_peerChannel source = new TLRPC.TL_peerChannel();
+            source.channel_id = channelTg(discussionChannel);
+            forwarded.from_id = source;
+            forwarded.channel_post = discussionPost;
+            forwarded.saved_from_peer = source;
+            forwarded.saved_from_msg_id = discussionPost;
+            forwarded.date = message.date;
+            forwarded.flags |= TLObject.FLAG_0 | TLObject.FLAG_2 | TLObject.FLAG_4;
+            message.fwd_from = forwarded;
+            message.flags |= TLObject.FLAG_2;
+        }
         WaysGramMapper.readPaidMessage(message, m);
         return message;
     }
@@ -1641,6 +1689,11 @@ public class WaysGramChats {
                 channel.optLong("owner_telegram_id") == selfId || channel.optBoolean("is_admin"));
         full.can_view_stats = canViewStats;
         if (canViewStats) full.flags |= TLObject.FLAG_20;
+        full.can_view_revenue = channel.optBoolean("can_view_revenue", false);
+        if (full.can_view_revenue) full.flags2 |= TLObject.FLAG_12;
+        full.can_view_stars_revenue = channel.optBoolean("can_view_stars_revenue",
+                channel.optLong("owner_telegram_id") == selfId);
+        if (full.can_view_stars_revenue) full.flags2 |= TLObject.FLAG_15;
         full.participants_count = channel.optInt("member_count");
         boolean channelOwner = channel.optLong("owner_telegram_id") == selfId;
         int adminsCount = Math.max(0, channel.optInt("admin_count", 0));
@@ -1788,6 +1841,11 @@ public class WaysGramChats {
         boolean canViewStats = group.optBoolean("can_view_stats", admin);
         full.can_view_stats = canViewStats;
         if (canViewStats) full.flags |= TLObject.FLAG_20;
+        full.can_view_revenue = group.optBoolean("can_view_revenue", false);
+        if (full.can_view_revenue) full.flags2 |= TLObject.FLAG_12;
+        full.can_view_stars_revenue = group.optBoolean("can_view_stars_revenue",
+                group.optLong("owner_telegram_id") == selfId);
+        if (full.can_view_stars_revenue) full.flags2 |= TLObject.FLAG_15;
         full.participants = participants;
         full.notify_settings = new TLRPC.TL_peerNotifySettings();
         TLRPC.ChannelLocation groupLocation = chatLocation(group);

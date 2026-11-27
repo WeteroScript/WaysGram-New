@@ -41,7 +41,9 @@ class ChatChangeEventChecks(unittest.TestCase):
         body = self.chats[start:self.chats.index('\n    }', start)]
         self.assertIn('chatCache.remove(cacheKey(account, tgId));', body,
                       'кэш другого аккаунта трогать нельзя')
-        self.assertIn('"channel".equals(scope) ? channelTg(id) : id', body)
+        self.assertIn('final long tgId = channelScope ? channelTg(id) : id;', body)
+        self.assertIn('controller.putChat(updated, true);', body,
+                      'новые права должны попасть в Chat до обновления ChatFull')
         self.assertIn('loadFullChat(tgId, 0, true)', body)
         self.assertIn('dialogsNeedReload', body)
 

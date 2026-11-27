@@ -9621,6 +9621,11 @@ def test_channel_post_comments_open_native_discussion_thread(api_env) -> None:
             thread = await client.get(f"/api/groups/{group_id}/threads/{root}/replies", headers=owner)
             assert thread.status_code == 200, thread.text
             assert thread.json()["ids"] == [root, comment_id]
+            root_page = await client.get(f"/api/groups/{group_id}/messages?message_ids={root}", headers=owner)
+            assert root_page.status_code == 200, root_page.text
+            root_message = root_page.json()["messages"][0]
+            assert root_message["discussion_channel_id"] == channel_id
+            assert root_message["discussion_post_id"] == post_id
 
             # Ответ на корень — тоже валидный комментарий.
             reply = await client.post(f"/api/channels/{channel_id}/messages/{post_id}/comments",

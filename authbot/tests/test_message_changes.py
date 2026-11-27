@@ -4,6 +4,7 @@ from io import BytesIO
 from PIL import Image
 
 from test_messenger_api import client_for, run
+from messenger_api import channel_chat_stars_id
 from test_star_gifts import ADMIN, env, headers  # noqa: F401  (env is a pytest fixture)
 
 
@@ -1787,11 +1788,145 @@ def test_channel_paid_reactions_are_opt_in_atomic_and_idempotent(env):
             analytics = (await client.get(base + '/analytics?days=7', headers=owner)).json()
             assert (analytics['published_posts_remaining'], analytics['paid_reaction_stars']) == (0, 5)
         async with aiosqlite.connect(path) as db:
-            # Платная реакция только списывается с отправителя: владельцу канала ничего не начисляется.
+            # Покупка атомарно списывает Stars у отправителя и зачисляет их на баланс канала.
             cur = await db.execute("SELECT telegram_id,amount FROM economy_transactions WHERE reason LIKE 'channel_paid_reaction:%' ORDER BY telegram_id")
             assert await cur.fetchall() == [(102, -5)]
             cur = await db.execute('SELECT stars FROM accounts WHERE telegram_id=102')
             assert (await cur.fetchone())[0] == 15
+            channel_stars_id = channel_chat_stars_id(channel.json()["id"])
+            cur = await db.execute('SELECT stars FROM chat_stars WHERE chat_id=?', (channel_stars_id,))
+            assert (await cur.fetchone())[0] == 5
+            cur = await db.execute("SELECT amount,balance_after FROM chat_star_transactions WHERE chat_id=? AND reason LIKE 'channel_paid_reaction:%'",
+                                   (channel_stars_id,))
+            assert await cur.fetchall() == [(5, 5)]
+
+    run(scenario())
+
+
+def test_legacy_channel_stars_are_moved_out_of_the_group_id_range(env):
+    import aiosqlite
+    import messenger_api
+
+    path, _app = env
+
+    async def scenario():
+        # Simulate the old, colliding id=1 ledger after one group and one channel both
+        # received Stars; the previous chat_stars row held their combined balance.
+        async with aiosqlite.connect(path) as db:
+            await db.execute("INSERT INTO chat_stars(chat_id,stars) VALUES(1,12)")
+            await db.execute("""INSERT INTO chat_star_transactions
+                (chat_id,amount,balance_after,reason,created_at)
+                VALUES(1,7,7,'group_message_fee:legacy',1)""")
+            await db.execute("""INSERT INTO chat_star_transactions
+                (chat_id,amount,balance_after,reason,created_at)
+                VALUES(1,5,12,'channel_paid_reaction:legacy',2)""")
+            await db.commit()
+
+        await messenger_api.init_messenger_storage(path)
+        async with aiosqlite.connect(path) as db:
+            cur = await db.execute("SELECT chat_id,stars FROM chat_stars ORDER BY chat_id")
+            assert await cur.fetchall() == [(1, 7), (1_000_000_001, 5)]
+            cur = await db.execute("SELECT chat_id,amount,balance_after FROM chat_star_transactions ORDER BY id")
+            assert await cur.fetchall() == [(1, 7, 7), (1_000_000_001, 5, 5)]
+
+    run(scenario())
+
+
+def test_personal_wallet_history_filters_and_paginates(env):
+    import aiosqlite
+
+    path, app = env
+
+    async def scenario():
+        async with aiosqlite.connect(path) as db:
+            await db.execute("DELETE FROM economy_transactions WHERE telegram_id=101")
+            await db.executemany("""INSERT INTO economy_transactions
+                (telegram_id,asset,amount,balance_after,reason,admin_id,created_at)
+                VALUES(101,?,?,?,?,NULL,?)""", [
+                ("stars", 5, 25, "history_in_1", 1),
+                ("stars", -3, 22, "history_out", 2),
+                ("stars", 7, 29, "history_in_2", 3),
+                ("grams", 2, 2, "history_gram", 4),
+            ])
+            await db.commit()
+        async with await client_for(app) as client:
+            owner = headers(101)
+            incoming = await client.get('/api/me/wallet/transactions?asset=stars&inbound=true&limit=1',
+                                        headers=owner)
+            assert incoming.status_code == 200
+            assert [row['amount'] for row in incoming.json()['transactions']] == [7]
+            cursor = incoming.json()['next_offset']
+            assert cursor is not None
+            older = await client.get(f'/api/me/wallet/transactions?asset=stars&inbound=true&limit=1&offset_id={cursor}',
+                                     headers=owner)
+            assert [row['amount'] for row in older.json()['transactions']] == [5]
+            assert older.json()['next_offset'] is None
+
+            outgoing = await client.get('/api/me/wallet/transactions?asset=stars&outbound=true',
+                                        headers=owner)
+            assert [row['amount'] for row in outgoing.json()['transactions']] == [-3]
+            grams = await client.get('/api/me/wallet/transactions?asset=grams', headers=owner)
+            assert [(row['asset'], row['amount']) for row in grams.json()['transactions']] == [('grams', 2)]
+            ascending = await client.get('/api/me/wallet/transactions?asset=stars&ascending=true&limit=1',
+                                         headers=owner)
+            assert [row['amount'] for row in ascending.json()['transactions']] == [5]
+            second = await client.get(
+                f"/api/me/wallet/transactions?asset=stars&ascending=true&limit=1&offset_id={ascending.json()['next_offset']}",
+                headers=owner,
+            )
+            assert [row['amount'] for row in second.json()['transactions']] == [-3]
+
+    run(scenario())
+
+
+def test_channel_stars_balance_is_peer_scoped_and_not_the_personal_wallet(env):
+    import aiosqlite
+
+    path, app = env
+
+    async def scenario():
+        async with aiosqlite.connect(path) as db:
+            await db.execute('UPDATE accounts SET stars=17 WHERE telegram_id=101')
+            await db.execute('UPDATE accounts SET stars=20 WHERE telegram_id=102')
+            await db.commit()
+        async with await client_for(app) as client:
+            owner, reader = headers(101), headers(102)
+            channel = await client.post('/api/channels', headers=owner,
+                                        json={'title': 'Scoped Stars', 'username': 'scoped_stars', 'is_public': True})
+            channel_id = channel.json()['id']
+            details = (await client.get(f'/api/channels/{channel_id}', headers=owner)).json()
+            group_id = details['discussion_group_id']
+            post = await client.post(f'/api/channels/{channel_id}/messages', headers=owner,
+                                     json={'body': 'Stars balance'})
+            assert post.status_code == 201, post.text
+            assert (await client.put(f'/api/channels/{channel_id}/paid-reactions', headers=owner,
+                                     json={'enabled': True})).status_code == 200
+            purchase = await client.post(
+                f"/api/channels/{channel_id}/messages/{post.json()['id']}/paid-reactions",
+                headers={**reader, 'Idempotency-Key': 'scoped-paid-reaction-0001'}, json={'stars': 5},
+            )
+            assert purchase.status_code == 200, purchase.text
+
+            channel_history = await client.get(f'/api/channels/{channel_id}/stars?limit=10', headers=owner)
+            assert channel_history.status_code == 200, channel_history.text
+            assert (channel_history.json()['stars'], channel_history.json()['overall_revenue']) == (5, 5)
+            assert [(tx['amount'], tx['reason'].split(':', 1)[0])
+                    for tx in channel_history.json()['transactions']] == [(5, 'channel_paid_reaction')]
+            # The default discussion group can have the same numeric ID as its channel;
+            # its balance and journal must still remain independent.
+            async with aiosqlite.connect(path) as db:
+                await db.execute("INSERT INTO chat_stars(chat_id,stars) VALUES(?,3)", (group_id,))
+                await db.execute("""INSERT INTO chat_star_transactions
+                    (chat_id,amount,balance_after,reason,created_at) VALUES(?,3,3,'group_message_fee:test',1)""",
+                                 (group_id,))
+                await db.commit()
+            group_history = await client.get(f'/api/groups/{group_id}/stars?limit=10', headers=owner)
+            assert group_history.status_code == 200, group_history.text
+            assert group_history.json()['stars'] == 3
+            assert [(tx['amount'], tx['balance_after'])
+                    for tx in group_history.json()['transactions']] == [(3, 3)]
+            assert (await client.get(f'/api/channels/{channel_id}/stars', headers=reader)).status_code == 403
+            assert (await client.get('/api/me/wallet', headers=owner)).json()['stars'] == 17
 
     run(scenario())
 
@@ -1929,7 +2064,7 @@ def test_channel_paid_media_requires_purchase_and_charges_once(env):
         async with aiosqlite.connect(path) as db:
             cur = await db.execute("SELECT telegram_id,amount FROM economy_transactions WHERE reason LIKE 'channel_paid_media:%' ORDER BY telegram_id")
             assert await cur.fetchall() == [(102, -5)]
-            cur = await db.execute("SELECT stars FROM chat_stars WHERE chat_id=?", (channel.json()['id'],))
+            cur = await db.execute("SELECT stars FROM chat_stars WHERE chat_id=?", (channel_chat_stars_id(channel.json()['id']),))
             assert (await cur.fetchone())[0] == 5
 
     run(scenario())
@@ -1984,7 +2119,7 @@ def test_paid_channel_subscription_expires_without_converting_to_free_membership
         async with aiosqlite.connect(path) as db:
             cur = await db.execute("SELECT telegram_id,SUM(amount),COUNT(*) FROM economy_transactions WHERE reason=? GROUP BY telegram_id ORDER BY telegram_id", (f'channel_subscription:{cid}',))
             assert await cur.fetchall() == [(102, -12, 2)]
-            cur = await db.execute("SELECT stars FROM chat_stars WHERE chat_id=?", (cid,))
+            cur = await db.execute("SELECT stars FROM chat_stars WHERE chat_id=?", (channel_chat_stars_id(cid),))
             assert (await cur.fetchone())[0] == 12
 
     run(scenario())
@@ -2129,7 +2264,7 @@ def test_channel_inbox_is_private_and_requires_current_confirmed_fee(env):
             # канала; в личный кошелёк владельца ничего не начисляется.
             cur = await db.execute("SELECT telegram_id,amount FROM economy_transactions WHERE reason LIKE 'channel_inbox:%' ORDER BY telegram_id")
             assert await cur.fetchall() == [(102, -6)]
-            cur = await db.execute("SELECT stars FROM chat_stars WHERE chat_id=?", (channel.json()['id'],))
+            cur = await db.execute("SELECT stars FROM chat_stars WHERE chat_id=?", (channel_chat_stars_id(channel.json()['id']),))
             assert (await cur.fetchone())[0] == 6
 
     run(scenario())
@@ -2625,7 +2760,7 @@ def test_sponsored_placement_requires_consent_and_settles_real_stars_once(env):
             async with aiosqlite.connect(path) as db:
                 cur = await db.execute("SELECT telegram_id,amount FROM economy_transactions WHERE reason LIKE 'channel_sponsored_post:%' ORDER BY telegram_id")
                 assert await cur.fetchall() == [(102, -7)]
-                cur = await db.execute("SELECT stars FROM chat_stars WHERE chat_id=?", (channel.json()['id'],))
+                cur = await db.execute("SELECT stars FROM chat_stars WHERE chat_id=?", (channel_chat_stars_id(channel.json()['id']),))
                 assert (await cur.fetchone())[0] == 7
             another = await client.post(inbox + '/me/sponsored-offers', headers={**sponsor, 'Idempotency-Key': 'sponsored-placement-02'}, json=body)
             async with aiosqlite.connect(path) as db:

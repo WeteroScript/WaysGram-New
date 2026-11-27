@@ -23,10 +23,12 @@ def test_page_is_served_without_auth(env) -> None:
             assert response.headers["content-type"].startswith("text/html")
             assert "no-store" in response.headers.get("cache-control", "")
             body = response.text
-            for marker in ("Юзернеймы", "Подарки", "Инвентарь", "FRAGMENT", "Подключить TON"):
+            for marker in ("Юзернеймы", "Подарки", "Инвентарь", "FRAGMENT", "Мои лоты"):
                 assert marker in body, marker
-            # Вёрстка повторяет сайт: таблица с колонками и сетка карточек.
-            assert "Минимальная ставка" in body
+            # Fragment UI is a fixed-price marketplace: TON, auctions and serials are absent.
+            for removed in ("Подключить TON", "Пополнить за TON", "Минимальная ставка",
+                            "Аукцион", "Серийный номер", "/api/me/ton"):
+                assert removed not in body, removed
             assert "grid-template-columns: repeat(3, 1fr)" in body
             assert "collectible_traits" in body
 
@@ -73,16 +75,32 @@ def test_page_calls_only_our_api(env) -> None:
         async with await client_for(app) as client:
             body = (await client.get("/fragment")).text
             for route in ("/api/collectibles", "/api/gift-market", "/api/me/fragment/gifts",
-                          "/api/me/ton", "/api/telegram/gifts/"):
+                          "/api/telegram/gifts/"):
                 assert route in body, route
+            assert "/api/gift-market?mine=true&limit=60" in body
             assert "requestModelArtwork" in body
+            assert "requestPatternArtwork" in body
             assert "lottie.loadAnimation" in body
             assert "model_document_id" in body
+            assert "pattern_document_id" in body
             # Ключ идемпотентности строится по тому же шаблону, что и в клиенте.
             assert '"wg-" + action + "-" + clean' in body
             assert '"Idempotency-Key"' in body
 
     run(scenario())
+
+
+def test_gift_filters_own_listings_and_refresh_interval(env) -> None:
+    body = PAGE.read_text(encoding="utf-8")
+    for label in ("Все подарки", "Фон", "Узор", "Подарок", "Коллекции",
+                  "Цена по возрастанию", "Цена по убыванию", "Мои лоты",
+                  "Снять с продажи"):
+        assert label in body, label
+    assert "mine=true" in body
+    assert "if (interval > 0 && interval < 10000) { interval = 10000; }" in body
+    assert "if (interval >= 10000)" in body
+    assert 'kv("Серийный номер"' not in body
+    assert "serialOf(" not in body
 
 
 def test_model_renderer_assets_are_served_locally(env) -> None:

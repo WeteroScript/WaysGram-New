@@ -64,15 +64,16 @@ class FragmentMiniAppChecks(unittest.TestCase):
             self.assertNotIn(f'data-tab="{removed.lower()}"', self.page)
 
     def test_page_looks_like_the_site(self):
-        # Скриншоты fragment.com: брендовая строка, кнопка TON, таблица с колонками,
-        # сетка карточек с номером и ценой, страница лота с атрибутами.
-        for marker in ("FRAGMENT", "Подключить TON", "Минимальная ставка",
-                       "Купить и продать юзернеймы", "Топ подарков", "Коллекции",
-                       "Серийный номер", "Модель", "Узор", "Фон"):
+        # Fragment UI keeps the gift marketplace, collectible artwork and collection filters.
+        for marker in ("FRAGMENT", "Купить и продать юзернеймы", "Подарки", "Мои лоты",
+                       "Коллекции", "Модель", "Узор", "Фон", "Все подарки"):
             self.assertIn(marker, self.page, marker)
+        for removed in ("Подключить TON", "Минимальная ставка", "Аукцион", "Серийный номер"):
+            self.assertNotIn(removed, self.page, removed)
         self.assertIn("grid-template-columns: repeat(3, 1fr)", self.page)
         self.assertIn("collectible_traits", self.page)
         self.assertIn("/api/telegram/gifts/", self.page)
+        self.assertIn("if (interval >= 10000)", self.page)
 
     def test_page_never_carries_the_token_in_the_url(self):
         # Токен приходит мостом: страница сама его не выпрашивает и в ссылке его нет.
@@ -85,10 +86,14 @@ class FragmentMiniAppChecks(unittest.TestCase):
 
     def test_page_uses_only_our_api(self):
         for path in ("/api/collectibles", "/api/gift-market", "/api/me/fragment/gifts",
-                     "/api/me/ton", "/api/gifts/"):
+                     "/api/gifts/"):
             self.assertIn(path, self.page, path)
+        self.assertIn("/api/gift-market?mine=true&limit=60", self.page)
+        self.assertNotIn("/api/me/ton", self.page)
         self.assertIn("requestModelArtwork", self.page)
+        self.assertIn("requestPatternArtwork", self.page)
         self.assertIn("model_document_id", self.page)
+        self.assertIn("pattern_document_id", self.page)
         self.assertIn("lottie.loadAnimation", self.page)
         # Никаких запросов к сторонним доменам: рендерер модели поставляется локально.
         self.assertNotIn("http://", self.page)
@@ -141,6 +146,19 @@ class FragmentMiniAppChecks(unittest.TestCase):
         self.assertIn('info.purchase_date = card.optInt("purchase_date")', fragment)
         self.assertIn('info.amount = card.optLong("price_stars")', fragment)
 
+    def test_profile_maps_purchased_usernames_as_additional_names(self):
+        mapper_path = ROOT / "android-source" / "TMessagesProj" / "src" / "main" / "java" \
+            / "org" / "telegram" / "tgnet" / "WaysGramMapper.java"
+        profile_path = ROOT / "android-source" / "TMessagesProj" / "src" / "main" / "java" \
+            / "org" / "telegram" / "ui" / "ProfileActivity.java"
+        mapper = mapper_path.read_text(encoding="utf-8")
+        profile = profile_path.read_text(encoding="utf-8")
+        api = (ROOT / "authbot" / "fragment_market.py").read_text(encoding="utf-8")
+        self.assertIn('json.optJSONArray("usernames")', mapper)
+        self.assertIn("user.usernames.add(nativeUsername)", mapper)
+        self.assertIn("alsoUsernamesString(username, usernames", profile)
+        self.assertIn('"username": name', api)
+
     def test_money_operations_are_idempotent(self):
         # Мини-апп повторяет те же ключи, что и нативный клиент.
         fragment = self.source("tgnet/WaysGramFragment.java")
@@ -173,12 +191,11 @@ class FragmentMiniAppChecks(unittest.TestCase):
                       '@router.get("/api/telegram/gifts/{gift_id}/sticker"'):
             self.assertIn(route, api, route)
 
-    def test_market_listings_carry_the_card_number(self):
-        # На карточке подарка, как на сайте, стоит номер («#1821»), а не серийник.
-        api = (ROOT / "authbot" / "messenger_api.py").read_text(encoding="utf-8")
-        self.assertIn("(SELECT n.unique_num FROM gift_unique_numbers n", api)
-        self.assertIn("WHERE n.serial_number=l.serial_number) AS unique_num", api)
-        self.assertIn("Number(item.unique_num || 0) > 0", self.page)
+    def test_gift_serial_is_not_rendered_in_fragment(self):
+        # Serial numbers stay internal for API operations; no raw number is shown to users.
+        self.assertNotIn("Серийный номер", self.page)
+        self.assertNotIn("serialOf(", self.page)
+        self.assertNotIn('kv("Номер"', self.page)
 
     def test_rules_that_keep_the_market_honest(self):
         server = (ROOT / "authbot" / "fragment_market.py").read_text(encoding="utf-8")
@@ -189,9 +206,10 @@ class FragmentMiniAppChecks(unittest.TestCase):
         self.assertIn("tx_hash TEXT NOT NULL UNIQUE", server)
         self.assertIn('"TON_DEPOSIT_DUPLICATE"', server)
 
-    def test_market_never_sells_a_chat_username(self):
+    def test_unclaimed_names_cannot_be_taken_from_public_entities(self):
         server = (ROOT / "authbot" / "fragment_market.py").read_text(encoding="utf-8")
-        self.assertIn('for table in ("chat_groups", "channels", "bots")', server)
+        self.assertIn("async def username_used_outside_market", server)
+        self.assertIn('for table in ("accounts", "chat_groups", "channels", "bots")', server)
         self.assertIn('"reserved": reserved,', server)
 
     def test_ton_watcher_is_present(self):

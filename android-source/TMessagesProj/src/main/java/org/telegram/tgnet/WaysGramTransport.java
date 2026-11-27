@@ -654,13 +654,15 @@ public class WaysGramTransport {
         // ---- wallet: Stars and Gram balances with their history ----
         if (request instanceof TL_stars.TL_payments_getStarsStatus) {
             TL_stars.TL_payments_getStarsStatus req = (TL_stars.TL_payments_getStarsStatus) request;
-            return WaysGramEconomy.status(account, req.ton, true);
+            return WaysGramEconomy.status(account, req.peer, selfId, req.ton, true,
+                    "", 50, false, false, false);
         } else if (request instanceof TL_stars.TL_payments_getStarsTransactions) {
             TL_stars.TL_payments_getStarsTransactions req = (TL_stars.TL_payments_getStarsTransactions) request;
-            if (!TextUtils.isEmpty(req.offset)) {
-                return WaysGramEconomy.status(account, req.ton, false); // everything was returned on the first page
-            }
-            return WaysGramEconomy.status(account, req.ton, true);
+            return WaysGramEconomy.status(account, req.peer, selfId, req.ton, true,
+                    req.offset, req.limit, req.inbound, req.outbound, req.ascending);
+        } else if (request instanceof TLRPC.TL_payments_getStarsRevenueStats) {
+            return WaysGramEconomy.revenueStats(account,
+                    (TLRPC.TL_payments_getStarsRevenueStats) request, selfId);
         }
 
         // ---- gift shop: catalog and artwork from Telegram, purchase on the WaysGram server ----

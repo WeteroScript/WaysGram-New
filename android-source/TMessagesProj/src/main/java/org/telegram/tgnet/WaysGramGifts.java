@@ -423,8 +423,10 @@ public class WaysGramGifts {
         boolean mine = req.peer instanceof TLRPC.TL_inputPeerSelf
                 || (req.peer instanceof TLRPC.TL_inputPeerUser && req.peer.user_id == selfId);
         // Подарки канала лежат не в личном инвентаре, а у самого канала (см. /api/channels/{id}/gifts).
-        boolean channelPeer = req.peer instanceof TLRPC.TL_inputPeerChannel
-                && ((TLRPC.TL_inputPeerChannel) req.peer).channel_id != 0;
+        long channelTgId = req.peer instanceof TLRPC.TL_inputPeerChannel
+                ? ((TLRPC.TL_inputPeerChannel) req.peer).channel_id : 0;
+        boolean channelPeer = channelTgId > 0 && !WaysGramChats.isGroupChannel(channelTgId)
+                && WaysGramChats.channelServer(channelTgId) > 0;
         if ((!mine && !channelPeer) || !TextUtils.isEmpty(req.offset) || req.collection_id != 0) {
             return out;
         }
@@ -440,7 +442,7 @@ public class WaysGramGifts {
         }
         if (channelPeer) {
             JSONObject json = WaysGramApi.get(account, "/api/channels/"
-                    + ((TLRPC.TL_inputPeerChannel) req.peer).channel_id + "/gifts");
+                    + WaysGramChats.channelServer(channelTgId) + "/gifts");
             JSONArray rows = json.optJSONArray("gifts");
             if (rows == null) {
                 return out;
@@ -618,11 +620,15 @@ public class WaysGramGifts {
         TLRPC.TL_inputInvoiceStarGift invoice = (TLRPC.TL_inputInvoiceStarGift) req.invoice;
         forSale(account, invoice.gift_id);
         if (invoice.peer instanceof TLRPC.TL_inputPeerChannel) {
+            long channelTgId = ((TLRPC.TL_inputPeerChannel) invoice.peer).channel_id;
+            if (WaysGramChats.isGroupChannel(channelTgId) || WaysGramChats.channelServer(channelTgId) <= 0) {
+                throw new WaysGramApi.ApiException(400, "CHANNEL_GIFT_PEER_INVALID");
+            }
+            long channelId = WaysGramChats.channelServer(channelTgId);
             // Подарок каналу, как в Telegram: он остаётся у канала и виден в его профиле.
             // Ошибки сервера (мало Stars, подарок закончился) обязаны дойти до интерфейса.
             try {
-                WaysGramApi.post(account, "/api/channels/"
-                        + ((TLRPC.TL_inputPeerChannel) invoice.peer).channel_id + "/gifts",
+                WaysGramApi.post(account, "/api/channels/" + channelId + "/gifts",
                         channelGiftBody(invoice));
             } catch (WaysGramApi.ApiException e) {
                 if (e.status == 409 && e.detail != null && e.detail.contains("Stars")) {

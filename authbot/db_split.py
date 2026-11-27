@@ -111,6 +111,7 @@ MESSENGER_TABLES = frozenset(
         "fragment_gift_deposits",
         # Рынок коллекционных юзернеймов (fragment_market.py).
         "collectibles",
+        "collectible_entity_bindings",
         "collectible_listings",
         "collectible_auctions",
         "collectible_auction_bids",

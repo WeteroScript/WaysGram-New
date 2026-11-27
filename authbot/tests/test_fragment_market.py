@@ -9,6 +9,7 @@ TON с уже зачисленным хешем второй раз не про�
 import time
 
 import aiosqlite
+import db_split
 import pytest
 
 import fragment_market
@@ -41,6 +42,11 @@ async def usernames(path) -> dict[int, str]:
     async with aiosqlite.connect(path) as db:
         cur = await db.execute("SELECT telegram_id,username FROM accounts")
         return {int(row[0]): str(row[1]) for row in await cur.fetchall()}
+
+
+def query(path, sql: str, params: tuple = ()):
+    with db_split.sqlite_connect(path) as connection:
+        return connection.execute(sql, params).fetchall()
 
 
 def test_existing_usernames_belong_to_their_accounts(env) -> None:
@@ -85,9 +91,24 @@ def test_sale_transfers_ownership_and_pays_the_seller(env) -> None:
 
             # Комиссия 5 %: покупатель отдал 100, продавец получил 95.
             assert await balances(path, 102, 101) == {102: 900, 101: 95}
-            # Имя реально переехало на аккаунт покупателя.
-            assert (await usernames(path))[102] == "buyer"
-            assert (await usernames(path))[101] == ""
+            # Покупка добавляет имя в профиль, не заменяя основной username.
+            primary = await usernames(path)
+            assert primary[102] == "friend"
+            assert primary[101] == ""
+            profile = await client.get("/api/users/102", headers=headers(102))
+            assert profile.status_code == 200
+            assert {item["username"] for item in profile.json()["usernames"]} == {"buyer"}
+
+            notice = query(
+                path,
+                """SELECT a.username,m.recipient_telegram_id,m.body FROM messages m
+                   JOIN accounts a ON a.telegram_id=m.sender_telegram_id
+                   WHERE m.sender_telegram_id=? AND m.recipient_telegram_id=?
+                   ORDER BY m.id DESC LIMIT 1""",
+                (777_000_777, 101),
+            )
+            assert len(notice) == 1 and notice[0][:2] == ("fragment", 101)
+            assert "@buyer" in notice[0][2] and "Fragment" in notice[0][2]
 
     run(scenario())
 
@@ -145,11 +166,25 @@ def test_sold_name_is_frozen_before_it_can_be_resold(env) -> None:
                                       json={"price_stars": 500})
             assert frozen.status_code == 423
             assert frozen.json()["detail"]["code"] == "TRANSFER_FROZEN"
+            async with aiosqlite.connect(path) as db:
+                await db.execute(
+                    "UPDATE collectibles SET transfer_frozen_until=0 WHERE name='buyer'"
+                )
+                await db.commit()
+            relisted = await client.put("/api/collectibles/buyer/listing", headers=headers(102),
+                                        json={"price_stars": 500})
+            assert relisted.status_code == 200 and relisted.json()["for_sale"] is True
+            listed_profile = await client.get("/api/users/102", headers=headers(102))
+            assert listed_profile.json()["usernames"] == []
+            unlisted = await client.delete("/api/collectibles/buyer/listing", headers=headers(102))
+            assert unlisted.status_code == 200
+            profile = await client.get("/api/users/102", headers=headers(102))
+            assert [item["username"] for item in profile.json()["usernames"]] == ["buyer"]
 
     run(scenario())
 
 
-def test_free_name_is_bought_from_the_service_and_old_name_returns_to_the_pool(env) -> None:
+def test_free_name_is_added_as_an_additional_profile_username(env) -> None:
     path, app = env
     give_stars(path, 101, 20_000)
 
@@ -167,10 +202,13 @@ def test_free_name_is_bought_from_the_service_and_old_name_returns_to_the_pool(e
             assert claimed.json()["owner"]["telegram_id"] == 101
             assert await balances(path, 101) == {101: 20_000 - fragment_market.system_price("zhenya")}
             names = await usernames(path)
-            assert names[101] == "zhenya"
-            # Прежнее имя снова продаётся сервисом.
+            assert names[101] == "buyer"
+            profile = await client.get("/api/users/101", headers=headers(101))
+            assert profile.status_code == 200
+            assert {item["username"] for item in profile.json()["usernames"]} == {"zhenya"}
+            # Основной и купленный юзернеймы остаются отдельными активами.
             old = (await client.get("/api/collectibles/buyer", headers=headers(101))).json()
-            assert old["free"] is True
+            assert old["mine"] is True and old["free"] is False
 
     run(scenario())
 
@@ -225,7 +263,9 @@ def test_auction_holds_the_bid_refunds_the_outbid_and_transfers_the_name(env) ->
             assert settled["owner"]["telegram_id"] == ADMIN
             assert settled["last_auction"]["status"] == "sold"
             assert await balances(path, 101) == {101: 190}  # 200 минус 5 % комиссии
-            assert (await usernames(path))[ADMIN] == "buyer"
+            assert (await usernames(path))[ADMIN] == "boss"
+            winner_profile = await client.get(f"/api/users/{ADMIN}", headers=headers(ADMIN))
+            assert {item["username"] for item in winner_profile.json()["usernames"]} == {"buyer"}
 
     run(scenario())
 
@@ -348,27 +388,130 @@ def test_commission_can_be_changed_by_the_operator(env, monkeypatch: pytest.Monk
     run(scenario())
 
 
-def test_group_username_is_not_sold_by_the_market(env) -> None:
-    """Имя группы принадлежит чату, а не рынку: его нельзя ни занять, ни купить."""
+def test_group_username_can_be_listed_and_restored(env) -> None:
     path, app = env
 
     async def scenario() -> None:
         async with aiosqlite.connect(path) as db:
-            await db.execute(
+            cur = await db.execute(
                 "INSERT INTO chat_groups(title,owner_telegram_id,username,created_at)"
                 " VALUES('Клуб',101,'clubhouse',1)"
             )
-            await db.commit()
-            await db.execute("UPDATE accounts SET stars=50000 WHERE telegram_id=101")
+            group_id = int(cur.lastrowid)
             await db.commit()
         async with await client_for(app) as client:
             card = (await client.get("/api/collectibles/clubhouse", headers=headers(101))).json()
-            assert card["free"] is False and card["reserved"] is True
-            assert card["price_stars"] == 0
-            claim = await client.post("/api/collectibles/clubhouse/claim", headers=headers(101),
-                                      json={})
+            assert card["mine"] is True and card["free"] is False
+            assert card["entity_type"] == "group" and card["entity_id"] == group_id
+            claim = await client.post("/api/collectibles/clubhouse/claim", headers=headers(101), json={})
             assert claim.status_code == 409
-            assert claim.json()["detail"]["code"] == "USERNAME_TAKEN"
+
+            listed = await client.put(
+                "/api/collectibles/clubhouse/listing", headers=headers(101),
+                json={"price_stars": 80},
+            )
+            assert listed.status_code == 200 and listed.json()["for_sale"] is True
+            assert query(path, "SELECT username FROM chat_groups WHERE id=?", (group_id,)) == [(None,)]
+
+            removed = await client.delete(
+                "/api/collectibles/clubhouse/listing", headers=headers(101)
+            )
+            assert removed.status_code == 200 and removed.json()["for_sale"] is False
+            assert removed.json()["entity_type"] == "group"
+            assert query(path, "SELECT username FROM chat_groups WHERE id=?", (group_id,)) == [("clubhouse",)]
+
+    run(scenario())
+
+
+def test_channel_username_can_be_listed_and_restored(env) -> None:
+    path, app = env
+
+    async def scenario() -> None:
+        async with aiosqlite.connect(path) as db:
+            cur = await db.execute(
+                "INSERT INTO channels(username,title,owner_telegram_id,created_at,is_public)"
+                " VALUES('clubchannel','Канал',101,1,1)"
+            )
+            channel_id = int(cur.lastrowid)
+            await db.commit()
+        async with await client_for(app) as client:
+            card = (await client.get("/api/collectibles/clubchannel", headers=headers(101))).json()
+            assert card["mine"] is True and card["entity_type"] == "channel"
+            assert card["entity_id"] == channel_id
+
+            listed = await client.put(
+                "/api/collectibles/clubchannel/listing", headers=headers(101),
+                json={"price_stars": 90},
+            )
+            assert listed.status_code == 200 and listed.json()["for_sale"] is True
+            assert query(path, "SELECT is_public FROM channels WHERE id=?", (channel_id,)) == [(0,)]
+
+            removed = await client.delete(
+                "/api/collectibles/clubchannel/listing", headers=headers(101)
+            )
+            assert removed.status_code == 200 and removed.json()["entity_type"] == "channel"
+            assert query(path, "SELECT username,is_public FROM channels WHERE id=?", (channel_id,)) == [
+                ("clubchannel", 1)
+            ]
+
+    run(scenario())
+
+
+def test_new_group_and_channel_usernames_become_owned_market_assets(env) -> None:
+    path, app = env
+
+    async def scenario() -> None:
+        async with await client_for(app) as client:
+            group = await client.post(
+                "/api/groups", headers=headers(101),
+                json={"title": "New group", "username": "newgroup"},
+            )
+            assert group.status_code == 201, group.text
+            channel = await client.post(
+                "/api/channels", headers=headers(101),
+                json={"title": "New channel", "username": "newchannel", "comments": False},
+            )
+            assert channel.status_code == 201, channel.text
+
+            group_card = (await client.get("/api/collectibles/newgroup", headers=headers(101))).json()
+            channel_card = (await client.get("/api/collectibles/newchannel", headers=headers(101))).json()
+            assert group_card["mine"] is True and group_card["entity_type"] == "group"
+            assert channel_card["mine"] is True and channel_card["entity_type"] == "channel"
+            profile = (await client.get("/api/users/101", headers=headers(101))).json()
+            assert profile["usernames"] == []
+
+            stolen_account_name = await client.put(
+                "/api/me", headers=headers(102), json={"username": "newchannel"}
+            )
+            assert stolen_account_name.status_code == 409
+            stolen_channel_name = await client.post(
+                "/api/channels", headers=headers(102),
+                json={"title": "Impostor", "username": "newgroup", "comments": False},
+            )
+            assert stolen_channel_name.status_code == 409
+
+            renamed_group = await client.put(
+                f"/api/groups/{group.json()['id']}", headers=headers(101),
+                json={"username": "renamedgroup"},
+            )
+            assert renamed_group.status_code == 200, renamed_group.text
+            renamed_channel = await client.put(
+                f"/api/channels/{channel.json()['id']}", headers=headers(101),
+                json={"username": "renamedchannel"},
+            )
+            assert renamed_channel.status_code == 200, renamed_channel.text
+            old_group = (await client.get("/api/collectibles/newgroup", headers=headers(102))).json()
+            old_channel = (await client.get("/api/collectibles/newchannel", headers=headers(102))).json()
+            assert old_group["free"] is True and old_channel["free"] is True
+            assert (await client.get("/api/collectibles/renamedgroup", headers=headers(101))).json()[
+                "entity_type"
+            ] == "group"
+            assert (await client.get("/api/collectibles/renamedchannel", headers=headers(101))).json()[
+                "entity_type"
+            ] == "channel"
+
+            mine = (await client.get("/api/collectibles?section=mine", headers=headers(101))).json()
+            assert {item["name"] for item in mine["items"]} >= {"renamedgroup", "renamedchannel"}
 
     run(scenario())
 
@@ -429,8 +572,8 @@ def test_market_is_created_by_the_storage_migration(env) -> None:
                 "SELECT name FROM messenger.sqlite_master WHERE type='table' AND name LIKE 'collectible%'"
             )
             names = {str(row[0]) for row in await cur.fetchall()}
-        assert {"collectibles", "collectible_listings", "collectible_auctions",
-                "collectible_auction_bids", "collectible_transfers"} <= names
+        assert {"collectibles", "collectible_entity_bindings", "collectible_listings",
+                "collectible_auctions", "collectible_auction_bids", "collectible_transfers"} <= names
         # Повторная инициализация не падает и не дублирует владельцев.
         await init_messenger_storage(path)
         async with aiosqlite.connect(path) as db:

@@ -73,17 +73,19 @@ class ChannelMonetizationChecks(unittest.TestCase):
         self.assertIn("request instanceof TLRPC.TL_messages_getPaidReactionPrivacy", transport)
         self.assertIn("request instanceof TLRPC.TL_messages_togglePaidReactionPrivacy", transport)
 
-    def test_paid_reaction_is_debit_only_and_reported_with_totals(self):
+    def test_paid_reaction_credits_channel_without_crediting_owner_wallet(self):
         api = self.server("messenger_api.py")
-        self.assertIn("Платная реакция только списывается с отправителя", api)
+        self.assertIn("Stars-баланс канала", api)
+        self.assertIn("await credit_chat_stars(", api)
         self.assertNotIn("for account_id, amount in ((uid, -stars), (owner, stars)):", api)
         self.assertIn('"total_stars": total_stars', api)
         self.assertIn("async def attach_paid_reactions(items: list[dict[str, Any]], channel_id: int, user_id: int)", api)
         self.assertIn('item["paid_stars"] = total', api)
 
-    def test_analytics_counts_paid_reactions_by_debits(self):
+    def test_analytics_counts_debits_and_reads_channel_stars_credit(self):
         api = self.server("messenger_api.py")
-        self.assertIn("покупки считаем по дебетам", api)
+        self.assertIn("Число покупок берём из атомарных списаний", api)
+        self.assertIn("channel_chat_stars_id(channel_id)", api)
         self.assertIn('f"channel_paid_reaction:{channel_id}:*"', api)
 
     # ---------------------------------------------------------------- платные сообщения в канал

@@ -71,6 +71,15 @@ CREATE TABLE IF NOT EXISTS collectibles (
 CREATE INDEX IF NOT EXISTS idx_collectibles_owner
     ON collectibles(owner_telegram_id, kind);
 
+-- Preserve the account/group/channel that supplied a username so an unlisted name
+-- can be restored to the same entity, but only while that entity still belongs to
+-- the seller. A purchased name has no binding and appears as an additional username.
+CREATE TABLE IF NOT EXISTS collectible_entity_bindings (
+    collectible_id INTEGER PRIMARY KEY,
+    entity_type TEXT NOT NULL CHECK(entity_type IN ('account','group','channel')),
+    entity_id INTEGER NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS collectible_listings (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     collectible_id INTEGER NOT NULL,
@@ -224,7 +233,41 @@ async def seed_from_accounts(db: Any, now: int | None = None) -> int:
             " WHERE name=? COLLATE NOCASE AND owner_telegram_id IS NULL",
             (int(row["telegram_id"]), name),
         )
+        await _bind_entity(db, name, "account", int(row["telegram_id"]))
         seeded += 1
+
+    # Public group/channel usernames are also collectible assets. Seed them to the
+    # owning account so the same secure listing flow can authorize the owner.
+    entity_queries = (
+        ("group", "SELECT id,username,owner_telegram_id,created_at FROM chat_groups"
+         " WHERE COALESCE(username,'')<>''"),
+        ("channel", "SELECT id,username,owner_telegram_id,created_at FROM channels"
+         " WHERE COALESCE(is_public,1)=1 AND COALESCE(username,'')<>''"),
+    )
+    for entity_type, sql in entity_queries:
+        try:
+            cur = await db.execute(sql)
+            entities = await cur.fetchall()
+        except Exception:  # noqa: BLE001 - minimal test schemas may omit chat tables
+            continue
+        for entity in entities:
+            name = str(entity["username"] or "").strip().lstrip("@").lower()
+            owner_id = int(entity["owner_telegram_id"] or 0)
+            if not owner_id or not USERNAME_RE.fullmatch(name):
+                continue
+            await db.execute(
+                "INSERT OR IGNORE INTO collectibles(kind,name,owner_telegram_id,acquired_at,source)"
+                " VALUES('username',?,?,?,'account')",
+                (name, owner_id, int(entity["created_at"] or stamp)),
+            )
+            await db.execute(
+                "UPDATE collectibles SET owner_telegram_id=?"
+                " WHERE name=? COLLATE NOCASE AND owner_telegram_id IS NULL",
+                (owner_id, name),
+            )
+            await _bind_entity(db, name, entity_type, int(entity["id"]))
+            seeded += 1
+
     await db.commit()
     return seeded
 
@@ -238,17 +281,143 @@ async def _collectible(db: Any, name: str) -> aiosqlite.Row | None:
     return await cur.fetchone()
 
 
+async def _bind_entity(db: Any, name: str, entity_type: str, entity_id: int) -> None:
+    collectible = await _collectible(db, name)
+    if collectible is None or collectible["owner_telegram_id"] is None:
+        return
+    owner_id = int(collectible["owner_telegram_id"])
+    if entity_type == "account":
+        cur = await db.execute(
+            "SELECT 1 FROM accounts WHERE telegram_id=? AND username=? COLLATE NOCASE",
+            (owner_id, name),
+        )
+    elif entity_type == "group":
+        cur = await db.execute(
+            "SELECT 1 FROM chat_groups WHERE id=? AND owner_telegram_id=?"
+            " AND username=? COLLATE NOCASE",
+            (int(entity_id), owner_id, name),
+        )
+    else:
+        cur = await db.execute(
+            "SELECT 1 FROM channels WHERE id=? AND owner_telegram_id=?"
+            " AND username=? COLLATE NOCASE AND COALESCE(is_public,1)=1",
+            (int(entity_id), owner_id, name),
+        )
+    if await cur.fetchone() is None:
+        return
+    await db.execute(
+        """INSERT INTO collectible_entity_bindings(collectible_id,entity_type,entity_id)
+           VALUES(?,?,?)
+           ON CONFLICT(collectible_id) DO UPDATE SET
+               entity_type=excluded.entity_type,entity_id=excluded.entity_id""",
+        (int(collectible["id"]), entity_type, int(entity_id)),
+    )
+
+
+async def _entity_binding(db: Any, collectible_id: int, owner_id: int) -> dict[str, Any] | None:
+    cur = await db.execute(
+        "SELECT entity_type,entity_id FROM collectible_entity_bindings WHERE collectible_id=?",
+        (int(collectible_id),),
+    )
+    binding = await cur.fetchone()
+    if binding is None:
+        return None
+    cur = await db.execute("SELECT name FROM collectibles WHERE id=?", (int(collectible_id),))
+    collectible = await cur.fetchone()
+    if collectible is None:
+        return None
+    name = str(collectible["name"] or "").strip().lstrip("@").casefold()
+    entity_type, entity_id = str(binding["entity_type"]), int(binding["entity_id"])
+    if entity_type == "account":
+        cur = await db.execute(
+            "SELECT display_name,username FROM accounts WHERE telegram_id=?",
+            (entity_id,),
+        )
+        row = await cur.fetchone()
+        current_name = str(row["username"] or "").strip().lstrip("@").casefold() if row else ""
+        if row is None or entity_id != int(owner_id) or current_name != name:
+            return None
+        return {"type": "account", "id": entity_id,
+                "title": str(row["display_name"] or row["username"] or "")}
+    if entity_type == "group":
+        cur = await db.execute(
+            "SELECT title,owner_telegram_id,username FROM chat_groups WHERE id=?", (entity_id,)
+        )
+    else:
+        cur = await db.execute(
+            "SELECT title,owner_telegram_id,username,is_public FROM channels WHERE id=?", (entity_id,)
+        )
+    row = await cur.fetchone()
+    current_name = str(row["username"] or "").strip().lstrip("@").casefold() if row else ""
+    if (row is None or int(row["owner_telegram_id"] or 0) != int(owner_id)
+            or current_name != name
+            or (entity_type == "channel" and not bool(row["is_public"]))):
+        return None
+    return {"type": entity_type, "id": entity_id, "title": str(row["title"] or "")}
+
+
+async def _username_entity(db: Any, name: str) -> dict[str, Any] | None:
+    """The account, group or public channel that currently uses this username."""
+    cur = await db.execute(
+        "SELECT id,title,owner_telegram_id FROM chat_groups"
+        " WHERE username=? COLLATE NOCASE LIMIT 1",
+        (name,),
+    )
+    row = await cur.fetchone()
+    if row is not None:
+        return {
+            "type": "group",
+            "id": int(row["id"]),
+            "title": str(row["title"] or ""),
+            "owner_telegram_id": int(row["owner_telegram_id"] or 0),
+        }
+    cur = await db.execute(
+        "SELECT id,title,owner_telegram_id FROM channels"
+        " WHERE username=? COLLATE NOCASE AND COALESCE(is_public,1)=1 LIMIT 1",
+        (name,),
+    )
+    row = await cur.fetchone()
+    if row is not None:
+        return {
+            "type": "channel",
+            "id": int(row["id"]),
+            "title": str(row["title"] or ""),
+            "owner_telegram_id": int(row["owner_telegram_id"] or 0),
+        }
+    cur = await db.execute(
+        "SELECT telegram_id,display_name,username FROM accounts"
+        " WHERE username=? COLLATE NOCASE LIMIT 1",
+        (name,),
+    )
+    row = await cur.fetchone()
+    if row is not None:
+        return {
+            "type": "account",
+            "id": int(row["telegram_id"]),
+            "title": str(row["display_name"] or row["username"] or ""),
+            "owner_telegram_id": int(row["telegram_id"]),
+        }
+    return None
+
+
 async def _ensure_collectible(db: Any, name: str, now: int) -> aiosqlite.Row:
     row = await _collectible(db, name)
     if row is not None:
+        if row["owner_telegram_id"] is not None:
+            entity = await _username_entity(db, name)
+            if entity is not None and int(entity["owner_telegram_id"]) == int(row["owner_telegram_id"]):
+                await _bind_entity(db, name, entity["type"], int(entity["id"]))
         return row
     cur = await db.execute(
         "SELECT telegram_id,created_at FROM accounts WHERE username=? COLLATE NOCASE",
         (name,),
     )
     account = await cur.fetchone()
-    owner = int(account["telegram_id"]) if account is not None else None
-    acquired = int(account["created_at"] or now) if account is not None else 0
+    entity = None if account is not None else await _username_entity(db, name)
+    owner = (int(account["telegram_id"]) if account is not None
+             else (int(entity["owner_telegram_id"]) if entity else None))
+    acquired = (int(account["created_at"] or now) if account is not None
+                else (int(now) if entity else 0))
     await db.execute(
         "INSERT OR IGNORE INTO collectibles(kind,name,owner_telegram_id,acquired_at,source)"
         " VALUES('username',?,?,?,'account')",
@@ -257,6 +426,10 @@ async def _ensure_collectible(db: Any, name: str, now: int) -> aiosqlite.Row:
     row = await _collectible(db, name)
     if row is None:  # pragma: no cover - INSERT OR IGNORE с тем же именем
         raise MarketError(409, "COLLECTIBLE_CONFLICT", "Не удалось завести имя")
+    if account is not None:
+        await _bind_entity(db, name, "account", int(account["telegram_id"]))
+    elif entity is not None:
+        await _bind_entity(db, name, entity["type"], int(entity["id"]))
     return row
 
 
@@ -372,38 +545,15 @@ def _commission(price: int) -> int:
 async def _transfer_ownership(
     db: Any, name: str, seller_id: int | None, buyer_id: int, now: int, *, source: str
 ) -> None:
-    """Передаёт имя покупателю и возвращает его прежнее имя в общий фонд."""
-    cur = await db.execute("SELECT username FROM accounts WHERE telegram_id=?", (int(buyer_id),))
-    row = await cur.fetchone()
-    previous = str(row["username"] or "").strip().lstrip("@").lower() if row else ""
-    if previous and previous != name:
-        # Куплено новое имя — старое освобождается и снова продаётся сервисом.
-        await db.execute(
-            "INSERT OR IGNORE INTO collectibles(kind,name,owner_telegram_id,acquired_at,source)"
-            " VALUES('username',?,NULL,?,'system')",
-            (previous, int(now)),
-        )
-        await db.execute(
-            "UPDATE collectibles SET owner_telegram_id=NULL,source='system',"
-            "transfer_frozen_until=0 WHERE name=? COLLATE NOCASE",
-            (previous,),
-        )
-    if seller_id:
-        await db.execute(
-            "UPDATE accounts SET username='',updated_at=? WHERE telegram_id=?"
-            " AND username=? COLLATE NOCASE",
-            (int(now), int(seller_id), name),
-        )
-    # На всякий случай снимаем имя с любого другого аккаунта: два владельца
-    # одного имени — это дыра, а не состояние.
+    """Передаёт именно актив Fragment, не подменяя основной username аккаунта."""
+    collectible = await _collectible(db, name)
+    if collectible is None:
+        raise MarketError(409, "COLLECTIBLE_CONFLICT", "Имя не найдено")
+    # После продажи старый аккаунт/канал/группа больше не может автоматически
+    # получить имя обратно при снятии лота. У покупателя это будет дополнительный ник.
     await db.execute(
-        "UPDATE accounts SET username='',updated_at=? WHERE username=? COLLATE NOCASE"
-        " AND telegram_id<>?",
-        (int(now), name, int(buyer_id)),
-    )
-    await db.execute(
-        "UPDATE accounts SET username=?,updated_at=? WHERE telegram_id=?",
-        (name, int(now), int(buyer_id)),
+        "DELETE FROM collectible_entity_bindings WHERE collectible_id=?",
+        (int(collectible["id"]),),
     )
     await db.execute(
         "UPDATE collectibles SET owner_telegram_id=?,acquired_at=?,transfer_frozen_until=?,"
@@ -438,12 +588,23 @@ async def card(db: Any, name: str, viewer_id: int | None = None,
     auction = await _active_auction(db, collectible_id)
     last = await _last_auction(db, collectible_id)
     frozen_until = int(row["transfer_frozen_until"] or 0)
-    # Имя группы, канала или бота принадлежит не рынку: его нельзя ни купить, ни занять.
+    entity = None
+    if owner_id is not None:
+        entity = await _entity_binding(db, collectible_id, int(owner_id))
+        if entity is None:
+            current_entity = await _username_entity(db, key)
+            if current_entity is not None and int(current_entity["owner_telegram_id"]) == int(owner_id):
+                entity = current_entity
+                await _bind_entity(db, key, entity["type"], int(entity["id"]))
+    # Имя не из рынка остаётся занятым, в том числе если его использует аккаунт.
     reserved = owner_id is None and await _username_used_outside_market(db, key)
     result: dict[str, Any] = {
         "name": key,
         "kind": str(row["kind"]),
         "owner": owner,
+        "entity_type": entity["type"] if entity else "",
+        "entity_id": int(entity["id"]) if entity else 0,
+        "entity_title": str(entity["title"]) if entity else "",
         "mine": bool(owner_id and viewer_id and int(owner_id) == int(viewer_id)),
         "free": owner_id is None and not reserved,
         "reserved": reserved,
@@ -501,7 +662,7 @@ async def search(
     items: list[dict[str, Any]] = []
     if section in ("market", "for_sale"):
         sql = (
-            "SELECT c.name,c.owner_telegram_id,l.price_stars,l.id AS listing_id,"
+            "SELECT c.id,c.name,c.owner_telegram_id,l.price_stars,l.id AS listing_id,"
             " a.telegram_id AS account_id,a.display_name,a.username,a.avatar_media_id"
             " FROM collectible_listings l"
             " JOIN collectibles c ON c.id=l.collectible_id"
@@ -516,13 +677,19 @@ async def search(
         params.append(int(limit))
         cur = await db.execute(sql, params)
         for row in await cur.fetchall():
+            owner_id = int(row["owner_telegram_id"] or 0)
+            entity = (await _entity_binding(db, int(row["id"]), owner_id)
+                      if owner_id else None)
             items.append({
                 "name": str(row["name"]),
                 "kind": "sale",
                 "price_stars": int(row["price_stars"] or 0),
                 "listing_id": int(row["listing_id"] or 0),
                 "owner": await _public_account(db, row["owner_telegram_id"]),
-                "mine": bool(row["owner_telegram_id"] and int(row["owner_telegram_id"]) == int(viewer_id)),
+                "mine": bool(owner_id and owner_id == int(viewer_id)),
+                "entity_type": entity["type"] if entity else "",
+                "entity_id": int(entity["id"]) if entity else 0,
+                "entity_title": str(entity["title"]) if entity else "",
                 "auction": None,
             })
     if section in ("market", "auctions"):
@@ -585,14 +752,24 @@ async def search(
                     "bids_count": 0,
                     "ends_at": int(row["ends_at"] or 0),
                 }
+            name = str(row["name"])
+            entity = await _entity_binding(db, int(row["id"]), int(viewer_id))
+            if entity is None:
+                current_entity = await _username_entity(db, name)
+                if current_entity is not None and int(current_entity["owner_telegram_id"]) == int(viewer_id):
+                    entity = current_entity
+                    await _bind_entity(db, name, entity["type"], int(entity["id"]))
             items.append({
-                "name": str(row["name"]),
+                "name": name,
                 "kind": "auction" if auction else ("sale" if row["listing_id"] else "owned"),
                 "price_stars": int(row["price_stars"] or 0) if row["listing_id"] else 0,
                 "listing_id": int(row["listing_id"] or 0),
                 "owner": await _public_account(db, viewer_id),
                 "mine": True,
                 "auction": auction,
+                "entity_type": entity["type"] if entity else "",
+                "entity_id": int(entity["id"]) if entity else 0,
+                "entity_title": str(entity["title"]) if entity else "",
                 "frozen_until": int(row["transfer_frozen_until"] or 0),
                 "frozen": int(row["transfer_frozen_until"] or 0) > stamp,
             })
@@ -604,6 +781,101 @@ async def search(
         "commission_percent": commission_percent(),
         "freeze_seconds": TRANSFER_FREEZE_SECONDS,
     }
+
+
+async def _username_occupied_by_other(
+    db: Any, name: str, owner_id: int, entity_type: str = "", entity_id: int = 0,
+) -> bool:
+    for table in ("accounts", "chat_groups", "channels", "bots"):
+        try:
+            if table == "accounts":
+                cur = await db.execute(
+                    "SELECT 1 FROM accounts WHERE username=? COLLATE NOCASE"
+                    " AND telegram_id<>? LIMIT 1",
+                    (name, int(owner_id)),
+                )
+            elif table == "chat_groups":
+                cur = await db.execute(
+                    "SELECT 1 FROM chat_groups WHERE username=? COLLATE NOCASE"
+                    " AND id<>? LIMIT 1",
+                    (name, int(entity_id) if entity_type == "group" else -1),
+                )
+            elif table == "channels":
+                cur = await db.execute(
+                    "SELECT 1 FROM channels WHERE username=? COLLATE NOCASE"
+                    " AND id<>? AND COALESCE(is_public,1)=1 LIMIT 1",
+                    (name, int(entity_id) if entity_type == "channel" else -1),
+                )
+            else:
+                cur = await db.execute(
+                    "SELECT 1 FROM bots WHERE username=? COLLATE NOCASE LIMIT 1", (name,)
+                )
+        except Exception:  # noqa: BLE001 - optional entity tables vary in small test schemas
+            continue
+        if await cur.fetchone() is not None:
+            return True
+    return False
+
+
+async def _detach_entity_username(
+    db: Any, collectible_id: int, name: str, owner_id: int, now: int,
+) -> None:
+    binding = await _entity_binding(db, collectible_id, owner_id)
+    if binding is None:
+        return
+    entity_type = str(binding["type"])
+    entity_id = int(binding["id"])
+    if entity_type == "account":
+        await db.execute(
+            "UPDATE accounts SET username='',updated_at=?"
+            " WHERE telegram_id=? AND username=? COLLATE NOCASE",
+            (int(now), entity_id, name),
+        )
+    elif entity_type == "group":
+        await db.execute(
+            "UPDATE chat_groups SET username=NULL WHERE id=? AND owner_telegram_id=?"
+            " AND username=? COLLATE NOCASE",
+            (entity_id, int(owner_id), name),
+        )
+    elif entity_type == "channel":
+        # channels.username is NOT NULL UNIQUE; private channels use a unique private_* slug.
+        await db.execute(
+            "UPDATE channels SET username=?,is_public=0 WHERE id=? AND owner_telegram_id=?"
+            " AND username=? COLLATE NOCASE AND COALESCE(is_public,1)=1",
+            ("private_" + secrets.token_hex(16), entity_id, int(owner_id), name),
+        )
+
+
+async def _restore_entity_username(
+    db: Any, collectible_id: int, name: str, owner_id: int, now: int,
+) -> None:
+    cur = await db.execute(
+        "SELECT entity_type,entity_id FROM collectible_entity_bindings WHERE collectible_id=?",
+        (int(collectible_id),),
+    )
+    binding = await cur.fetchone()
+    if binding is None:
+        return
+    entity_type, entity_id = str(binding["entity_type"]), int(binding["entity_id"])
+    if await _username_occupied_by_other(db, name, owner_id, entity_type, entity_id):
+        return
+    if entity_type == "account":
+        await db.execute(
+            "UPDATE accounts SET username=?,updated_at=? WHERE telegram_id=? AND username=''",
+            (name, int(now), entity_id),
+        )
+    elif entity_type == "group":
+        await db.execute(
+            "UPDATE chat_groups SET username=? WHERE id=? AND owner_telegram_id=?"
+            " AND (username IS NULL OR username='')",
+            (name, entity_id, int(owner_id)),
+        )
+    elif entity_type == "channel":
+        await db.execute(
+            "UPDATE channels SET username=?,is_public=1 WHERE id=? AND owner_telegram_id=?"
+            " AND is_public=0 AND username LIKE 'private_%'",
+            (name, entity_id, int(owner_id)),
+        )
 
 
 async def put_listing(db: Any, telegram_id: int, name: str, price: int,
@@ -638,6 +910,7 @@ async def put_listing(db: Any, telegram_id: int, name: str, price: int,
             "status,created_at) VALUES(?,?,?,'active',?)",
             (int(row["id"]), int(telegram_id), int(price), stamp),
         )
+    await _detach_entity_username(db, int(row["id"]), key, int(telegram_id), stamp)
     await db.commit()
     return await card(db, key, telegram_id, stamp)
 
@@ -655,12 +928,15 @@ async def unlist(db: Any, telegram_id: int, name: str, now: int | None = None) -
     )
     if cur.rowcount == 0:
         raise MarketError(404, "LISTING_NOT_FOUND", "Имя не выставлено на продажу")
+    await _restore_entity_username(db, int(row["id"]), key, int(telegram_id), stamp)
     await db.commit()
     return await card(db, key, telegram_id, stamp)
 
 
-async def buy(db: Any, telegram_id: int, name: str, now: int | None = None,
-              idempotent_reason: str = "") -> dict[str, Any]:
+async def buy(
+    db: Any, telegram_id: int, name: str, now: int | None = None,
+    idempotent_reason: str = "", *, commit: bool = True, notify_sale: Any = None,
+) -> dict[str, Any]:
     """Покупка по фикс-цене: списание, выплата продавцу минус комиссия, передача."""
     _activate(db)
     stamp = int(now if now is not None else time.time())
@@ -687,8 +963,15 @@ async def buy(db: Any, telegram_id: int, name: str, now: int | None = None,
         (stamp, int(listing["id"])),
     )
     await _transfer_ownership(db, key, seller_id, int(telegram_id), stamp, source="sale")
-    await db.commit()
-    return await card(db, key, telegram_id, stamp)
+    result = await card(db, key, telegram_id, stamp)
+    result["seller_id"] = seller_id
+    result["buyer_id"] = int(telegram_id)
+    result["sale_price_stars"] = price
+    if notify_sale is not None:
+        await notify_sale(db, seller_id, key, price, int(telegram_id), stamp)
+    if commit:
+        await db.commit()
+    return result
 
 
 async def claim(db: Any, telegram_id: int, name: str, now: int | None = None) -> dict[str, Any]:
@@ -918,38 +1201,147 @@ async def settle_due(db: Any, now: int | None = None) -> list[dict[str, Any]]:
 
 async def on_username_changed(db: Any, telegram_id: int, old_name: str, new_name: str,
                               now: int | None = None) -> None:
-    """Синхронизирует справочник после ручной смены юзернейма в профиле."""
+    """Синхронизирует основной username, сохраняя купленные дополнительные имена."""
     _activate(db)
     stamp = int(now if now is not None else time.time())
+    owner_id = int(telegram_id)
     old = str(old_name or "").strip().lstrip("@").lower()
     new = str(new_name or "").strip().lstrip("@").lower()
     if old and old != new:
-        await db.execute(
-            "UPDATE collectibles SET owner_telegram_id=NULL,source='system',"
-            "transfer_frozen_until=0 WHERE name=? COLLATE NOCASE AND owner_telegram_id=?",
-            (old, int(telegram_id)),
+        cur = await db.execute(
+            "SELECT id,source FROM collectibles WHERE name=? COLLATE NOCASE"
+            " AND owner_telegram_id=?",
+            (old, owner_id),
         )
+        previous = await cur.fetchone()
+        # Купленный/заявленный ник остаётся активом аккаунта, даже если его
+        # временно поставили основным и затем заменили другим.
+        if previous is not None:
+            if str(previous["source"]) == "account":
+                await db.execute(
+                    "UPDATE collectibles SET owner_telegram_id=NULL,source='system',"
+                    "transfer_frozen_until=0 WHERE id=?",
+                    (int(previous["id"]),),
+                )
+            # A purchased name remains owned, but no longer belongs to this primary
+            # account address once the user changes it.
+            await db.execute(
+                "DELETE FROM collectible_entity_bindings WHERE collectible_id=?"
+                " AND entity_type='account' AND entity_id=?",
+                (int(previous["id"]), owner_id),
+            )
     if USERNAME_RE.fullmatch(new):
         await db.execute(
             "INSERT OR IGNORE INTO collectibles(kind,name,owner_telegram_id,acquired_at,source)"
             " VALUES('username',?,?,?,'account')",
-            (new, int(telegram_id), stamp),
+            (new, owner_id, stamp),
         )
-        await db.execute(
-            "UPDATE collectibles SET owner_telegram_id=?,acquired_at=?,"
-            "transfer_frozen_until=? WHERE name=? COLLATE NOCASE",
-            (int(telegram_id), stamp, stamp + TRANSFER_FREEZE_SECONDS, new),
+        cur = await db.execute(
+            "SELECT id,owner_telegram_id FROM collectibles WHERE name=? COLLATE NOCASE",
+            (new,),
         )
+        collectible = await cur.fetchone()
+        if collectible is not None and collectible["owner_telegram_id"] is None:
+            await db.execute(
+                "UPDATE collectibles SET owner_telegram_id=?,acquired_at=?,"
+                "transfer_frozen_until=?,source='account' WHERE id=?",
+                (owner_id, stamp, stamp + TRANSFER_FREEZE_SECONDS, int(collectible["id"])),
+            )
+        await _bind_entity(db, new, "account", owner_id)
     await db.commit()
 
 
-async def _username_used_outside_market(db: Any, name: str) -> bool:
-    """Занято ли имя группой, каналом или ботом: такие имена рынок не продаёт."""
-    for table in ("chat_groups", "channels", "bots"):
-        try:
-            cur = await db.execute(
-                f"SELECT 1 FROM {table} WHERE username=? COLLATE NOCASE LIMIT 1", (name,)
+async def on_entity_username_changed(
+    db: Any, telegram_id: int, entity_type: str, entity_id: int,
+    old_name: str, new_name: str, now: int | None = None,
+) -> None:
+    """Keeps account-owned username assets in sync with a group/channel address."""
+    _activate(db)
+    stamp = int(now if now is not None else time.time())
+    owner_id = int(telegram_id)
+    old = str(old_name or "").strip().lstrip("@").lower()
+    new = str(new_name or "").strip().lstrip("@").lower()
+    if old and old != new:
+        cur = await db.execute(
+            "SELECT id,source FROM collectibles WHERE name=? COLLATE NOCASE"
+            " AND owner_telegram_id=?",
+            (old, owner_id),
+        )
+        previous = await cur.fetchone()
+        if previous is not None:
+            if str(previous["source"]) == "account":
+                await db.execute(
+                    "UPDATE collectibles SET owner_telegram_id=NULL,source='system',"
+                    "transfer_frozen_until=0 WHERE id=?",
+                    (int(previous["id"]),),
+                )
+            # A purchased username keeps its owner when detached from an entity.
+            await db.execute(
+                "DELETE FROM collectible_entity_bindings WHERE collectible_id=?"
+                " AND entity_type=? AND entity_id=?",
+                (int(previous["id"]), str(entity_type), int(entity_id)),
             )
+    if USERNAME_RE.fullmatch(new):
+        await db.execute(
+            "INSERT OR IGNORE INTO collectibles(kind,name,owner_telegram_id,acquired_at,source)"
+            " VALUES('username',?,?,?,'account')",
+            (new, owner_id, stamp),
+        )
+        cur = await db.execute(
+            "SELECT id,owner_telegram_id FROM collectibles WHERE name=? COLLATE NOCASE",
+            (new,),
+        )
+        collectible = await cur.fetchone()
+        if collectible is not None and collectible["owner_telegram_id"] is None:
+            await db.execute(
+                "UPDATE collectibles SET owner_telegram_id=?,acquired_at=?,"
+                "transfer_frozen_until=?,source='account' WHERE id=?",
+                (owner_id, stamp, stamp + TRANSFER_FREEZE_SECONDS, int(collectible["id"])),
+            )
+        await _bind_entity(db, new, str(entity_type), int(entity_id))
+
+
+async def owned_usernames(
+    db: Any, telegram_id: int, primary_username: str = "",
+) -> list[dict[str, Any]]:
+    """Public additional active usernames owned by one account."""
+    _activate(db)
+    primary = str(primary_username or "").strip().lstrip("@").lower()
+    try:
+        cur = await db.execute(
+            "SELECT c.name,EXISTS(SELECT 1 FROM collectible_listings l"
+            " WHERE l.collectible_id=c.id AND l.status='active') AS for_sale"
+            " FROM collectibles c WHERE c.owner_telegram_id=? AND c.kind='username'"
+            " AND NOT EXISTS(SELECT 1 FROM collectible_listings l"
+            "               WHERE l.collectible_id=c.id AND l.status='active')"
+            " AND NOT EXISTS(SELECT 1 FROM collectible_entity_bindings b"
+            "               WHERE b.collectible_id=c.id AND b.entity_type IN ('group','channel'))"
+            " ORDER BY c.acquired_at DESC,c.name",
+            (int(telegram_id),),
+        )
+        rows = await cur.fetchall()
+    except Exception:  # noqa: BLE001 - profile responses also work during a partial migration
+        return []
+    result = []
+    seen = {primary} if primary else set()
+    for row in rows:
+        name = str(row["name"] or "").strip().lstrip("@").lower()
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        result.append({"username": name, "active": True,
+                       "for_sale": bool(row["for_sale"])})
+    return result
+
+
+async def _username_used_outside_market(db: Any, name: str) -> bool:
+    """Занято ли имя аккаунтом, группой, каналом или ботом вне рынка."""
+    for table in ("accounts", "chat_groups", "channels", "bots"):
+        try:
+            sql = f"SELECT 1 FROM {table} WHERE username=? COLLATE NOCASE"
+            if table == "channels":
+                sql += " AND COALESCE(is_public,1)=1"
+            cur = await db.execute(sql + " LIMIT 1", (name,))
         except Exception:  # noqa: BLE001 - в урезанных схемах этих таблиц может не быть
             continue
         if await cur.fetchone() is not None:
@@ -957,8 +1349,16 @@ async def _username_used_outside_market(db: Any, name: str) -> bool:
     return False
 
 
+async def username_used_outside_market(db: Any, name: str) -> bool:
+    """Whether an account, public entity, or bot currently uses the canonical name."""
+    key = str(name or "").strip().lstrip("@").lower()
+    if not USERNAME_RE.fullmatch(key):
+        return False
+    return await _username_used_outside_market(db, key)
+
+
 async def username_taken_elsewhere(db: Any, telegram_id: int, name: str) -> bool:
-    """Занят ли юзернейм чужим лотом: купленное имя нельзя занять в обход рынка."""
+    """Is a market-owned username unavailable to this account/entity?"""
     _activate(db)
     key = str(name or "").strip().lstrip("@").lower()
     if not USERNAME_RE.fullmatch(key):
@@ -966,7 +1366,9 @@ async def username_taken_elsewhere(db: Any, telegram_id: int, name: str) -> bool
     row = await _collectible(db, key)
     if row is None or row["owner_telegram_id"] is None:
         return False
-    return int(row["owner_telegram_id"]) != int(telegram_id)
+    if int(row["owner_telegram_id"]) != int(telegram_id):
+        return True
+    return await _active_listing(db, int(row["id"])) is not None
 
 
 # ---------------------------------------------------------------- TON
@@ -1117,6 +1519,8 @@ def register_routes(
     idempotency_descriptor: Any = None,
     idempotency_lookup: Any = None,
     idempotency_store: Any = None,
+    sale_notification: Any = None,
+    notification_wakeup: Any = None,
 ) -> None:
     """Регистрирует REST-методы рынка на уже собранном роутере."""
 
@@ -1247,11 +1651,31 @@ def register_routes(
     ) -> dict[str, Any]:
         user = await viewer(authorization)
         uid = int(user["telegram_id"])
-        return await _idempotent_mutation(
+        push_queued = False
+
+        async def purchase_action(db: Any, telegram_id: int, now: int) -> dict[str, Any]:
+            nonlocal push_queued
+
+            async def notify(db_connection: Any, seller_id: int, item_name: str,
+                             price: int, buyer_id: int, stamp: int) -> None:
+                nonlocal push_queued
+                if sale_notification is not None:
+                    push_queued = bool(await sale_notification(
+                        db_connection, seller_id, "username", item_name, price, buyer_id, stamp
+                    ))
+
+            return await buy(
+                db, telegram_id, name, now, commit=False,
+                notify_sale=notify if sale_notification is not None else None,
+            )
+
+        result = await _idempotent_mutation(
             "collectible_buy", f"/api/collectibles/{name}/buy", payload or {},
-            idempotency_key,
-            lambda db, telegram_id, now: buy(db, telegram_id, name, now), uid,
+            idempotency_key, purchase_action, uid,
         )
+        if push_queued and notification_wakeup is not None:
+            notification_wakeup.set()
+        return result
 
     @router.post("/api/collectibles/{name}/claim")
     async def claim_collectible(

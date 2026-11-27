@@ -206,6 +206,35 @@ public class WaysGramMapper {
             user.username = username;
             user.flags |= TLObject.FLAG_3;
         }
+        JSONArray additionalUsernames = json.optJSONArray("usernames");
+        if (additionalUsernames != null) {
+            for (int i = 0; i < additionalUsernames.length(); i++) {
+                JSONObject item = additionalUsernames.optJSONObject(i);
+                String additional = item == null
+                        ? cleanName(additionalUsernames.optString(i, ""))
+                        : cleanName(item.optString("username", ""));
+                if (additional.isEmpty() || additional.equalsIgnoreCase(username)
+                        || (item != null && !item.optBoolean("active", true))) {
+                    continue;
+                }
+                boolean duplicate = false;
+                for (TLRPC.TL_username present : user.usernames) {
+                    if (additional.equalsIgnoreCase(present.username)) {
+                        duplicate = true;
+                        break;
+                    }
+                }
+                if (!duplicate) {
+                    TLRPC.TL_username nativeUsername = new TLRPC.TL_username();
+                    nativeUsername.username = additional;
+                    nativeUsername.active = true;
+                    user.usernames.add(nativeUsername);
+                }
+            }
+            if (!user.usernames.isEmpty()) {
+                user.flags2 |= TLObject.FLAG_0;
+            }
+        }
         user.premium = true; // every WaysGram account has Premium, permanently
         String waysGramPhone = waysGramPhoneDigits(json);
         if (!waysGramPhone.isEmpty()) {
