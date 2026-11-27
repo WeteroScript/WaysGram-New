@@ -9608,29 +9608,58 @@ def test_channel_post_comments_open_native_discussion_thread(api_env) -> None:
             root = body["root_message_id"]
             assert root > 0 and body["group_id"] == group_id and body["comments_count"] == 0
 
-            # Первый комментарий цепляется к корню треда.
-            comment = await client.post(f"/api/channels/{channel_id}/messages/{post_id}/comments",
-                                        headers=reader, json={"body": "Первый"})
+            empty_replies = await client.get(
+                f"/api/groups/{group_id}/threads/{root}/replies", headers=owner)
+            assert empty_replies.status_code == 200 and empty_replies.json()["ids"] == []
+
+            # Обычный канал-подписчик открывает native discussion; это же добавляет
+            # его в привязанную группу до отправки через обычный group-message API.
+            reader_discussion = await client.get(
+                f"/api/channels/{channel_id}/messages/{post_id}/discussion", headers=reader)
+            assert reader_discussion.status_code == 200, reader_discussion.text
+            assert reader_discussion.json()["root_message_id"] == root
+
+            # Native UI отправляет reply на корневое сообщение через /groups/{id}/messages.
+            comment = await client.post(f"/api/groups/{group_id}/messages", headers=reader,
+                                        json={"body": "Первый", "reply_to_id": root})
             assert comment.status_code == 201, comment.text
             comment_id = comment.json()["id"]
 
+            # И ответ на комментарий, и ответ напрямую корню попадают в тот же native-тред.
+            nested = await client.post(f"/api/groups/{group_id}/messages", headers=owner,
+                                       json={"body": "Вложенный ответ", "reply_to_id": comment_id})
+            assert nested.status_code == 201, nested.text
+            nested_id = nested.json()["id"]
+            reply = await client.post(f"/api/groups/{group_id}/messages", headers=owner,
+                                      json={"body": "Ответ на корень", "reply_to_id": root})
+            assert reply.status_code == 201, reply.text
+            reply_id = reply.json()["id"]
+            ordinary = await client.post(f"/api/groups/{group_id}/messages", headers=owner,
+                                         json={"body": "Обычное сообщение без ответа"})
+            assert ordinary.status_code == 201, ordinary.text
+
             after = (await client.get(f"/api/channels/{channel_id}/messages", headers=owner)).json()["messages"]
             row = next(item for item in after if item["id"] == post_id)
-            assert row["comments_count"] == 1 and row["last_comment_id"] == comment_id
+            assert row["comments_count"] == 3 and row["last_comment_id"] == reply_id
 
             thread = await client.get(f"/api/groups/{group_id}/threads/{root}/replies", headers=owner)
             assert thread.status_code == 200, thread.text
-            assert thread.json()["ids"] == [root, comment_id]
+            assert thread.json()["ids"] == [comment_id, nested_id, reply_id]
+            assert ordinary.json()["id"] not in thread.json()["ids"]
+            window = await client.get(
+                f"/api/groups/{group_id}/threads/{root}/replies?offset_id={reply_id}&add_offset=-2&limit=2",
+                headers=owner)
+            assert window.status_code == 200, window.text
+            assert window.json()["ids"] == [comment_id, nested_id]
+            root_only = await client.get(
+                f"/api/groups/{group_id}/threads/{root}/replies?include_root=true&limit=1", headers=owner)
+            assert root_only.status_code == 200, root_only.text
+            assert root_only.json()["ids"] == [root]
             root_page = await client.get(f"/api/groups/{group_id}/messages?message_ids={root}", headers=owner)
             assert root_page.status_code == 200, root_page.text
             root_message = root_page.json()["messages"][0]
             assert root_message["discussion_channel_id"] == channel_id
             assert root_message["discussion_post_id"] == post_id
-
-            # Ответ на корень — тоже валидный комментарий.
-            reply = await client.post(f"/api/channels/{channel_id}/messages/{post_id}/comments",
-                                      headers=owner, json={"body": "Ответ на корень", "reply_to_id": root})
-            assert reply.status_code == 201, reply.text
 
             # Посторонний без членства в группе тред не откроет.
             outsider = {"Authorization": "Bearer thread-outsider"}

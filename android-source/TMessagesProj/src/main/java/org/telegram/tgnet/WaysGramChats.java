@@ -421,8 +421,9 @@ public class WaysGramChats {
             replies.channel_id = discussionGroup;
             int lastComment = m.optInt("last_comment_id", 0);
             if (lastComment > 0) {
-                replies.max_id = lastComment;
-                replies.read_max_id = lastComment;
+                int lastCommentClientId = clientGroupId(lastComment);
+                replies.max_id = lastCommentClientId;
+                replies.read_max_id = lastCommentClientId;
                 replies.flags |= TLObject.FLAG_2 | TLObject.FLAG_3;
             }
             message.replies = replies;
@@ -466,33 +467,54 @@ public class WaysGramChats {
 
     // ---------------------------------------------------------------- dialogs
 
+    /** Metadata and full messages for one native discussion-thread page. */
+    static final class ThreadPage {
+        final JSONArray messages;
+        final int count;
+        final boolean hasMore;
+
+        ThreadPage(JSONArray messages, int count, boolean hasMore) {
+            this.messages = messages;
+            this.count = count;
+            this.hasMore = hasMore;
+        }
+    }
+
     /**
-     * Сообщения треда комментариев (корень поста и ответы) в том виде, в каком их отдаёт сервер.
+     * Сообщения native-треда: корень запрашивается отдельно от ответов, как в штатном клиенте.
      * Список id берётся из {@code /threads/{root}/replies}, полные сообщения — штатным
      * {@code /messages?message_ids=}, поэтому конвертация в TL остаётся в одном месте.
      */
-    static org.json.JSONArray threadMessages(int account, long group, int root, int offsetId, int addOffset,
-                                             int limit) throws WaysGramApi.ApiException {
+    static ThreadPage threadMessages(int account, long group, int root, int offsetId, int addOffset,
+                                     int limit, boolean includeRoot) throws WaysGramApi.ApiException {
         StringBuilder path = new StringBuilder("/api/groups/").append(group)
                 .append("/threads/").append(root).append("/replies?limit=").append(Math.max(1, Math.min(limit, 100)));
         if (offsetId > 0) {
             path.append("&offset_id=").append(offsetId);
         }
-        if (addOffset > 0) {
+        if (addOffset != 0) {
             path.append("&add_offset=").append(addOffset);
+        }
+        if (includeRoot) {
+            path.append("&include_root=true");
         }
         JSONObject page = WaysGramApi.get(account, path.toString());
         JSONArray ids = page.optJSONArray("ids");
-        if (ids == null || ids.length() == 0) {
-            return new JSONArray();
+        JSONArray messages = new JSONArray();
+        if (ids != null && ids.length() > 0) {
+            StringBuilder csv = new StringBuilder();
+            for (int i = 0; i < ids.length(); i++) {
+                if (csv.length() > 0) csv.append(',');
+                csv.append(ids.optInt(i));
+            }
+            JSONArray loaded = WaysGramApi.get(account, "/api/groups/" + group + "/messages?message_ids=" + csv)
+                    .optJSONArray("messages");
+            if (loaded != null) {
+                messages = loaded;
+            }
         }
-        StringBuilder csv = new StringBuilder();
-        for (int i = 0; i < ids.length(); i++) {
-            if (csv.length() > 0) csv.append(',');
-            csv.append(ids.optInt(i));
-        }
-        return WaysGramApi.get(account, "/api/groups/" + group + "/messages?message_ids=" + csv)
-                .optJSONArray("messages");
+        return new ThreadPage(messages, page.optInt("count", ids == null ? 0 : ids.length()),
+                page.optBoolean("has_more"));
     }
 
     /** Профили участников группы для ответа треда. */

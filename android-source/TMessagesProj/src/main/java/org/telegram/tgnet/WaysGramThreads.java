@@ -60,16 +60,22 @@ public final class WaysGramThreads {
         final ArrayList<TLRPC.Message> messages = new ArrayList<>();
         final ArrayList<TLRPC.Chat> chats = new ArrayList<>();
         final ArrayList<TLRPC.User> users = new ArrayList<>();
+        int count;
+        boolean hasMore;
     }
 
     private static Thread load(int account, long group, int root, int offsetId, int addOffset, int limit,
-                               long selfId, String token) throws WaysGramApi.ApiException {
+                               boolean includeRoot, long selfId, String token) throws WaysGramApi.ApiException {
         JSONObject groupInfo = WaysGramApi.request("GET", "/api/groups/" + group, null, token, 20000);
         if (!TextUtils.equals(token, WaysGramApi.getToken(account))) {
             throw new WaysGramApi.ApiException(401, "AUTH_KEY_UNREGISTERED");
         }
         Thread thread = new Thread();
-        JSONArray rows = WaysGramChats.threadMessages(account, group, root, offsetId, addOffset, limit);
+        WaysGramChats.ThreadPage page = WaysGramChats.threadMessages(
+                account, group, root, offsetId, addOffset, limit, includeRoot);
+        thread.count = page.count;
+        thread.hasMore = page.hasMore;
+        JSONArray rows = page.messages;
         if (rows != null) {
             for (int i = 0; i < rows.length(); i++) {
                 JSONObject row = rows.optJSONObject(i);
@@ -110,15 +116,17 @@ public final class WaysGramThreads {
         if (group <= 0 || root <= 0) {
             throw new WaysGramApi.ApiException(404, "DISCUSSION_NOT_AVAILABLE");
         }
-        Thread thread = load(account, group, root, 0, 0, 100, selfId, token);
+        // getDiscussionMessage supplies only the discussion root; getReplies loads its comments.
+        Thread thread = load(account, group, root, 0, 0, 1, true, selfId, token);
         TLRPC.TL_messages_discussionMessage out = new TLRPC.TL_messages_discussionMessage();
         out.messages.addAll(thread.messages);
         out.chats.addAll(thread.chats);
         out.users.addAll(thread.users);
         int last = info.optInt("last_comment_id", 0);
-        out.max_id = last;
-        out.read_inbox_max_id = last;
-        out.read_outbox_max_id = last;
+        int lastClientId = last > 0 ? WaysGramChats.clientGroupId(last) : 0;
+        out.max_id = lastClientId;
+        out.read_inbox_max_id = lastClientId;
+        out.read_outbox_max_id = lastClientId;
         out.unread_count = 0;
         return out;
     }
@@ -128,15 +136,18 @@ public final class WaysGramThreads {
     private static TLObject replies(int account, TLRPC.TL_messages_getReplies req,
                                     long selfId, String token) throws WaysGramApi.ApiException {
         long group = groupId(req.peer);
-        if (req.msg_id <= 0) {
+        int root = WaysGramChats.serverGroupId(req.msg_id);
+        if (root <= 0) {
             throw new WaysGramApi.ApiException(400, "MESSAGE_ID_INVALID");
         }
         int limit = req.limit > 0 ? Math.min(req.limit, 100) : 100;
-        Thread thread = load(account, group, req.msg_id, req.offset_id, Math.max(0, req.add_offset),
-                limit, selfId, token);
+        int offsetId = req.offset_id > WaysGramChats.GROUP_MESSAGE_OFFSET
+                ? WaysGramChats.serverGroupId(req.offset_id) : req.offset_id;
+        Thread thread = load(account, group, root, offsetId, req.add_offset,
+                limit, false, selfId, token);
         TLRPC.TL_messages_channelMessages out = new TLRPC.TL_messages_channelMessages();
         out.messages.addAll(thread.messages);
-        out.count = thread.messages.size();
+        out.count = thread.count;
         out.chats.addAll(thread.chats);
         out.users.addAll(thread.users);
         return out;

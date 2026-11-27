@@ -252,20 +252,37 @@ class NativeMessagingSourceChecks(unittest.TestCase):
         self.assertIn('actionPath + "decline"', inbox)
         self.assertIn('putBoolean(slot + ":proposal", proposal)', inbox)
 
-    def test_channel_discussions_use_owned_groups_and_real_comment_threads(self):
+    def test_channel_discussions_open_the_native_replies_thread(self):
         chat = self.source('ui/ChatActivity.java')
         editor = self.source('ui/ChatEditActivity.java')
         discussion = self.source('ui/WaysGramDiscussions.java')
+        threads = self.source('tgnet/WaysGramThreads.java')
+        chats = self.source('tgnet/WaysGramChats.java')
+        transport = self.source('tgnet/WaysGramTransport.java')
+
         self.assertNotIn('items.add(LocaleController.getString(R.string.WaysGramDiscussionGroup));', chat)
+        self.assertNotIn('WaysGramDiscussions.open(', chat,
+                         'кнопка «Прокомментировать» не должна открывать старый диалог')
+        self.assertIn('openDiscussionMessageChat(currentChat.id, message, message.getId(), linkedChatId, maxReadId, 0, null);', chat)
         self.assertIn('WaysGramDiscussions.settings(this, currentAccount, chatId)', editor)
         self.assertIn('create()', discussion)
         self.assertIn('loadFullChat(channel, 0, true)', discussion)
         self.assertIn('"owner".equals(group.optString("role"))', discussion)
         self.assertIn('WaysGramChats.channelServer(channel)', discussion)
-        self.assertIn('data.optLong("next_before_id")', discussion)
-        self.assertIn('request("POST", path, payload, token, 15000, key)', discussion)
-        self.assertIn('payload.put("reply_to_id", replyToId)', discussion)
-        self.assertIn('row.optString("reply_to_body")', discussion)
+
+        # The native Telegram thread screen asks for the discussion root, then its replies.
+        self.assertIn('request instanceof TLRPC.TL_messages_getDiscussionMessage', threads)
+        self.assertIn('request instanceof TLRPC.TL_messages_getReplies', threads)
+        self.assertIn('"/api/channels/" + channel + "/messages/" + req.msg_id + "/discussion"', threads)
+        self.assertIn('0, 0, 1, true, selfId, token', threads)
+        self.assertIn('int root = WaysGramChats.serverGroupId(req.msg_id);', threads)
+        self.assertIn('limit, false, selfId, token', threads)
+        self.assertIn('out.count = thread.count;', threads)
+        self.assertIn('"/api/groups/" + group', chats)
+        self.assertIn('"/threads/"', chats)
+        self.assertIn('if (addOffset != 0)', chats)
+        self.assertIn('int lastCommentClientId = clientGroupId(lastComment);', chats)
+        self.assertIn('WaysGramThreads.handle(account, request, selfId, expectedToken)', transport)
 
     def test_paid_subscription_links_require_explicit_confirm_and_stable_retry(self):
         launch = self.source('ui/LaunchActivity.java')

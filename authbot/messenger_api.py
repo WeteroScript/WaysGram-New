@@ -20538,13 +20538,15 @@ def build_messenger_router(
     @router.get("/api/groups/{group_id}/threads/{root_message_id}/replies")
     async def group_thread_replies(group_id: int, root_message_id: int,
                                    offset_id: int = Query(default=0, ge=0),
-                                   add_offset: int = Query(default=0, ge=0),
+                                   add_offset: int = Query(default=0, ge=-200, le=200),
                                    limit: int = Query(default=100, ge=1, le=100),
+                                   include_root: bool = Query(default=False),
                                    authorization: str | None = Header(default=None)) -> dict[str, Any]:
-        """Идентификаторы сообщений треда: корень поста плюс комментарии.
+        """Идентификаторы корня или ответов в формате native Telegram replies.
 
-        Полные сообщения клиент запрашивает штатным `/api/groups/{id}/messages?message_ids=`,
-        поэтому конвертация в TL остаётся в одном месте.
+        По умолчанию выдаются только комментарии, как у `messages.getReplies`; для
+        `messages.getDiscussionMessage` клиент отдельно запрашивает корневое сообщение.
+        Полные сообщения загружаются через `/api/groups/{id}/messages?message_ids=`.
         """
         uid = int((await current_user(authorization))["telegram_id"])
         async with aiosqlite.connect(db_path()) as db:
@@ -20564,17 +20566,24 @@ def build_messenger_router(
                    WHERE group_id=? AND channel_id=? AND post_id=? ORDER BY group_message_id ASC""",
                 (group_id, channel_id, post_id),
             )
-            ids = [int(row[0]) for row in await cur.fetchall()]
-        ordered = [root_message_id] + ids
+            comments = [int(row[0]) for row in await cur.fetchall()]
+        ordered = ([root_message_id] if include_root else []) + comments
         if offset_id > 0:
-            ordered = [mid for mid in ordered if mid < offset_id]
-        page = ordered[add_offset:add_offset + limit]
+            # Telegram offsets are anchored at a message and use a negative add_offset
+            # to include older replies before it. Find the insertion point too, since a
+            # fresh thread can carry the client's initial sentinel offset of 1.
+            anchor = next((index for index, message_id in enumerate(ordered)
+                           if message_id >= offset_id), len(ordered))
+            start = max(0, anchor + add_offset)
+        else:
+            start = max(0, add_offset)
+        page = ordered[start:start + limit]
         return {
             "ids": page,
             "count": len(ordered),
             "root_message_id": root_message_id,
             "batch_message_ids": True,
-            "has_more": add_offset + limit < len(ordered),
+            "has_more": start + len(page) < len(ordered),
         }
 
     @router.get("/api/channels/{channel_id}/messages/{post_id}/comments")
@@ -20757,6 +20766,21 @@ def build_messenger_router(
             media_fields = await media_message_fields(db, media_id)
             reply_to_id = parse_reply_id(payload)
             quote = parse_message_quote(payload, reply_to_id)
+            if reply_to_id and discussion is None and topic_id is None:
+                # Native thread replies are sent through the ordinary group-message API.
+                # Associate replies to a discussion root/comment with that channel post so
+                # getReplies, the channel's comment count, and the legacy REST view stay in sync.
+                cur = await db.execute("""SELECT channel_id,post_id FROM channel_post_discussions
+                    WHERE group_id=? AND root_message_id=?
+                    UNION ALL
+                    SELECT channel_id,post_id FROM channel_post_comments
+                    WHERE group_id=? AND group_message_id=? LIMIT 1""",
+                    (group_id, reply_to_id, group_id, reply_to_id))
+                mapped_thread = await cur.fetchone()
+                if mapped_thread is not None:
+                    discussion = (int(mapped_thread[0]), int(mapped_thread[1]))
+                    if "send_as_id" in payload:
+                        raise HTTPException(400, "INVALID_GROUP_SEND_IDENTITY")
             if reply_to_id and discussion:
                 cur = await db.execute("""SELECT 1 FROM channel_post_comments p
                     JOIN group_messages m ON m.id=p.group_message_id AND m.group_id=p.group_id
@@ -20974,7 +20998,17 @@ def build_messenger_router(
 
             reply_to_id = parse_reply_id(payload)
             quote = parse_message_quote(payload, reply_to_id)
+            discussion = None
             if reply_to_id:
+                cur = await db.execute("""SELECT channel_id,post_id FROM channel_post_discussions
+                    WHERE group_id=? AND root_message_id=?
+                    UNION ALL
+                    SELECT channel_id,post_id FROM channel_post_comments
+                    WHERE group_id=? AND group_message_id=? LIMIT 1""",
+                    (group_id, reply_to_id, group_id, reply_to_id))
+                mapped_thread = await cur.fetchone()
+                if mapped_thread is not None:
+                    discussion = (int(mapped_thread[0]), int(mapped_thread[1]))
                 await require_reply_target(
                     db,
                     "SELECT 1 FROM group_messages WHERE id=? AND group_id=?",
@@ -21005,6 +21039,9 @@ def build_messenger_router(
                 message_id = int(cur.lastrowid)
                 if paid_fee_each > 0:
                     await charge_group_message_fee(db, uid, group_id, paid_fee_each, message_id, now)
+                if discussion is not None:
+                    await db.execute("INSERT INTO channel_post_comments VALUES(?,?,?,?)",
+                                     (message_id, group_id, *discussion))
                 if quote is not None:
                     await db.execute("UPDATE group_messages SET quote_json=? WHERE id=?",
                                      (json.dumps(quote, ensure_ascii=True, separators=(",", ":")), message_id))

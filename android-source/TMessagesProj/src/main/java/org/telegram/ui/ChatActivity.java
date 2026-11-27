@@ -34997,7 +34997,9 @@ public class ChatActivity extends BaseFragment implements
             case OPTION_WAYSGRAM_DISCUSSIONS: {
                 MessageObject post = selectedObjectGroup != null ? selectedObjectGroup.findPrimaryMessageObject() : selectedObject;
                 if (post != null && currentChat != null && ChatObject.isChannelAndNotMegaGroup(currentChat)) {
-                    WaysGramDiscussions.open(this, currentAccount, currentChat.id, post.getId());
+                    int maxReadId = post.messageOwner.replies != null ? post.messageOwner.replies.read_max_id : -1;
+                    long linkedChatId = post.messageOwner.replies != null ? post.messageOwner.replies.channel_id : 0;
+                    openDiscussionMessageChat(currentChat.id, post, post.getId(), linkedChatId, maxReadId, 0, null);
                 }
                 break;
             }
@@ -42650,12 +42652,7 @@ public class ChatActivity extends BaseFragment implements
             } else {
                 message = cell.getMessageObject();
             }
-            // WaysGram хранит комментарии сам: открываем их экран вместо MTProto-треда.
-            if (org.telegram.tgnet.WaysGramTransport.ENABLED && currentChat != null
-                    && ChatObject.isChannelAndNotMegaGroup(currentChat) && message != null) {
-                WaysGramDiscussions.open(ChatActivity.this, currentAccount, currentChat.id, message.getId());
-                return;
-            }
+            // Use the standard discussion-thread screen for both Telegram and WaysGram posts.
             int maxReadId;
             long linkedChatId;
             if (message.messageOwner.replies != null) {

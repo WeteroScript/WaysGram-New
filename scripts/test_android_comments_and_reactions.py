@@ -80,17 +80,18 @@ class CommentsAndReactions(unittest.TestCase):
         self.assertIn("loadFullChat(channel, 0, true)", self.discussions)
         self.assertIn("NotificationCenter.dialogsNeedReload", self.discussions)
 
-    def test_posts_show_the_comment_button(self):
-        # Кнопка «Прокомментировать» под постом требует трёх вещей: has_link у канала,
-        # replies с channel_id связанной группы и переход в наши комментарии.
+    def test_posts_show_the_comment_button_and_open_native_threads(self):
+        # «Прокомментировать» показывает штатную кнопку обсуждения и открывает native thread,
+        # не старый самописный AlertDialog.
         chats = self.read(JAVA + "tgnet/WaysGramChats.java")
         self.assertIn("channel.has_link = true;", chats)
         self.assertIn("channel.flags |= TLObject.FLAG_20;", chats)
         self.assertIn("replies.channel_id = discussionGroup;", chats)
         self.assertIn("message.replies = replies;", chats)
         chat = self.read(JAVA + "ui/ChatActivity.java")
-        self.assertIn("WaysGramDiscussions.open(ChatActivity.this, currentAccount, currentChat.id, message.getId())", chat)
         self.assertIn("public void didPressCommentButton(ChatMessageCell cell)", chat)
+        self.assertIn("openDiscussionMessageChat(currentChat.id, message, message.getId(), linkedChatId, maxReadId, 0, null);", chat)
+        self.assertNotIn("WaysGramDiscussions.open(", chat)
 
     def test_strings_exist(self):
         for name in ("WaysGramDiscussionCreate", "WaysGramDiscussionEnabled"):
