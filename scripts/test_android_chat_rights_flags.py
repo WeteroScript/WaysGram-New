@@ -117,6 +117,20 @@ class ChatRightsFlags(unittest.TestCase):
         full = self.method_body(self.chats, 'public static TLRPC.TL_messages_chatFull fullChat(int account, long chatId, long selfId)')
         self.assertIn('participant.waysGramAdminRights = groupAdminRights(', full)
 
+    def test_member_ban_rights_mask_includes_non_message_switches(self):
+        to_mask = self.method_body(self.chats, 'static int sendRestrictionMask(TLRPC.TL_chatBannedRights rights)')
+        from_mask = self.method_body(self.chats, 'static TLRPC.TL_chatBannedRights bannedRightsFor(int mask, boolean changeInfoRestricted)')
+        fields = {
+            'invite_users': 2048,
+            'pin_messages': 4096,
+            'edit_rank': 8192,
+            'manage_topics': 16384,
+            'manage_linked_peers': 32768,
+        }
+        for field, bit in fields.items():
+            self.assertIn(f'rights.{field}) mask |= {bit};', to_mask, field)
+            self.assertIn(f'rights.{field} = (mask & {bit}) != 0;', from_mask, field)
+
 
 if __name__ == '__main__':
     unittest.main()

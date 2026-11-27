@@ -39,6 +39,7 @@ import org.telegram.ui.Components.ColoredImageSpan;
 import org.telegram.ui.Components.LayoutHelper;
 import org.telegram.ui.Components.LinkSpanDrawable;
 import org.telegram.ui.Components.RLottieImageView;
+import org.telegram.ui.Stars.StarsIntroActivity;
 import org.telegram.ui.Stories.recorder.ButtonWithCounterView;
 
 public class FragmentUsernameBottomSheet {
@@ -88,19 +89,21 @@ public class FragmentUsernameBottomSheet {
             ownerName = "";
         }
 
-        final String money = BillingController.getInstance().formatCurrency(info.amount, info.currency);
-        final String crypto_money = BillingController.getInstance().formatCurrency(info.crypto_amount, info.crypto_currency);
+        final String money = TextUtils.isEmpty(info.currency) ? "" : BillingController.getInstance().formatCurrency(info.amount, info.currency);
+        final String crypto_money = TextUtils.isEmpty(info.crypto_currency) ? "" : BillingController.getInstance().formatCurrency(info.crypto_amount, info.crypto_currency);
+        final String price = TextUtils.isEmpty(crypto_money) ? money : crypto_money;
+        final String secondaryPrice = TextUtils.isEmpty(crypto_money) || TextUtils.isEmpty(money) ? "" : "(" + money + ")";
 
         String title;
         String message;
         String link;
         if (type == TYPE_USERNAME) {
             title = LocaleController.formatString(R.string.FragmentUsernameTitle, "@" + name);
-            message = LocaleController.formatString(R.string.FragmentUsernameMessage, LocaleController.formatShortDateTime(info.purchase_date), crypto_money, TextUtils.isEmpty(money) ? "" : "(" + money + ")");
+            message = LocaleController.formatString(R.string.FragmentUsernameMessage, LocaleController.formatShortDateTime(info.purchase_date), price, secondaryPrice);
             link = MessagesController.getInstance(UserConfig.selectedAccount).linkPrefix + "/" + name;
         } else if (type == TYPE_PHONE) {
             title = LocaleController.formatString(R.string.FragmentPhoneTitle, PhoneFormat.getInstance().format("+" + name));
-            message = LocaleController.formatString(R.string.FragmentPhoneMessage, LocaleController.formatShortDateTime(info.purchase_date), crypto_money, TextUtils.isEmpty(money) ? "" : "(" + money + ")");
+            message = LocaleController.formatString(R.string.FragmentPhoneMessage, LocaleController.formatShortDateTime(info.purchase_date), price, secondaryPrice);
             link = PhoneFormat.getInstance().format("+" + name);
         } else {
             return;
@@ -123,6 +126,7 @@ public class FragmentUsernameBottomSheet {
         span.setWidth(dp(13));
         tonIcon.setSpan(span, 0, tonIcon.length(), Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
         CharSequence messageSpanned = AndroidUtilities.replaceCharSequence("TON", AndroidUtilities.replaceTags(message), tonIcon);
+        messageSpanned = StarsIntroActivity.replaceStarsWithPlain(messageSpanned, .8f);
 
         TextView headerView = new LinkSpanDrawable.LinksTextView(context);
         headerView.setTypeface(AndroidUtilities.bold());
@@ -159,12 +163,12 @@ public class FragmentUsernameBottomSheet {
         descriptionView.setText(messageSpanned);
         layout.addView(descriptionView, LayoutHelper.createLinear(LayoutHelper.MATCH_PARENT, LayoutHelper.WRAP_CONTENT, Gravity.CENTER_HORIZONTAL, 32, 0, 32, 19));
 
-        ButtonWithCounterView button = new ButtonWithCounterView(context, resourcesProvider).setRound();
-        button.setText(getString(R.string.FragmentUsernameOpen), false);
-        button.setOnClickListener(v -> {
-            Browser.openUrl(context, info.url);
-        });
-        layout.addView(button, LayoutHelper.createLinear(LayoutHelper.MATCH_PARENT, 48, 6, 0, 6, 0));
+        if (type == TYPE_PHONE) {
+            ButtonWithCounterView button = new ButtonWithCounterView(context, resourcesProvider).setRound();
+            button.setText(getString(R.string.FragmentUsernameOpen), false);
+            button.setOnClickListener(v -> Browser.openUrl(context, info.url));
+            layout.addView(button, LayoutHelper.createLinear(LayoutHelper.MATCH_PARENT, 48, 6, 0, 6, 0));
+        }
 
         if (copy != null) {
             ButtonWithCounterView button2 = new ButtonWithCounterView(context, resourcesProvider).setRound().setNeutral();

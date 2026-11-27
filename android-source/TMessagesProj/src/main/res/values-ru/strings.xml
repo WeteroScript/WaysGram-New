@@ -574,6 +574,11 @@
     <string name="ActionGiftTonInbound">отправил(а) Вам подарок стоимостью **un2**</string>
     <string name="ActionGiftInbound">un1 отправил(а) Вам подарок стоимостью **un2**</string>
     <string name="ActionGiftOutbound">Вы отправили подарок стоимостью **un2**</string>
+    <string name="ActionFragmentStarsTransferInbound">un1 передал вам **un2**</string>
+    <string name="FragmentStarsCount_one">%d звезда</string>
+    <string name="FragmentStarsCount_few">%d звезды</string>
+    <string name="FragmentStarsCount_many">%d звёзд</string>
+    <string name="FragmentStarsCount_other">%d звёзд</string>
     <string name="ActionPrepaidGiftInbound">un1 отправил(а) улучшение стоимостью **un2** к Вашему подарку</string>
     <string name="ActionPrepaidGiftOutbound">Вы отправили улучшение стоимостью **un2** для подарка **un1**</string>
     <string name="ActionGiftSelf">Вы купили подарок стоимостью **un2**</string>
@@ -11575,6 +11580,13 @@
     <string name="WaysGramDiscussionError">Не удалось загрузить или обновить обсуждение.</string>
     <string name="WaysGramDiscussionCreate">Создать группу</string>
     <string name="WaysGramDiscussionEnabled">Комментарии включены. Откройте канал заново, чтобы под постами появилась кнопка комментариев.</string>
+    <string name="WaysGramLinkedChannelChoose">Выбрать канал</string>
+    <string name="WaysGramLinkedChannelNotLinked">К этой группе не привязан канал.</string>
+    <string name="WaysGramLinkedChannelLinked">Привязанный канал: %1$s</string>
+    <string name="WaysGramLinkedChannelConfirm">Привязать канал «%1$s» к этой группе?</string>
+    <string name="WaysGramLinkedChannelNoChannels">У вас нет собственных каналов для привязки.</string>
+    <string name="WaysGramLinkedChannelUnlinkConfirm">Отвязать канал от этой группы?</string>
+    <string name="WaysGramLinkedChannelSaved">Привязанный канал обновлён.</string>
     <string name="WaysGramPostComments">Комментарии</string>
     <string name="WaysGramCommentsEmpty">Комментариев пока нет.</string>
     <string name="WaysGramCommentsWrite">Написать комментарий</string>

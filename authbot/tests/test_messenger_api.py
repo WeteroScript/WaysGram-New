@@ -5041,6 +5041,11 @@ def test_pinned_messages_cover_direct_group_and_channel_permissions(api_env) -> 
             )
             assert group_post.status_code == 201
             group_message_id = group_post.json()["id"]
+            restricted_pins = await client.put(
+                f"/api/groups/{group_id}/send-permissions", headers=owner,
+                json={"default_send_restrictions": 4096},
+            )
+            assert restricted_pins.status_code == 200, restricted_pins.text
             denied_group = await client.post(
                 "/api/pins", headers=member,
                 json={"scope": "group", "peer_id": group_id, "message_id": group_message_id},

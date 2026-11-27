@@ -131,7 +131,7 @@
   .kv .k { color: var(--muted); font-size: 13px; flex: 1; }
   .kv .v { font-weight: 600; font-size: 14px; }
   .link { color: var(--blue); font-weight: 600; font-size: 14px; }
-  input.field {
+  input.field, select.field {
     width: 100%; height: 42px; border-radius: 10px; border: 1px solid var(--line);
     background: var(--bg-soft); color: var(--text); padding: 0 12px; outline: none;
     margin-top: 8px; font-size: 15px;
@@ -181,6 +181,13 @@
   .tile .price .state.green { color: var(--green); }
   .tile .price .state.blue { color: var(--blue); }
   .tile .price .state.muted { color: var(--muted); }
+  .inventory-item { min-width: 0; display: flex; flex-direction: column; gap: 6px; }
+  .inventory-item .tile { width: 100%; }
+  .inventory-withdraw {
+    min-height: 34px; border: 1px solid var(--line); border-radius: 9px;
+    background: var(--card); color: var(--blue); font-size: 13px; font-weight: 700;
+  }
+  .inventory-withdraw[disabled] { opacity: .5; }
 
   .hint { margin: 6px 12px; }
 
@@ -206,6 +213,77 @@
     border-radius: 7px; font-size: 14px; white-space: nowrap;
   }
   .choice-menu button:active, .choice-menu button.selected { background: var(--card-soft); }
+  .selected-filters { display: flex; flex-wrap: wrap; gap: 6px; padding: 7px 12px 2px; }
+  .selected-filter {
+    display: inline-flex; align-items: center; gap: 7px; max-width: 100%;
+    padding: 6px 9px; border: 1px solid var(--line); border-radius: 999px;
+    background: var(--card); color: var(--text); font-size: 12px; white-space: nowrap;
+  }
+  .selected-filter .remove { color: var(--muted); font-size: 15px; line-height: 1; }
+  .tile-number {
+    position: absolute; z-index: 3; top: 6px; left: 6px; padding: 3px 6px;
+    border-radius: 7px; color: #fff; background: rgba(10, 17, 24, .68);
+    font-size: 10px; font-weight: 700; line-height: 1.1;
+  }
+  .selection-sheet { position: fixed; inset: 0; z-index: 1100; display: flex; justify-content: center; align-items: flex-end; }
+  .sheet-backdrop { position: absolute; inset: 0; background: rgba(0, 0, 0, .56); }
+  .sheet-panel {
+    position: relative; z-index: 1; display: flex; flex-direction: column;
+    width: 100%; max-width: 760px; max-height: 94vh; min-height: 55vh;
+    padding: 7px 0 max(14px, env(safe-area-inset-bottom));
+    background: var(--bg); border-radius: 20px 20px 0 0; box-shadow: 0 -10px 40px rgba(0,0,0,.25);
+  }
+  .sheet-grabber { width: 38px; height: 4px; border-radius: 5px; background: var(--muted); opacity: .55; margin: 0 auto 6px; }
+  .sheet-head { display: flex; align-items: center; gap: 10px; padding: 9px 14px 12px; border-bottom: 1px solid var(--line); }
+  .sheet-head h2 { flex: 1; min-width: 0; font-size: 19px; }
+  .sheet-close { width: 30px; font-size: 27px; line-height: 1; color: var(--muted); text-align: left; }
+  .sheet-clear { color: var(--blue); font-size: 13px; font-weight: 700; white-space: nowrap; }
+  .sheet-body { flex: 1; min-height: 0; overflow-y: auto; padding: 10px 12px 18px; overscroll-behavior: contain; }
+  .sheet-search {
+    display: flex; align-items: center; gap: 9px; height: 42px; margin: 2px 0 10px;
+    padding: 0 12px; border-radius: 11px; background: var(--card-soft); color: var(--muted);
+  }
+  .sheet-search input { flex: 1; min-width: 0; border: 0; outline: 0; background: transparent; color: var(--text); font-size: 14px; }
+  .sheet-search input::placeholder { color: var(--muted); }
+  .collection-list { display: flex; flex-direction: column; gap: 3px; }
+  .collection-row {
+    display: flex; align-items: center; gap: 12px; width: 100%; min-height: 66px;
+    padding: 8px 10px; border-radius: 12px; text-align: left; background: transparent;
+  }
+  .collection-row:active, .collection-row.selected { background: var(--card); }
+  .collection-icon {
+    width: 48px; height: 48px; flex: 0 0 auto; position: relative; overflow: hidden;
+    display: flex; align-items: center; justify-content: center; border-radius: 13px;
+    background: var(--card-soft); font-size: 25px;
+  }
+  .collection-icon img { position: absolute; inset: 0; width: 100%; height: 100%; padding: 5px; object-fit: contain; }
+  .collection-copy { min-width: 0; flex: 1; }
+  .collection-name { display: block; overflow: hidden; text-overflow: ellipsis; font-size: 14px; font-weight: 700; }
+  .collection-count { display: block; margin-top: 3px; color: var(--muted); font-size: 12px; }
+  .collection-check { width: 21px; height: 21px; flex: 0 0 auto; border: 1.5px solid var(--muted); border-radius: 50%; display: grid; place-items: center; color: #fff; font-size: 12px; }
+  .collection-row.selected .collection-check { border-color: var(--blue); background: var(--blue); }
+  .filter-section { margin-bottom: 8px; overflow: hidden; border: 1px solid var(--line); border-radius: 12px; background: var(--card); }
+  .filter-section-head { display: flex; align-items: center; gap: 8px; width: 100%; padding: 13px 12px; text-align: left; }
+  .filter-section-head strong { flex: 1; font-size: 15px; }
+  .filter-section-head .selected-count { color: var(--muted); font-size: 12px; }
+  .filter-section-head .arrow { color: var(--muted); transition: transform .15s ease; }
+  .filter-section.open .filter-section-head .arrow { transform: rotate(180deg); }
+  .filter-section-body { padding: 0 10px 10px; border-top: 1px solid var(--line); }
+  .filter-actions { display: flex; align-items: center; justify-content: space-between; padding: 9px 2px 6px; }
+  .filter-actions span { font-size: 12px; color: var(--muted); }
+  .filter-actions button { color: var(--blue); font-size: 12px; font-weight: 700; }
+  .filter-option-list { max-height: 250px; overflow-y: auto; }
+  .filter-option {
+    display: flex; align-items: center; gap: 10px; min-height: 42px; padding: 5px 2px;
+    border-top: 1px solid var(--line); cursor: pointer;
+  }
+  .filter-option input { width: 18px; height: 18px; margin: 0; accent-color: var(--blue); }
+  .filter-option .option-name { flex: 1; font-size: 13px; }
+  .filter-option .option-count { color: var(--muted); font-size: 12px; }
+  @media (min-width: 700px) {
+    .sheet-panel { align-self: center; width: min(640px, calc(100% - 32px)); max-height: 86vh; min-height: 0; border-radius: 20px; }
+    .sheet-grabber { display: none; }
+  }
   .toast {
     position: fixed; left: 12px; right: 12px; bottom: 16px;
     background: var(--card-soft); color: var(--text);
@@ -259,13 +337,14 @@
         <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="M16.5 16.5L21 21"/></svg>
         <input id="gift-search" placeholder="Поиск по названию…" autocomplete="off">
       </div>
-      <button class="chip" id="collections" style="height: 34px; margin-top: 6px;">Коллекции ▾</button>
+      <button class="chip" id="collections" style="height: 38px; margin-top: 3px;">Коллекции</button>
+      <button class="chip" id="gift-filter" style="height: 38px; margin-top: 3px;">Фильтры</button>
     </div>
+    <div class="selected-filters" id="selected-filters" hidden></div>
     <div class="section-head"><h2>Мои лоты</h2></div>
     <div class="grid" id="my-gift-grid"></div>
     <div class="section-head">
       <h2>Подарки</h2>
-      <button class="chip on" id="gift-filter">Все подарки ▾</button>
       <button class="chip" id="gift-sort">Цена ↓</button>
     </div>
     <div class="row" style="padding: 0 12px 5px;">
@@ -276,7 +355,7 @@
 
   <section class="view" id="view-inventory" hidden>
     <div class="card hint">
-      <div class="label">Переданный подарок переходит во владение @fragment. Свои депозиты можно выставить на продажу здесь.</div>
+      <div class="label">Купленные и переданные подарки хранятся у @fragment. Выставьте подарок на продажу или нажмите «Вывести», чтобы получить его в профиль.</div>
       <div class="link" id="copy-fragment" style="margin-top: 6px;">Скопировать @fragment</div>
     </div>
     <div class="grid" id="inventory-grid"></div>
@@ -285,6 +364,18 @@
   <section class="view" id="view-detail" hidden></section>
 </main>
 
+<div class="selection-sheet" id="selection-sheet" hidden>
+  <button class="sheet-backdrop" id="sheet-backdrop" aria-label="Закрыть"></button>
+  <section class="sheet-panel" role="dialog" aria-modal="true" aria-labelledby="sheet-title">
+    <div class="sheet-grabber"></div>
+    <header class="sheet-head">
+      <button class="sheet-close" id="sheet-close" aria-label="Назад">‹</button>
+      <h2 id="sheet-title">Коллекции</h2>
+      <button class="sheet-clear" id="sheet-clear">Сбросить</button>
+    </header>
+    <div class="sheet-body" id="sheet-content"></div>
+  </section>
+</div>
 <div class="toast" id="toast" hidden></div>
 
 <script>
@@ -296,15 +387,18 @@
   var state = {
     tab: "usernames",
     namesSort: "desc",
-    giftFilter: "all",
     giftSort: "desc",
-    collection: "",
+    filters: { collection: [], model: [], backdrop: [], symbol: [] },
     giftQuery: "",
     market: null,
     mine: null,
     gifts: null,
     ownListings: null,
+    giftCatalog: null,
     inventory: null,
+    sheetMode: "",
+    sheetSearch: { collection: "", model: "", backdrop: "", symbol: "" },
+    openFilterSections: { collection: true, model: false, backdrop: false, symbol: false },
     autoRefresh: { usernames: 0, gifts: 0 },
     busy: false,
     detail: null
@@ -392,11 +486,46 @@
     return Math.max(1, hours) + " ч";
   }
 
+  function currencyOf(item) {
+    return String(item && (item.currency || item.listing_currency) || "stars").toLowerCase() === "grams"
+      ? "grams" : "stars";
+  }
+
   function priceOf(item) {
-    return Number(item.price_stars || 0);
+    if (item && item.price !== undefined && item.price !== null) { return Number(item.price || 0); }
+    return currencyOf(item) === "grams"
+      ? Number(item.price_grams || 0) : Number(item.price_stars || 0);
+  }
+
+  function priceLabel(item, amount) {
+    var value = amount === undefined ? priceOf(item) : Number(amount || 0);
+    return currencyOf(item) === "grams"
+      ? "💎 " + num(value) + " Gram" : "⭐ " + num(value) + " Stars";
+  }
+
+  function colorHex(value) {
+    if (value === null || value === undefined || value === "") { return ""; }
+    var raw = String(value).trim();
+    if (/^#[0-9a-f]{3,6}$/i.test(raw)) { return raw; }
+    if (/^[0-9a-f]{6}$/i.test(raw)) { return "#" + raw; }
+    var number = Number(value);
+    if (!isFinite(number) || number < 0 || number > 0xFFFFFF) { return ""; }
+    var hex = Math.floor(number).toString(16);
+    while (hex.length < 6) { hex = "0" + hex; }
+    return "#" + hex;
   }
 
   function colorFor(item) {
+    var traits = item && item.attributes && item.attributes.collectible_traits;
+    var backdrop = traits && traits.backdrop;
+    if (backdrop && typeof backdrop === "object") {
+      var center = colorHex(backdrop.center_color);
+      var edge = colorHex(backdrop.edge_color);
+      if (center && edge) {
+        return "radial-gradient(circle at 50% 40%, " + center + " 0%, " + edge + " 100%)";
+      }
+      if (center || edge) { return center || edge; }
+    }
     var key = String(item.telegram_gift_id || "") + String(item.serial_number || item.name || "");
     var hash = 0;
     for (var i = 0; i < key.length; i++) { hash = (hash * 31 + key.charCodeAt(i)) | 0; }
@@ -744,6 +873,8 @@
     var items = (state.market || []).filter(function (item) {
       return !query || String(item.name || "").toLowerCase().indexOf(query) === 0;
     }).sort(function (a, b) {
+      var assetOrder = currencyOf(a).localeCompare(currencyOf(b));
+      if (assetOrder) { return assetOrder; }
       return state.namesSort === "asc" ? priceOf(a) - priceOf(b) : priceOf(b) - priceOf(a);
     });
 
@@ -757,7 +888,7 @@
       html += '<div class="trow" data-name="' + esc(name) + '">'
         + '<div><div class="name">@' + esc(name) + '<span class="badge green">Продажа</span>'
         + '</div><div class="sub">' + esc(name) + '.t.me</div></div>'
-        + '<div class="side"><div class="amount">⭐ ' + num(priceOf(item)) + '</div>'
+        + '<div class="side"><div class="amount">' + esc(priceLabel(item)) + '</div>'
         + '<div class="state green">Фиксированная цена</div></div>'
         + '<div class="chev">›</div></div>';
     });
@@ -776,8 +907,8 @@
         var entityLabel = item.entity_type === "channel" ? "Канал"
           : (item.entity_type === "group" ? "Группа"
             : (item.entity_type === "account" ? "Аккаунт" : "Юзернейм"));
-        var subtitle = item.price_stars
-          ? "На продаже · ⭐ " + num(item.price_stars)
+        var subtitle = item.listing_id
+          ? "На продаже · " + priceLabel(item)
           : (item.frozen ? "В вашем профиле · временно нельзя перепродать" : "В вашем профиле");
         if (item.entity_type) {
           subtitle = entityLabel + (item.entity_title ? " · " + item.entity_title : "") + " · " + subtitle;
@@ -829,8 +960,10 @@
 
   function renderNameCard(name, card) {
     var mine = !!card.mine;
-    var price = Number(card.price_stars || 0);
-    var badge = price > 0 ? '<span class="badge green">Продаётся</span>'
+    var listed = !!card.for_sale;
+    var price = listed ? Number(card.price || priceOf(card)) : 0;
+    var saleCurrency = currencyOf(card);
+    var badge = listed ? '<span class="badge green">Продаётся</span>'
       : (mine ? '<span class="badge muted">Ваше имя</span>'
         : '<span class="badge muted">Свободно</span>');
     var html = detailHead("@" + name, badge);
@@ -850,8 +983,9 @@
       html += '<div class="kv"><span class="k">Во владении с</span><span class="v">'
         + new Date(card.purchase_date * 1000).toLocaleDateString("ru-RU") + "</span></div>";
     }
-    if (price > 0) {
-      html += '<div class="kv"><span class="k">Цена</span><span class="v">⭐ ' + num(price) + "</span></div>";
+    if (listed) {
+      html += '<div class="kv"><span class="k">Цена</span><span class="v">'
+        + esc(priceLabel({ currency: saleCurrency }, price)) + "</span></div>";
     }
     if (card.frozen && card.frozen_until) {
       html += '<div class="kv"><span class="k">Повторная продажа</span><span class="v">после '
@@ -859,20 +993,21 @@
     }
     html += "</div>";
 
-    if (!mine && price > 0) {
-      html += '<button class="primary" id="buy">Купить за ⭐ ' + num(price) + "</button>";
+    if (!mine && listed) {
+      html += '<button class="primary" id="buy">Купить за ' + esc(priceLabel({ currency: saleCurrency }, price)) + "</button>";
     } else if (!mine && card.free) {
       html += '<button class="primary" id="claim">Занять за ⭐ '
         + num(card.system_price_stars || card.claim_price_stars || 0) + "</button>";
     }
     if (mine) {
-      if (price > 0) {
+      if (listed) {
         html += '<button class="primary" id="unlist">Снять с продажи</button>';
       } else if (card.frozen) {
         html += '<div class="card"><div class="label">После покупки имя можно будет перепродать через сутки.</div></div>';
       } else {
-        html += '<div class="card"><div class="label">Цена продажи в звёздах</div>'
-          + '<input class="field" id="list-price" inputmode="numeric" placeholder="Цена в звёздах">'
+        html += '<div class="card"><div class="label">Цена продажи</div>'
+          + '<select class="field" id="list-currency"><option value="stars">⭐ Stars</option><option value="grams">💎 Gram</option></select>'
+          + '<input class="field" id="list-price" inputmode="numeric" placeholder="Сумма">'
           + '<button class="primary" id="list">Выставить на продажу</button>'
           + '<div class="note">Комиссия сервиса: ' + num(card.commission_percent || 5) + "%</div></div>";
       }
@@ -894,7 +1029,8 @@
       $("list").addEventListener("click", function () {
         var value = Number(($("list-price").value || "").trim());
         if (!(value > 0)) { toast("Укажите цену"); return; }
-        nameAction("listing", "Выставлено на продажу", "/listing", { price_stars: value }, "PUT");
+        var currency = $("list-currency").value;
+        nameAction("listing", "Выставлено на продажу", "/listing", { currency: currency, price: value }, "PUT");
       });
     }
     if ($("unlist")) {
@@ -947,15 +1083,29 @@
 
   /* ------------------------------------------------------------- подарки */
 
+  function selectedFilterQuery() {
+    var parts = [];
+    ["collection", "model", "backdrop", "symbol"].forEach(function (key) {
+      var values = state.filters[key] || [];
+      if (values.length) {
+        parts.push(encodeURIComponent(key) + "=" + encodeURIComponent(values.join(",")));
+      }
+    });
+    return parts.length ? "&" + parts.join("&") : "";
+  }
+
   function loadGifts(force) {
-    if (!force && state.gifts && state.ownListings) { renderGifts(); return; }
+    if (!force && state.gifts && state.ownListings && state.giftCatalog) { renderGifts(); return; }
     if (!state.gifts) { $("gift-grid").innerHTML = '<div class="skeleton">Загружаем подарки…</div>'; }
+    var filters = selectedFilterQuery();
     Promise.all([
-      api("/api/gift-market?limit=60"),
-      api("/api/gift-market?mine=true&limit=60")
+      api("/api/gift-market?limit=100" + filters),
+      api("/api/gift-market?mine=true&limit=100" + filters),
+      api("/api/gift-market/catalog")
     ]).then(function (result) {
       state.gifts = (result[0] && result[0].listings) || [];
       state.ownListings = (result[1] && result[1].listings) || [];
+      state.giftCatalog = result[2] || { collections: [], filters: {} };
       renderGifts();
     }).catch(function (error) {
       $("gift-grid").innerHTML = '<div class="empty">' + esc(error.message) + "</div>";
@@ -965,37 +1115,74 @@
   function sortGifts(items) {
     var sorted = items.slice();
     sorted.sort(function (a, b) {
-      var difference = Number(a.price_grams || 0) - Number(b.price_grams || 0);
+      var currencyDifference = currencyOf(a).localeCompare(currencyOf(b));
+      if (currencyDifference) { return currencyDifference; }
+      var difference = priceOf(a) - priceOf(b);
       return state.giftSort === "asc" ? difference : -difference;
     });
     return sorted;
   }
 
-  function giftHasCategory(item, category) {
-    if (category === "all") { return true; }
-    if (category === "gift") { return !!(item.telegram_gift_id || item.gift_name); }
-    var traits = item.attributes && item.attributes.collectible_traits;
-    var entry = traits && traits[category];
-    return !!entry;
+  function traitValue(item, key) {
+    var traits = item && item.attributes && item.attributes.collectible_traits;
+    if (!traits) { return ""; }
+    var entry = traits[key];
+    if (!entry && key === "symbol") { entry = traits.pattern; }
+    if (typeof entry === "string") { return entry; }
+    return entry && String(entry.name || "").trim() || "";
   }
 
   function filteredGifts(source) {
     var query = (state.giftQuery || "").trim().toLowerCase();
     return (source || []).filter(function (item) {
-      if (!giftHasCategory(item, state.giftFilter)) { return false; }
-      if (state.collection && String(item.gift_name || "") !== state.collection) { return false; }
+      var collectionFilters = state.filters.collection || [];
+      if (collectionFilters.length && collectionFilters.indexOf(String(item.gift_name || "")) < 0) { return false; }
+      var matched = ["model", "backdrop", "symbol"].every(function (key) {
+        var values = state.filters[key] || [];
+        return !values.length || values.indexOf(traitValue(item, key)) >= 0;
+      });
+      if (!matched) { return false; }
       if (query && String(item.gift_name || "").toLowerCase().indexOf(query) < 0) { return false; }
       return true;
     });
   }
 
+  function renderSelectedFilters() {
+    var node = $("selected-filters");
+    var selections = [];
+    ["collection", "model", "backdrop", "symbol"].forEach(function (key) {
+      (state.filters[key] || []).forEach(function (value) {
+        var label = key === "collection" ? value
+          : ({ model: "Модель", backdrop: "Фон", symbol: "Символ" }[key] + ": " + value);
+        selections.push({ key: key, value: value, label: label });
+      });
+    });
+    node.hidden = selections.length === 0;
+    node.innerHTML = selections.map(function (selection, index) {
+      return '<button class="selected-filter" data-filter-index="' + index + '">'
+        + '<span>' + esc(selection.label) + '</span><span class="remove">×</span></button>';
+    }).join("");
+    Array.prototype.forEach.call(node.querySelectorAll(".selected-filter"), function (button) {
+      button.addEventListener("click", function () {
+        var selection = selections[Number(button.dataset.filterIndex)];
+        toggleFilterValue(selection.key, selection.value);
+      });
+    });
+  }
+
   function renderGifts() {
-    var filterLabels = { all: "Все подарки", backdrop: "Фон", pattern: "Узор", gift: "Подарок" };
-    $("gift-filter").textContent = (filterLabels[state.giftFilter] || "Все подарки") + " ▾";
-    $("gift-filter").classList.toggle("on", state.giftFilter !== "all");
+    var activeCount = 0;
+    ["collection", "model", "backdrop", "symbol"].forEach(function (key) {
+      activeCount += (state.filters[key] || []).length;
+    });
+    $("gift-filter").textContent = activeCount ? "Фильтры · " + activeCount : "Фильтры";
+    $("gift-filter").classList.toggle("on", activeCount > 0);
     $("gift-sort").textContent = state.giftSort === "asc" ? "Цена ↑" : "Цена ↓";
-    $("collections").textContent = state.collection ? state.collection + " ▾" : "Коллекции ▾";
-    $("collections").classList.toggle("on", !!state.collection);
+    var collectionCount = (state.filters.collection || []).length;
+    $("collections").textContent = collectionCount
+      ? "Коллекции · " + collectionCount : "Коллекции";
+    $("collections").classList.toggle("on", collectionCount > 0);
+    renderSelectedFilters();
 
     stopGiftModelPlayers();
     drawGrid($("my-gift-grid"), sortGifts(filteredGifts(state.ownListings)), true,
@@ -1009,21 +1196,28 @@
       container.innerHTML = '<div class="empty">' + esc(emptyMessage || "Пока пусто.") + "</div>";
       return;
     }
+    var inventory = container.id === "inventory-grid";
     container.innerHTML = items.map(function (item, index) {
       var emoji = String(item.gift_emoji || "🎁");
-      var price = Number(item.price_grams || 0) > 0 ? "💎 " + num(item.price_grams) : "";
+      var price = priceOf(item) > 0 ? priceLabel(item) : "";
+      var uniqueNumber = Number(item.unique_num || 0);
       var stateText = owned
         ? (item.is_listed ? "На продаже" : "В инвентаре")
         : "Продаётся";
       var stateClass = owned ? (item.is_listed ? "blue" : "muted") : "green";
-      return '<button class="tile" data-index="' + index + '">'
+      var tile = '<button class="tile" data-index="' + index + '">'
         + '<span class="art" style="background:' + colorFor(item) + '">'
+        + (uniqueNumber > 0 ? '<span class="tile-number">#' + num(uniqueNumber) + '</span>' : "")
         + '<span class="emoji">' + esc(emoji) + "</span>"
         + '<img alt="" hidden><span class="model-art" aria-hidden="true"></span>'
         + '<span class="pattern-art" aria-hidden="true"></span></span>'
         + '<span class="price"><span class="grow">' + esc(price) + "</span>"
         + '<span class="state ' + stateClass + '">' + esc(stateText) + "</span></span>"
         + "</button>";
+      return inventory
+        ? '<div class="inventory-item">' + tile
+          + '<button class="inventory-withdraw" data-index="' + index + '">Вывести</button></div>'
+        : tile;
     }).join("");
 
     Array.prototype.forEach.call(container.querySelectorAll(".tile"), function (tile) {
@@ -1035,46 +1229,72 @@
       requestPatternArtwork(item, tile.querySelector(".pattern-art"), false);
       tile.addEventListener("click", function () { openGift(item, owned); });
     });
+    if (inventory) {
+      Array.prototype.forEach.call(container.querySelectorAll(".inventory-withdraw"), function (button) {
+        var item = items[Number(button.dataset.index)];
+        button.addEventListener("click", function () { withdrawGift(item, button); });
+      });
+    }
   }
 
   function openGift(item, owned) {
+    var fragmentInventory = !!(item && item.fragment_inventory);
     var title = String(item.gift_name || "Подарок");
-    var badge = owned
+    var badge = fragmentInventory
       ? (item.is_listed ? '<span class="badge blue">На продаже</span>'
-        : '<span class="badge muted">В инвентаре</span>')
-      : '<span class="badge green">Продаётся</span>';
+        : '<span class="badge muted">В инвентаре Fragment</span>')
+      : (owned
+        ? (item.is_listed ? '<span class="badge blue">На продаже</span>'
+          : '<span class="badge muted">В инвентаре</span>')
+        : '<span class="badge green">Продаётся</span>');
 
     var html = detailHead(title, badge);
     html += '<div class="big-art" style="background:' + colorFor(item) + '">'
+      + (Number(item.unique_num || 0) > 0 ? '<span class="tile-number">#' + num(item.unique_num) + '</span>' : "")
       + '<span class="emoji">' + esc(item.gift_emoji || "🎁") + "</span>"
       + '<img alt="" hidden><div class="model-art" aria-hidden="true"></div>'
       + '<div class="pattern-art" aria-hidden="true"></div></div>';
 
     var traits = (item.attributes && item.attributes.collectible_traits) || null;
     var rows = "";
-    if (owned) {
+    if (fragmentInventory) {
+      rows += kv("Владелец", "@fragment", null);
+    } else if (owned) {
       rows += kv("Владелец", "Вы", null);
     } else if (item.seller_username) {
       rows += kv("Владелец", "@" + item.seller_username, null);
     }
     if (traits) {
       rows += kv("Модель", trait(traits, "model"));
-      rows += kv("Узор", trait(traits, "pattern"));
+      rows += kv("Символ", trait(traits, "symbol") || trait(traits, "pattern"));
       rows += kv("Фон", trait(traits, "backdrop"));
     }
     if (rows) { html += '<div class="card">' + rows + "</div>"; }
 
-    if (!owned) {
+    if (fragmentInventory) {
+      if (item.is_listed) {
+        html += '<div class="card"><div class="label">Цена лота</div><div class="value big">'
+          + esc(priceLabel(item)) + "</div></div>"
+          + '<button class="primary" id="unlist-gift">Снять с продажи</button>';
+      } else {
+        html += '<div class="card"><div class="label">Цена продажи</div>'
+          + '<select class="field" id="sell-currency"><option value="grams">💎 Gram</option><option value="stars">⭐ Stars</option></select>'
+          + '<input class="field" id="sell-price" inputmode="numeric" placeholder="Сумма"></div>'
+          + '<button class="primary" id="sell-gift">Продать</button>';
+      }
+      html += '<button class="primary" id="withdraw-gift">Вывести</button>';
+    } else if (!owned) {
       html += '<div class="card"><div class="label">Цена продажи</div>'
-        + '<div class="value big">💎 ' + num(item.price_grams) + " Gram</div></div>"
-        + '<button class="primary" id="buy-gift">Купить за 💎 ' + num(item.price_grams) + "</button>";
+        + '<div class="value big">' + esc(priceLabel(item)) + "</div></div>"
+        + '<button class="primary" id="buy-gift">Купить за ' + esc(priceLabel(item)) + "</button>";
     } else if (item.is_listed) {
-      html += '<div class="card"><div class="label">Цена лота</div><div class="value big">💎 '
-        + num(item.price_grams) + " Gram</div></div>"
+      html += '<div class="card"><div class="label">Цена лота</div><div class="value big">'
+        + esc(priceLabel(item)) + "</div></div>"
         + '<button class="primary" id="unlist-gift">Снять с продажи</button>';
     } else {
       html += '<div class="card"><div class="label">Цена продажи</div>'
-        + '<input class="field" id="sell-price" inputmode="numeric" placeholder="Цена в Gram"></div>'
+        + '<select class="field" id="sell-currency"><option value="grams">💎 Gram</option><option value="stars">⭐ Stars</option></select>'
+        + '<input class="field" id="sell-price" inputmode="numeric" placeholder="Сумма"></div>'
         + '<button class="primary" id="sell-gift">Продать</button>';
     }
 
@@ -1094,10 +1314,16 @@
             state.gifts = null;
             state.ownListings = null;
             state.inventory = null;
-            toast("Подарок куплен");
+            state.tab = "inventory";
+            toast("Подарок куплен и добавлен в инвентарь Fragment");
             closeDetail();
           })
           .catch(function (error) { toast(error.message); });
+      });
+    }
+    if ($("withdraw-gift")) {
+      $("withdraw-gift").addEventListener("click", function (event) {
+        withdrawGift(item, event.currentTarget);
       });
     }
     if ($("unlist-gift")) {
@@ -1116,9 +1342,10 @@
     if ($("sell-gift")) {
       $("sell-gift").addEventListener("click", function () {
         var price = Number(($("sell-price").value || "").trim());
-        if (!(price > 0)) { toast("Укажите цену в Gram"); return; }
+        var currency = $("sell-currency").value;
+        if (!(price > 0)) { toast("Укажите цену"); return; }
         api("/api/gifts/" + encodeURIComponent(item.serial_number) + "/list",
-          { method: "POST", body: { price_grams: price } })
+          { method: "POST", body: { currency: currency, price: price } })
           .then(function () {
             state.inventory = null;
             state.gifts = null;
@@ -1129,6 +1356,34 @@
           .catch(function (error) { toast(error.message); });
       });
     }
+  }
+
+  function withdrawGift(item, button) {
+    var serial = String(item && item.serial_number || "").trim();
+    if (!serial || state.busy) { return; }
+    state.busy = true;
+    if (button) { button.disabled = true; }
+    api("/api/me/fragment/gifts/" + encodeURIComponent(serial) + "/withdraw", {
+      method: "POST",
+      body: {},
+      idempotency: idem("withdraw", serial)
+    }).then(function () {
+      state.inventory = null;
+      state.gifts = null;
+      state.ownListings = null;
+      toast("Подарок выведен из Fragment — он пришёл в чат от @fragment");
+      if (!$('view-detail').hidden) {
+        state.tab = "inventory";
+        closeDetail();
+      } else {
+        loadInventory();
+      }
+    }).catch(function (error) {
+      toast(error.message);
+    }).then(function () {
+      state.busy = false;
+      if (button) { button.disabled = false; }
+    });
   }
 
   function kv(label, value, percent) {
@@ -1163,7 +1418,7 @@
       $("inventory-grid"),
       state.inventory || [],
       true,
-      "Здесь появятся подарки, которые вы передали во владение @fragment."
+      "Здесь появятся купленные и переданные подарки."
     );
   }
 
@@ -1215,18 +1470,191 @@
     document.addEventListener("keydown", escape, true);
   }
 
-  function collections() {
-    var names = [];
-    (state.gifts || []).concat(state.ownListings || []).forEach(function (item) {
-      var name = String(item.gift_name || "").trim();
-      if (name && names.indexOf(name) < 0) { names.push(name); }
+  function filterOptions(key) {
+    var catalog = state.giftCatalog || {};
+    if (key === "collection") { return catalog.collections || []; }
+    var filters = catalog.filters || {};
+    return filters[key] || [];
+  }
+
+  function openSelectionSheet(mode) {
+    state.sheetMode = mode;
+    state.sheetSearch = { collection: "", model: "", backdrop: "", symbol: "" };
+    $("selection-sheet").hidden = false;
+    $("sheet-title").textContent = mode === "collections" ? "Коллекции" : "Фильтры";
+    renderSelectionSheet();
+  }
+
+  function closeSelectionSheet() {
+    $("selection-sheet").hidden = true;
+    state.sheetMode = "";
+  }
+
+  function renderSelectionSheet() {
+    if (state.sheetMode === "collections") { renderCollectionsSheet(); }
+    else if (state.sheetMode === "filters") { renderFiltersSheet(); }
+  }
+
+  function applyFilterChange() {
+    state.gifts = null;
+    state.ownListings = null;
+    loadGifts(true);
+  }
+
+  function toggleFilterValue(key, value) {
+    var selected = (state.filters[key] || []).slice();
+    var index = selected.indexOf(value);
+    if (index >= 0) { selected.splice(index, 1); }
+    else { selected.push(value); }
+    state.filters[key] = selected;
+    renderSelectionSheet();
+    applyFilterChange();
+  }
+
+  function setFilterCheckbox(key, value, checked) {
+    var selected = (state.filters[key] || []).slice();
+    var options = filterOptions(key).map(function (option) { return String(option.name || ""); });
+    if (!selected.length) {
+      if (!checked) { selected = options.filter(function (option) { return option !== value; }); }
+    } else if (checked) {
+      if (selected.indexOf(value) < 0) { selected.push(value); }
+    } else {
+      selected = selected.filter(function (option) { return option !== value; });
+    }
+    state.filters[key] = selected.length >= options.length ? [] : selected;
+    renderSelectionSheet();
+    applyFilterChange();
+  }
+
+  function clearFilterSection(key) {
+    state.filters[key] = [];
+    renderSelectionSheet();
+    applyFilterChange();
+  }
+
+  function renderCollectionsSheet() {
+    var scrollTop = $("sheet-content").scrollTop;
+    var all = filterOptions("collection");
+    var query = String(state.sheetSearch.collection || "").trim().toLowerCase();
+    var options = all.filter(function (item) {
+      return !query || String(item.name || "").toLowerCase().indexOf(query) >= 0;
     });
-    names.sort(function (a, b) { return a.localeCompare(b, "ru"); });
-    var options = [{ value: "", label: "Все коллекции" }];
-    names.forEach(function (name) { options.push({ value: name, label: name }); });
-    showChoiceMenu($("collections"), options, state.collection, function (value) {
-      state.collection = value;
-      renderGifts();
+    var selected = state.filters.collection || [];
+    var total = all.reduce(function (sum, item) { return sum + Number(item.count || 0); }, 0);
+    var html = '<label class="sheet-search"><span aria-hidden="true">⌕</span>'
+      + '<input id="sheet-collection-search" placeholder="Поиск коллекций" value="' + esc(state.sheetSearch.collection || "") + '"></label>'
+      + '<div class="collection-list">'
+      + '<button class="collection-row" data-clear-collection="1"><span class="collection-icon">✦</span>'
+      + '<span class="collection-copy"><span class="collection-name">Все коллекции</span>'
+      + '<span class="collection-count">' + num(total) + ' подарков</span></span>'
+      + '<span class="collection-check">' + (selected.length ? "" : "✓") + '</span></button>';
+    options.forEach(function (item, index) {
+      var name = String(item.name || "");
+      var checked = selected.indexOf(name) >= 0;
+      html += '<button class="collection-row' + (checked ? ' selected' : '') + '" data-collection-index="' + index + '">'
+        + '<span class="collection-icon" style="background:' + esc(colorFor(item)) + '">'
+        + '<span class="emoji">' + esc(item.gift_emoji || "🎁") + '</span>'
+        + (item.telegram_gift_id ? '<img data-artwork-id="' + esc(item.telegram_gift_id) + '" alt="" hidden>' : '')
+        + '</span><span class="collection-copy"><span class="collection-name">' + esc(name) + '</span>'
+        + '<span class="collection-count">' + num(item.count || 0) + ' подарков</span></span>'
+        + '<span class="collection-check">' + (checked ? "✓" : "") + '</span></button>';
+    });
+    html += '</div>';
+    if (!options.length) { html += '<div class="empty">Коллекции не найдены.</div>'; }
+    $("sheet-content").innerHTML = html;
+    $("sheet-content").scrollTop = scrollTop;
+    $("sheet-clear").hidden = !selected.length;
+    var search = $("sheet-collection-search");
+    search.addEventListener("input", function () {
+      state.sheetSearch.collection = search.value;
+      renderCollectionsSheet();
+      var nextSearch = $("sheet-collection-search");
+      nextSearch.focus();
+      nextSearch.setSelectionRange(nextSearch.value.length, nextSearch.value.length);
+    });
+    var clear = $("sheet-content").querySelector("[data-clear-collection]");
+    clear.addEventListener("click", function () { clearFilterSection("collection"); });
+    Array.prototype.forEach.call($("sheet-content").querySelectorAll("[data-collection-index]"), function (button) {
+      var item = options[Number(button.dataset.collectionIndex)];
+      var img = button.querySelector("img");
+      if (img) { artwork(img.dataset.artworkId, img, button.querySelector(".emoji")); }
+      button.addEventListener("click", function () { toggleFilterValue("collection", String(item.name || "")); });
+    });
+  }
+
+  function renderFiltersSheet() {
+    var scrollTop = $("sheet-content").scrollTop;
+    var definitions = [
+      { key: "collection", title: "Collection" },
+      { key: "model", title: "Model" },
+      { key: "backdrop", title: "Backdrop" },
+      { key: "symbol", title: "Symbol" }
+    ];
+    var html = '<div class="filter-intro">Выберите параметры подарков. Количество рядом со значением показывает активные лоты.</div>';
+    definitions.forEach(function (section) {
+      var options = filterOptions(section.key);
+      var selected = state.filters[section.key] || [];
+      var isAll = selected.length === 0;
+      var open = !!state.openFilterSections[section.key];
+      var title = section.title;
+      html += '<section class="filter-section' + (open ? ' open' : '') + '" data-filter-section="' + section.key + '">'
+        + '<button class="filter-section-head" data-section-toggle="' + section.key + '"><strong>' + title + '</strong>'
+        + '<span class="selected-count">' + (isAll ? "Все" : selected.length + " выбрано") + '</span>'
+        + '<span class="arrow">⌄</span></button>';
+      if (open) {
+        var search = String(state.sheetSearch[section.key] || "");
+        var query = search.trim().toLowerCase();
+        var visible = options.filter(function (option) {
+          return !query || String(option.name || "").toLowerCase().indexOf(query) >= 0;
+        });
+        html += '<div class="filter-section-body"><label class="sheet-search"><span aria-hidden="true">⌕</span>'
+          + '<input data-filter-search="' + section.key + '" placeholder="Поиск" value="' + esc(search) + '"></label>'
+          + '<div class="filter-actions"><span>' + num(options.length) + ' значений</span>'
+          + '<button data-select-all="' + section.key + '">Выбрать все</button></div>'
+          + '<div class="filter-option-list">';
+        visible.forEach(function (option) {
+          var name = String(option.name || "");
+          var checked = isAll || selected.indexOf(name) >= 0;
+          html += '<label class="filter-option" data-option-search="' + esc(name.toLowerCase()) + '">'
+            + '<input type="checkbox" data-filter-key="' + section.key + '" data-filter-value="' + esc(name) + '"'
+            + (checked ? ' checked' : '') + '><span class="option-name">' + esc(name) + '</span>'
+            + '<span class="option-count">' + num(option.count || 0) + '</span></label>';
+        });
+        if (!visible.length) { html += '<div class="empty">Значения не найдены.</div>'; }
+        html += '</div></div>';
+      }
+      html += '</section>';
+    });
+    $("sheet-content").innerHTML = html;
+    $("sheet-content").scrollTop = scrollTop;
+    var anySelected = ["collection", "model", "backdrop", "symbol"].some(function (key) {
+      return (state.filters[key] || []).length > 0;
+    });
+    $("sheet-clear").hidden = !anySelected;
+    Array.prototype.forEach.call($("sheet-content").querySelectorAll("[data-section-toggle]"), function (button) {
+      button.addEventListener("click", function () {
+        var key = button.dataset.sectionToggle;
+        state.openFilterSections[key] = !state.openFilterSections[key];
+        renderFiltersSheet();
+      });
+    });
+    Array.prototype.forEach.call($("sheet-content").querySelectorAll("[data-filter-search]"), function (input) {
+      input.addEventListener("input", function () {
+        state.sheetSearch[input.dataset.filterSearch] = input.value;
+        var query = input.value.trim().toLowerCase();
+        var section = input.closest(".filter-section");
+        Array.prototype.forEach.call(section.querySelectorAll(".filter-option"), function (option) {
+          option.hidden = query && option.dataset.optionSearch.indexOf(query) < 0;
+        });
+      });
+    });
+    Array.prototype.forEach.call($("sheet-content").querySelectorAll("[data-select-all]"), function (button) {
+      button.addEventListener("click", function () { clearFilterSection(button.dataset.selectAll); });
+    });
+    Array.prototype.forEach.call($("sheet-content").querySelectorAll("[data-filter-key]"), function (input) {
+      input.addEventListener("change", function () {
+        setFilterCheckbox(input.dataset.filterKey, input.dataset.filterValue, input.checked);
+      });
     });
   }
 
@@ -1281,18 +1709,7 @@
       state.giftQuery = $("gift-search").value;
       if (state.gifts || state.ownListings) { renderGifts(); }
     });
-    $("gift-filter").addEventListener("click", function () {
-      var options = [
-        { value: "all", label: "Все подарки" },
-        { value: "backdrop", label: "Фон" },
-        { value: "pattern", label: "Узор" },
-        { value: "gift", label: "Подарок" }
-      ];
-      showChoiceMenu($("gift-filter"), options, state.giftFilter, function (value) {
-        state.giftFilter = value;
-        if (state.gifts || state.ownListings) { renderGifts(); }
-      });
-    });
+    $("gift-filter").addEventListener("click", function () { openSelectionSheet("filters"); });
     $("gift-sort").addEventListener("click", function () {
       showChoiceMenu($("gift-sort"), [
         { value: "asc", label: "Цена по возрастанию" },
@@ -1303,7 +1720,23 @@
       });
     });
     $("gift-autorefresh").addEventListener("click", function () { chooseAutoRefresh("gifts"); });
-    $("collections").addEventListener("click", collections);
+    $("collections").addEventListener("click", function () { openSelectionSheet("collections"); });
+    $("sheet-close").addEventListener("click", closeSelectionSheet);
+    $("sheet-backdrop").addEventListener("click", closeSelectionSheet);
+    $("sheet-clear").addEventListener("click", function () {
+      if (state.sheetMode === "collections") {
+        clearFilterSection("collection");
+      } else {
+        ["collection", "model", "backdrop", "symbol"].forEach(function (key) {
+          state.filters[key] = [];
+        });
+        renderSelectionSheet();
+        applyFilterChange();
+      }
+    });
+    document.addEventListener("keydown", function (event) {
+      if (event.key === "Escape" && !$("selection-sheet").hidden) { closeSelectionSheet(); }
+    });
     $("copy-fragment").addEventListener("click", function () { copy("@fragment"); });
   }
 

@@ -12,6 +12,7 @@ import aiosqlite
 import db_split
 import pytest
 
+import fragment_deposit
 import fragment_market
 from messenger_api import init_messenger_storage
 from test_messenger_api import client_for, run
@@ -38,6 +39,25 @@ def give_stars(path, telegram_id: int, stars: int) -> None:
     run(scenario())
 
 
+def give_grams(path, telegram_id: int, grams: int) -> None:
+    async def scenario():
+        async with aiosqlite.connect(path) as db:
+            await db.execute("UPDATE accounts SET grams=? WHERE telegram_id=?", (grams, telegram_id))
+            await db.commit()
+
+    run(scenario())
+
+
+async def gram_balances(path, *ids) -> dict[int, int]:
+    async with aiosqlite.connect(path) as db:
+        cur = await db.execute(
+            "SELECT telegram_id,grams FROM accounts WHERE telegram_id IN (%s)"
+            % ",".join("?" * len(ids)),
+            ids,
+        )
+        return {int(row[0]): int(row[1]) for row in await cur.fetchall()}
+
+
 async def usernames(path) -> dict[int, str]:
     async with aiosqlite.connect(path) as db:
         cur = await db.execute("SELECT telegram_id,username FROM accounts")
@@ -61,6 +81,44 @@ def test_existing_usernames_belong_to_their_accounts(env) -> None:
             assert card["free"] is False
             assert card["for_sale"] is False
             assert card["mine"] is False
+
+    run(scenario())
+
+
+def test_legacy_username_stars_listing_migrates_to_currency_schema(env) -> None:
+    path, _app = env
+
+    async def scenario() -> None:
+        async with aiosqlite.connect(path) as db:
+            await db.execute("DROP INDEX IF EXISTS messenger.idx_collectible_listings_active")
+            await db.execute("DROP TABLE messenger.collectible_listings")
+            await db.execute("""CREATE TABLE messenger.collectible_listings (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                collectible_id INTEGER NOT NULL,
+                seller_telegram_id INTEGER NOT NULL,
+                price_stars INTEGER NOT NULL CHECK(price_stars > 0),
+                status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active','sold','cancelled')),
+                created_at INTEGER NOT NULL,
+                sold_at INTEGER
+            )""")
+            cur = await db.execute(
+                "INSERT INTO collectibles(kind,name,owner_telegram_id,acquired_at,source) "
+                "VALUES('username','legacyuser',101,123,'account')"
+            )
+            collectible_id = int(cur.lastrowid)
+            await db.execute(
+                "INSERT INTO collectible_listings(collectible_id,seller_telegram_id,price_stars,status,created_at) "
+                "VALUES(?,101,321,'active',123)",
+                (collectible_id,),
+            )
+            await db.commit()
+        async with aiosqlite.connect(path) as db:
+            await fragment_market.ensure_storage(db)
+            cur = await db.execute(
+                "SELECT price_stars,price_grams,currency,status FROM collectible_listings"
+            )
+            row = await cur.fetchone()
+            assert tuple(row) == (321, 0, "stars", "active")
 
     run(scenario())
 
@@ -108,7 +166,105 @@ def test_sale_transfers_ownership_and_pays_the_seller(env) -> None:
                 (777_000_777, 101),
             )
             assert len(notice) == 1 and notice[0][:2] == ("fragment", 101)
-            assert "@buyer" in notice[0][2] and "Fragment" in notice[0][2]
+            assert "@buyer" in notice[0][2] and "@Fragment" in notice[0][2]
+            assert "95" in notice[0][2] and "звёзд" in notice[0][2]
+
+            messages = (await client.get(
+                f"/api/messages?with={fragment_deposit.FRAGMENT_TELEGRAM_ID}",
+                headers=headers(101),
+            )).json()["messages"]
+            transfer = next(message for message in messages
+                            if message.get("fragment_star_transfer_stars"))
+            assert transfer["sender_id"] == fragment_deposit.FRAGMENT_TELEGRAM_ID
+            assert transfer["recipient_id"] == 101
+            assert transfer["fragment_star_transfer_stars"] == 95
+
+    run(scenario())
+
+
+def test_username_gram_sale_debits_and_pays_grams_without_a_stars_card(env) -> None:
+    path, app = env
+    give_grams(path, 102, 1_000)
+    give_grams(path, 101, 0)
+    give_stars(path, 102, 0)
+    give_stars(path, 101, 0)
+
+    async def scenario() -> None:
+        async with await client_for(app) as client:
+            listed = await client.put(
+                "/api/collectibles/buyer/listing", headers=headers(101),
+                json={"currency": "grams", "price": 100},
+            )
+            assert listed.status_code == 200, listed.text
+            assert listed.json()["currency"] == "grams"
+            assert listed.json()["price_grams"] == 100
+            assert listed.json()["price_stars"] == 0
+
+            market = await client.get("/api/collectibles?section=for_sale", headers=headers(102))
+            item = market.json()["items"][0]
+            assert item["currency"] == "grams" and item["price"] == 100
+
+            bought = await client.post(
+                "/api/collectibles/buyer/buy",
+                headers={**headers(102), "Idempotency-Key": "buyer-gram-sale-mutation-0001"},
+                json={},
+            )
+            assert bought.status_code == 200, bought.text
+            assert bought.json()["sale_currency"] == "grams"
+            assert bought.json()["sale_price_grams"] == 100
+            assert bought.json()["payout_grams"] == 95
+            assert await gram_balances(path, 102, 101) == {102: 900, 101: 95}
+            assert await balances(path, 102, 101) == {102: 0, 101: 0}
+            assert query(
+                path,
+                "SELECT 1 FROM message_fragment_star_transfers WHERE message_id IN "
+                "(SELECT id FROM messages WHERE recipient_telegram_id=?)",
+                (101,),
+            ) == []
+
+    run(scenario())
+
+
+def test_username_auction_payout_is_a_native_fragment_stars_transfer(env) -> None:
+    path, app = env
+    give_stars(path, 102, 1_000)
+    give_stars(path, 101, 0)
+
+    async def scenario() -> None:
+        async with await client_for(app) as client:
+            started = await client.post(
+                "/api/collectibles/buyer/auction",
+                headers={**headers(101), "Idempotency-Key": "fragment-auction-start-0001"},
+                json={"min_bid_stars": 100, "duration_hours": 1},
+            )
+            assert started.status_code == 200, started.text
+            bid = await client.post(
+                "/api/collectibles/buyer/bid",
+                headers={**headers(102), "Idempotency-Key": "fragment-auction-bid-0001"},
+                json={"amount_stars": 100},
+            )
+            assert bid.status_code == 200, bid.text
+            async with aiosqlite.connect(path) as db:
+                await db.execute(
+                    """UPDATE collectible_auctions SET ends_at=?
+                       WHERE collectible_id=(SELECT id FROM collectibles WHERE name='buyer')
+                         AND status='active'""",
+                    (int(time.time()) - 1,),
+                )
+                await db.commit()
+
+            settled = await client.get("/api/collectibles/buyer", headers=headers(101))
+            assert settled.status_code == 200, settled.text
+            assert await balances(path, 101, 102) == {101: 95, 102: 900}
+            messages = (await client.get(
+                f"/api/messages?with={fragment_deposit.FRAGMENT_TELEGRAM_ID}",
+                headers=headers(101),
+            )).json()["messages"]
+            transfer = next(message for message in messages
+                            if message.get("fragment_star_transfer_stars"))
+            assert transfer["fragment_star_transfer_stars"] == 95
+            assert transfer["sender_id"] == fragment_deposit.FRAGMENT_TELEGRAM_ID
+            assert "95" in transfer["body"] and "@buyer" in transfer["body"]
 
     run(scenario())
 

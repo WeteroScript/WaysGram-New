@@ -66,12 +66,17 @@ class FragmentMiniAppChecks(unittest.TestCase):
     def test_page_looks_like_the_site(self):
         # Fragment UI keeps the gift marketplace, collectible artwork and collection filters.
         for marker in ("FRAGMENT", "Купить и продать юзернеймы", "Подарки", "Мои лоты",
-                       "Коллекции", "Модель", "Узор", "Фон", "Все подарки"):
+                       "Коллекции", "Collection", "Model", "Backdrop", "Symbol",
+                       "Фильтры", "currency: currency", "price: value"):
             self.assertIn(marker, self.page, marker)
         for removed in ("Подключить TON", "Минимальная ставка", "Аукцион", "Серийный номер"):
             self.assertNotIn(removed, self.page, removed)
         self.assertIn("grid-template-columns: repeat(3, 1fr)", self.page)
         self.assertIn("collectible_traits", self.page)
+        self.assertIn("backdrop.center_color", self.page)
+        self.assertIn("backdrop.edge_color", self.page)
+        self.assertIn('class="inventory-withdraw"', self.page)
+        self.assertIn("/api/me/fragment/gifts/", self.page)
         self.assertIn("/api/telegram/gifts/", self.page)
         self.assertIn("if (interval >= 10000)", self.page)
 
@@ -88,7 +93,8 @@ class FragmentMiniAppChecks(unittest.TestCase):
         for path in ("/api/collectibles", "/api/gift-market", "/api/me/fragment/gifts",
                      "/api/gifts/"):
             self.assertIn(path, self.page, path)
-        self.assertIn("/api/gift-market?mine=true&limit=60", self.page)
+        self.assertIn("/api/gift-market?mine=true&limit=100", self.page)
+        self.assertIn("/api/gift-market/catalog", self.page)
         self.assertNotIn("/api/me/ton", self.page)
         self.assertIn("requestModelArtwork", self.page)
         self.assertIn("requestPatternArtwork", self.page)
@@ -146,6 +152,27 @@ class FragmentMiniAppChecks(unittest.TestCase):
         self.assertIn('info.purchase_date = card.optInt("purchase_date")', fragment)
         self.assertIn('info.amount = card.optLong("price_stars")', fragment)
 
+    def test_collectible_username_card_formats_stars_without_a_learn_more_button(self):
+        fragment = self.source("tgnet/WaysGramFragment.java")
+        self.assertIn('info.currency = "XTR";', fragment)
+        self.assertNotIn('info.currency = "STARS";', fragment)
+        self.assertIn('info.crypto_currency = "";', fragment)
+
+        billing = self.source("messenger/BillingController.java")
+        self.assertIn('if ("XTR".equalsIgnoreCase(currency))', billing)
+
+        bottom_sheet = self.source("ui/FragmentUsernameBottomSheet.java")
+        self.assertIn('TextUtils.isEmpty(info.currency) ? "" : BillingController', bottom_sheet)
+        self.assertIn('TextUtils.isEmpty(info.crypto_currency) ? "" : BillingController', bottom_sheet)
+        self.assertIn('StarsIntroActivity.replaceStarsWithPlain(messageSpanned, .8f)', bottom_sheet)
+        self.assertRegex(bottom_sheet, r'(?s)if \(type == TYPE_PHONE\)\s*\{\s*ButtonWithCounterView button = .*?FragmentUsernameOpen')
+        self.assertIn('R.string.FragmentUsernameCopy', bottom_sheet)
+        self.assertIn('if (copy != null)', bottom_sheet)
+
+        profile = self.source("ui/ProfileActivity.java")
+        self.assertIn('TextUtils.isEmpty(info.crypto_currency) ? "" :', profile)
+        self.assertIn('StarsIntroActivity.replaceStarsWithPlain(message, .8f)', profile)
+
     def test_profile_maps_purchased_usernames_as_additional_names(self):
         mapper_path = ROOT / "android-source" / "TMessagesProj" / "src" / "main" / "java" \
             / "org" / "telegram" / "tgnet" / "WaysGramMapper.java"
@@ -187,9 +214,27 @@ class FragmentMiniAppChecks(unittest.TestCase):
         self.assertIn("process_due_username_auctions()", api)
         for route in ('@router.get("/api/gift-market"', '@router.get("/api/me/gifts")',
                       '@router.get("/api/me/fragment/gifts")',
+                      '@router.post("/api/me/fragment/gifts/{serial_number}/withdraw"',
                       '@router.post("/api/gifts/{serial_number}/list"',
                       '@router.get("/api/telegram/gifts/{gift_id}/sticker"'):
             self.assertIn(route, api, route)
+        self.assertIn("message_fragment_star_transfers", api)
+        self.assertIn("fragment_star_transfer_stars", api)
+
+    def test_fragment_transfers_map_to_native_telegram_service_actions(self):
+        mapper = self.source("tgnet/WaysGramMapper.java")
+        message_object = self.source("messenger/MessageObject.java")
+        self.assertIn('json.optLong("fragment_star_transfer_stars", 0L)', mapper)
+        self.assertIn("new TLRPC.TL_messageActionGiftStars()", mapper)
+        self.assertIn("giftStarsAction.amount == 0", message_object)
+        self.assertIn("ActionFragmentStarsTransferInbound", message_object)
+        for resource in ("values/strings.xml", "values-ru/strings.xml"):
+            xml = self.resource(resource)
+            self.assertIn('name="ActionFragmentStarsTransferInbound"', xml)
+            self.assertIn('name="FragmentStarsCount_one"', xml)
+        gifts = self.source("messenger/waysgram/WaysGramGiftMessages.java")
+        self.assertIn("toServiceMessage(account, m, selfId)", mapper)
+        self.assertIn("TL_messageActionStarGiftUnique", gifts)
 
     def test_gift_serial_is_not_rendered_in_fragment(self):
         # Serial numbers stay internal for API operations; no raw number is shown to users.

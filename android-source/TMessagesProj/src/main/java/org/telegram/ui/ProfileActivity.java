@@ -7517,12 +7517,16 @@ public class ProfileActivity extends BaseFragment implements NotificationCenter.
                             }
                             final String usernameStr = "@" + usernameObj.username;
                             final String date = LocaleController.getInstance().getFormatterBoostExpired().format(new Date(info.purchase_date * 1000L));
-                            final String cryptoAmount = BillingController.getInstance().formatCurrency(info.crypto_amount, info.crypto_currency);
-                            final String amount = BillingController.getInstance().formatCurrency(info.amount, info.currency);
+                            final String cryptoAmount = TextUtils.isEmpty(info.crypto_currency) ? "" : BillingController.getInstance().formatCurrency(info.crypto_amount, info.crypto_currency);
+                            final String amount = TextUtils.isEmpty(info.currency) ? "" : BillingController.getInstance().formatCurrency(info.amount, info.currency);
+                            final String price = TextUtils.isEmpty(cryptoAmount) ? amount : cryptoAmount;
+                            final String secondaryPrice = TextUtils.isEmpty(cryptoAmount) || TextUtils.isEmpty(amount) ? "" : "(" + amount + ")";
+                            CharSequence message = AndroidUtilities.replaceTags(formatString(R.string.FragmentChannelUsername, usernameStr, date, price, secondaryPrice));
+                            message = StarsIntroActivity.replaceStarsWithPlain(message, .8f);
                             BulletinFactory.of(shareAlert.bulletinContainer2, resourcesProvider)
                                     .createImageBulletin(
                                             R.drawable.filled_username,
-                                            AndroidUtilities.withLearnMore(AndroidUtilities.replaceTags(formatString(R.string.FragmentChannelUsername, usernameStr, date, cryptoAmount, TextUtils.isEmpty(amount) ? "" : "(" + amount + ")")), () -> {
+                                            AndroidUtilities.withLearnMore(message, () -> {
                                                 Bulletin.hideVisible();
                                                 Browser.openUrl(getContext(), info.url);
                                             })

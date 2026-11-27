@@ -990,6 +990,10 @@ async def init_messenger_storage(database_path: Path) -> None:
                 upgrade_level INTEGER NOT NULL DEFAULT 0,
                 attributes_json TEXT NOT NULL DEFAULT '{}'
             );
+            CREATE TABLE IF NOT EXISTS message_fragment_star_transfers (
+                message_id INTEGER PRIMARY KEY REFERENCES messages(id) ON DELETE CASCADE,
+                stars INTEGER NOT NULL CHECK(stars > 0)
+            );
             CREATE TABLE IF NOT EXISTS message_contacts (
                 message_id INTEGER PRIMARY KEY REFERENCES messages(id) ON DELETE CASCADE,
                 contact_name TEXT NOT NULL,
@@ -1490,12 +1494,16 @@ async def init_messenger_storage(database_path: Path) -> None:
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 serial_number TEXT NOT NULL UNIQUE,
                 seller_telegram_id INTEGER NOT NULL,
-                price_grams INTEGER NOT NULL CHECK(price_grams > 0),
+                price_grams INTEGER NOT NULL DEFAULT 0 CHECK(price_grams >= 0),
+                price_stars INTEGER NOT NULL DEFAULT 0 CHECK(price_stars >= 0),
+                currency TEXT NOT NULL DEFAULT 'grams' CHECK(currency IN ('grams','stars')),
                 status TEXT NOT NULL DEFAULT 'active'
                     CHECK(status IN ('active','sold','cancelled')),
                 buyer_telegram_id INTEGER,
                 created_at INTEGER NOT NULL,
-                sold_at INTEGER
+                sold_at INTEGER,
+                CHECK((currency='grams' AND price_grams>0 AND price_stars=0)
+                   OR (currency='stars' AND price_stars>0 AND price_grams=0))
             );
             CREATE INDEX IF NOT EXISTS idx_gift_market_status_time
                 ON gift_market_listings(status,created_at DESC);
@@ -1880,6 +1888,48 @@ async def init_messenger_storage(database_path: Path) -> None:
         # A database from an older version keeps everything in one file: move the messenger tables out first,
         # because a table left in the main file would hide the one in the messenger file.
         await db_split.migrate_legacy_with(db, database_path)
+        # Gift listings used to be Gram-only with CHECK(price_grams > 0). Rebuild
+        # once so Star listings can store exactly one price without a fake Gram amount.
+        cur = await db.execute(f"PRAGMA {db_split.SCHEMA}.table_info(gift_market_listings)")
+        gift_listing_columns = {str(row[1]) for row in await cur.fetchall()}
+        if "currency" not in gift_listing_columns:
+            await db.execute(f"DROP INDEX IF EXISTS {db_split.SCHEMA}.idx_gift_market_status_time")
+            await db.execute(f"DROP INDEX IF EXISTS {db_split.SCHEMA}.idx_gift_market_seller")
+            await db.execute(
+                f"ALTER TABLE {db_split.SCHEMA}.gift_market_listings "
+                "RENAME TO gift_market_listings_legacy"
+            )
+            await db.execute(f"""CREATE TABLE {db_split.SCHEMA}.gift_market_listings (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                serial_number TEXT NOT NULL UNIQUE,
+                seller_telegram_id INTEGER NOT NULL,
+                price_grams INTEGER NOT NULL DEFAULT 0 CHECK(price_grams >= 0),
+                price_stars INTEGER NOT NULL DEFAULT 0 CHECK(price_stars >= 0),
+                currency TEXT NOT NULL DEFAULT 'grams' CHECK(currency IN ('grams','stars')),
+                status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active','sold','cancelled')),
+                buyer_telegram_id INTEGER,
+                created_at INTEGER NOT NULL,
+                sold_at INTEGER,
+                CHECK((currency='grams' AND price_grams>0 AND price_stars=0)
+                   OR (currency='stars' AND price_stars>0 AND price_grams=0))
+            )""")
+            await db.execute(
+                f"""INSERT INTO {db_split.SCHEMA}.gift_market_listings
+                   (id,serial_number,seller_telegram_id,price_grams,price_stars,currency,
+                    status,buyer_telegram_id,created_at,sold_at)
+                   SELECT id,serial_number,seller_telegram_id,price_grams,0,'grams',
+                          status,buyer_telegram_id,created_at,sold_at
+                   FROM {db_split.SCHEMA}.gift_market_listings_legacy"""
+            )
+            await db.execute(f"DROP TABLE {db_split.SCHEMA}.gift_market_listings_legacy")
+        await db.execute(
+            f"CREATE INDEX IF NOT EXISTS {db_split.SCHEMA}.idx_gift_market_status_time "
+            "ON gift_market_listings(status,created_at DESC)"
+        )
+        await db.execute(
+            f"CREATE INDEX IF NOT EXISTS {db_split.SCHEMA}.idx_gift_market_seller "
+            "ON gift_market_listings(seller_telegram_id,status)"
+        )
         await db.execute(f"""CREATE VIEW IF NOT EXISTS {db_split.SCHEMA}.active_channel_members AS
             SELECT channel_id,telegram_id,joined_at FROM channel_members
             UNION ALL
@@ -2267,6 +2317,11 @@ async def init_messenger_storage(database_path: Path) -> None:
                             ("background_emoji_id", "INTEGER NOT NULL DEFAULT 0"),
                             ("profile_color_id", "INTEGER NOT NULL DEFAULT 0"),
                             ("profile_background_emoji_id", "INTEGER NOT NULL DEFAULT 0"),
+                            ("emoji_status_id", "INTEGER NOT NULL DEFAULT 0"),
+                            ("sticker_set_id", "INTEGER NOT NULL DEFAULT 0"),
+                            ("sticker_set_access_hash", "INTEGER NOT NULL DEFAULT 0"),
+                            ("emoji_set_id", "INTEGER NOT NULL DEFAULT 0"),
+                            ("emoji_set_access_hash", "INTEGER NOT NULL DEFAULT 0"),
                             ("location_latitude", "REAL"), ("location_longitude", "REAL"),
                             ("location_label", "TEXT NOT NULL DEFAULT ''"),
                             ("location_address", "TEXT NOT NULL DEFAULT ''")):
@@ -3702,40 +3757,97 @@ def build_messenger_router(
 
     async def notify_fragment_sale(
         db: Any, seller_id: int, asset_kind: str, asset_name: str,
-        price: int, buyer_id: int, now: int,
+        price: int, buyer_id: int, now: int, *, currency: str = "stars",
     ) -> bool:
-        """Persist a DM and a push to the seller from the @fragment service account."""
+        """Persist the sale receipt; Stars proceeds get a matching native Stars action."""
         cur = await db.execute(
             "SELECT telegram_id FROM accounts WHERE LOWER(username)='fragment' LIMIT 1"
         )
         fragment_row = await cur.fetchone()
         fragment_id = (int(fragment_row[0]) if fragment_row
                        else fragment_deposit.FRAGMENT_TELEGRAM_ID)
-        if asset_kind == "gift":
+        star_transfer = str(currency).lower() == "stars"
+        stars = max(0, int(price))
+        stars_label = f"{stars:,}".replace(",", " ")
+        if asset_kind == "gift" and not star_transfer:
             body = f"Ваш подарок «{asset_name}» купили на Fragment за {int(price)} Gram."
             title = "Подарок продан на Fragment"
             price_label = f"{int(price)} Gram"
+            message_type = "fragment_sale"
+        elif asset_kind == "gift":
+            body = f"@Fragment зачислил вам {stars_label} Stars за продажу подарка «{asset_name}»."
+            title = "Передача Stars от Fragment"
+            price_label = f"⭐ {stars_label}"
+            message_type = "fragment_star_transfer"
         else:
             username = str(asset_name).strip().lstrip("@")
-            body = f"Ваш юзернейм @{username} купили на Fragment за ⭐ {int(price)}."
-            title = "Юзернейм продан на Fragment"
-            price_label = f"⭐ {int(price)}"
+            if star_transfer:
+                body = f"@Fragment передал вам {stars_label} звёзд за продажу юзернейма @{username}."
+                title = "Передача Stars от Fragment"
+                price_label = f"⭐ {stars_label}"
+                message_type = "fragment_star_transfer"
+            else:
+                body = f"Ваш юзернейм @{username} продан на Fragment за {int(price)} Gram."
+                title = "Юзернейм продан на Fragment"
+                price_label = f"💎 {int(price)} Gram"
+                message_type = "fragment_sale"
         cur = await db.execute(
             "INSERT INTO messages(sender_telegram_id,recipient_telegram_id,body,created_at)"
             " VALUES(?,?,?,?)",
             (fragment_id, int(seller_id), body, int(now)),
         )
         message_id = int(cur.lastrowid)
+        if star_transfer:
+            await db.execute(
+                "INSERT INTO message_fragment_star_transfers(message_id,stars) VALUES(?,?)",
+                (message_id, stars),
+            )
         await record_event(
             db, "dm", message_id, "new_message", fragment_id,
             user_a=fragment_id, user_b=int(seller_id),
         )
         return await enqueue_push(
-            db, fragment_id, int(seller_id), "Fragment", body,
+            db, fragment_id, int(seller_id), title, body,
             {"scope": "dm", "chat_id": str(fragment_id),
-             "message_id": str(message_id), "type": "fragment_sale",
+             "message_id": str(message_id), "type": message_type,
              "asset_kind": asset_kind, "asset_name": str(asset_name),
              "price": price_label, "buyer_id": str(int(buyer_id))}, int(now),
+        )
+
+    async def notify_fragment_gift_purchase(
+        db: Any, buyer_id: int, gift_name: str, price: int, now: int,
+        *, currency: str = "grams",
+    ) -> bool:
+        """Tell the buyer that the NFT is escrowed in their Fragment inventory."""
+        cur = await db.execute(
+            "SELECT telegram_id FROM accounts WHERE LOWER(username)='fragment' LIMIT 1"
+        )
+        fragment_row = await cur.fetchone()
+        fragment_id = (int(fragment_row[0]) if fragment_row
+                       else fragment_deposit.FRAGMENT_TELEGRAM_ID)
+        asset = "stars" if str(currency).lower() == "stars" else "grams"
+        amount_label = f"⭐ {int(price)} Stars" if asset == "stars" else f"💎 {int(price)} Gram"
+        body = (
+            f"Вы приобрели коллекционный подарок «{gift_name}» на Fragment за "
+            f"{amount_label}. Он добавлен в инвентарь Fragment. "
+            "Нажмите «Вывести», чтобы перенести его в свой профиль."
+        )
+        cur = await db.execute(
+            "INSERT INTO messages(sender_telegram_id,recipient_telegram_id,body,created_at)"
+            " VALUES(?,?,?,?)",
+            (fragment_id, int(buyer_id), body, int(now)),
+        )
+        message_id = int(cur.lastrowid)
+        await record_event(
+            db, "dm", message_id, "new_message", fragment_id,
+            user_a=fragment_id, user_b=int(buyer_id),
+        )
+        return await enqueue_push(
+            db, fragment_id, int(buyer_id), "Покупка на Fragment", body,
+            {"scope": "dm", "chat_id": str(fragment_id),
+             "message_id": str(message_id), "type": "fragment_gift_purchase",
+             "asset_kind": "gift", "asset_name": str(gift_name),
+             "price": amount_label}, int(now),
         )
 
     async def push_worker() -> None:
@@ -5481,8 +5593,8 @@ def build_messenger_router(
         return row is not None and not bool(row[0])
 
     # Bits of chat_groups.default_send_restrictions. Mirrors WaysGramChats.bannedRightsFor
-    # and sendRestrictionMask on the client: every switch of the "Permissions" screen has
-    # its own bit. Bits 1..32 are the original layout, 64..1024 refine it.
+    # and sendRestrictionMask on the client. Although the column kept its original name,
+    # it stores every default banned right exposed by the group Permissions screen.
     SEND_TEXT = 1
     SEND_PHOTOS = 2
     SEND_VIDEO = 4
@@ -5494,8 +5606,17 @@ def build_messenger_router(
     EMBED_LINKS = 256
     SEND_POLLS = 512
     SEND_REACTIONS = 1024
-    MAX_SEND_RESTRICTIONS = SEND_TEXT | SEND_PHOTOS | SEND_VIDEO | SEND_AUDIO | SEND_STICKERS \
+    RESTRICT_INVITE_USERS = 2048
+    RESTRICT_PIN_MESSAGES = 4096
+    RESTRICT_EDIT_RANK = 8192
+    RESTRICT_MANAGE_TOPICS = 16384
+    RESTRICT_MANAGE_LINKED_PEERS = 32768
+    MAX_SEND_RESTRICTIONS = (
+        SEND_TEXT | SEND_PHOTOS | SEND_VIDEO | SEND_AUDIO | SEND_STICKERS
         | SEND_DOCS | SEND_VOICE | SEND_ROUND_VIDEO | EMBED_LINKS | SEND_POLLS | SEND_REACTIONS
+        | RESTRICT_INVITE_USERS | RESTRICT_PIN_MESSAGES | RESTRICT_EDIT_RANK
+        | RESTRICT_MANAGE_TOPICS | RESTRICT_MANAGE_LINKED_PEERS
+    )
 
     def send_restrictions(mask: int, version: int) -> int:
         """Restrictions in the current bit layout.
@@ -5513,6 +5634,56 @@ def build_messenger_router(
         if mask & SEND_TEXT:
             mask |= SEND_POLLS
         return mask
+
+    async def group_member_banned_rights(db: Any, group_id: int, member: dict[str, Any]) -> int:
+        """Default and individual restrictions that apply to an ordinary member.
+
+        Owners and admins are governed by their explicit admin rights, not by the
+        default member restrictions. Individual mutes share the same bit layout as
+        the default mask and may therefore include non-send permissions too.
+        """
+        if member["role"] != "member":
+            return 0
+        cur = await db.execute(
+            "SELECT COALESCE(default_send_restrictions,0),COALESCE(send_restrictions_version,0) "
+            "FROM chat_groups WHERE id=?",
+            (group_id,),
+        )
+        row = await cur.fetchone()
+        if row is None:
+            return 0
+        mask = send_restrictions(int(row[0] or 0), int(row[1] or 0))
+        cur = await db.execute(
+            "SELECT COALESCE(rights,0) FROM group_mutes "
+            "WHERE group_id=? AND telegram_id=? AND (until_date=0 OR until_date>?)",
+            (group_id, int(member.get("telegram_id") or 0), int(time.time())),
+        )
+        muted = await cur.fetchone()
+        return mask | (int(muted[0] or 0) if muted else 0)
+
+    async def group_can_invite_members(db: Any, group_id: int, member: dict[str, Any]) -> bool:
+        if member["role"] == "member":
+            return not (await group_member_banned_rights(db, group_id, member) & RESTRICT_INVITE_USERS)
+        return group_has_right(member, 2)
+
+    async def group_can_pin_messages(db: Any, group_id: int, member: dict[str, Any]) -> bool:
+        if member["role"] == "member":
+            return not (await group_member_banned_rights(db, group_id, member) & RESTRICT_PIN_MESSAGES)
+        return group_has_right(member, 8)
+
+    async def group_can_manage_topics(db: Any, group_id: int, member: dict[str, Any]) -> bool:
+        if member["role"] == "member":
+            return not (await group_member_banned_rights(db, group_id, member) & RESTRICT_MANAGE_TOPICS)
+        return group_has_right(member, 1)
+
+    async def group_can_manage_linked_peers(db: Any, group_id: int, member: dict[str, Any]) -> bool:
+        if member["role"] == "owner":
+            return True
+        if member["role"] == "member":
+            return not (await group_member_banned_rights(db, group_id, member) & RESTRICT_MANAGE_LINKED_PEERS)
+        # The current group-admin mask exposes change-info as its closest
+        # delegation for managing the group's linked peers.
+        return group_has_right(member, 1)
 
     async def require_group_can_send(db: Any, group_id: int, uid: int, media_id: str | None = None) -> None:
         cur = await db.execute("""SELECT
@@ -5618,7 +5789,7 @@ def build_messenger_router(
     ) -> dict[str, Any]:
         db.row_factory = aiosqlite.Row
         cur = await db.execute(
-            """SELECT gm.role,gm.admin_rights,gm.anonymous_allowed,g.title,g.username,g.owner_telegram_id
+            """SELECT gm.telegram_id,gm.role,gm.admin_rights,gm.anonymous_allowed,g.title,g.username,g.owner_telegram_id
                FROM group_members gm JOIN chat_groups g ON g.id=gm.group_id
                WHERE gm.group_id=? AND gm.telegram_id=?""",
             (group_id, telegram_id),
@@ -6713,6 +6884,15 @@ def build_messenger_router(
                           EXISTS(SELECT 1 FROM gift_market_listings l
                                  WHERE l.serial_number=user_gifts.serial_number
                                    AND l.status='active') AS is_listed,
+                          (SELECT l.price_grams FROM gift_market_listings l
+                            WHERE l.serial_number=user_gifts.serial_number
+                              AND l.status='active' LIMIT 1) AS price_grams,
+                          (SELECT l.price_stars FROM gift_market_listings l
+                            WHERE l.serial_number=user_gifts.serial_number
+                              AND l.status='active' LIMIT 1) AS price_stars,
+                          (SELECT l.currency FROM gift_market_listings l
+                            WHERE l.serial_number=user_gifts.serial_number
+                              AND l.status='active' LIMIT 1) AS listing_currency,
                           EXISTS(SELECT 1 FROM gift_collectible_auctions a
                                  WHERE a.serial_number=user_gifts.serial_number
                                    AND a.status='active') AS is_auctioned,
@@ -6785,6 +6965,8 @@ def build_messenger_router(
             documents_by_id: dict[str, dict[str, list[dict[str, Any]]]] = {}
             for row in rows:
                 item = dict(row)
+                if fragment_only:
+                    item["fragment_inventory"] = True
                 raw_attributes = item.pop("attributes_json", "{}")
                 try:
                     attributes = json.loads(raw_attributes or "{}")
@@ -7105,6 +7287,146 @@ def build_messenger_router(
         return await gift_inventory(
             int(user["telegram_id"]), limit, offset, public=False, fragment_only=True
         )
+
+    @router.post("/api/me/fragment/gifts/{serial_number}/withdraw", status_code=201)
+    async def withdraw_fragment_gift(
+        serial_number: str,
+        payload: dict[str, Any] | None = None,
+        authorization: str | None = Header(default=None),
+        idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+    ) -> dict[str, Any]:
+        """Release an escrowed Fragment gift and send it as a native gift DM."""
+        uid = int((await current_user(authorization))["telegram_id"])
+        serial = serial_number.strip().upper()
+        if not GIFT_SERIAL_RE.fullmatch(serial):
+            raise HTTPException(status_code=400, detail="Некорректный серийный номер подарка")
+        now = int(time.time())
+        scope = f"/api/me/fragment/gifts/{serial}/withdraw"
+        descriptor = idempotency_descriptor(scope, payload or {}, idempotency_key)
+        queued_push = False
+        async with aiosqlite.connect(db_path()) as db:
+            db.row_factory = aiosqlite.Row
+            await db.execute("BEGIN IMMEDIATE")
+            previous = await idempotency_lookup(db, uid, scope, descriptor, now)
+            if previous is not None:
+                await db.rollback()
+                return previous
+            cur = await db.execute(
+                "SELECT telegram_id FROM accounts WHERE LOWER(username)='fragment' LIMIT 1"
+            )
+            fragment_row = await cur.fetchone()
+            fragment_id = (int(fragment_row[0]) if fragment_row
+                           else fragment_deposit.FRAGMENT_TELEGRAM_ID)
+            cur = await db.execute(
+                """SELECT g.id,g.serial_number,g.gift_name,g.telegram_gift_id,g.gift_emoji,
+                          g.upgrade_level,g.attributes_json,
+                          (SELECT n.unique_num FROM gift_unique_numbers n
+                            WHERE n.serial_number=g.serial_number) AS unique_num
+                   FROM user_gifts g
+                   JOIN fragment_gift_deposits d ON d.serial_number=g.serial_number
+                                                AND d.telegram_id=?
+                   WHERE g.serial_number=? AND g.owner_telegram_id=?""",
+                (uid, serial, fragment_id),
+            )
+            gift = await cur.fetchone()
+            if gift is None:
+                await db.rollback()
+                raise HTTPException(status_code=404, detail="Подарок не найден в инвентаре Fragment")
+            cur = await db.execute(
+                "SELECT seller_telegram_id FROM gift_market_listings "
+                "WHERE serial_number=? AND status='active'",
+                (serial,),
+            )
+            listing = await cur.fetchone()
+            if listing is not None:
+                if int(listing[0]) != uid:
+                    await db.rollback()
+                    raise HTTPException(status_code=409, detail="Активный лот принадлежит другому продавцу")
+                await db.execute(
+                    "UPDATE gift_market_listings SET status='cancelled' "
+                    "WHERE serial_number=? AND seller_telegram_id=? AND status='active'",
+                    (serial, uid),
+                )
+            cur = await db.execute(
+                "SELECT 1 FROM gift_collectible_auctions WHERE serial_number=? AND status='active'",
+                (serial,),
+            )
+            if await cur.fetchone():
+                await db.rollback()
+                raise HTTPException(status_code=409, detail="Сначала отмените активный аукцион подарка")
+            cur = await db.execute(
+                "UPDATE user_gifts SET owner_telegram_id=? WHERE id=? AND owner_telegram_id=?",
+                (uid, int(gift["id"]), fragment_id),
+            )
+            if cur.rowcount != 1:
+                await db.rollback()
+                raise HTTPException(status_code=409, detail="Владение подарком уже изменилось")
+            await db.execute(
+                "DELETE FROM fragment_gift_deposits WHERE telegram_id=? AND serial_number=?",
+                (uid, serial),
+            )
+            await apply_gift_autosave(db, serial, uid, fragment_id)
+            try:
+                attributes = json.loads(str(gift["attributes_json"] or "{}"))
+            except (TypeError, ValueError):
+                attributes = {}
+            if not isinstance(attributes, dict):
+                attributes = {}
+            body = "Подарок WaysGram"
+            cur = await db.execute(
+                """INSERT INTO messages
+                   (sender_telegram_id,recipient_telegram_id,body,created_at)
+                   VALUES(?,?,?,?)""",
+                (fragment_id, uid, body, now),
+            )
+            message_id = int(cur.lastrowid)
+            gift_name = str(gift["gift_name"])
+            telegram_gift_id = str(gift["telegram_gift_id"] or "")
+            upgrade_level = max(0, int(gift["upgrade_level"] or 0))
+            await db.execute(
+                """INSERT INTO message_gifts
+                   (message_id,serial_number,gift_name,telegram_gift_id,upgrade_level,attributes_json)
+                   VALUES(?,?,?,?,?,?)""",
+                (message_id, serial, gift_name, telegram_gift_id, upgrade_level,
+                 json.dumps(attributes, ensure_ascii=False, separators=(",", ":"))),
+            )
+            await db.execute(
+                """INSERT INTO gift_transactions
+                   (event_type,serial_number,gift_name,from_telegram_id,to_telegram_id,created_at,message_id)
+                   VALUES('transfer',?,?,?,?,?,?)""",
+                (serial, gift_name, fragment_id, uid, now, message_id),
+            )
+            await record_event(
+                db, "dm", message_id, "new_message", fragment_id,
+                user_a=fragment_id, user_b=uid,
+            )
+            result = {
+                "id": message_id,
+                "status": "withdrawn",
+                "type": "gift",
+                "sender_id": fragment_id,
+                "recipient_id": uid,
+                "body": body,
+                "gift_serial_number": serial,
+                "gift_name": gift_name,
+                "gift_telegram_gift_id": telegram_gift_id,
+                "gift_upgrade_level": upgrade_level,
+                "gift_unique_num": int(gift["unique_num"] or 0),
+                "gift_instance_id": int(gift["id"]),
+                "gift_attributes": attributes,
+                "created_at": now,
+            }
+            await idempotency_store(db, uid, scope, descriptor, result, now)
+            queued_push = await enqueue_push(
+                db, fragment_id, uid, "Подарок от Fragment",
+                f"Fragment передал вам подарок «{gift_name}».",
+                {"scope": "dm", "chat_id": str(fragment_id),
+                 "message_id": str(message_id), "type": "gift"}, now,
+            )
+            await db.commit()
+        if queued_push:
+            push_wakeup.set()
+        return result
 
     @router.get("/api/users/{user_id}/gifts")
     async def user_gifts(
@@ -9432,6 +9754,10 @@ def build_messenger_router(
         limit: int = Query(default=50, ge=1, le=100),
         before_id: int = Query(default=0, ge=0),
         mine: bool = Query(default=False),
+        collection: str = Query(default=""),
+        model: str = Query(default=""),
+        backdrop: str = Query(default=""),
+        symbol: str = Query(default=""),
         authorization: str | None = Header(default=None),
     ) -> dict[str, Any]:
         viewer = await current_user(authorization)
@@ -9439,14 +9765,12 @@ def build_messenger_router(
         async with aiosqlite.connect(db_path()) as db:
             db.row_factory = aiosqlite.Row
             owner_filter = "=" if mine else "<>"
-            cur = await db.execute(
-                f"""SELECT l.id AS listing_id,l.serial_number,l.price_grams,l.created_at,
-                          g.id AS gift_instance_id,g.owner_telegram_id AS gift_owner_id,
-                          g.gift_id,g.telegram_gift_id,g.gift_name,g.gift_emoji,
-                          g.upgrade_level,g.attributes_json,
+            query = f"""SELECT l.id AS listing_id,l.serial_number,l.price_grams,l.price_stars,
+                          l.currency,l.created_at,g.id AS gift_instance_id,
+                          g.owner_telegram_id AS gift_owner_id,g.gift_id,g.telegram_gift_id,
+                          g.gift_name,g.gift_emoji,g.upgrade_level,g.attributes_json,
                           a.telegram_id AS seller_id,a.username AS seller_username,
-                          a.display_name AS seller_display_name,
-                          1 AS is_listed,
+                          a.display_name AS seller_display_name,1 AS is_listed,
                           (SELECT n.unique_num FROM gift_unique_numbers n
                             WHERE n.serial_number=l.serial_number) AS unique_num
                    FROM gift_market_listings l
@@ -9458,11 +9782,25 @@ def build_messenger_router(
                                             WHERE LOWER(username)='fragment' LIMIT 1)
                        AND EXISTS(SELECT 1 FROM fragment_gift_deposits d
                                   WHERE d.telegram_id=l.seller_telegram_id
-                                    AND d.serial_number=l.serial_number)))
-                     AND (?=0 OR l.id<?)
-                   ORDER BY l.id DESC LIMIT ?""",
-                (viewer_id, before_id, before_id, limit),
+                                    AND d.serial_number=l.serial_number)))"""
+            params: list[Any] = [viewer_id]
+            filter_specs = (
+                (collection, "g.gift_name"),
+                (model, "CASE WHEN json_valid(g.attributes_json) THEN json_extract(g.attributes_json,'$.collectible_traits.model.name') END"),
+                (backdrop, "CASE WHEN json_valid(g.attributes_json) THEN json_extract(g.attributes_json,'$.collectible_traits.backdrop.name') END"),
+                (symbol, "CASE WHEN json_valid(g.attributes_json) THEN COALESCE(json_extract(g.attributes_json,'$.collectible_traits.symbol.name'),json_extract(g.attributes_json,'$.collectible_traits.pattern.name')) END"),
             )
+            for raw_values, expression in filter_specs:
+                values = list(dict.fromkeys(
+                    value.strip() for value in str(raw_values or "").split(",")
+                    if value.strip()
+                ))
+                if values:
+                    query += " AND " + expression + " IN (" + ",".join("?" for _ in values) + ")"
+                    params.extend(values)
+            query += " AND (?=0 OR l.id<?) ORDER BY l.id DESC LIMIT ?"
+            params.extend((before_id, before_id, limit))
+            cur = await db.execute(query, params)
             rows = await cur.fetchall()
         items = []
         for row in rows:
@@ -9471,11 +9809,74 @@ def build_messenger_router(
                 item["attributes"] = json.loads(item.pop("attributes_json") or "{}")
             except (TypeError, ValueError):
                 item["attributes"] = {}
+            item["price"] = int(item["price_stars"] or 0) if item["currency"] == "stars" else int(item["price_grams"] or 0)
             item["model_document_id"] = _collectible_model_document_id(item["attributes"])
             item["pattern_document_id"] = _collectible_pattern_document_id(item["attributes"])
             item["mine"] = bool(mine)
             items.append(item)
-        return {"currency": "grams", "listings": items, "count": len(items)}
+        currencies = sorted({str(item["currency"]) for item in items})
+        return {
+            "currency": currencies[0] if len(currencies) == 1 else ("mixed" if currencies else "grams"),
+            "currencies": currencies or ["grams", "stars"],
+            "listings": items,
+            "count": len(items),
+        }
+
+    @router.get("/api/gift-market/catalog")
+    async def gift_market_catalog(
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, Any]:
+        await current_user(authorization)
+        async with aiosqlite.connect(db_path()) as db:
+            db.row_factory = aiosqlite.Row
+            cur = await db.execute(
+                """SELECT l.serial_number,g.gift_name,g.telegram_gift_id,g.gift_emoji,
+                          g.attributes_json
+                   FROM gift_market_listings l
+                   JOIN user_gifts g ON g.serial_number=l.serial_number
+                   WHERE l.status='active' AND (g.owner_telegram_id=l.seller_telegram_id OR (
+                       g.owner_telegram_id=(SELECT telegram_id FROM accounts
+                                            WHERE LOWER(username)='fragment' LIMIT 1)
+                       AND EXISTS(SELECT 1 FROM fragment_gift_deposits d
+                                  WHERE d.telegram_id=l.seller_telegram_id
+                                    AND d.serial_number=l.serial_number)))
+                   ORDER BY l.id DESC"""
+            )
+            rows = await cur.fetchall()
+        collections_by_name: dict[str, dict[str, Any]] = {}
+        trait_counts: dict[str, dict[str, int]] = {
+            "model": {}, "backdrop": {}, "symbol": {},
+        }
+        for row in rows:
+            collection_name = str(row["gift_name"] or "").strip()
+            if collection_name:
+                entry = collections_by_name.setdefault(collection_name, {
+                    "name": collection_name, "count": 0,
+                    "telegram_gift_id": str(row["telegram_gift_id"] or ""),
+                    "gift_emoji": str(row["gift_emoji"] or "🎁"),
+                })
+                entry["count"] += 1
+            try:
+                attributes = json.loads(str(row["attributes_json"] or "{}"))
+            except (TypeError, ValueError):
+                attributes = {}
+            traits = gift_upgrades.traits_of(attributes) or {}
+            for filter_name, trait_name in (("model", "model"), ("backdrop", "backdrop"),
+                                            ("symbol", "symbol")):
+                trait = traits.get(trait_name)
+                if filter_name == "symbol" and not trait:
+                    trait = traits.get("pattern")
+                value = str(trait.get("name") or "").strip() if isinstance(trait, dict) else str(trait or "").strip()
+                if value:
+                    values = trait_counts[filter_name]
+                    values[value] = values.get(value, 0) + 1
+        collections_list = sorted(collections_by_name.values(), key=lambda x: x["name"].casefold())
+        trait_options = {
+            key: [{"name": name, "count": count}
+                  for name, count in sorted(values.items(), key=lambda pair: (-pair[1], pair[0].casefold()))]
+            for key, values in trait_counts.items()
+        }
+        return {"collections": collections_list, "filters": trait_options, "count": len(rows)}
 
     @router.post("/api/gifts/{serial_number}/list", status_code=201)
     async def create_gift_listing(
@@ -9488,15 +9889,24 @@ def build_messenger_router(
         serial = serial_number.strip().upper()
         if not GIFT_SERIAL_RE.fullmatch(serial):
             raise HTTPException(status_code=400, detail="Некорректный серийный номер подарка")
-        raw_price = payload.get("price_grams")
+        currency = str(payload.get("currency") or "grams").strip().lower()
+        if currency == "gram":
+            currency = "grams"
+        if currency not in {"grams", "stars"}:
+            raise HTTPException(status_code=400, detail="Поддерживаются только Gram и Stars")
+        raw_price = payload.get("price")
+        if raw_price is None:
+            raw_price = payload.get("price_grams" if currency == "grams" else "price_stars")
         if isinstance(raw_price, bool):
-            raise HTTPException(status_code=400, detail="Цена должна быть целым числом Gram")
+            raise HTTPException(status_code=400, detail="Цена должна быть целым числом")
         try:
             price = int(raw_price)
         except (TypeError, ValueError):
-            raise HTTPException(status_code=400, detail="Укажите цену в Gram")
+            raise HTTPException(status_code=400, detail=f"Укажите цену в {'Gram' if currency == 'grams' else 'Stars'}")
         if not 1 <= price <= 1_000_000_000:
-            raise HTTPException(status_code=400, detail="Цена должна быть от 1 до 1000000000 Gram")
+            raise HTTPException(status_code=400, detail="Цена должна быть от 1 до 1000000000")
+        price_grams = price if currency == "grams" else 0
+        price_stars = price if currency == "stars" else 0
         now = int(time.time())
         async with aiosqlite.connect(db_path()) as db:
             db.row_factory = aiosqlite.Row
@@ -9541,17 +9951,17 @@ def build_messenger_router(
                 listing_id = int(previous_listing["id"])
                 await db.execute(
                     """UPDATE gift_market_listings
-                       SET seller_telegram_id=?,price_grams=?,status='active',
-                           buyer_telegram_id=NULL,created_at=?,sold_at=NULL
+                       SET seller_telegram_id=?,price_grams=?,price_stars=?,currency=?,
+                           status='active',buyer_telegram_id=NULL,created_at=?,sold_at=NULL
                        WHERE id=?""",
-                    (uid, price, now, listing_id),
+                    (uid, price_grams, price_stars, currency, now, listing_id),
                 )
             else:
                 cur = await db.execute(
                     """INSERT INTO gift_market_listings
-                       (serial_number,seller_telegram_id,price_grams,status,created_at)
-                       VALUES(?,?,?,'active',?)""",
-                    (serial, uid, price, now),
+                       (serial_number,seller_telegram_id,price_grams,price_stars,currency,status,created_at)
+                       VALUES(?,?,?,?,?,'active',?)""",
+                    (serial, uid, price_grams, price_stars, currency, now),
                 )
                 listing_id = int(cur.lastrowid)
             await db.commit()
@@ -9560,8 +9970,10 @@ def build_messenger_router(
             "listing_id": listing_id,
             "serial_number": serial,
             "gift_name": str(gift["gift_name"]),
-            "price_grams": price,
-            "currency": "grams",
+            "price": price,
+            "price_grams": price_grams,
+            "price_stars": price_stars,
+            "currency": currency,
         }
 
     @router.delete("/api/gifts/{serial_number}/list")
@@ -9600,8 +10012,9 @@ def build_messenger_router(
             await db.execute("BEGIN IMMEDIATE")
             cur = await db.execute(
                 """SELECT l.id,l.serial_number,l.seller_telegram_id,l.price_grams,
-                          g.id AS gift_instance_id,g.owner_telegram_id AS gift_owner_id,
-                          g.gift_name,g.telegram_gift_id,g.upgrade_level,g.attributes_json
+                          l.price_stars,l.currency,g.id AS gift_instance_id,
+                          g.owner_telegram_id AS gift_owner_id,g.gift_name,g.telegram_gift_id,
+                          g.upgrade_level,g.attributes_json
                    FROM gift_market_listings l
                    JOIN user_gifts g ON g.serial_number=l.serial_number
                    WHERE l.id=? AND l.status='active'
@@ -9618,29 +10031,33 @@ def build_messenger_router(
                 await db.rollback()
                 raise HTTPException(status_code=404, detail="Объявление недоступно")
             seller_id = int(listing["seller_telegram_id"])
-            price = int(listing["price_grams"])
+            currency = str(listing["currency"] or "grams")
+            if currency not in {"grams", "stars"}:
+                await db.rollback()
+                raise HTTPException(status_code=409, detail="Валюта объявления недоступна")
+            price = int(listing["price_stars"] or 0) if currency == "stars" else int(listing["price_grams"] or 0)
             serial = str(listing["serial_number"])
             if buyer_id == seller_id:
                 await db.rollback()
                 raise HTTPException(status_code=400, detail="Нельзя купить собственный подарок")
             cur = await db.execute(
-                "SELECT grams,is_banned FROM accounts WHERE telegram_id=?",
+                f"SELECT {currency},is_banned FROM accounts WHERE telegram_id=?",
                 (buyer_id,),
             )
             buyer = await cur.fetchone()
             cur = await db.execute(
-                "SELECT grams,is_banned FROM accounts WHERE telegram_id=?",
+                f"SELECT {currency},is_banned FROM accounts WHERE telegram_id=?",
                 (seller_id,),
             )
             seller = await cur.fetchone()
             if not buyer or buyer["is_banned"] or not seller or seller["is_banned"]:
                 await db.rollback()
                 raise HTTPException(status_code=403, detail="Один из аккаунтов недоступен")
-            if int(buyer["grams"]) < price:
+            if int(buyer[currency]) < price:
                 await db.rollback()
-                raise HTTPException(status_code=409, detail="Недостаточно Gram")
-            buyer_balance = int(buyer["grams"]) - price
-            seller_balance = int(seller["grams"]) + price
+                raise HTTPException(status_code=409, detail=f"Недостаточно {'Stars' if currency == 'stars' else 'Gram'}")
+            buyer_balance = int(buyer[currency]) - price
+            seller_balance = int(seller[currency]) + price
             cur = await db.execute(
                 "UPDATE gift_market_listings SET status='sold',buyer_telegram_id=?,sold_at=? WHERE id=? AND status='active'",
                 (buyer_id, now, listing_id),
@@ -9648,29 +10065,43 @@ def build_messenger_router(
             if cur.rowcount != 1:
                 await db.rollback()
                 raise HTTPException(status_code=409, detail="Объявление уже куплено")
+            cur = await db.execute(
+                "SELECT telegram_id FROM accounts WHERE LOWER(username)='fragment' LIMIT 1"
+            )
+            fragment_row = await cur.fetchone()
+            fragment_owner_id = (int(fragment_row[0]) if fragment_row
+                                 else fragment_deposit.FRAGMENT_TELEGRAM_ID)
             gift_owner_id = int(listing["gift_owner_id"] or 0)
             cur = await db.execute(
                 "UPDATE user_gifts SET owner_telegram_id=? WHERE id=? AND owner_telegram_id=?",
-                (buyer_id, int(listing["gift_instance_id"]), gift_owner_id),
+                (fragment_owner_id, int(listing["gift_instance_id"]), gift_owner_id),
             )
             if cur.rowcount != 1:
                 await db.rollback()
                 raise HTTPException(status_code=409, detail="Владение подарком уже изменилось")
+            # Ownership is escrowed by @fragment until the buyer explicitly withdraws it.
             await db.execute(
-                "UPDATE accounts SET grams=?,updated_at=? WHERE telegram_id=?",
+                "DELETE FROM fragment_gift_deposits WHERE serial_number=?",
+                (serial,),
+            )
+            await fragment_deposit.record(
+                db, buyer_id, serial, str(listing["gift_name"]), now,
+            )
+            await db.execute(
+                f"UPDATE accounts SET {currency}=?,updated_at=? WHERE telegram_id=?",
                 (buyer_balance, now, buyer_id),
             )
             await db.execute(
-                "UPDATE accounts SET grams=?,updated_at=? WHERE telegram_id=?",
+                f"UPDATE accounts SET {currency}=?,updated_at=? WHERE telegram_id=?",
                 (seller_balance, now, seller_id),
             )
             await db.executemany(
                 """INSERT INTO economy_transactions
                    (telegram_id,asset,amount,balance_after,reason,admin_id,created_at)
-                   VALUES(?,'grams',?,?,?,NULL,?)""",
+                   VALUES(?,?,?,?,?,NULL,?)""",
                 [
-                    (buyer_id, -price, buyer_balance, f"gift_market_purchase:{listing_id}", now),
-                    (seller_id, price, seller_balance, f"gift_market_sale:{listing_id}", now),
+                    (buyer_id, currency, -price, buyer_balance, f"gift_market_purchase:{listing_id}", now),
+                    (seller_id, currency, price, seller_balance, f"gift_market_sale:{listing_id}", now),
                 ],
             )
             await db.execute(
@@ -9679,43 +10110,15 @@ def build_messenger_router(
                    VALUES('market_sale',?,?,?,?,?)""",
                 (serial, str(listing["gift_name"]), seller_id, buyer_id, now),
             )
-            cur = await db.execute(
-                """INSERT INTO messages
-                   (sender_telegram_id,recipient_telegram_id,body,created_at)
-                   VALUES(?,?,?,?)""",
-                (buyer_id, buyer_id, "", now),
-            )
-            saved_message_id = int(cur.lastrowid)
-            try:
-                market_gift_attributes = json.loads(str(listing["attributes_json"] or "{}"))
-            except (TypeError, ValueError):
-                market_gift_attributes = {}
-            if not isinstance(market_gift_attributes, dict):
-                market_gift_attributes = {}
-            market_gift_attributes.update({
-                "event_type": "purchase",
-                "native_action": "star_gift_purchase",
-                "price_grams": price,
-                "currency": "grams",
-            })
-            await db.execute(
-                """INSERT INTO message_gifts
-                   (message_id,serial_number,gift_name,telegram_gift_id,upgrade_level,attributes_json)
-                   VALUES(?,?,?,?,?,?)""",
-                (saved_message_id, serial, str(listing["gift_name"]),
-                 str(listing["telegram_gift_id"] or ""),
-                 max(0, int(listing["upgrade_level"] or 0)),
-                 json.dumps(market_gift_attributes, ensure_ascii=False, separators=(",", ":"))),
-            )
-            await record_event(
-                db, "dm", saved_message_id, "new_message", buyer_id,
-                user_a=buyer_id, user_b=buyer_id,
+            queued_buyer_notice = await notify_fragment_gift_purchase(
+                db, buyer_id, str(listing["gift_name"]), price, now, currency=currency,
             )
             queued_fragment_notice = await notify_fragment_sale(
-                db, seller_id, "gift", str(listing["gift_name"]), price, buyer_id, now
+                db, seller_id, "gift", str(listing["gift_name"]), price, buyer_id, now,
+                currency=currency,
             )
             await db.commit()
-        if queued_fragment_notice:
+        if queued_buyer_notice or queued_fragment_notice:
             push_wakeup.set()
         return {
             "status": "purchased",
@@ -9724,8 +10127,13 @@ def build_messenger_router(
             "gift_name": str(listing["gift_name"]),
             "seller_id": seller_id,
             "buyer_id": buyer_id,
-            "price_grams": price,
-            "grams_balance": buyer_balance,
+            "price": price,
+            "price_grams": price if currency == "grams" else 0,
+            "price_stars": price if currency == "stars" else 0,
+            "currency": currency,
+            "grams_balance": buyer_balance if currency == "grams" else None,
+            "stars_balance": buyer_balance if currency == "stars" else None,
+            "inventory": "fragment",
         }
 
     async def require_gift_upgrade_support(db: Any, gift_id: str) -> None:
@@ -11303,20 +11711,51 @@ def build_messenger_router(
         async with aiosqlite.connect(db_path()) as db:
             await db.execute("BEGIN IMMEDIATE" if write else "BEGIN")
             if write:
-                cur = await db.execute("SELECT 1 FROM channels WHERE id=? AND owner_telegram_id=?", (channel_id, uid))
-                if not await cur.fetchone():
+                cur = await db.execute("SELECT owner_telegram_id FROM channels WHERE id=?", (channel_id,))
+                channel = await cur.fetchone()
+                if channel is None:
                     raise HTTPException(404, "CHANNEL_NOT_FOUND")
                 if payload is None or "group_id" not in payload:
                     raise HTTPException(400, "DISCUSSION_GROUP_REQUIRED")
                 group_id = payload["group_id"]
+                is_channel_owner = int(channel[0]) == uid
+                if not is_channel_owner and group_id is not None:
+                    raise HTTPException(404, "CHANNEL_NOT_FOUND")
+                cur = await db.execute("SELECT group_id FROM channel_discussion_groups WHERE channel_id=?", (channel_id,))
+                old_link = await cur.fetchone()
+                old_group_id = int(old_link[0]) if old_link else None
+                if not is_channel_owner and old_group_id is None:
+                    raise HTTPException(404, "CHANNEL_NOT_FOUND")
+                if group_id is not None and (type(group_id) is not int or group_id <= 0):
+                    raise HTTPException(400, "INVALID_DISCUSSION_GROUP")
+                if not is_channel_owner:
+                    cur = await db.execute(
+                        "SELECT role FROM group_members WHERE group_id=? AND telegram_id=?",
+                        (old_group_id, uid),
+                    )
+                    group_role = await cur.fetchone()
+                    if group_role is None or str(group_role[0]) != "owner":
+                        raise HTTPException(404, "CHANNEL_NOT_FOUND")
+
+                # Linking or unlinking a discussion is a linked-peer operation for
+                # the group. The channel owner must also be a group member; the
+                # group owner and admins with change-info bypass member restrictions.
+                groups_to_authorize = set()
+                if old_group_id is not None and old_group_id != group_id:
+                    groups_to_authorize.add(old_group_id)
+                if group_id is not None:
+                    cur = await db.execute("SELECT 1 FROM chat_groups WHERE id=?", (group_id,))
+                    if not await cur.fetchone():
+                        raise HTTPException(404, "DISCUSSION_GROUP_NOT_FOUND")
+                    groups_to_authorize.add(group_id)
+                for authorized_group_id in groups_to_authorize:
+                    linked_member = await require_group_member(db, authorized_group_id, uid)
+                    if not await group_can_manage_linked_peers(db, authorized_group_id, linked_member):
+                        raise HTTPException(403, "GROUP_LINKED_PEERS_RESTRICTED")
+
                 if group_id is None:
                     await db.execute("DELETE FROM channel_discussion_groups WHERE channel_id=?", (channel_id,))
                 else:
-                    if type(group_id) is not int or group_id <= 0:
-                        raise HTTPException(400, "INVALID_DISCUSSION_GROUP")
-                    cur = await db.execute("SELECT 1 FROM chat_groups WHERE id=? AND owner_telegram_id=?", (group_id, uid))
-                    if not await cur.fetchone():
-                        raise HTTPException(403, "DISCUSSION_GROUP_OWNER_REQUIRED")
                     cur = await db.execute("SELECT 1 FROM channel_discussion_groups WHERE group_id=? AND channel_id<>?", (group_id, channel_id))
                     if await cur.fetchone():
                         raise HTTPException(409, "DISCUSSION_GROUP_ALREADY_LINKED")
@@ -13602,6 +14041,8 @@ def build_messenger_router(
                    gift_attachment.telegram_gift_id AS gift_telegram_gift_id,
                    gift_attachment.upgrade_level AS gift_upgrade_level,
                    gift_attachment.attributes_json AS gift_attributes_json,
+                   (SELECT stars FROM message_fragment_star_transfers s
+                    WHERE s.message_id=messages.id) AS fragment_star_transfer_stars,
                    (SELECT unique_num FROM gift_unique_numbers n
                     WHERE n.serial_number=gift_attachment.serial_number) AS gift_unique_num,
                    (SELECT id FROM user_gifts ug
@@ -14109,9 +14550,12 @@ def build_messenger_router(
         if not isinstance(rank, str) or len(rank) > 32:
             raise HTTPException(400, "Некорректная должность")
         async with aiosqlite.connect(db_path()) as db:
+            await db.execute("BEGIN IMMEDIATE")
             member = await require_group_member(db, group_id, uid)
+            await require_group_member(db, group_id, target_id)
             if member["role"] == "member":
-                raise HTTPException(403, "Нет права изменять администраторов")
+                if target_id != uid or (await group_member_banned_rights(db, group_id, member) & RESTRICT_EDIT_RANK):
+                    raise HTTPException(403, "Нет права изменять эту подпись")
             await db.execute("UPDATE group_members SET rank=? WHERE group_id=? AND telegram_id=?",
                              (rank.strip(), group_id, target_id))
             await record_event(db, "group", 0, "chat_changed", uid, chat_id=group_id)
@@ -16437,12 +16881,25 @@ def build_messenger_router(
     scheduled_worker_task: asyncio.Task | None = None
 
     async def process_due_username_auctions() -> int:
-        """Закрывает истёкшие аукционы юзернеймов, не дожидаясь чтения карточки."""
+        """Закрывает аукционы и зачисляет продавцам Stars-карточкой от @fragment."""
         now = int(time.time())
+        queued_push = False
+
+        async def notify_username_payout(
+            db: Any, seller_id: int, item_name: str, stars: int,
+            buyer_id: int, stamp: int,
+        ) -> None:
+            nonlocal queued_push
+            queued_push = bool(await notify_fragment_sale(
+                db, seller_id, "username", item_name, stars, buyer_id, stamp,
+            )) or queued_push
+
         async with aiosqlite.connect(db_path()) as db:
             await db.execute("BEGIN IMMEDIATE")
-            settled = await fragment_market.settle_due(db, now)
+            settled = await fragment_market.settle_due(db, now, notify_username_payout)
             await db.commit()
+        if queued_push:
+            push_wakeup.set()
         return len(settled)
 
     async def scheduled_message_worker() -> None:
@@ -16788,9 +17245,9 @@ def build_messenger_router(
                 event_user_b = int(message["recipient_telegram_id"])
             elif scope == "group":
                 membership = await require_group_member(db, chat_id, user_id)
-                if not group_has_right(membership, 8):
+                if not await group_can_pin_messages(db, chat_id, membership):
                     await db.rollback()
-                    raise HTTPException(status_code=403, detail="Закреплять сообщения могут только администраторы группы")
+                    raise HTTPException(status_code=403, detail="Закреплять сообщения запрещено правами группы")
                 cur = await db.execute(
                     "SELECT 1 FROM group_messages WHERE id=? AND group_id=? AND topic_id IS NULL", (message_id, chat_id)
                 )
@@ -18608,6 +19065,8 @@ def build_messenger_router(
                           g.pre_history_hidden,g.join_request,COALESCE(g.forum_enabled,0) AS forum_enabled,
                           g.location_latitude,g.location_longitude,g.location_label,g.location_address,
                           g.color_id,g.background_emoji_id,g.profile_color_id,g.profile_background_emoji_id,
+                          g.emoji_status_id,g.sticker_set_id,g.sticker_set_access_hash,
+                          g.emoji_set_id,g.emoji_set_access_hash,
                           (SELECT COUNT(*) FROM group_members m WHERE m.group_id=g.id) AS member_count
                    FROM chat_groups g WHERE g.id=?""",
                 (group_id,),
@@ -18635,7 +19094,22 @@ def build_messenger_router(
                 rows = await cur.fetchall()
                 pending = rows[0]["total"] if rows else 0
                 recent_requesters = [r["telegram_id"] for r in rows]
+            cur = await db.execute(
+                """SELECT c.id,c.title,c.username,c.owner_telegram_id,c.is_public,c.avatar_media_id
+                   FROM channel_discussion_groups d JOIN channels c ON c.id=d.channel_id
+                   WHERE d.group_id=?""",
+                (group_id,),
+            )
+            linked_channel = await cur.fetchone()
         result = dict(group)
+        result["linked_channel_id"] = int(linked_channel["id"]) if linked_channel else 0
+        result["linked_channel"] = ({
+            "id": int(linked_channel["id"]), "title": str(linked_channel["title"] or ""),
+            "username": str(linked_channel["username"] or ""),
+            "owner_telegram_id": int(linked_channel["owner_telegram_id"]),
+            "is_public": bool(linked_channel["is_public"]),
+            "avatar_media_id": str(linked_channel["avatar_media_id"] or ""),
+        } if linked_channel else None)
         # Клиент читает маску в текущей раскладке битов; старые значения расширяем.
         result["default_send_restrictions"] = send_restrictions(
             int(result.get("default_send_restrictions") or 0),
@@ -18785,7 +19259,7 @@ def build_messenger_router(
         async with aiosqlite.connect(db_path()) as db:
             await db.execute("BEGIN IMMEDIATE" if write else "BEGIN")
             member = await require_group_member(db, group_id, uid)
-            manage = group_has_right(member, 1)
+            manage = await group_can_manage_topics(db, group_id, member)
             if not write:
                 cur = await db.execute("SELECT id,title,closed,created_at FROM group_topics WHERE group_id=? AND deleted_at IS NULL ORDER BY id DESC LIMIT 100", (group_id,))
                 rows = await cur.fetchall()
@@ -18811,7 +19285,8 @@ def build_messenger_router(
         uid = int((await current_user(authorization))["telegram_id"])
         async with aiosqlite.connect(db_path()) as db:
             await db.execute("BEGIN IMMEDIATE")
-            if not group_has_right(await require_group_member(db, group_id, uid), 1):
+            member = await require_group_member(db, group_id, uid)
+            if not await group_can_manage_topics(db, group_id, member):
                 raise HTTPException(403, "GROUP_TOPIC_MANAGE_REQUIRED")
             topic = await get_group_topic_row(db, group_id, topic_id)
             if request.method == "DELETE":
@@ -18858,7 +19333,8 @@ def build_messenger_router(
             raise HTTPException(400, "INVALID_TOPIC_PIN")
         async with aiosqlite.connect(db_path()) as db:
             await db.execute("BEGIN IMMEDIATE")
-            if not group_has_right(await require_group_member(db, group_id, uid), 8):
+            member = await require_group_member(db, group_id, uid)
+            if not await group_can_pin_messages(db, group_id, member):
                 raise HTTPException(403, "GROUP_TOPIC_PIN_REQUIRED")
             await get_group_topic_row(db, group_id, topic_id)
             if message:
@@ -18887,7 +19363,9 @@ def build_messenger_router(
             rows = await cur.fetchall()
             cur = await db.execute("SELECT 1 FROM group_topic_followers WHERE group_id=? AND topic_id=? AND telegram_id=?", (group_id, topic_id, uid))
             notifications_enabled = await cur.fetchone() is not None
-        return {"topic": topic, "can_manage": group_has_right(member, 1), "can_pin": group_has_right(member, 8),
+            can_manage = await group_can_manage_topics(db, group_id, member)
+            can_pin = await group_can_pin_messages(db, group_id, member)
+        return {"topic": topic, "can_manage": can_manage, "can_pin": can_pin,
                 "notifications_enabled": notifications_enabled,
                 "messages": [dict(row) for row in reversed(rows[:limit])],
                 "next_before_id": rows[limit - 1]["id"] if len(rows) > limit else 0}
@@ -19284,6 +19762,18 @@ def build_messenger_router(
                 value = payload[key]
                 if type(value) is not int or value < 0:
                     raise HTTPException(400, "INVALID_PEER_COLOR")
+                fields[key] = value
+        for key in ("emoji_status_id", "sticker_set_id", "emoji_set_id"):
+            if key in payload:
+                value = payload[key]
+                if type(value) is not int or not 0 <= value < 2**63:
+                    raise HTTPException(400, "INVALID_GROUP_CUSTOMIZATION")
+                fields[key] = value
+        for key in ("sticker_set_access_hash", "emoji_set_access_hash"):
+            if key in payload:
+                value = payload[key]
+                if type(value) is not int or not -(2**63) <= value < 2**63:
+                    raise HTTPException(400, "INVALID_GROUP_CUSTOMIZATION")
                 fields[key] = value
         if not fields:
             raise HTTPException(400, "Нет полей для изменения")
@@ -20118,8 +20608,8 @@ def build_messenger_router(
             db.row_factory = aiosqlite.Row
             await db.execute("BEGIN IMMEDIATE")
             membership = await require_group_member(db, group_id, uid)
-            if not group_has_right(membership, 2):
-                raise HTTPException(status_code=403, detail="Добавлять участников могут администраторы группы")
+            if not await group_can_invite_members(db, group_id, membership):
+                raise HTTPException(status_code=403, detail="Добавлять участников запрещено правами группы")
             target_id = 0
             if payload.get("telegram_id") is not None:
                 try:
@@ -20193,7 +20683,7 @@ def build_messenger_router(
         uid = int((await current_user(authorization))["telegram_id"])
         until = payload.get("until_date")
         rights = payload.get("rights", 1)
-        if type(rights) is not int or not 1 <= rights <= 63:
+        if type(rights) is not int or not 1 <= rights <= MAX_SEND_RESTRICTIONS:
             raise HTTPException(400, "Некорректные ограничения")
         if "until_date" not in payload or (until is not None and (type(until) is not int or (until != 0 and not int(time.time()) < until <= 2147483647))):
             raise HTTPException(400, "Некорректный срок ограничения")

@@ -77,7 +77,8 @@ def test_page_calls_only_our_api(env) -> None:
             for route in ("/api/collectibles", "/api/gift-market", "/api/me/fragment/gifts",
                           "/api/telegram/gifts/"):
                 assert route in body, route
-            assert "/api/gift-market?mine=true&limit=60" in body
+            assert "/api/gift-market?mine=true&limit=100" in body
+            assert "/api/gift-market/catalog" in body
             assert "requestModelArtwork" in body
             assert "requestPatternArtwork" in body
             assert "lottie.loadAnimation" in body
@@ -92,15 +93,26 @@ def test_page_calls_only_our_api(env) -> None:
 
 def test_gift_filters_own_listings_and_refresh_interval(env) -> None:
     body = PAGE.read_text(encoding="utf-8")
-    for label in ("Все подарки", "Фон", "Узор", "Подарок", "Коллекции",
-                  "Цена по возрастанию", "Цена по убыванию", "Мои лоты",
-                  "Снять с продажи"):
+    for label in ("Collection", "Model", "Backdrop", "Symbol", "Коллекции",
+                  "Выбрать все", "Цена по возрастанию", "Цена по убыванию",
+                  "Мои лоты", "Снять с продажи", "selected-filters"):
         assert label in body, label
     assert "mine=true" in body
     assert "if (interval > 0 && interval < 10000) { interval = 10000; }" in body
     assert "if (interval >= 10000)" in body
     assert 'kv("Серийный номер"' not in body
     assert "serialOf(" not in body
+
+
+def test_fragment_inventory_supports_withdrawal_price_and_trait_backdrops() -> None:
+    body = PAGE.read_text(encoding="utf-8")
+    assert 'class="inventory-withdraw"' in body
+    assert 'id="withdraw-gift"' in body
+    assert "/api/me/fragment/gifts/" in body and "/withdraw" in body
+    assert "item.price_grams" in body
+    assert "backdrop.center_color" in body
+    assert "backdrop.edge_color" in body
+    assert "fragment_inventory" in body
 
 
 def test_model_renderer_assets_are_served_locally(env) -> None:

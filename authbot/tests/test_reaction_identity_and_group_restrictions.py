@@ -133,8 +133,8 @@ def test_group_send_restrictions_keep_every_switch(api) -> None:
             )
             assert created.status_code == 201, created.text
             group_id = created.json()["id"]
-            # 1024 — реакции, 256 — ссылки, 512 — опросы, 64 — голосовые, 128 — кружочки.
-            mask = 1024 | 256 | 512 | 64 | 128
+            # Весь диапазон — отправка, реакции и остальные пять флагов прав участников.
+            mask = (1 << 16) - 1
             applied = await client.put(
                 f"/api/groups/{group_id}/send-permissions",
                 headers=headers(98101),
@@ -218,5 +218,103 @@ def test_group_reactions_restriction_is_enforced(api) -> None:
             # Набор тот же, что уже стоит: проверка прав выполняется до сравнения набора.
             denied = await client.put(endpoint, headers=headers(98302), json={"reactions": ["👍"]})
             assert denied.status_code == 403, denied.text
+
+    run(scenario())
+
+
+def test_member_default_rights_enforce_invite_pin_rank_and_topics(api) -> None:
+    """Default member bans gate invite/pin/rank/topic writes; owners retain admin access."""
+    account(api, 98401, "rights_owner")
+    account(api, 98402, "rights_member")
+    account(api, 98403, "rights_invitee")
+    account(api, 98404, "rights_second_invitee")
+    _path, _store, app = api
+
+    async def scenario() -> None:
+        owner, member = headers(98401), headers(98402)
+        async with await client_for(app) as client:
+            created = await client.post(
+                "/api/groups", headers=owner,
+                json={"title": "Member permissions", "member_ids": [98402]},
+            )
+            assert created.status_code == 201, created.text
+            group_id = created.json()["id"]
+            root = f"/api/groups/{group_id}"
+
+            # With the switches enabled by default, ordinary members can use the actions.
+            invite = await client.post(root + "/members", headers=member, json={"telegram_id": 98403})
+            assert invite.status_code == 201, invite.text
+            rank = await client.put(root + "/members/98402/rank", headers=member, json={"rank": "Helper"})
+            assert rank.status_code == 200, rank.text
+            topic_response = await client.post(root + "/topics", headers=member, json={"title": "Member topic"})
+            assert topic_response.status_code == 200, topic_response.text
+            topic = root + f"/topics/{topic_response.json()['id']}"
+            assert (await client.get(root + "/topics", headers=member)).json()["can_manage"] is True
+
+            group_message = await client.post(root + "/messages", headers=member, json={"body": "Group pin"})
+            assert group_message.status_code == 201, group_message.text
+            group_pin = {"scope": "group", "peer_id": group_id, "message_id": group_message.json()["id"]}
+            assert (await client.post("/api/pins", headers=member, json=group_pin)).status_code == 200
+            topic_message = await client.post(topic + "/messages", headers=member, json={"body": "Topic pin"})
+            assert topic_message.status_code == 201, topic_message.text
+            topic_message_id = topic_message.json()["id"]
+            assert (await client.put(topic + "/pin", headers=member,
+                                     json={"message_id": topic_message_id})).status_code == 200
+
+            # The five upper switches are server-enforced, not just serialized by the client.
+            restricted_mask = 2048 | 4096 | 8192 | 16384
+            applied = await client.put(root + "/send-permissions", headers=owner,
+                                       json={"default_send_restrictions": restricted_mask})
+            assert applied.status_code == 200, applied.text
+            assert (await client.get(root + "/topics", headers=member)).json()["can_manage"] is False
+
+            denied_invite = await client.post(root + "/members", headers=member, json={"telegram_id": 98404})
+            assert denied_invite.status_code == 403, denied_invite.text
+            denied_rank = await client.put(root + "/members/98402/rank", headers=member,
+                                           json={"rank": "Blocked"})
+            assert denied_rank.status_code == 403, denied_rank.text
+            denied_topic = await client.post(root + "/topics", headers=member, json={"title": "Blocked topic"})
+            assert denied_topic.status_code == 403, denied_topic.text
+            assert (await client.patch(topic, headers=member, json={"title": "Blocked rename"})).status_code == 403
+
+            another_group_message = await client.post(root + "/messages", headers=member,
+                                                      json={"body": "Restricted group pin"})
+            assert another_group_message.status_code == 201, another_group_message.text
+            denied_group_pin = await client.post("/api/pins", headers=member, json={
+                "scope": "group", "peer_id": group_id, "message_id": another_group_message.json()["id"],
+            })
+            assert denied_group_pin.status_code == 403, denied_group_pin.text
+            another_topic_message = await client.post(topic + "/messages", headers=member,
+                                                     json={"body": "Restricted topic pin"})
+            assert another_topic_message.status_code == 201, another_topic_message.text
+            denied_topic_pin = await client.put(topic + "/pin", headers=member,
+                                                json={"message_id": another_topic_message.json()["id"]})
+            assert denied_topic_pin.status_code == 403, denied_topic_pin.text
+
+            # Owner privileges are independent of the default restrictions.
+            assert (await client.post(root + "/members", headers=owner,
+                                      json={"telegram_id": 98404})).status_code == 201
+            assert (await client.put(root + "/members/98402/rank", headers=owner,
+                                     json={"rank": "Trusted"})).status_code == 200
+            assert (await client.post("/api/pins", headers=owner, json={
+                "scope": "group", "peer_id": group_id, "message_id": another_group_message.json()["id"],
+            })).status_code == 200
+            assert (await client.put(topic + "/pin", headers=owner,
+                                     json={"message_id": another_topic_message.json()["id"]})).status_code == 200
+            assert (await client.post(root + "/topics", headers=owner,
+                                      json={"title": "Owner topic"})).status_code == 200
+
+            # Per-member mute masks accept and enforce these upper bits too.
+            assert (await client.put(root + "/send-permissions", headers=owner,
+                                     json={"default_send_restrictions": 0})).status_code == 200
+            muted = await client.put(root + "/members/98402/mute", headers=owner,
+                                     json={"until_date": 0, "rights": 8192})
+            assert muted.status_code == 200, muted.text
+            assert (await client.put(root + "/members/98402/rank", headers=member,
+                                     json={"rank": "Muted"})).status_code == 403
+            assert (await client.put(root + "/members/98402/mute", headers=owner,
+                                     json={"until_date": None})).status_code == 200
+            assert (await client.put(root + "/members/98402/rank", headers=member,
+                                     json={"rank": "Unmuted"})).status_code == 200
 
     run(scenario())

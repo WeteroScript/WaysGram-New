@@ -919,8 +919,23 @@ public class WaysGramTransport {
             } else if (update.emoji_status instanceof TLRPC.TL_emojiStatusCollectible) {
                 documentId = ((TLRPC.TL_emojiStatusCollectible) update.emoji_status).document_id;
             }
-            return WaysGramChats.updateChannelSettings(account, update.channel.channel_id,
-                    WaysGramChats.settings("emoji_status_id", documentId));
+            JSONObject fields = WaysGramChats.settings("emoji_status_id", documentId);
+            if (WaysGramChats.isGroupChannel(update.channel.channel_id)) {
+                return WaysGramChats.updateGroupSettings(account, update.channel.channel_id, fields);
+            }
+            return WaysGramChats.updateChannelSettings(account, update.channel.channel_id, fields);
+        } else if (request instanceof TLRPC.TL_channels_setStickers) {
+            TLRPC.TL_channels_setStickers update = (TLRPC.TL_channels_setStickers) request;
+            if (WaysGramChats.isGroupChannel(update.channel.channel_id)) {
+                return WaysGramChats.setGroupStickerSet(account, update.channel.channel_id, update.stickerset, false);
+            }
+            return new TLRPC.TL_boolTrue();
+        } else if (request instanceof TLRPC.TL_channels_setEmojiStickers) {
+            TLRPC.TL_channels_setEmojiStickers update = (TLRPC.TL_channels_setEmojiStickers) request;
+            if (WaysGramChats.isGroupChannel(update.channel.channel_id)) {
+                return WaysGramChats.setGroupStickerSet(account, update.channel.channel_id, update.stickerset, true);
+            }
+            return new TLRPC.TL_boolTrue();
         } else if (request instanceof TLRPC.TL_channels_deleteHistory) {
             TLRPC.TL_channels_deleteHistory clear = (TLRPC.TL_channels_deleteHistory) request;
             return WaysGramChats.clearChannelHistory(account, clear.channel.channel_id, clear.for_everyone);
@@ -961,8 +976,6 @@ public class WaysGramTransport {
             return WaysGramChats.updateLocation(account, edit.channel.channel_id,
                     edit.geo_point.lat, edit.geo_point._long, edit.address);
         } else if (request instanceof TLRPC.TL_channels_reorderUsernames
-                || request instanceof TLRPC.TL_channels_setStickers
-                || request instanceof TLRPC.TL_channels_setEmojiStickers
                 || request instanceof TLRPC.TL_channels_setMainProfileTab) {
             return new TLRPC.TL_boolTrue();
         } else if (request instanceof TLRPC.TL_channels_getChannelRecommendations) {

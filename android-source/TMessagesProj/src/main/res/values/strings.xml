@@ -581,6 +581,9 @@
     <string name="ActionGiftTonInbound">sent you a gift for **un2**</string>
     <string name="ActionGiftInbound">un1 sent you a gift for **un2**</string>
     <string name="ActionGiftOutbound">You have sent a gift for **un2**</string>
+    <string name="ActionFragmentStarsTransferInbound">un1 sent you **un2**</string>
+    <string name="FragmentStarsCount_one">%d Star</string>
+    <string name="FragmentStarsCount_other">%d Stars</string>
     <string name="ActionPrepaidGiftInbound">un1 sent an upgrade worth **un2** for your gift</string>
     <string name="ActionPrepaidGiftOutbound">You sent an upgrade worth **un2** for **un1**\'s gift</string>
     <string name="ActionGiftSelf">You bought a gift for **un2**</string>
@@ -11748,6 +11751,13 @@
     <string name="WaysGramDiscussionError">Could not load or update the discussion.</string>
     <string name="WaysGramDiscussionCreate">Create a group</string>
     <string name="WaysGramDiscussionEnabled">Comments are on. Reopen the channel to see the comment button on posts.</string>
+    <string name="WaysGramLinkedChannelChoose">Choose a channel</string>
+    <string name="WaysGramLinkedChannelNotLinked">No channel is linked to this group.</string>
+    <string name="WaysGramLinkedChannelLinked">Linked channel: %1$s</string>
+    <string name="WaysGramLinkedChannelConfirm">Link %1$s to this group?</string>
+    <string name="WaysGramLinkedChannelNoChannels">You do not own any channels to link.</string>
+    <string name="WaysGramLinkedChannelUnlinkConfirm">Unlink this channel from the group?</string>
+    <string name="WaysGramLinkedChannelSaved">The linked channel was updated.</string>
     <string name="WaysGramPostComments">Comments</string>
     <string name="WaysGramCommentsEmpty">No comments yet.</string>
     <string name="WaysGramCommentsWrite">Write a comment</string>

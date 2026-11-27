@@ -48,6 +48,25 @@ class GroupProfileColorSourceChecks(unittest.TestCase):
         self.assertIn('channel.color = peerColor(colorId, colorEmoji);', color)
         self.assertIn('channel.flags2 |= TLObject.FLAG_7;', color)
 
+    def test_group_appearance_screen_has_saved_status_and_packs(self):
+        chats = self.source('tgnet/WaysGramChats.java')
+        transport = self.source('tgnet/WaysGramTransport.java')
+        full = chats.split('public static TLRPC.TL_messages_chatFull fullChat(', 1)[1].split(
+            'private static void addMember', 1)[0]
+        self.assertIn('full.can_set_stickers = admin;', full)
+        self.assertIn('full.emojiset = groupStickerSet(group, "emoji_set", true);', full)
+        self.assertIn('full.stickerset = groupStickerSet(group, "sticker_set", false);', full)
+        status = chats.split('private static void applyChannelFlags', 1)[1].split('private static TLRPC.ChannelLocation', 1)[0]
+        self.assertIn('channel.emoji_status = emojiStatus;', status)
+        self.assertIn('channel.flags2 |= TLObject.FLAG_9;', status)
+        self.assertIn('WaysGramChats.setGroupStickerSet(account, update.channel.channel_id, update.stickerset, false)', transport)
+        self.assertIn('WaysGramChats.setGroupStickerSet(account, update.channel.channel_id, update.stickerset, true)', transport)
+        group_ui = self.source('ui/GroupColorActivity.java')
+        shared_ui = self.source('ui/ChannelColorActivity.java')
+        self.assertIn('extends ChannelColorActivity', group_ui)
+        self.assertIn('buttonContainer', shared_ui)
+        self.assertIn('Gravity.BOTTOM', shared_ui)
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -375,11 +375,49 @@ public class WaysGramMapper {
         return toMessage(m, selfId, org.telegram.messenger.UserConfig.selectedAccount);
     }
 
+    /** Build Telegram's native Stars service action for a Fragment payout message. */
+    private static TLRPC.Message fragmentStarsTransferMessage(JSONObject json, long selfId) {
+        if (json == null) {
+            return null;
+        }
+        long stars = json.optLong("fragment_star_transfer_stars", 0L);
+        long senderId = json.optLong("sender_id", 0L);
+        long recipientId = json.optLong("recipient_id", 0L);
+        if (stars <= 0 || senderId <= 0 || recipientId <= 0) {
+            return null;
+        }
+        long messageId = json.optLong("id", 0L);
+        int date = (int) Math.max(0L, Math.min(Integer.MAX_VALUE, json.optLong("created_at", 0L)));
+        boolean out = senderId == selfId;
+
+        TLRPC.TL_messageActionGiftStars action = new TLRPC.TL_messageActionGiftStars();
+        action.currency = "XTR";
+        // WaysGram payouts are Stars transfers, not a paid Telegram purchase.
+        // amount=0 is the in-memory discriminator used by MessageObject below.
+        action.amount = 0;
+        action.stars = stars;
+
+        TLRPC.TL_messageService message = new TLRPC.TL_messageService();
+        message.id = (int) Math.max(1L, Math.min(Integer.MAX_VALUE, messageId));
+        message.date = date;
+        message.out = out;
+        message.from_id = peerUser(senderId);
+        message.peer_id = peerUser(out ? recipientId : selfId);
+        message.dialog_id = out ? recipientId : senderId;
+        message.flags = TLRPC.MESSAGE_FLAG_HAS_FROM_ID | TLObject.FLAG_9;
+        message.action = action;
+        return message;
+    }
+
     /**
      * Gift purchases, transfers and received gifts are drawn with Telegram's
      * native gift card instead of a plain text bubble.
      */
     public static TLRPC.Message toMessage(JSONObject m, long selfId, int account) {
+        final TLRPC.Message fragmentStarsTransfer = fragmentStarsTransferMessage(m, selfId);
+        if (fragmentStarsTransfer != null) {
+            return fragmentStarsTransfer;
+        }
         final TLRPC.Message waysGramGiftMessage =
                 org.telegram.messenger.waysgram.WaysGramGiftMessages.toServiceMessage(account, m, selfId);
         if (waysGramGiftMessage != null) {

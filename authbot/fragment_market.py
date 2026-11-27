@@ -84,11 +84,15 @@ CREATE TABLE IF NOT EXISTS collectible_listings (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     collectible_id INTEGER NOT NULL,
     seller_telegram_id INTEGER NOT NULL,
-    price_stars INTEGER NOT NULL CHECK(price_stars > 0),
+    price_stars INTEGER NOT NULL DEFAULT 0 CHECK(price_stars >= 0),
+    price_grams INTEGER NOT NULL DEFAULT 0 CHECK(price_grams >= 0),
+    currency TEXT NOT NULL DEFAULT 'stars' CHECK(currency IN ('stars','grams')),
     status TEXT NOT NULL DEFAULT 'active'
         CHECK(status IN ('active','sold','cancelled')),
     created_at INTEGER NOT NULL,
-    sold_at INTEGER
+    sold_at INTEGER,
+    CHECK((currency='stars' AND price_stars>0 AND price_grams=0)
+       OR (currency='grams' AND price_grams>0 AND price_stars=0))
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_collectible_listings_active
     ON collectible_listings(collectible_id) WHERE status='active';
@@ -131,6 +135,9 @@ CREATE TABLE IF NOT EXISTS collectible_transfers (
     to_telegram_id INTEGER,
     price_stars INTEGER NOT NULL DEFAULT 0,
     commission_stars INTEGER NOT NULL DEFAULT 0,
+    price_grams INTEGER NOT NULL DEFAULT 0,
+    commission_grams INTEGER NOT NULL DEFAULT 0,
+    currency TEXT NOT NULL DEFAULT 'stars' CHECK(currency IN ('stars','grams')),
     kind TEXT NOT NULL DEFAULT 'sale'
         CHECK(kind IN ('sale','auction','claim','system')),
     created_at INTEGER NOT NULL
@@ -201,6 +208,60 @@ def system_price(name: str) -> int:
 
 async def ensure_storage(db: Any) -> None:
     await db.executescript(db_split.qualify_ddl(SCHEMA_SQL))
+    cur = await db.execute(f"PRAGMA {db_split.SCHEMA}.table_info(collectible_listings)")
+    columns = {str(row[1]) for row in await cur.fetchall()}
+    if "currency" not in columns:
+        # Rebuild the old Stars-only table: the old CHECK(price_stars > 0) cannot
+        # represent Gram listings without storing a misleading Stars value.
+        await db.execute(f"DROP INDEX IF EXISTS {db_split.SCHEMA}.idx_collectible_listings_active")
+        await db.execute(
+            f"ALTER TABLE {db_split.SCHEMA}.collectible_listings "
+            "RENAME TO collectible_listings_legacy"
+        )
+        await db.execute(f"""CREATE TABLE {db_split.SCHEMA}.collectible_listings (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            collectible_id INTEGER NOT NULL,
+            seller_telegram_id INTEGER NOT NULL,
+            price_stars INTEGER NOT NULL DEFAULT 0 CHECK(price_stars >= 0),
+            price_grams INTEGER NOT NULL DEFAULT 0 CHECK(price_grams >= 0),
+            currency TEXT NOT NULL DEFAULT 'stars' CHECK(currency IN ('stars','grams')),
+            status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active','sold','cancelled')),
+            created_at INTEGER NOT NULL,
+            sold_at INTEGER,
+            CHECK((currency='stars' AND price_stars>0 AND price_grams=0)
+               OR (currency='grams' AND price_grams>0 AND price_stars=0))
+        )""")
+        await db.execute(
+            f"""INSERT INTO {db_split.SCHEMA}.collectible_listings
+               (id,collectible_id,seller_telegram_id,price_stars,price_grams,currency,status,created_at,sold_at)
+               SELECT id,collectible_id,seller_telegram_id,price_stars,0,'stars',status,created_at,sold_at
+               FROM {db_split.SCHEMA}.collectible_listings_legacy"""
+        )
+        await db.execute(f"DROP TABLE {db_split.SCHEMA}.collectible_listings_legacy")
+    else:
+        cur = await db.execute(f"PRAGMA {db_split.SCHEMA}.table_info(collectible_listings)")
+        columns = {str(row[1]) for row in await cur.fetchall()}
+        if "price_grams" not in columns:
+            await db.execute(
+                f"ALTER TABLE {db_split.SCHEMA}.collectible_listings "
+                "ADD COLUMN price_grams INTEGER NOT NULL DEFAULT 0"
+            )
+    await db.execute(
+        f"CREATE UNIQUE INDEX IF NOT EXISTS {db_split.SCHEMA}.idx_collectible_listings_active "
+        "ON collectible_listings(collectible_id) WHERE status='active'"
+    )
+    cur = await db.execute(f"PRAGMA {db_split.SCHEMA}.table_info(collectible_transfers)")
+    transfer_columns = {str(row[1]) for row in await cur.fetchall()}
+    for column, definition in (
+        ("price_grams", "INTEGER NOT NULL DEFAULT 0"),
+        ("commission_grams", "INTEGER NOT NULL DEFAULT 0"),
+        ("currency", "TEXT NOT NULL DEFAULT 'stars'"),
+    ):
+        if column not in transfer_columns:
+            await db.execute(
+                f"ALTER TABLE {db_split.SCHEMA}.collectible_transfers "
+                f"ADD COLUMN {column} {definition}"
+            )
     await db.commit()
 
 
@@ -454,7 +515,7 @@ async def _public_account(db: Any, telegram_id: int | None) -> dict[str, Any] | 
 
 async def _active_listing(db: Any, collectible_id: int) -> aiosqlite.Row | None:
     cur = await db.execute(
-        "SELECT id,collectible_id,seller_telegram_id,price_stars,created_at"
+        "SELECT id,collectible_id,seller_telegram_id,price_stars,price_grams,currency,created_at"
         " FROM collectible_listings WHERE collectible_id=? AND status='active'",
         (int(collectible_id),),
     )
@@ -485,7 +546,8 @@ async def _last_auction(db: Any, collectible_id: int) -> aiosqlite.Row | None:
 
 async def _history(db: Any, collectible_id: int, limit: int = 10) -> list[dict[str, Any]]:
     cur = await db.execute(
-        "SELECT from_telegram_id,to_telegram_id,price_stars,commission_stars,kind,created_at"
+        "SELECT from_telegram_id,to_telegram_id,price_stars,commission_stars,"
+        "price_grams,commission_grams,currency,kind,created_at"
         " FROM collectible_transfers WHERE collectible_id=? ORDER BY id DESC LIMIT ?",
         (int(collectible_id), int(limit)),
     )
@@ -498,6 +560,14 @@ async def _balance(db: Any, telegram_id: int) -> int:
     if row is None:
         raise MarketError(404, "ACCOUNT_NOT_FOUND", "Аккаунт не найден")
     return int(row["stars"])
+
+
+async def _grams_balance(db: Any, telegram_id: int) -> int:
+    cur = await db.execute("SELECT grams FROM accounts WHERE telegram_id=?", (int(telegram_id),))
+    row = await cur.fetchone()
+    if row is None:
+        raise MarketError(404, "ACCOUNT_NOT_FOUND", "Аккаунт не найден")
+    return int(row["grams"])
 
 
 async def _add_stars(db: Any, telegram_id: int, delta: int, reason: str, now: int) -> int:
@@ -519,6 +589,25 @@ async def _add_stars(db: Any, telegram_id: int, delta: int, reason: str, now: in
     await db.execute(
         "INSERT INTO economy_transactions(telegram_id,asset,amount,balance_after,reason,"
         "admin_id,created_at) VALUES(?,'stars',?,?,?,NULL,?)",
+        (int(telegram_id), int(delta), balance, reason, int(now)),
+    )
+    return balance
+
+
+async def _add_grams(db: Any, telegram_id: int, delta: int, reason: str, now: int) -> int:
+    """Изменяет Gram-баланс и записывает экономическую проводку атомарно."""
+    cur = await db.execute(
+        "UPDATE accounts SET grams=grams+?,updated_at=? WHERE telegram_id=? AND grams>=?",
+        (int(delta), int(now), int(telegram_id), -int(delta)),
+    )
+    if cur.rowcount != 1:
+        if await _account_exists(db, telegram_id):
+            raise MarketError(409, "NOT_ENOUGH_GRAMS", "Недостаточно Gram")
+        raise MarketError(404, "ACCOUNT_NOT_FOUND", "Аккаунт не найден")
+    balance = await _grams_balance(db, telegram_id)
+    await db.execute(
+        "INSERT INTO economy_transactions(telegram_id,asset,amount,balance_after,reason,"
+        "admin_id,created_at) VALUES(?,'grams',?,?,?,NULL,?)",
         (int(telegram_id), int(delta), balance, reason, int(now)),
     )
     return balance
@@ -564,22 +653,30 @@ async def _transfer_ownership(
 
 async def _record_transfer(
     db: Any, collectible_id: int, seller_id: int | None, buyer_id: int,
-    price: int, commission: int, kind: str, now: int,
+    price: int, commission: int, kind: str, now: int, currency: str = "stars",
 ) -> None:
+    asset = "grams" if str(currency).lower() == "grams" else "stars"
     await db.execute(
         "INSERT INTO collectible_transfers(collectible_id,from_telegram_id,to_telegram_id,"
-        "price_stars,commission_stars,kind,created_at) VALUES(?,?,?,?,?,?,?)",
-        (int(collectible_id), seller_id, int(buyer_id), int(price), int(commission), kind, int(now)),
+        "price_stars,commission_stars,price_grams,commission_grams,currency,kind,created_at) "
+        "VALUES(?,?,?,?,?,?,?,?,?,?)",
+        (int(collectible_id), seller_id, int(buyer_id),
+         int(price) if asset == "stars" else 0,
+         int(commission) if asset == "stars" else 0,
+         int(price) if asset == "grams" else 0,
+         int(commission) if asset == "grams" else 0,
+         asset, kind, int(now)),
     )
 
 
 async def card(db: Any, name: str, viewer_id: int | None = None,
-               now: int | None = None, share_url: str = "") -> dict[str, Any]:
+               now: int | None = None, share_url: str = "",
+               notify_sale: Any = None) -> dict[str, Any]:
     """Карточка имени: владелец, цена, аукцион, заморозка и история."""
     _activate(db)
     stamp = int(now if now is not None else time.time())
     key = canonical_name(name)
-    await settle_due(db, stamp)
+    await settle_due(db, stamp, notify_sale)
     row = await _ensure_collectible(db, key, stamp)
     collectible_id = int(row["id"])
     owner_id = row["owner_telegram_id"]
@@ -609,8 +706,15 @@ async def card(db: Any, name: str, viewer_id: int | None = None,
         "free": owner_id is None and not reserved,
         "reserved": reserved,
         "system_price_stars": system_price(key),
-        "price_stars": int(listing["price_stars"]) if listing is not None else (
-            0 if owner_id is not None or reserved else system_price(key)),
+        "price_stars": (int(listing["price_stars"] or 0)
+                        if listing is not None and str(listing["currency"]) == "stars"
+                        else (0 if owner_id is not None or reserved else system_price(key))),
+        "price_grams": (int(listing["price_grams"] or 0)
+                        if listing is not None and str(listing["currency"]) == "grams" else 0),
+        "currency": str(listing["currency"]) if listing is not None else "",
+        "price": (int(listing["price_grams"] or 0) if listing is not None
+                  and str(listing["currency"]) == "grams" else
+                  (int(listing["price_stars"] or 0) if listing is not None else 0)),
         "for_sale": listing is not None,
         "listing_id": int(listing["id"]) if listing is not None else 0,
         "auction": None,
@@ -651,19 +755,19 @@ async def card(db: Any, name: str, viewer_id: int | None = None,
 
 async def search(
     db: Any, viewer_id: int, *, section: str = "market", query: str = "",
-    limit: int = 50, now: int | None = None,
+    limit: int = 50, now: int | None = None, notify_sale: Any = None,
 ) -> dict[str, Any]:
     """Списки рынка: что продаётся, что на аукционе, что уже моё."""
     _activate(db)
     stamp = int(now if now is not None else time.time())
-    await settle_due(db, stamp)
+    await settle_due(db, stamp, notify_sale)
     await seed_from_accounts(db, stamp)
     prefix = str(query or "").strip().lstrip("@").lower()
     items: list[dict[str, Any]] = []
     if section in ("market", "for_sale"):
         sql = (
-            "SELECT c.id,c.name,c.owner_telegram_id,l.price_stars,l.id AS listing_id,"
-            " a.telegram_id AS account_id,a.display_name,a.username,a.avatar_media_id"
+            "SELECT c.id,c.name,c.owner_telegram_id,l.price_stars,l.price_grams,l.currency,"
+            "l.id AS listing_id,a.telegram_id AS account_id,a.display_name,a.username,a.avatar_media_id"
             " FROM collectible_listings l"
             " JOIN collectibles c ON c.id=l.collectible_id"
             " LEFT JOIN accounts a ON a.telegram_id=c.owner_telegram_id"
@@ -673,7 +777,7 @@ async def search(
         if prefix:
             sql += " AND c.name LIKE ?"
             params.append(prefix + "%")
-        sql += " ORDER BY l.price_stars, c.name LIMIT ?"
+        sql += " ORDER BY l.currency,CASE WHEN l.currency='stars' THEN l.price_stars ELSE l.price_grams END,c.name LIMIT ?"
         params.append(int(limit))
         cur = await db.execute(sql, params)
         for row in await cur.fetchall():
@@ -684,6 +788,10 @@ async def search(
                 "name": str(row["name"]),
                 "kind": "sale",
                 "price_stars": int(row["price_stars"] or 0),
+                "price_grams": int(row["price_grams"] or 0),
+                "currency": str(row["currency"] or "stars"),
+                "price": int(row["price_grams"] or 0) if str(row["currency"] or "stars") == "grams"
+                         else int(row["price_stars"] or 0),
                 "listing_id": int(row["listing_id"] or 0),
                 "owner": await _public_account(db, row["owner_telegram_id"]),
                 "mine": bool(owner_id and owner_id == int(viewer_id)),
@@ -727,7 +835,7 @@ async def search(
     if section == "mine":
         sql = (
             "SELECT c.id,c.name,c.acquired_at,c.transfer_frozen_until,"
-            " l.price_stars,l.id AS listing_id,"
+            " l.price_stars,l.price_grams,l.currency,l.id AS listing_id,"
             " a2.id AS auction_id,a2.current_bid_stars,a2.min_bid_stars,a2.ends_at"
             " FROM collectibles c"
             " LEFT JOIN collectible_listings l ON l.collectible_id=c.id AND l.status='active'"
@@ -763,6 +871,11 @@ async def search(
                 "name": name,
                 "kind": "auction" if auction else ("sale" if row["listing_id"] else "owned"),
                 "price_stars": int(row["price_stars"] or 0) if row["listing_id"] else 0,
+                "price_grams": int(row["price_grams"] or 0) if row["listing_id"] else 0,
+                "currency": str(row["currency"] or "stars") if row["listing_id"] else "",
+                "price": (int(row["price_grams"] or 0) if row["listing_id"]
+                          and str(row["currency"] or "stars") == "grams" else
+                          (int(row["price_stars"] or 0) if row["listing_id"] else 0)),
                 "listing_id": int(row["listing_id"] or 0),
                 "owner": await _public_account(db, viewer_id),
                 "mine": True,
@@ -879,11 +992,17 @@ async def _restore_entity_username(
 
 
 async def put_listing(db: Any, telegram_id: int, name: str, price: int,
-                      now: int | None = None) -> dict[str, Any]:
+                      now: int | None = None, notify_sale: Any = None,
+                      currency: str = "stars") -> dict[str, Any]:
     """Выставляет имя на продажу. Продавец — только текущий владелец из базы."""
     _activate(db)
     stamp = int(now if now is not None else time.time())
     key = canonical_name(name)
+    asset = str(currency or "stars").strip().lower()
+    if asset not in {"stars", "grams", "gram"}:
+        raise MarketError(400, "CURRENCY_INVALID", "Поддерживаются только Stars и Gram")
+    if asset == "gram":
+        asset = "grams"
     if int(price) <= 0:
         raise MarketError(400, "PRICE_INVALID", "Цена должна быть больше нуля")
     if int(price) > 10_000_000:
@@ -899,23 +1018,26 @@ async def put_listing(db: Any, telegram_id: int, name: str, price: int,
     if await _active_auction(db, int(row["id"])) is not None:
         raise MarketError(409, "AUCTION_ACTIVE", "Сначала закончите аукцион")
     listing = await _active_listing(db, int(row["id"]))
+    stars_price = int(price) if asset == "stars" else 0
+    grams_price = int(price) if asset == "grams" else 0
     if listing is not None:
         await db.execute(
-            "UPDATE collectible_listings SET price_stars=? WHERE id=?",
-            (int(price), int(listing["id"])),
+            "UPDATE collectible_listings SET price_stars=?,price_grams=?,currency=? WHERE id=?",
+            (stars_price, grams_price, asset, int(listing["id"])),
         )
     else:
         await db.execute(
             "INSERT INTO collectible_listings(collectible_id,seller_telegram_id,price_stars,"
-            "status,created_at) VALUES(?,?,?,'active',?)",
-            (int(row["id"]), int(telegram_id), int(price), stamp),
+            "price_grams,currency,status,created_at) VALUES(?,?,?,?,?,'active',?)",
+            (int(row["id"]), int(telegram_id), stars_price, grams_price, asset, stamp),
         )
     await _detach_entity_username(db, int(row["id"]), key, int(telegram_id), stamp)
     await db.commit()
-    return await card(db, key, telegram_id, stamp)
+    return await card(db, key, telegram_id, stamp, notify_sale=notify_sale)
 
 
-async def unlist(db: Any, telegram_id: int, name: str, now: int | None = None) -> dict[str, Any]:
+async def unlist(db: Any, telegram_id: int, name: str, now: int | None = None,
+                 notify_sale: Any = None) -> dict[str, Any]:
     _activate(db)
     stamp = int(now if now is not None else time.time())
     key = canonical_name(name)
@@ -930,7 +1052,7 @@ async def unlist(db: Any, telegram_id: int, name: str, now: int | None = None) -
         raise MarketError(404, "LISTING_NOT_FOUND", "Имя не выставлено на продажу")
     await _restore_entity_username(db, int(row["id"]), key, int(telegram_id), stamp)
     await db.commit()
-    return await card(db, key, telegram_id, stamp)
+    return await card(db, key, telegram_id, stamp, notify_sale=notify_sale)
 
 
 async def buy(
@@ -941,7 +1063,7 @@ async def buy(
     _activate(db)
     stamp = int(now if now is not None else time.time())
     key = canonical_name(name)
-    await settle_due(db, stamp)
+    await settle_due(db, stamp, notify_sale)
     row = await _ensure_collectible(db, key, stamp)
     listing = await _active_listing(db, int(row["id"]))
     if listing is None:
@@ -949,32 +1071,39 @@ async def buy(
     seller_id = int(listing["seller_telegram_id"])
     if seller_id == int(telegram_id):
         raise MarketError(409, "OWN_LISTING", "Это ваше имя")
-    price = int(listing["price_stars"])
+    currency = str(listing["currency"] or "stars")
+    price = int(listing["price_grams"] or 0) if currency == "grams" else int(listing["price_stars"] or 0)
     commission = _commission(price)
     payout = price - commission
-    await _add_stars(db, int(telegram_id), -price,
-                     f"username_purchase:{int(listing['id'])}", stamp)
-    await _add_stars(db, seller_id, payout,
-                     f"username_sale:{int(listing['id'])}", stamp)
+    add_balance = _add_grams if currency == "grams" else _add_stars
+    await add_balance(db, int(telegram_id), -price,
+                      f"username_purchase:{int(listing['id'])}", stamp)
+    await add_balance(db, seller_id, payout,
+                      f"username_sale:{int(listing['id'])}", stamp)
     await _record_transfer(db, int(row["id"]), seller_id, int(telegram_id),
-                           price, commission, "sale", stamp)
+                           price, commission, "sale", stamp, currency=currency)
     await db.execute(
         "UPDATE collectible_listings SET status='sold',sold_at=? WHERE id=? AND status='active'",
         (stamp, int(listing["id"])),
     )
     await _transfer_ownership(db, key, seller_id, int(telegram_id), stamp, source="sale")
-    result = await card(db, key, telegram_id, stamp)
+    result = await card(db, key, telegram_id, stamp, notify_sale=notify_sale)
     result["seller_id"] = seller_id
     result["buyer_id"] = int(telegram_id)
-    result["sale_price_stars"] = price
-    if notify_sale is not None:
-        await notify_sale(db, seller_id, key, price, int(telegram_id), stamp)
+    result["sale_price_stars"] = price if currency == "stars" else 0
+    result["payout_stars"] = payout if currency == "stars" else 0
+    result["sale_price_grams"] = price if currency == "grams" else 0
+    result["payout_grams"] = payout if currency == "grams" else 0
+    result["sale_currency"] = currency
+    if notify_sale is not None and currency == "stars":
+        await notify_sale(db, seller_id, key, payout, int(telegram_id), stamp)
     if commit:
         await db.commit()
     return result
 
 
-async def claim(db: Any, telegram_id: int, name: str, now: int | None = None) -> dict[str, Any]:
+async def claim(db: Any, telegram_id: int, name: str, now: int | None = None,
+                notify_sale: Any = None) -> dict[str, Any]:
     """Покупает свободное имя у сервиса по цене из таблицы длин."""
     _activate(db)
     stamp = int(now if now is not None else time.time())
@@ -1003,11 +1132,12 @@ async def claim(db: Any, telegram_id: int, name: str, now: int | None = None) ->
                            price, "claim", stamp)
     await _transfer_ownership(db, key, None, int(telegram_id), stamp, source="claim")
     await db.commit()
-    return await card(db, key, telegram_id, stamp)
+    return await card(db, key, telegram_id, stamp, notify_sale=notify_sale)
 
 
 async def start_auction(db: Any, telegram_id: int, name: str, min_bid: int,
-                        hours: int, now: int | None = None) -> dict[str, Any]:
+                        hours: int, now: int | None = None,
+                        notify_sale: Any = None) -> dict[str, Any]:
     _activate(db)
     stamp = int(now if now is not None else time.time())
     key = canonical_name(name)
@@ -1031,11 +1161,11 @@ async def start_auction(db: Any, telegram_id: int, name: str, min_bid: int,
         (int(row["id"]), int(telegram_id), int(min_bid), stamp, ends_at),
     )
     await db.commit()
-    return await card(db, key, telegram_id, stamp)
+    return await card(db, key, telegram_id, stamp, notify_sale=notify_sale)
 
 
 async def cancel_auction(db: Any, telegram_id: int, name: str,
-                         now: int | None = None) -> dict[str, Any]:
+                         now: int | None = None, notify_sale: Any = None) -> dict[str, Any]:
     _activate(db)
     stamp = int(now if now is not None else time.time())
     key = canonical_name(name)
@@ -1055,7 +1185,7 @@ async def cancel_auction(db: Any, telegram_id: int, name: str,
         (stamp, int(auction["id"])),
     )
     await db.commit()
-    return await card(db, key, telegram_id, stamp)
+    return await card(db, key, telegram_id, stamp, notify_sale=notify_sale)
 
 
 async def bids(db: Any, name: str, limit: int = 30) -> list[dict[str, Any]]:
@@ -1081,12 +1211,12 @@ async def bids(db: Any, name: str, limit: int = 30) -> list[dict[str, Any]]:
 
 
 async def place_bid(db: Any, telegram_id: int, name: str, amount: int,
-                    now: int | None = None) -> dict[str, Any]:
+                    now: int | None = None, notify_sale: Any = None) -> dict[str, Any]:
     """Ставка холдит звёзды до конца аукциона; перебитая ставка возвращается."""
     _activate(db)
     stamp = int(now if now is not None else time.time())
     key = canonical_name(name)
-    await settle_due(db, stamp)
+    await settle_due(db, stamp, notify_sale)
     row = await _ensure_collectible(db, key, stamp)
     auction = await _active_auction(db, int(row["id"]))
     if auction is None:
@@ -1132,10 +1262,13 @@ async def place_bid(db: Any, telegram_id: int, name: str, amount: int,
     }
 
 
-async def settle_due(db: Any, now: int | None = None) -> list[dict[str, Any]]:
+async def settle_due(db: Any, now: int | None = None,
+                     notify_sale: Any = None) -> list[dict[str, Any]]:
     """Закрывает истёкшие аукционы. Вызывается и воркером, и лениво — при чтении.
 
     Расчёт живёт в базе, а не в памяти: рестарт процесса ничего не теряет.
+    If supplied, notify_sale records the seller's post-commission Stars transfer
+    in the same transaction as the auction settlement.
     """
     _activate(db)
     stamp = int(now if now is not None else time.time())
@@ -1188,6 +1321,8 @@ async def settle_due(db: Any, now: int | None = None) -> list[dict[str, Any]]:
             "final_price_stars=?,settled_at=? WHERE id=? AND status='active'",
             (int(bidder), bid, stamp, auction_id),
         )
+        if notify_sale is not None:
+            await notify_sale(db, seller_id, name, payout, int(bidder), stamp)
         sold.append({
             "auction_id": auction_id,
             "name": name,
@@ -1195,6 +1330,7 @@ async def settle_due(db: Any, now: int | None = None) -> list[dict[str, Any]]:
             "seller_telegram_id": seller_id,
             "price_stars": bid,
             "commission_stars": commission,
+            "payout_stars": payout,
         })
     return sold
 
@@ -1524,6 +1660,26 @@ def register_routes(
 ) -> None:
     """Регистрирует REST-методы рынка на уже собранном роутере."""
 
+    def sale_notifier():
+        state = {"push_queued": False}
+
+        async def notify(db: Any, seller_id: int, item_name: str, stars: int,
+                         buyer_id: int, stamp: int) -> bool:
+            if sale_notification is None:
+                return False
+            queued = bool(await sale_notification(
+                db, int(seller_id), "username", str(item_name), int(stars),
+                int(buyer_id), int(stamp),
+            ))
+            state["push_queued"] = state["push_queued"] or queued
+            return queued
+
+        return notify, state
+
+    def wake_sale_push(state: dict[str, bool]) -> None:
+        if state.get("push_queued") and notification_wakeup is not None:
+            notification_wakeup.set()
+
     async def viewer(authorization: str | None) -> dict[str, Any]:
         return await current_user(authorization)
 
@@ -1536,15 +1692,20 @@ def register_routes(
         user = await viewer(authorization)
         if section not in ("market", "for_sale", "auctions", "mine"):
             raise HTTPException(400, detail={"code": "SECTION_INVALID", "message": "Неизвестный раздел"})
+        notify_sale, notification_state = sale_notifier()
         async with aiosqlite.connect(db_path()) as db:
             await db.execute("BEGIN IMMEDIATE")
             try:
-                result = await search(db, int(user["telegram_id"]), section=section, query=query)
+                result = await search(
+                    db, int(user["telegram_id"]), section=section, query=query,
+                    notify_sale=notify_sale,
+                )
             except MarketError as error:
                 await db.rollback()
                 _raise(error)
                 raise
             await db.commit()
+        wake_sale_push(notification_state)
         return result
 
     @router.get("/api/me/collectibles")
@@ -1556,15 +1717,19 @@ def register_routes(
         name: str, authorization: str | None = Header(default=None)
     ) -> dict[str, Any]:
         user = await viewer(authorization)
+        notify_sale, notification_state = sale_notifier()
         async with aiosqlite.connect(db_path()) as db:
             await db.execute("BEGIN IMMEDIATE")
             try:
-                result = await card(db, name, int(user["telegram_id"]))
+                result = await card(
+                    db, name, int(user["telegram_id"]), notify_sale=notify_sale,
+                )
             except MarketError as error:
                 await db.rollback()
                 _raise(error)
                 raise
             await db.commit()
+        wake_sale_push(notification_state)
         return result
 
     @router.get("/api/collectibles/{name}/bids")
@@ -1586,18 +1751,27 @@ def register_routes(
         authorization: str | None = Header(default=None),
     ) -> dict[str, Any]:
         user = await viewer(authorization)
-        price = payload.get("price_stars")
+        currency = str(payload.get("currency") or "stars").strip().lower()
+        if currency == "gram":
+            currency = "grams"
+        price_key = "price_grams" if currency == "grams" else "price_stars"
+        price = payload.get("price", payload.get(price_key))
         if type(price) is not int:
-            raise HTTPException(400, detail={"code": "PRICE_INVALID", "message": "Цена в звёздах — целое число"})
+            raise HTTPException(400, detail={"code": "PRICE_INVALID", "message": "Цена должна быть целым числом"})
+        notify_sale, notification_state = sale_notifier()
         async with aiosqlite.connect(db_path()) as db:
             await db.execute("BEGIN IMMEDIATE")
             try:
-                result = await put_listing(db, int(user["telegram_id"]), name, price)
+                result = await put_listing(
+                    db, int(user["telegram_id"]), name, price, notify_sale=notify_sale,
+                    currency=currency,
+                )
             except MarketError as error:
                 await db.rollback()
                 _raise(error)
                 raise
             await db.commit()
+        wake_sale_push(notification_state)
         return result
 
     @router.delete("/api/collectibles/{name}/listing")
@@ -1605,15 +1779,19 @@ def register_routes(
         name: str, authorization: str | None = Header(default=None)
     ) -> dict[str, Any]:
         user = await viewer(authorization)
+        notify_sale, notification_state = sale_notifier()
         async with aiosqlite.connect(db_path()) as db:
             await db.execute("BEGIN IMMEDIATE")
             try:
-                result = await unlist(db, int(user["telegram_id"]), name)
+                result = await unlist(
+                    db, int(user["telegram_id"]), name, notify_sale=notify_sale,
+                )
             except MarketError as error:
                 await db.rollback()
                 _raise(error)
                 raise
             await db.commit()
+        wake_sale_push(notification_state)
         return result
 
     async def _idempotent_mutation(
@@ -1651,30 +1829,19 @@ def register_routes(
     ) -> dict[str, Any]:
         user = await viewer(authorization)
         uid = int(user["telegram_id"])
-        push_queued = False
+        notify_sale, notification_state = sale_notifier()
 
         async def purchase_action(db: Any, telegram_id: int, now: int) -> dict[str, Any]:
-            nonlocal push_queued
-
-            async def notify(db_connection: Any, seller_id: int, item_name: str,
-                             price: int, buyer_id: int, stamp: int) -> None:
-                nonlocal push_queued
-                if sale_notification is not None:
-                    push_queued = bool(await sale_notification(
-                        db_connection, seller_id, "username", item_name, price, buyer_id, stamp
-                    ))
-
             return await buy(
                 db, telegram_id, name, now, commit=False,
-                notify_sale=notify if sale_notification is not None else None,
+                notify_sale=notify_sale,
             )
 
         result = await _idempotent_mutation(
             "collectible_buy", f"/api/collectibles/{name}/buy", payload or {},
             idempotency_key, purchase_action, uid,
         )
-        if push_queued and notification_wakeup is not None:
-            notification_wakeup.set()
+        wake_sale_push(notification_state)
         return result
 
     @router.post("/api/collectibles/{name}/claim")
@@ -1686,11 +1853,16 @@ def register_routes(
     ) -> dict[str, Any]:
         user = await viewer(authorization)
         uid = int(user["telegram_id"])
-        return await _idempotent_mutation(
+        notify_sale, notification_state = sale_notifier()
+        result = await _idempotent_mutation(
             "collectible_claim", f"/api/collectibles/{name}/claim", payload or {},
             idempotency_key,
-            lambda db, telegram_id, now: claim(db, telegram_id, name, now), uid,
+            lambda db, telegram_id, now: claim(
+                db, telegram_id, name, now, notify_sale=notify_sale,
+            ), uid,
         )
+        wake_sale_push(notification_state)
+        return result
 
     @router.post("/api/collectibles/{name}/auction")
     async def create_auction(
@@ -1704,27 +1876,34 @@ def register_routes(
         hours = payload.get("duration_hours", 24)
         if type(min_bid) is not int or type(hours) is not int:
             raise HTTPException(400, detail={"code": "PRICE_INVALID", "message": "Ставка и срок — целые числа"})
-        return await _idempotent_mutation(
+        notify_sale, notification_state = sale_notifier()
+        result = await _idempotent_mutation(
             "collectible_auction_start", f"/api/collectibles/{name}/auction", payload,
             idempotency_key,
             lambda db, telegram_id, now: start_auction(
-                db, telegram_id, name, min_bid, hours, now), uid,
+                db, telegram_id, name, min_bid, hours, now, notify_sale=notify_sale), uid,
         )
+        wake_sale_push(notification_state)
+        return result
 
     @router.delete("/api/collectibles/{name}/auction")
     async def drop_auction(
         name: str, authorization: str | None = Header(default=None)
     ) -> dict[str, Any]:
         user = await viewer(authorization)
+        notify_sale, notification_state = sale_notifier()
         async with aiosqlite.connect(db_path()) as db:
             await db.execute("BEGIN IMMEDIATE")
             try:
-                result = await cancel_auction(db, int(user["telegram_id"]), name)
+                result = await cancel_auction(
+                    db, int(user["telegram_id"]), name, notify_sale=notify_sale,
+                )
             except MarketError as error:
                 await db.rollback()
                 _raise(error)
                 raise
             await db.commit()
+        wake_sale_push(notification_state)
         return result
 
     @router.post("/api/collectibles/{name}/bid")
@@ -1738,10 +1917,15 @@ def register_routes(
         amount = payload.get("amount_stars")
         if type(amount) is not int:
             raise HTTPException(400, detail={"code": "PRICE_INVALID", "message": "Ставка — целое число звёзд"})
-        return await _idempotent_mutation(
+        notify_sale, notification_state = sale_notifier()
+        result = await _idempotent_mutation(
             "collectible_bid", f"/api/collectibles/{name}/bid", payload, idempotency_key,
-            lambda db, telegram_id, now: place_bid(db, telegram_id, name, amount, now), uid,
+            lambda db, telegram_id, now: place_bid(
+                db, telegram_id, name, amount, now, notify_sale=notify_sale,
+            ), uid,
         )
+        wake_sale_push(notification_state)
+        return result
 
     @router.get("/api/me/ton")
     async def read_ton(authorization: str | None = Header(default=None)) -> dict[str, Any]:

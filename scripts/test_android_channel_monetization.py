@@ -88,6 +88,22 @@ class ChannelMonetizationChecks(unittest.TestCase):
         self.assertIn("channel_chat_stars_id(channel_id)", api)
         self.assertIn('f"channel_paid_reaction:{channel_id}:*"', api)
 
+    # ---------------------------------------------------------------- Stars history and group balances
+
+    def test_null_history_cursor_is_not_the_string_null(self):
+        economy = self.source("tgnet/WaysGramEconomy.java")
+        self.assertIn('history.isNull("next_offset")', economy)
+        self.assertIn('!"null".equalsIgnoreCase(next)', economy)
+        self.assertIn('status.next_offset = next;', economy)
+
+    def test_group_stars_balance_is_shown_without_a_fiat_quote(self):
+        layout = self.source("ui/ChannelMonetizationLayout.java")
+        setter = layout.split("private void setStarsBalance(", 1)[1].split("private Runnable setStarsBalanceButtonText", 1)[0]
+        self.assertIn("if (stars_rate > 0)", setter)
+        self.assertIn('starsBalanceSubtitle.setText("");', setter)
+        self.assertNotIn("if (stars_rate == 0) {\n                return;", layout)
+        self.assertIn("setStarsBalance(availableValue.crypto_amount2, balances.next_withdrawal_at);", layout)
+
     # ---------------------------------------------------------------- платные сообщения в канал
 
     def test_channel_paid_messages_price_round_trip(self):

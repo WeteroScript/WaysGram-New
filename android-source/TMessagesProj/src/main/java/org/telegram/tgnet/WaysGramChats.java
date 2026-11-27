@@ -987,6 +987,13 @@ public class WaysGramChats {
             channel.profile_color = peerColor(profileColor, profileEmoji);
             channel.flags2 |= TLObject.FLAG_8;
         }
+        long emojiStatusId = c.optLong("emoji_status_id");
+        if (emojiStatusId > 0) {
+            TLRPC.TL_emojiStatus emojiStatus = new TLRPC.TL_emojiStatus();
+            emojiStatus.document_id = emojiStatusId;
+            channel.emoji_status = emojiStatus;
+            channel.flags2 |= TLObject.FLAG_9;
+        }
     }
 
     /** Геолокация чата: TL_channelLocation из полей location_* ответа сервера. */
@@ -1082,6 +1089,25 @@ public class WaysGramChats {
         return new TLRPC.TL_updates();
     }
 
+    public static TLRPC.TL_boolTrue setGroupStickerSet(int account, long chatId,
+                                                        TLRPC.InputStickerSet stickerSet,
+                                                        boolean emojiSet) throws WaysGramApi.ApiException {
+        long id = 0;
+        long accessHash = 0;
+        if (stickerSet instanceof TLRPC.TL_inputStickerSetID) {
+            id = ((TLRPC.TL_inputStickerSetID) stickerSet).id;
+            accessHash = ((TLRPC.TL_inputStickerSetID) stickerSet).access_hash;
+            if (id <= 0) throw new WaysGramApi.ApiException(400, "STICKERSET_INVALID");
+        } else if (!(stickerSet instanceof TLRPC.TL_inputStickerSetEmpty)) {
+            throw new WaysGramApi.ApiException(400, "STICKERSET_INVALID");
+        }
+        JSONObject fields = emojiSet
+                ? settings("emoji_set_id", id, "emoji_set_access_hash", accessHash)
+                : settings("sticker_set_id", id, "sticker_set_access_hash", accessHash);
+        updateGroupSettings(account, chatId, fields);
+        return new TLRPC.TL_boolTrue();
+    }
+
     /** Присутствие в группе: сколько участников заходило за последние пять минут. */
     static TLRPC.TL_chatOnlines onlines(int account, long chatId) throws WaysGramApi.ApiException {
         JSONObject data = WaysGramApi.get(account, "/api/groups/" + chatId + "/onlines");
@@ -1155,7 +1181,10 @@ public class WaysGramChats {
             JSONObject group = groups.optJSONObject(i);
             if (group == null) continue;
             String role = group.optString("role", "member");
-            if (!"owner".equals(role) && !"admin".equals(role)) continue;
+            boolean canManage = "owner".equals(role)
+                    || "admin".equals(role) && (group.optInt("admin_rights") & 1) != 0
+                    || "member".equals(role) && (group.optInt("default_send_restrictions") & 32768) == 0;
+            if (!canManage) continue;
             out.chats.add(toMegagroup(account, group, selfId));
         }
         out.count = out.chats.size();
@@ -1182,14 +1211,14 @@ public class WaysGramChats {
     // ---------------------------------------------------------------- group send restrictions
 
     /*
-     * Маска «что запрещено участникам». Биты 1..32 — исходные способы отправки, 64..1024
-     * добавлены позже, потому что экран «Права участников» показывает больше переключателей,
-     * чем было битов: реакции, опросы, ссылки, голосовые и кружочки раньше не сохранялись
-     * вовсе (переключатель возвращался в исходное положение), а музыка и голосовые делили
-     * один бит. Значения старых масок трактуются как прежде: отдельные биты лишь уточняют.
+     * Маска запрещённых прав участников. Первые 11 бит описывают отправку; старые
+     * значения расширяются без потери совместимости. Старшие биты сохраняют остальные
+     * переключатели экрана «Права участников» (приглашения, закрепление, ранги, темы,
+     * связанные чаты), которые иначе возвращались в исходное состояние.
      *
      * 1 текст · 2 фото · 4 видео · 8 музыка · 16 стикеры/гифки/игры · 32 файлы ·
-     * 64 голосовые · 128 кружочки · 256 ссылки · 512 опросы · 1024 реакции
+     * 64 голосовые · 128 кружочки · 256 ссылки · 512 опросы · 1024 реакции ·
+     * 2048 приглашения · 4096 закрепления · 8192 ранги · 16384 темы · 32768 связанные чаты
      */
 
     /** WaysGram stores what members may send as a bitmask; the UI works with denied flags. */
@@ -1216,6 +1245,11 @@ public class WaysGramChats {
         rights.embed_links = (mask & 256) != 0;
         rights.send_polls = (mask & 512) != 0;
         rights.send_reactions = (mask & 1024) != 0;
+        rights.invite_users = (mask & 2048) != 0;
+        rights.pin_messages = (mask & 4096) != 0;
+        rights.edit_rank = (mask & 8192) != 0;
+        rights.manage_topics = (mask & 16384) != 0;
+        rights.manage_linked_peers = (mask & 32768) != 0;
         /*
          * Флаги берём в проводном виде — по ним сравниваются права, — но решения интерфейса
          * («можно ли отправлять») остаются по исходной маске: TLRPC выводит send_messages и
@@ -1242,6 +1276,11 @@ public class WaysGramChats {
         if (rights.embed_links) mask |= 256;
         if (rights.send_polls) mask |= 512;
         if (rights.send_reactions) mask |= 1024;
+        if (rights.invite_users) mask |= 2048;
+        if (rights.pin_messages) mask |= 4096;
+        if (rights.edit_rank) mask |= 8192;
+        if (rights.manage_topics) mask |= 16384;
+        if (rights.manage_linked_peers) mask |= 32768;
         return mask;
     }
 
@@ -1777,6 +1816,19 @@ public class WaysGramChats {
         return result;
     }
 
+    private static TLRPC.StickerSet groupStickerSet(JSONObject group, String prefix, boolean emojis) {
+        long id = group.optLong(prefix + "_id");
+        if (id <= 0) return null;
+        TLRPC.TL_stickerSet set = new TLRPC.TL_stickerSet();
+        set.id = id;
+        set.access_hash = group.optLong(prefix + "_access_hash");
+        set.title = group.optString(prefix + "_title", emojis ? "Group emoji pack" : "Group sticker pack");
+        set.short_name = group.optString(prefix + "_short_name", "");
+        set.emojis = emojis;
+        if (emojis) set.flags |= TLObject.FLAG_7;
+        return set;
+    }
+
     /** A group as a megagroup chat: the native supergroup screens read this payload. */
     public static TLRPC.TL_messages_chatFull fullChat(int account, long chatId, long selfId) throws WaysGramApi.ApiException {
         JSONObject group = WaysGramApi.get(account, "/api/groups/" + chatId);
@@ -1825,6 +1877,10 @@ public class WaysGramChats {
         boolean canViewParticipants = admin || !membersHidden;
         full.can_view_participants = canViewParticipants;
         if (canViewParticipants) full.flags |= TLObject.FLAG_3;
+        full.can_set_username = ownerId == selfId;
+        if (full.can_set_username) full.flags |= TLObject.FLAG_6;
+        full.can_set_stickers = admin;
+        if (full.can_set_stickers) full.flags |= TLObject.FLAG_7;
         full.participants_count = Math.max(1, group.optInt("member_count", 1));
         if (adminsCount > 0) {
             full.admins_count = adminsCount;
@@ -1921,10 +1977,24 @@ public class WaysGramChats {
             }
         }
         full.chat_photo = WaysGramMapper.photo(group.optString("avatar_media_id", ""));
+        full.stickerset = groupStickerSet(group, "sticker_set", false);
+        if (full.stickerset != null) full.flags |= TLObject.FLAG_8;
+        full.emojiset = groupStickerSet(group, "emoji_set", true);
+        if (full.emojiset != null) full.flags2 |= TLObject.FLAG_10;
+        long linkedChannelId = group.optLong("linked_channel_id");
+        if (linkedChannelId > 0) {
+            full.linked_chat_id = channelTg(linkedChannelId);
+            full.flags |= TLObject.FLAG_14;
+        }
 
         TLRPC.TL_messages_chatFull out = new TLRPC.TL_messages_chatFull();
         out.full_chat = full;
         out.chats.add(toMegagroup(account, group, selfId));
+        JSONObject linkedChannel = group.optJSONObject("linked_channel");
+        if (linkedChannelId > 0 && linkedChannel != null) {
+            out.chats.add(toChannel(account, linkedChannel, selfId,
+                    joinedChannels(account).contains(linkedChannelId)));
+        }
         out.users.addAll(users.users);
         return out;
     }

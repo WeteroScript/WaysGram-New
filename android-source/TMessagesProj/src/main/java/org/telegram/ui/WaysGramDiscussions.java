@@ -152,6 +152,151 @@ final class WaysGramDiscussions {
                 org.telegram.messenger.NotificationCenter.dialogsNeedReload);
     }
 
+    /** Link a channel from the group's own settings, including the currently-unlinked state. */
+    static void groupSettings(BaseFragment fragment, int account, long groupId) {
+        String token = WaysGramApi.getToken(account);
+        if (groupId <= 0 || !active(fragment, account, token)) return;
+        request(fragment, account, token,
+                () -> WaysGramApi.request("GET", "/api/groups/" + groupId, null, token, 10000),
+                group -> {
+                    long linkedId = group.optLong("linked_channel_id");
+                    JSONObject linked = group.optJSONObject("linked_channel");
+                    String title = linked == null ? "" : linked.optString("title", "");
+                    CharSequence message = linkedId > 0
+                            ? LocaleController.formatString(R.string.WaysGramLinkedChannelLinked, title)
+                            : LocaleController.getString(R.string.WaysGramLinkedChannelNotLinked);
+                    AlertDialog.Builder builder = dialog(fragment, R.string.LinkedChannel)
+                            .setMessage(message)
+                            .setPositiveButton(LocaleController.getString(R.string.WaysGramLinkedChannelChoose),
+                                    (d, w) -> chooseLinkedChannel(fragment, account, token, groupId, linkedId));
+                    if (linkedId > 0) {
+                        builder.setNeutralButton(LocaleController.getString(R.string.WaysGramDiscussionUnlink),
+                                (d, w) -> fragment.showDialog(dialog(fragment, R.string.LinkedChannel)
+                                        .setMessage(LocaleController.getString(R.string.WaysGramLinkedChannelUnlinkConfirm))
+                                        .setNegativeButton(LocaleController.getString(R.string.Cancel), null)
+                                        .setPositiveButton(LocaleController.getString(R.string.WaysGramDiscussionUnlink),
+                                                (confirm, button) -> saveGroupChannelLink(fragment, account, token,
+                                                        groupId, linkedId, 0))
+                                        .create()));
+                    }
+                    fragment.showDialog(builder.setNegativeButton(LocaleController.getString(R.string.Close), null).create());
+                }, error -> notice(fragment, R.string.LinkedChannel, R.string.WaysGramDiscussionError));
+    }
+
+    private static void chooseLinkedChannel(BaseFragment fragment, int account, String token,
+                                            long groupId, long linkedId) {
+        request(fragment, account, token,
+                () -> WaysGramApi.request("GET", "/api/channels", null, token, 10000), data -> {
+                    JSONArray rows = data.optJSONArray("channels");
+                    long selfId = org.telegram.messenger.UserConfig.getInstance(account).getClientUserId();
+                    ArrayList<String> names = new ArrayList<>();
+                    ArrayList<Long> ids = new ArrayList<>();
+                    for (int i = 0; rows != null && i < rows.length(); i++) {
+                        JSONObject channel = rows.optJSONObject(i);
+                        if (channel == null || channel.optLong("owner_telegram_id") != selfId
+                                || channel.optLong("id") <= 0) continue;
+                        long id = channel.optLong("id");
+                        String title = channel.optString("title", "");
+                        String username = channel.optString("username", "");
+                        names.add(!TextUtils.isEmpty(username) ? title + "  @" + username : title);
+                        ids.add(id);
+                    }
+                    if (ids.isEmpty()) {
+                        fragment.showDialog(dialog(fragment, R.string.LinkedChannel)
+                                .setMessage(LocaleController.getString(R.string.WaysGramLinkedChannelNoChannels))
+                                .setPositiveButton(LocaleController.getString(R.string.OK), null).create());
+                        return;
+                    }
+                    fragment.showDialog(dialog(fragment, R.string.WaysGramLinkedChannelChoose)
+                            .setItems(names.toArray(new CharSequence[0]), (d, index) -> {
+                                if (!active(fragment, account, token)) return;
+                                long target = ids.get(index);
+                                String confirmText = LocaleController.formatString(
+                                        R.string.WaysGramLinkedChannelConfirm, names.get(index));
+                                fragment.showDialog(dialog(fragment, R.string.LinkedChannel)
+                                        .setMessage(confirmText)
+                                        .setNegativeButton(LocaleController.getString(R.string.Cancel), null)
+                                        .setPositiveButton(LocaleController.getString(R.string.OK), (confirm, button) ->
+                                                saveGroupChannelLink(fragment, account, token, groupId, linkedId, target))
+                                        .create());
+                            })
+                            .setNegativeButton(LocaleController.getString(R.string.Cancel), null).create());
+                }, error -> notice(fragment, R.string.LinkedChannel, R.string.WaysGramDiscussionError));
+    }
+
+    private static void saveGroupChannelLink(BaseFragment fragment, int account, String token,
+                                             long groupId, long oldChannel, long newChannel) {
+        if (oldChannel == newChannel) {
+            reloadGroup(fragment, account, groupId, oldChannel);
+            return;
+        }
+        if (oldChannel > 0) {
+            String oldPath = "/api/channels/" + oldChannel + "/discussion-group";
+            request(fragment, account, token,
+                    () -> WaysGramApi.request("PUT", oldPath,
+                            new JSONObject().put("group_id", JSONObject.NULL), token, 15000),
+                    data -> {
+                        if (newChannel > 0) {
+                            attachGroupToChannel(fragment, account, token, groupId, oldChannel, newChannel);
+                        } else {
+                            finishGroupChannelChange(fragment, account, groupId, oldChannel, 0);
+                        }
+                    }, error -> notice(fragment, R.string.LinkedChannel, R.string.WaysGramDiscussionError));
+        } else if (newChannel > 0) {
+            attachGroupToChannel(fragment, account, token, groupId, oldChannel, newChannel);
+        }
+    }
+
+    private static void attachGroupToChannel(BaseFragment fragment, int account, String token,
+                                             long groupId, long oldChannel, long newChannel) {
+        String path = "/api/channels/" + newChannel + "/discussion-group";
+        request(fragment, account, token,
+                () -> WaysGramApi.request("PUT", path,
+                        new JSONObject().put("group_id", groupId), token, 15000),
+                data -> finishGroupChannelChange(fragment, account, groupId, oldChannel, newChannel),
+                error -> {
+                    if (oldChannel > 0) {
+                        String restorePath = "/api/channels/" + oldChannel + "/discussion-group";
+                        request(fragment, account, token,
+                                () -> WaysGramApi.request("PUT", restorePath,
+                                        new JSONObject().put("group_id", groupId), token, 15000),
+                                restored -> notice(fragment, R.string.LinkedChannel, R.string.WaysGramDiscussionError),
+                                ignored -> notice(fragment, R.string.LinkedChannel, R.string.WaysGramDiscussionError));
+                    } else {
+                        notice(fragment, R.string.LinkedChannel, R.string.WaysGramDiscussionError);
+                    }
+                });
+    }
+
+    private static void finishGroupChannelChange(BaseFragment fragment, int account, long groupId,
+                                                 long oldChannel, long newChannel) {
+        if (!active(fragment, account, WaysGramApi.getToken(account))) return;
+        org.telegram.messenger.MessagesController controller =
+                org.telegram.messenger.MessagesController.getInstance(account);
+        controller.loadFullChat(groupId, 0, true);
+        if (oldChannel > 0) controller.loadFullChat(WaysGramChats.channelTg(oldChannel), 0, true);
+        if (newChannel > 0 && newChannel != oldChannel) {
+            controller.loadFullChat(WaysGramChats.channelTg(newChannel), 0, true);
+        }
+        fragment.getNotificationCenter().postNotificationName(
+                org.telegram.messenger.NotificationCenter.dialogsNeedReload);
+        if (fragment.getParentActivity() != null) {
+            fragment.showDialog(dialog(fragment, R.string.LinkedChannel)
+                    .setMessage(LocaleController.getString(R.string.WaysGramLinkedChannelSaved))
+                    .setPositiveButton(LocaleController.getString(R.string.OK), null).create());
+        }
+    }
+
+    private static void reloadGroup(BaseFragment fragment, int account, long groupId, long channelId) {
+        if (!active(fragment, account, WaysGramApi.getToken(account))) return;
+        org.telegram.messenger.MessagesController controller =
+                org.telegram.messenger.MessagesController.getInstance(account);
+        controller.loadFullChat(groupId, 0, true);
+        if (channelId > 0) controller.loadFullChat(WaysGramChats.channelTg(channelId), 0, true);
+        fragment.getNotificationCenter().postNotificationName(
+                org.telegram.messenger.NotificationCenter.dialogsNeedReload);
+    }
+
     /**
      * Открывает связанную группу обсуждений отдельным экраном.
      *
@@ -159,6 +304,12 @@ final class WaysGramDiscussions {
      * (раньше у подписчиков был доступ к каналу, но не к обсуждению). Если запрос не
      * прошёл — просто открываем группу по id из профиля канала.</p>
      */
+    static void openChannel(BaseFragment fragment, long channel) {
+        if (channel > 0 && fragment.getParentActivity() != null) {
+            fragment.presentFragment(ChatActivity.of(-channel));
+        }
+    }
+
     static void openGroup(BaseFragment fragment, int account, long channel, long group) {
         String token = WaysGramApi.getToken(account);
         if (group <= 0 || !active(fragment, account, token)) return;

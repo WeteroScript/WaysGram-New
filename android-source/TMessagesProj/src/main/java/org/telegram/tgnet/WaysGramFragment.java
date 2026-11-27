@@ -71,9 +71,11 @@ public final class WaysGramFragment {
         }
         TL_fragment.TL_collectibleInfo info = new TL_fragment.TL_collectibleInfo();
         info.purchase_date = card.optInt("purchase_date");
-        info.currency = "STARS";
+        // Telegram Stars use the three-letter XTR code supported by BillingController.
+        // This market has no separate TON/fiat price, so leave those fields empty.
+        info.currency = "XTR";
         info.amount = card.optLong("price_stars");
-        info.crypto_currency = "TON";
+        info.crypto_currency = "";
         info.crypto_amount = 0;
         String url = card.optString("share_url");
         info.url = TextUtils.isEmpty(url) ? "https://waysgram.app/" + path(name) : url;

@@ -113,8 +113,12 @@ public class WaysGramEconomy {
                 JSONObject row = rows.optJSONObject(i);
                 if (row != null) status.history.add(transaction(row, ton));
             }
-            String next = history == null ? "" : history.optString("next_offset", "");
-            if (!TextUtils.isEmpty(next)) {
+            // JSONObject.optString() can stringify JSON null as the literal "null" on
+            // Android. Treat a missing cursor as the end of history so the screen does
+            // not request offset_id=null (and keep rendering skeleton rows forever).
+            String next = history == null || history.isNull("next_offset")
+                    ? "" : history.optString("next_offset", "");
+            if (!TextUtils.isEmpty(next) && !"null".equalsIgnoreCase(next)) {
                 status.next_offset = next;
                 status.flags |= TLObject.FLAG_0;
             }

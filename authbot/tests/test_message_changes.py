@@ -1925,6 +1925,8 @@ def test_channel_stars_balance_is_peer_scoped_and_not_the_personal_wallet(env):
             assert group_history.json()['stars'] == 3
             assert [(tx['amount'], tx['balance_after'])
                     for tx in group_history.json()['transactions']] == [(3, 3)]
+            # A short first page must end with JSON null, not a fake cursor such as "null".
+            assert group_history.json()['next_offset'] is None
             assert (await client.get(f'/api/channels/{channel_id}/stars', headers=reader)).status_code == 403
             assert (await client.get('/api/me/wallet', headers=owner)).json()['stars'] == 17
 
@@ -2320,6 +2322,8 @@ def test_group_topics_have_separate_history_and_enforce_membership_and_closure(e
             path = f"/api/groups/{group.json()['id']}"
             topics = path + '/topics'
             assert (await client.get(topics, headers=outsider)).status_code == 403
+            assert (await client.put(path + '/send-permissions', headers=owner,
+                                     json={'default_send_restrictions': 16384})).status_code == 200
             assert (await client.post(topics, headers=member, json={'title': 'Denied'})).status_code == 403
             results = [await client.post(topics, headers=owner, json={'title': title}) for title in ('Planning', 'Ideas')]
             assert [r.status_code for r in results] == [200, 200]
@@ -2586,6 +2590,9 @@ def test_topic_attachment_and_pin_are_scoped_and_permission_checked(env):
             msg = await client.post(first + '/messages', headers=owner, json={'media_id': media})
             assert msg.status_code == 201
             mid = msg.json()['id']
+            restricted = await client.put(group_url + '/send-permissions', headers=owner,
+                                          json={'default_send_restrictions': 4096})
+            assert restricted.status_code == 200, restricted.text
             assert (await client.put(first + '/pin', headers=member, json={'message_id': mid})).status_code == 403
             assert (await client.put(second + '/pin', headers=owner, json={'message_id': mid})).status_code == 404
             assert (await client.put(first + '/pin', headers=owner, json={'message_id': mid})).status_code == 200
@@ -2991,6 +2998,36 @@ def test_group_paid_messages_charge_text_and_album_once_and_return_history(env):
             assert poor.status_code == 409 and poor.json()['detail'] == 'MESSAGE_FEE_INSUFFICIENT_STARS'
             final_history = (await client.get(messages_url, headers=member)).json()['messages']
             assert all(item['body'] != 'Not enough Stars' for item in final_history)
+
+    run(scenario())
+
+
+def test_group_stars_snapshot_preserves_balance_and_ends_short_page(env):
+    import aiosqlite
+
+    path, app = env
+
+    async def scenario():
+        async with await client_for(app) as client:
+            owner = headers(101)
+            created = await client.post('/api/groups', headers=owner,
+                                        json={'title': 'Group Stars snapshot'})
+            assert created.status_code == 201, created.text
+            group_id = created.json()['id']
+            async with aiosqlite.connect(path) as db:
+                await db.execute('INSERT INTO chat_stars(chat_id,stars) VALUES(?,?)', (group_id, 20000))
+                await db.executemany("""INSERT INTO chat_star_transactions
+                    (chat_id,amount,balance_after,reason,created_at) VALUES(?,?,?,?,?)""", [
+                    (group_id, 10000, 10000, 'group_message_fee:first', 1),
+                    (group_id, 10000, 20000, 'group_message_fee:second', 2),
+                ])
+                await db.commit()
+            snapshot = await client.get(f'/api/groups/{group_id}/stars?limit=5', headers=owner)
+            assert snapshot.status_code == 200, snapshot.text
+            body = snapshot.json()
+            assert body['stars'] == 20000
+            assert [row['amount'] for row in body['transactions']] == [10000, 10000]
+            assert body['next_offset'] is None
 
     run(scenario())
 

@@ -939,7 +939,7 @@ public class ChatEditActivity extends BaseFragment implements ImageUpdater.Image
                 });
             }
 
-            if (ChatObject.isChannel(currentChat) && (isChannel && ChatObject.canUserDoAdminAction(currentChat, ChatObject.ACTION_CHANGE_INFO) || !isChannel && ChatObject.canUserDoAdminAction(currentChat, ChatObject.ACTION_PIN))) {
+            if (ChatObject.isChannel(currentChat) && (isChannel && ChatObject.canUserDoAdminAction(currentChat, ChatObject.ACTION_CHANGE_INFO) || !isChannel && (currentChat.creator || ChatObject.canUserDoAdminAction(currentChat, ChatObject.ACTION_PIN)))) {
                 linkedCell = new TextCell(context);
                 linkedCell.setBackgroundDrawable(Theme.getSelectorDrawable(true));
                 typeEditContainer.addView(linkedCell, LayoutHelper.createLinear(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
@@ -949,9 +949,15 @@ public class ChatEditActivity extends BaseFragment implements ImageUpdater.Image
                     // отвязать, создать) — по долгому нажатию.
                     if (org.telegram.tgnet.WaysGramTransport.ENABLED) {
                         if (info != null && info.linked_chat_id != 0) {
-                            WaysGramDiscussions.openGroup(this, currentAccount, chatId, info.linked_chat_id);
-                        } else {
+                            if (isChannel) {
+                                WaysGramDiscussions.openGroup(this, currentAccount, chatId, info.linked_chat_id);
+                            } else {
+                                WaysGramDiscussions.openChannel(this, info.linked_chat_id);
+                            }
+                        } else if (isChannel) {
                             WaysGramDiscussions.settings(this, currentAccount, chatId);
+                        } else if (currentChat.creator) {
+                            WaysGramDiscussions.groupSettings(this, currentAccount, chatId);
                         }
                         return;
                     }
@@ -960,8 +966,12 @@ public class ChatEditActivity extends BaseFragment implements ImageUpdater.Image
                     presentFragment(fragment);
                 });
                 linkedCell.setOnLongClickListener(v -> {
-                    if (org.telegram.tgnet.WaysGramTransport.ENABLED) {
+                    if (org.telegram.tgnet.WaysGramTransport.ENABLED && isChannel) {
                         WaysGramDiscussions.settings(this, currentAccount, chatId);
+                        return true;
+                    }
+                    if (org.telegram.tgnet.WaysGramTransport.ENABLED && currentChat.creator && !isChannel) {
+                        WaysGramDiscussions.groupSettings(this, currentAccount, chatId);
                         return true;
                     }
                     return false;
@@ -2374,12 +2384,16 @@ public class ChatEditActivity extends BaseFragment implements ImageUpdater.Image
         }
 
         if (linkedCell != null) {
-            if (info == null || !isChannel && info.linked_chat_id == 0) {
+            if (info == null || !isChannel && info.linked_chat_id == 0 && !currentChat.creator) {
                 linkedCell.setVisibility(View.GONE);
             } else {
                 linkedCell.setVisibility(View.VISIBLE);
                 if (info.linked_chat_id == 0) {
-                    linkedCell.setTextAndValueAndIcon(getString("Discussion", R.string.Discussion), getString("DiscussionInfoShort", R.string.DiscussionInfoShort), R.drawable.msg_discuss, true);
+                    if (isChannel) {
+                        linkedCell.setTextAndValueAndIcon(getString("Discussion", R.string.Discussion), getString("DiscussionInfoShort", R.string.DiscussionInfoShort), R.drawable.msg_discuss, true);
+                    } else {
+                        linkedCell.setTextAndValueAndIcon(getString("LinkedChannel", R.string.LinkedChannel), getString(R.string.None), R.drawable.msg_channel, false);
+                    }
                 } else {
                     TLRPC.Chat chat = getMessagesController().getChat(info.linked_chat_id);
                     if (chat == null) {

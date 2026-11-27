@@ -143,10 +143,52 @@ def test_deposited_gift_is_listed_bought_and_notifies_seller(env) -> None:
             assert purchased.status_code == 201, purchased.text
             assert purchased.json()["seller_id"] == 101 and purchased.json()["buyer_id"] == 102
             assert purchased.json()["price_grams"] == 120
+            assert purchased.json()["inventory"] == "fragment"
             own_after = await client.get("/api/gift-market?mine=true", headers=headers(101))
             assert own_after.json()["count"] == 0
             assert query(path, "SELECT owner_telegram_id FROM user_gifts WHERE serial_number=?",
+                         (serial,))[0][0] == fragment_deposit.FRAGMENT_TELEGRAM_ID
+            assert query(path, "SELECT telegram_id FROM fragment_gift_deposits WHERE serial_number=?",
+                         (serial,)) == [(102,)]
+            buyer_profile = await client.get("/api/me/gifts", headers=headers(102))
+            assert buyer_profile.status_code == 200 and buyer_profile.json()["gifts"] == []
+            buyer_fragment = await client.get("/api/me/fragment/gifts", headers=headers(102))
+            assert buyer_fragment.status_code == 200
+            assert [item["serial_number"] for item in buyer_fragment.json()["gifts"]] == [serial]
+            assert buyer_fragment.json()["gifts"][0]["fragment_inventory"] is True
+
+            withdraw_key = "fragment-withdraw-replay-0001"
+            withdrawn = await client.post(
+                f"/api/me/fragment/gifts/{serial}/withdraw",
+                headers={**headers(102), "Idempotency-Key": withdraw_key},
+                json={},
+            )
+            assert withdrawn.status_code == 201, withdrawn.text
+            assert withdrawn.json()["status"] == "withdrawn"
+            assert withdrawn.json()["sender_id"] == fragment_deposit.FRAGMENT_TELEGRAM_ID
+            repeated = await client.post(
+                f"/api/me/fragment/gifts/{serial}/withdraw",
+                headers={**headers(102), "Idempotency-Key": withdraw_key},
+                json={},
+            )
+            assert repeated.status_code == 201 and repeated.json() == withdrawn.json()
+            assert query(path, "SELECT owner_telegram_id FROM user_gifts WHERE serial_number=?",
                          (serial,))[0][0] == 102
+            assert query(path, "SELECT COUNT(*) FROM fragment_gift_deposits WHERE serial_number=?",
+                         (serial,))[0][0] == 0
+            profile_gifts = (await client.get("/api/me/gifts", headers=headers(102))).json()["gifts"]
+            assert len(profile_gifts) == 1 and profile_gifts[0]["serial_number"] == serial
+            conversation = (await client.get(
+                f"/api/messages?with={fragment_deposit.FRAGMENT_TELEGRAM_ID}", headers=headers(102)
+            )).json()["messages"]
+            transfer = next(message for message in conversation
+                            if message.get("gift_serial_number") == serial)
+            assert transfer["sender_id"] == fragment_deposit.FRAGMENT_TELEGRAM_ID
+            assert transfer["recipient_id"] == 102
+            assert transfer["gift_name"] == "Подарок Telegram"
+            assert transfer["gift_telegram_gift_id"] == "g1"
+            assert any("Вы приобрели коллекционный подарок" in message["body"]
+                       for message in conversation)
 
     run(scenario())
     notice = query(
@@ -158,6 +200,38 @@ def test_deposited_gift_is_listed_bought_and_notifies_seller(env) -> None:
     )
     assert len(notice) == 1 and notice[0][:2] == ("fragment", 101)
     assert "купили на Fragment" in notice[0][2] and "120 Gram" in notice[0][2]
+
+
+def test_fragment_inventory_shows_active_listing_price(env) -> None:
+    path, app = env
+    run(bot_module.set_telegram_gift_values("g1", price=40, supply=5))
+
+    async def scenario() -> None:
+        async with await client_for(app) as client:
+            bought = await client.post(
+                "/api/telegram/gifts/g1/purchase", headers=headers(101), json={}
+            )
+            serial = bought.json()["gift"]["serial_number"]
+            deposited = await client.post(
+                "/api/messages/gift", headers=headers(101),
+                json={"recipient_id": fragment_deposit.FRAGMENT_TELEGRAM_ID,
+                      "serial_number": serial},
+            )
+            assert deposited.status_code == 201
+            listed = await client.post(
+                f"/api/gifts/{serial}/list", headers=headers(101),
+                json={"price_grams": 735},
+            )
+            assert listed.status_code == 201
+
+            inventory = await client.get("/api/me/fragment/gifts", headers=headers(101))
+            assert inventory.status_code == 200
+            gift = inventory.json()["gifts"][0]
+            assert gift["serial_number"] == serial
+            assert gift["is_listed"] == 1
+            assert gift["price_grams"] == 735
+
+    run(scenario())
 
 
 def test_fragment_inventory_filters_out_gifts_not_sent_to_fragment(env) -> None:
