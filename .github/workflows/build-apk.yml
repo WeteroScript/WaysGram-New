@@ -20,6 +20,16 @@ on:
       - "Procfile"
       - "runtime.txt"
   workflow_dispatch:
+    inputs:
+      source_ref:
+        description: "Optional source commit to rebuild for diagnostics"
+        required: false
+        type: string
+      diagnostics_only:
+        description: "Build without publishing a release"
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   # The release step below publishes the APK as an asset: artifacts cannot be resumed and a
@@ -35,6 +45,7 @@ jobs:
     # Workflow artifacts need a GitHub login to download; a release asset does not,
     # can be resumed and has the checksum next to it.
     needs: build
+    if: ${{ !inputs.diagnostics_only }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -119,6 +130,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
+          ref: ${{ inputs.source_ref || github.sha }}
           fetch-depth: 1
 
       - name: Reconstruct and extract uploaded source archive
@@ -335,6 +347,52 @@ jobs:
           ./gradlew --no-daemon --stacktrace --max-workers=2 \
             -Dorg.gradle.jvmargs="-Xmx5g -XX:MaxMetaspaceSize=1g -Dfile.encoding=UTF-8" \
             :TMessagesProj_App:assembleAfatRelease 2>&1 | tee /tmp/build.log
+
+      - name: Share obfuscated crash class mappings
+        if: ${{ always() && inputs.diagnostics_only }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path("TMessagesProj_App/build/outputs/mapping/afatRelease/mapping.txt")
+          if not path.is_file():
+              Path("/tmp/r8-mappings.md").write_text(
+                  "### R8 crash mapping unavailable\n\n"
+                  f"Build mapping file was not created: `{path}`.\n",
+                  encoding="utf-8",
+              )
+              raise SystemExit(0)
+
+          lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+          targets = (
+              "org.telegram.ui.Components.g71",
+              "org.telegram.ui.Components.za",
+          )
+          output = ["### R8 mappings for reported crash classes\n"]
+          for target in targets:
+              found = False
+              for index, line in enumerate(lines):
+                  if not line.endswith(f" -> {target}:"):
+                      continue
+                  found = True
+                  output.append(f"#### `{target}`\n")
+                  output.append("```text\n")
+                  output.append(line + "\n")
+                  for member in lines[index + 1:]:
+                      if member and not member[0].isspace():
+                          break
+                      output.append(member + "\n")
+                  output.append("```\n")
+              if not found:
+                  output.append(f"- `{target}` was not present in this mapping.\n")
+
+          Path("/tmp/r8-mappings.md").write_text("\n".join(output), encoding="utf-8")
+          PY
+          gh api "repos/${GITHUB_REPOSITORY}/commits/${GITHUB_SHA}/comments" \
+            -F body=@/tmp/r8-mappings.md >/dev/null
 
       - name: Report compile errors on the pull request
         if: failure()
