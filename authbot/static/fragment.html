@@ -150,14 +150,22 @@
     position: relative; border-radius: 10px; aspect-ratio: 1 / 1; overflow: hidden;
     display: flex; align-items: center; justify-content: center;
   }
-  .tile .art .emoji { font-size: 34px; }
+  .tile .art .emoji { font-size: 34px; position: relative; z-index: 1; }
   .tile .art img {
-    position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain;
+    position: absolute; inset: 0; z-index: 1; width: 100%; height: 100%; object-fit: contain;
     padding: 10%; image-rendering: auto;
   }
+  .pattern-texture {
+    position: absolute; inset: 0; z-index: 0; pointer-events: none;
+    visibility: hidden; opacity: 0; transition: opacity .15s ease;
+    -webkit-mask-repeat: repeat; mask-repeat: repeat;
+    -webkit-mask-size: 42px 42px; mask-size: 42px 42px;
+    -webkit-mask-position: center; mask-position: center; mask-mode: alpha;
+  }
+  .pattern-texture.active { visibility: visible; opacity: .22; }
   .tile .model-art, .big-art .model-art {
     position: absolute; inset: 5%; display: flex; align-items: center; justify-content: center;
-    visibility: hidden; opacity: 0; transition: opacity .15s ease; z-index: 1;
+    visibility: hidden; opacity: 0; transition: opacity .15s ease; z-index: 2;
   }
   .tile .model-art.active, .big-art .model-art.active { visibility: visible; opacity: 1; }
   .tile .model-art svg, .tile .model-art video,
@@ -189,8 +197,8 @@
     margin: 8px 12px; height: 200px; border-radius: 14px;
     display: flex; align-items: center; justify-content: center; position: relative; overflow: hidden;
   }
-  .big-art .emoji { font-size: 64px; }
-  .big-art img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; padding: 12%; }
+  .big-art .emoji { font-size: 64px; position: relative; z-index: 1; }
+  .big-art img { position: absolute; inset: 0; z-index: 1; width: 100%; height: 100%; object-fit: contain; padding: 12%; }
 
   .choice-menu {
     position: fixed; z-index: 1000; min-width: 168px; max-width: calc(100vw - 24px);
@@ -399,6 +407,7 @@
   var COLORS = ["#6e7d63", "#4f7f53", "#7c6bb0", "#b0865a", "#4f7e96", "#a06a88"];
   var artCache = {};
   var modelAssetCache = {};
+  var patternTextureCache = {};
   var activeModelPlayers = [];
   var activeModelObservers = [];
   var modelRenderGeneration = 0;
@@ -549,15 +558,27 @@
       .catch(function () { /* остаётся эмодзи */ });
   }
 
-  // Telegram's pattern document is a tinted, tiled backdrop texture, not another sticker
-  // layer on top of the gift. Until the mini-app reproduces that renderer, only show the
-  // full model document; drawing the raw pattern as foreground creates an opaque black mask.
+  // A Telegram pattern belongs to the backdrop: render one vector frame as a tinted mask
+  // and repeat it behind the gift model, rather than drawing its raw animation as a sticker.
   function modelDocumentId(item) {
     var value = item && item.model_document_id;
     if (!value) {
       var traits = item && item.attributes && item.attributes.collectible_traits;
       var model = traits && traits.model;
       value = model && typeof model === "object" ? model.document_id : "";
+    }
+    if (value === null || value === undefined || value === "" || value === 0 || value === "0") {
+      return "";
+    }
+    return String(value).trim();
+  }
+
+  function patternDocumentId(item) {
+    var value = item && item.pattern_document_id;
+    if (!value) {
+      var traits = item && item.attributes && item.attributes.collectible_traits;
+      var pattern = traits && traits.pattern;
+      value = pattern && typeof pattern === "object" ? pattern.document_id : "";
     }
     if (value === null || value === undefined || value === "" || value === 0 || value === "0") {
       return "";
@@ -612,6 +633,73 @@
     modelAssetCache[key] = promise;
     promise.catch(function () {
       if (modelAssetCache[key] === promise) { delete modelAssetCache[key]; }
+    });
+    return promise;
+  }
+
+  function patternTextureAsset(item, documentId) {
+    var giftId = String(item.telegram_gift_id || "").trim();
+    if (!giftId || !documentId) { return Promise.reject(new Error("pattern id missing")); }
+    var key = giftId + "|" + documentId;
+    if (patternTextureCache[key]) { return patternTextureCache[key]; }
+    var promise = modelAsset(item, documentId).then(function (asset) {
+      if (asset.type === "image") { return asset.url; }
+      if (asset.type !== "lottie" || !window.lottie
+          || typeof window.lottie.loadAnimation !== "function") {
+        throw new Error("pattern vector unavailable");
+      }
+      return new Promise(function (resolve, reject) {
+        var mount = document.createElement("div");
+        mount.setAttribute("aria-hidden", "true");
+        mount.style.cssText = "position:fixed;left:-10000px;top:0;width:96px;height:96px;"
+          + "overflow:hidden;pointer-events:none";
+        document.body.appendChild(mount);
+        var animation = null;
+        var settled = false;
+        var timer = setTimeout(function () {
+          finish(new Error("pattern render timed out"));
+        }, 8000);
+        function finish(error, url) {
+          if (settled) { return; }
+          settled = true;
+          clearTimeout(timer);
+          if (animation) {
+            try { animation.destroy(); } catch (ignored) { /* temporary renderer */ }
+          }
+          if (mount.parentNode) { mount.parentNode.removeChild(mount); }
+          if (error) { reject(error); } else { resolve(url); }
+        }
+        try {
+          animation = window.lottie.loadAnimation({
+            container: mount,
+            renderer: "svg",
+            loop: false,
+            autoplay: false,
+            animationData: JSON.parse(asset.text),
+            rendererSettings: { preserveAspectRatio: "xMidYMid meet" }
+          });
+          animation.addEventListener("DOMLoaded", function () {
+            try {
+              animation.goToAndStop(0, true);
+              var svg = mount.querySelector("svg");
+              if (!svg) { throw new Error("pattern SVG missing"); }
+              if (!svg.getAttribute("xmlns") && svg.namespaceURI) {
+                svg.setAttribute("xmlns", svg.namespaceURI);
+              }
+              var markup = new XMLSerializer().serializeToString(svg);
+              var url = URL.createObjectURL(new Blob([markup], { type: "image/svg+xml" }));
+              finish(null, url);
+            } catch (error) { finish(error); }
+          });
+          animation.addEventListener("data_failed", function () {
+            finish(new Error("pattern vector failed to load"));
+          });
+        } catch (error) { finish(error); }
+      });
+    });
+    patternTextureCache[key] = promise;
+    promise.catch(function () {
+      if (patternTextureCache[key] === promise) { delete patternTextureCache[key]; }
     });
     return promise;
   }
@@ -715,6 +803,54 @@
       observer.observe(node);
     } else {
       renderGiftModel(item, node, img, emojiNode);
+    }
+  }
+
+  function patternColorFor(item) {
+    var traits = item && item.attributes && item.attributes.collectible_traits;
+    var backdrop = traits && traits.backdrop;
+    return backdrop && typeof backdrop === "object" ? colorHex(backdrop.pattern_color) : "";
+  }
+
+  function renderPatternTexture(item, node) {
+    var documentId = patternDocumentId(item);
+    var color = patternColorFor(item);
+    var generation = modelRenderGeneration;
+    if (!documentId || !color || !node) { return; }
+    patternTextureAsset(item, documentId).then(function (textureUrl) {
+      if (generation !== modelRenderGeneration
+          || !document.documentElement.contains(node)) { return; }
+      var source = 'url("' + textureUrl + '")';
+      node.style.backgroundColor = color;
+      node.style.webkitMaskImage = source;
+      node.style.maskImage = source;
+      node.style.webkitMaskRepeat = "repeat";
+      node.style.maskRepeat = "repeat";
+      node.style.webkitMaskSize = "42px 42px";
+      node.style.maskSize = "42px 42px";
+      node.style.webkitMaskPosition = "center";
+      node.style.maskPosition = "center";
+      if (!node.style.webkitMaskImage && !node.style.maskImage) { return; }
+      node.classList.add("active");
+    }).catch(function () {
+      if (generation === modelRenderGeneration && node) {
+        node.classList.remove("active");
+      }
+    });
+  }
+
+  function requestPatternTexture(item, node, eager) {
+    if (!patternDocumentId(item) || !patternColorFor(item) || !node) { return; }
+    if (!eager && window.IntersectionObserver) {
+      var observer = new IntersectionObserver(function (entries) {
+        if (!entries.some(function (entry) { return entry.isIntersecting; })) { return; }
+        observer.disconnect();
+        renderPatternTexture(item, node);
+      }, { rootMargin: "120px" });
+      activeModelObservers.push(observer);
+      observer.observe(node);
+    } else {
+      renderPatternTexture(item, node);
     }
   }
 
@@ -1113,6 +1249,7 @@
       var tile = '<button class="tile" data-index="' + index + '">'
         + '<span class="art" style="background:' + colorFor(item) + '">'
         + (uniqueNumber > 0 ? '<span class="tile-number">#' + num(uniqueNumber) + '</span>' : "")
+        + '<span class="pattern-texture" aria-hidden="true"></span>'
         + '<span class="emoji">' + esc(emoji) + "</span>"
         + '<img alt="" hidden><span class="model-art" aria-hidden="true"></span></span>'
         + '<span class="price"><span class="grow">' + esc(price) + "</span>"
@@ -1130,6 +1267,7 @@
       var emoji = tile.querySelector(".emoji");
       artwork(item.telegram_gift_id, img, emoji);
       requestModelArtwork(item, tile.querySelector(".model-art"), img, emoji, false);
+      requestPatternTexture(item, tile.querySelector(".pattern-texture"), false);
       tile.addEventListener("click", function () { openGift(item, owned); });
     });
     if (inventory) {
@@ -1154,6 +1292,7 @@
     var html = detailHead(title, badge);
     html += '<div class="big-art" style="background:' + colorFor(item) + '">'
       + (Number(item.unique_num || 0) > 0 ? '<span class="tile-number">#' + num(item.unique_num) + '</span>' : "")
+      + '<div class="pattern-texture" aria-hidden="true"></div>'
       + '<span class="emoji">' + esc(item.gift_emoji || "🎁") + "</span>"
       + '<img alt="" hidden><div class="model-art" aria-hidden="true"></div></div>';
 
@@ -1207,6 +1346,7 @@
     var detailEmoji = detailArt.querySelector(".emoji");
     artwork(item.telegram_gift_id, detailImg, detailEmoji);
     requestModelArtwork(item, detailArt.querySelector(".model-art"), detailImg, detailEmoji, true);
+    requestPatternTexture(item, detailArt.querySelector(".pattern-texture"), true);
 
     if ($("buy-gift")) {
       $("buy-gift").addEventListener("click", function () {

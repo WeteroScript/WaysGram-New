@@ -9,7 +9,9 @@ import org.json.JSONArray;
 import org.json.JSONObject;
 import org.telegram.messenger.AndroidUtilities;
 import org.telegram.messenger.LocaleController;
+import org.telegram.messenger.MessagesController;
 import org.telegram.messenger.R;
+import org.telegram.tgnet.TLRPC;
 import org.telegram.tgnet.WaysGramApi;
 import org.telegram.tgnet.WaysGramChats;
 import org.telegram.ui.ActionBar.AlertDialog;
@@ -56,13 +58,14 @@ final class WaysGramDiscussions {
     static void settings(BaseFragment fragment, int account, long channel) {
         String token = WaysGramApi.getToken(account);
         String path = channelPath(channel) + "/discussion-group";
+        TLRPC.ChatFull chatInfo = MessagesController.getInstance(account).getChatFull(channel);
         request(fragment, account, token, () -> WaysGramApi.request("GET", path, null, token, 10000), linked -> {
             long current = linked.optLong("group_id");
             AlertDialog.Builder builder = dialog(fragment, R.string.WaysGramDiscussionGroup)
                     .setMessage(current > 0 ? LocaleController.formatString(R.string.WaysGramDiscussionLinked, linked.optString("title"))
                             : LocaleController.getString(R.string.WaysGramDiscussionNotLinked))
                     .setPositiveButton(LocaleController.getString(R.string.WaysGramDiscussionChoose), (d, w) ->
-                            choose(fragment, account, token, path, channel));
+                            choose(fragment, account, token, channel, chatInfo));
             if (current > 0) {
                 builder.setNeutralButton(LocaleController.getString(R.string.WaysGramDiscussionUnlink), (d, w) -> {
                     if (!active(fragment, account, token)) return;
@@ -82,42 +85,23 @@ final class WaysGramDiscussions {
                     .setMessage(LocaleController.getString(R.string.WaysGramDiscussionError))
                     .setNegativeButton(LocaleController.getString(R.string.Close), null)
                     .setPositiveButton(LocaleController.getString(R.string.WaysGramDiscussionChoose), (d, w) ->
-                            choose(fragment, account, token, path, channel)).create());
+                            choose(fragment, account, token, channel, chatInfo)).create());
         });
     }
 
-    private static void choose(BaseFragment fragment, int account, String token, String path, long channel) {
-        request(fragment, account, token, () -> WaysGramApi.request("GET", "/api/groups", null, token, 10000), data -> {
-            JSONArray groups = data.optJSONArray("groups");
-            ArrayList<String> names = new ArrayList<>();
-            ArrayList<Long> ids = new ArrayList<>();
-            for (int i = 0; groups != null && i < groups.length(); i++) {
-                JSONObject group = groups.optJSONObject(i);
-                if (group != null && "owner".equals(group.optString("role")) && group.optLong("id") > 0) {
-                    names.add(group.optString("title"));
-                    ids.add(group.optLong("id"));
-                }
-            }
-            if (ids.isEmpty()) {
-                // Раньше здесь был тупик: «у вас нет групп». Канал без связанной группы
-                // вообще не показывает кнопку комментариев, а создать группу вручную и
-                // вернуться сюда догадывался не каждый — теперь группу создаёт сервер.
-                fragment.showDialog(dialog(fragment, R.string.WaysGramDiscussionGroup)
-                        .setMessage(LocaleController.getString(R.string.WaysGramDiscussionNoGroups))
-                        .setNegativeButton(LocaleController.getString(R.string.Cancel), null)
-                        .setPositiveButton(LocaleController.getString(R.string.WaysGramDiscussionCreate), (d, w) ->
-                                create(fragment, account, token, path, channel)).create());
-                return;
-            }
-            fragment.showDialog(dialog(fragment, R.string.WaysGramDiscussionChoose).setItems(names.toArray(new CharSequence[0]), (d, index) -> {
-                if (!active(fragment, account, token)) return;
-                fragment.showDialog(dialog(fragment, R.string.WaysGramDiscussionGroup)
-                        .setMessage(LocaleController.formatString(R.string.WaysGramDiscussionConfirm, names.get(index)))
-                        .setNegativeButton(LocaleController.getString(R.string.Cancel), null)
-                        .setPositiveButton(LocaleController.getString(R.string.OK), (confirm, button) ->
-                                save(fragment, account, token, path, channel, ids.get(index))).create());
-            }).create());
-        }, error -> notice(fragment, R.string.WaysGramDiscussionGroup, R.string.WaysGramDiscussionError));
+    private static void choose(BaseFragment fragment, int account, String token, long channel,
+                               TLRPC.ChatFull chatInfo) {
+        if (!active(fragment, account, token)) return;
+        TLRPC.ChatFull full = chatInfo != null
+                ? chatInfo : MessagesController.getInstance(account).getChatFull(channel);
+
+        // Reuse Telegram's discussion picker: avatars, search, group creation and
+        // the native confirmation row all come from ChatLinkActivity. Its network
+        // requests are already translated by WaysGramTransport. ChatLinkActivity
+        // loads channel info itself if the cached full chat is not ready yet.
+        ChatLinkActivity picker = new ChatLinkActivity(channel, true);
+        picker.setInfo(full);
+        fragment.presentFragment(picker);
     }
 
     private static void save(BaseFragment fragment, int account, String token, String path, long channel, long group) {

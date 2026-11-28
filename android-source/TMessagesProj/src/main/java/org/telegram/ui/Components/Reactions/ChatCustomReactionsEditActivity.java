@@ -36,6 +36,7 @@ import androidx.annotation.NonNull;
 import androidx.core.math.MathUtils;
 
 import org.telegram.messenger.AndroidUtilities;
+import org.telegram.messenger.ChatObject;
 import org.telegram.messenger.FileLog;
 import org.telegram.messenger.LocaleController;
 import org.telegram.messenger.MessagesStorage;
@@ -314,7 +315,7 @@ public class ChatCustomReactionsEditActivity extends BaseFragment implements Not
         infoCell3.setText(LocaleController.getString(R.string.MaximumReactionsInfo));
         switchLayout.addView(infoCell3, LayoutHelper.createLinear(LayoutHelper.MATCH_PARENT, LayoutHelper.WRAP_CONTENT));
 
-        if (info.paid_media_allowed) {
+        if (canEditPaidReactions()) {
             paidCheckCell = new TextCheckCell(context);
             paidCheckCell.setTextAndCheck(LocaleController.getString(R.string.ChannelEnablePaidReactions), false, false);
             switchLayout.addView(paidCheckCell, LayoutHelper.createLinear(LayoutHelper.MATCH_PARENT, LayoutHelper.WRAP_CONTENT));
@@ -356,7 +357,7 @@ public class ChatCustomReactionsEditActivity extends BaseFragment implements Not
             }
 
             Boolean allowPaid = null;
-            if (paidCheckCell != null && info.paid_media_allowed) {
+            if (paidCheckCell != null && canEditPaidReactions()) {
                 allowPaid = paidCheckCell.isChecked();
             }
 
@@ -438,7 +439,7 @@ public class ChatCustomReactionsEditActivity extends BaseFragment implements Not
             }
             editText.append(editable);
             setCheckedEnableReactionCell(SELECT_TYPE_SOME, paid, false);
-        } else if (info.available_reactions instanceof TLRPC.TL_chatReactionsNone && (info != null && info.paid_media_allowed && info.paid_reactions_available)) {
+        } else if (info.available_reactions instanceof TLRPC.TL_chatReactionsNone && (canEditPaidReactions() && info.paid_reactions_available)) {
             setCheckedEnableReactionCell(SELECT_TYPE_NONE, paid, false);
         } else if (info.available_reactions instanceof TLRPC.TL_chatReactionsNone) {
             SpannableStringBuilder editable = new SpannableStringBuilder();
@@ -456,7 +457,7 @@ public class ChatCustomReactionsEditActivity extends BaseFragment implements Not
         enableReactionsCell.setTextAndCheck(LocaleController.getString(R.string.EnableReactions), selectedType != SELECT_TYPE_NONE || paid, false);
         editText.addReactionsSpan();
 
-        if (info.paid_media_allowed && info.paid_reactions_available) {
+        if (canEditPaidReactions() && info.paid_reactions_available) {
             toggleStarsEnabled();
         }
         initialSelectedEmojis.putAll(selectedEmojisMap);
@@ -905,6 +906,16 @@ public class ChatCustomReactionsEditActivity extends BaseFragment implements Not
                 }
             }
         }
+    }
+
+    private boolean canEditPaidReactions() {
+        if (org.telegram.tgnet.WaysGramTransport.ENABLED) {
+            // The WaysGram paid-reactions endpoint is owner-only. Do not use
+            // paid_media_allowed here: it is false while reactions are disabled,
+            // which used to hide the very switch needed to enable them.
+            return currentChat != null && currentChat.creator && ChatObject.isChannelAndNotMegaGroup(currentChat);
+        }
+        return info != null && info.paid_media_allowed;
     }
 
     public void toggleStarsEnabled() {

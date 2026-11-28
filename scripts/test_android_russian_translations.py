@@ -7,8 +7,9 @@
 `values-ru`. Своего сервера языков у WaysGram нет, а в сборке было переведено 530 строк из
 11 772 — остальное падало в английский.
 
-Тест держит файл полным и валидным для aapt2: имена только из базовых ресурсов, корректное
-экранирование и `formatted="false"` там, где строка не является форматом.
+Тест держит файл полным и валидным для aapt2: базовые имена ресурсов совпадают, а
+дополнительные CLDR-категории (`few`/`many` и т. п.) разрешены для локалей, где они нужны;
+также проверяются корректное экранирование и `formatted="false"` для буквальных процентов.
 """
 import io
 import re
@@ -54,9 +55,15 @@ class RussianTranslations(unittest.TestCase):
         self.assertEqual(self.strings()['AppName'].text, 'WaysGram')
         self.assertEqual(self.strings()['LanguageName'].text, 'Русский')
 
-    def test_only_base_string_names_are_translated(self):
+    def test_only_base_string_names_or_locale_plural_categories_are_translated(self):
         extra = sorted(set(self.strings()) - self.base_names)
-        self.assertEqual(extra, [], 'в values-ru есть строки, которых нет в базовых ресурсах')
+        unsupported = []
+        categories = {"zero", "two", "few", "many"}
+        for name in extra:
+            base, separator, category = name.rpartition("_")
+            if not separator or category not in categories or f"{base}_other" not in self.base_names:
+                unsupported.append(name)
+        self.assertEqual(unsupported, [], 'в values-ru есть неизвестные базовым ресурсам строки')
 
     def test_values_are_escaped_for_aapt2(self):
         problems = []

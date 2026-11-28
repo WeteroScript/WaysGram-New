@@ -2,7 +2,8 @@
 """Регрессии по реакциям каналов/групп и служебным сообщениям WaysGram.
 
 1. Платная реакция-звезда должна открывать окно Stars и по одиночному тапу.
-2. Стоковые реакции и их анимации в каналах/группахиспользует stock reaction picker.
+2. Реакции WaysGram должны обновлять выбранный набор и использовать локальную emoji-анимацию;
+   стоковый picker и его поведение не должны ломаться.
 3. Заглушка сервера METHOD_NOT_SUPPORTED не должна показываться пользователю как
    «Это действие пока не поддерживается WaysGram» после каждого действия.
 """
@@ -38,7 +39,8 @@ class ReactionRegressionChecks(unittest.TestCase):
         block = chat[start:end]
         self.assertIn("visibleReaction.isStar", block)
         self.assertIn("StarsReactionsSheet sheet = new StarsReactionsSheet(", block)
-        self.assertLess(block.index("visibleReaction.isStar"), block.index("toggleWaysGramReaction("))
+        self.assertLess(block.index("visibleReaction != null && visibleReaction.isStar"),
+                        block.index("selectWaysGramReaction("))
 
     def test_channels_and_groups_use_the_stock_reaction_palette(self):
         chat = self.source("ui/ChatActivity.java")
@@ -46,26 +48,24 @@ class ReactionRegressionChecks(unittest.TestCase):
         self.assertIn("currentChat == null", line)
         self.assertNotIn("waysGramReactionMenu = true", chat)
 
-    def test_waysgram_add_plays_overlay_but_removal_does_not(self):
+    def test_waysgram_selection_updates_and_sends_the_full_set(self):
         chat = self.source("ui/ChatActivity.java")
-        toggle_start = chat.index("    private boolean toggleWaysGramReaction(")
-        toggle_end = chat.index("    private void showWaysGramReactionAnimation(", toggle_start)
-        toggle = chat[toggle_start:toggle_end]
-        self.assertIn("return !selected;", toggle)
+        helper_start = chat.index("    private boolean selectWaysGramReaction(")
+        helper_end = chat.index("    public void selectReaction(", helper_start)
+        helper = chat[helper_start:helper_end]
+        self.assertIn("final boolean added = message.selectReaction(visibleReaction, bigEmoji, fromDoubleTap);", helper)
+        self.assertIn("if (!selected && !added)", helper)
+        self.assertIn("ArrayList<ReactionsLayoutInBubble.VisibleReaction> visibleReactions = message.getChoosenReactions();", helper)
+        self.assertIn("waysGramReactionRequests.add(key);", helper)
+        self.assertIn("sendReaction(message, visibleReactions, added ? visibleReaction : null", helper)
+        self.assertIn("if (added) {", helper)
+        self.assertIn("ReactionsEffectOverlay.show(ChatActivity.this", helper)
+        self.assertIn("ReactionsEffectOverlay.startAnimation();", helper)
 
-        animation_start = toggle_end
-        animation_end = chat.index("    public void selectReaction(", animation_start)
-        animation = chat[animation_start:animation_end]
-        self.assertIn("ReactionsEffectOverlay.show(ChatActivity.this", animation)
-        self.assertIn("ReactionsEffectOverlay.startAnimation();", animation)
-        self.assertIn("ReactionsEffectOverlay.ONLY_MOVE_ANIMATION", animation)
-
-        select_start = animation_end
-        select_end = chat.index("    private void updateMessageAnimated(", select_start)
-        select = chat[select_start:select_end]
+        select = chat[helper_end:chat.index("    private void updateMessageAnimated(", helper_end)]
         waysgram = select[:select.index("        if (isInScheduleMode()")]
-        self.assertIn("boolean added = toggleWaysGramReaction(", waysgram)
-        self.assertIn("if (added) {\n                    showWaysGramReactionAnimation(", waysgram)
+        self.assertIn("selectWaysGramReaction(cell, primaryMessage", waysgram)
+        self.assertIn("visibleReaction != null && visibleReaction.isStar", waysgram)
 
     def test_regular_reaction_uses_the_local_animation_fallback(self):
         chat = self.source("ui/ChatActivity.java")
@@ -75,13 +75,18 @@ class ReactionRegressionChecks(unittest.TestCase):
         self.assertNotIn("return false;", select,
                          "void selectReaction must exit with return, not a boolean")
         self.assertIn("if (primaryMessage == null || getParentActivity() == null) return;", select)
-        self.assertIn("if (added) {\n                    showWaysGramReactionAnimation(", select)
+        self.assertIn("selectWaysGramReaction(cell, primaryMessage", select)
 
-        animation_start = chat.index("    private void showWaysGramReactionAnimation(")
-        animation_end = chat.index("    public void selectReaction(", animation_start)
-        animation = chat[animation_start:animation_end]
-        self.assertIn("bigEmoji\n                ? ReactionsEffectOverlay.LONG_ANIMATION\n                : ReactionsEffectOverlay.ONLY_MOVE_ANIMATION", animation)
-        self.assertIn("ReactionsEffectOverlay.startAnimation();", animation)
+        helper_start = chat.index("    private boolean selectWaysGramReaction(")
+        helper_end = chat.index("    public void selectReaction(", helper_start)
+        helper = chat[helper_start:helper_end]
+        self.assertIn(
+            "int animationType = bigEmoji\n                        ? ReactionsEffectOverlay.LONG_ANIMATION\n                        : ReactionsEffectOverlay.ONLY_MOVE_ANIMATION;",
+            helper,
+        )
+        self.assertIn("ReactionsEffectOverlay.ONLY_MOVE_ANIMATION", helper)
+        self.assertNotIn("ReactionsEffectOverlay.SHORT_ANIMATION", helper)
+        self.assertIn("ReactionsEffectOverlay.startAnimation();", helper)
 
         overlay = self.source("ui/Components/Reactions/ReactionsEffectOverlay.java")
         self.assertIn("animationType != SHORT_ANIMATION", overlay)

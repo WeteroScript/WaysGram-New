@@ -94,10 +94,15 @@ class StockChannelGroupButtonChecks(unittest.TestCase):
             editor,
         )
 
-    def test_reaction_settings_have_no_waysgram_gates(self):
+    def test_paid_reactions_switch_uses_owner_check_only_for_waysgram_channels(self):
         reactions = self.source("ui/Components/Reactions/ChatCustomReactionsEditActivity.java")
-        self.assertNotIn("WaysGramTransport.ENABLED", reactions)
-        self.assertIn("if (info.paid_media_allowed) {", reactions)
+        self.assertIn("if (org.telegram.tgnet.WaysGramTransport.ENABLED)", reactions)
+        self.assertIn(
+            "return currentChat != null && currentChat.creator && ChatObject.isChannelAndNotMegaGroup(currentChat);",
+            reactions,
+        )
+        self.assertIn("return info != null && info.paid_media_allowed;", reactions)
+        self.assertGreaterEqual(reactions.count("if (canEditPaidReactions()) {"), 1)
 
     def test_mapper_exposes_stock_fields_used_by_restored_buttons(self):
         chats = self.source("tgnet/WaysGramChats.java")

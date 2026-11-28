@@ -30,7 +30,9 @@ class NativeMessagingSourceChecks(unittest.TestCase):
         custom = self.source('ui/WaysGramCustomizationActivity.java')
         launch = self.source('ui/LaunchActivity.java')
         self.assertIn('presentFragment(new WaysGramCustomizationActivity())', settings)
-        self.assertIn('tabsView.setBackground(tabsViewBackground);', self.source('ui/MainTabsActivity.java'))
+        tabs = self.source('ui/MainTabsActivity.java')
+        self.assertIn('tabsViewBackground = iBlur3FactoryGlass.create(tabsView', tabs)
+        self.assertIn('tabsView.setBackground(WaysGramCustomizationActivity.wrapBackground(', tabs)
         self.assertIn('ACTION_OPEN_DOCUMENT', custom)
         self.assertIn('https://t.wg/custom/', custom)
         self.assertIn('WaysGramCustomizationActivity.isLink(data)', launch)
@@ -267,8 +269,20 @@ class NativeMessagingSourceChecks(unittest.TestCase):
         self.assertIn('WaysGramDiscussions.settings(this, currentAccount, chatId)', editor)
         self.assertIn('create()', discussion)
         self.assertIn('loadFullChat(channel, 0, true)', discussion)
-        self.assertIn('"owner".equals(group.optString("role"))', discussion)
+        self.assertIn('new ChatLinkActivity(channel, true)', discussion)
+        self.assertIn('picker.setInfo(full)', discussion)
         self.assertIn('WaysGramChats.channelServer(channel)', discussion)
+
+        # The native Telegram selector keeps search and sends its selected group
+        # through the transport bridge to the WaysGram discussion-group endpoint.
+        group_picker = self.source('ui/ChatLinkActivity.java')
+        self.assertIn('boolean chooseDiscussionGroup', group_picker)
+        self.assertIn('searchAdapter.searchDialogs(text)', group_picker)
+        self.assertIn('TL_channels_getGroupsForDiscussion', group_picker)
+        self.assertIn('showLinkAlert(chat, true)', group_picker)
+        self.assertIn('linkChat(chat, null)', group_picker)
+        self.assertIn('WaysGramChats.setDiscussionGroup(account, link.broadcast.channel_id, groupId)', transport)
+        self.assertIn('"/api/channels/" + channelServer(channelTgId) + "/discussion-group"', chats)
 
         # The native Telegram thread screen asks for the discussion root, then its replies.
         self.assertIn('request instanceof TLRPC.TL_messages_getDiscussionMessage', threads)
@@ -651,9 +665,11 @@ class NativeMessagingSourceChecks(unittest.TestCase):
                       '!message.isSecretMedia()', 'getMessagesController().isFrozen()',
                       'ChatObject.ACTION_SEND_REACTIONS', 'chosen.size() >= 3',
                       'reaction.documentId != 0', 'waysGramReactionRequests.contains(key)',
-                      'getSendMessagesHelper().sendReaction(message, chosen',
+                      'getSendMessagesHelper().sendReaction(message, visibleReactions',
                       'waysGramReactionRequests.remove(key)'):
             self.assertIn(guard, picker)
+        self.assertIn('if (!selected && !added)', picker)
+        self.assertIn('ArrayList<ReactionsLayoutInBubble.VisibleReaction> visibleReactions = message.getChoosenReactions();', picker)
         self.assertIn('options.isEmpty() && optionsView == null && !waysGramReactionMenu', chat)
         self.assertNotIn('showWaysGramReactionPicker', chat)
         self.assertNotIn('R.string.WaysGramReactionSelected', chat)
@@ -665,7 +681,7 @@ class NativeMessagingSourceChecks(unittest.TestCase):
         self.assertIn('waysGramPalette ? Math.min(7, getItemsCount())', panel)
         self.assertIn('(waysGramPalette || type == TYPE_STICKER_SET_EMOJI)', panel)
         self.assertIn('Emoji.getEmojiDrawable(react.emojicon)', panel)
-        self.assertIn('toggleWaysGramReaction(primaryMessage, visibleReaction.emojicon)', chat)
+        self.assertIn('selectWaysGramReaction(cell, primaryMessage, reactionsLayout', chat)
         self.assertNotIn('isReactionsViewAvailable = !org.telegram.tgnet.WaysGramTransport.ENABLED', chat)
         self.assertIn('isReactionsViewAvailable = !isEphemeral', chat)
         self.assertIn('imageReceiver.setImageBitmap(Emoji.getEmojiDrawable(visibleReaction.emojicon))', bubble)

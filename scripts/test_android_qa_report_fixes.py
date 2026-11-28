@@ -120,7 +120,11 @@ class ReportFixes(unittest.TestCase):
 
     def test_server_accepts_extended_mask_and_reads_old_rows(self):
         self.assertIn("SEND_REACTIONS = 1024", self.server)
-        self.assertIn("MAX_SEND_RESTRICTIONS = SEND_TEXT | SEND_PHOTOS", self.server)
+        # The mask spans all send and linked-peer restriction bits; keep this
+        # independent of whether the bitwise expression is formatted on one line.
+        self.assertIn("MAX_SEND_RESTRICTIONS = (", self.server)
+        self.assertIn("| SEND_REACTIONS", self.server)
+        self.assertIn("| RESTRICT_MANAGE_LINKED_PEERS", self.server)
         self.assertIn("if type(mask) is not int or not 0 <= mask <= MAX_SEND_RESTRICTIONS:", self.server)
         self.assertIn("send_restrictions_version INTEGER NOT NULL DEFAULT 0", self.server)
         self.assertIn("def send_restrictions(mask: int, version: int) -> int:", self.server)
@@ -156,6 +160,35 @@ class ReportFixes(unittest.TestCase):
         self.assertIn('relaxed.remove("strict_artwork");', mapper)
         self.assertIn("status.pattern_document_id = resolveWornDocument(gift, traits, \"pattern\", pattern);", mapper)
         self.assertIn("WaysGramBundledArtwork.install();", mapper)
+
+    # ----------------------------------------------------------- fixes in mirror
+
+    def test_paid_reaction_switch_is_owner_only_for_waysgram_channels(self):
+        editor = self.source("java/org/telegram/ui/Components/Reactions/ChatCustomReactionsEditActivity.java")
+        self.assertIn("if (canEditPaidReactions()) {", editor)
+        self.assertIn("if (org.telegram.tgnet.WaysGramTransport.ENABLED)", editor)
+        self.assertIn(
+            "currentChat != null && currentChat.creator && ChatObject.isChannelAndNotMegaGroup(currentChat)",
+            editor,
+        )
+        self.assertIn("return info != null && info.paid_media_allowed;", editor)
+
+    def test_user_selector_skips_null_user_sections(self):
+        selector = self.source("java/org/telegram/ui/Components/Premium/boosts/UserSelectorBottomSheet.java")
+        self.assertIn("if (users == null || users.isEmpty())", selector)
+
+    def test_gram_tab_opens_wallet(self):
+        tabs = self.source("java/org/telegram/ui/MainTabsActivity.java")
+        self.assertIn("public static final int TABS_COUNT = 5;", tabs)
+        self.assertIn("private static final int POSITION_GRAM = 2;", tabs)
+        self.assertIn("return new WalletActivity();", tabs)
+        for name in ("values/strings.xml", "values-ru/strings.xml"):
+            resources = self.archive.read(BASE + "res/" + name).decode("utf-8")
+            self.assertIn('name="MainTabsGram"', resources)
+
+    def test_russian_send_gift_label_is_plain_text(self):
+        resources = self.archive.read(BASE + "res/values-ru/strings.xml").decode("utf-8")
+        self.assertIn('<string name="SendAGift">Отправить подарок</string>', resources)
 
 
 if __name__ == "__main__":

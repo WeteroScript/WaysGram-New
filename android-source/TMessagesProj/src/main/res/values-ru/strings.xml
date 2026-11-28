@@ -5638,7 +5638,7 @@
     <string name="GiftPremiumListFeaturesAndTerms">Ознакомиться с преимуществами подписки WaysGram Premium можно *здесь*.</string>
     <string name="GiftPremium">Подарить Premium</string>
     <string name="GiftPremiumGifting">Подарить Premium</string>
-    <string name="SendAGift">"Отправить подарок "</string>
+    <string name="SendAGift">Отправить подарок</string>
     <string name="ProfileSendAGift">Отправить подарок</string>
     <string name="ProfileSendAGiftToChannel">Отправить подарок</string>
     <string name="GiftPremiumActivateForFree">Активировать бесплатно</string>
@@ -10480,6 +10480,7 @@
     <string name="GiftAuctionWearInfo3Header">Подтверждение статуса владельца</string>
     <string name="GiftAuctionWearInfo3Text">При нажатии на значок подарка откроется информация о нём и его владельце.</string>
     <string name="MainTabsContacts">Контакты</string>
+    <string name="MainTabsGram">Gram</string>
     <string name="MainTabsCalls">Звонки</string>
     <string name="MainTabsChats">Чаты</string>
     <string name="MainTabsProfile">Профиль</string>

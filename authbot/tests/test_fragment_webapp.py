@@ -80,8 +80,10 @@ def test_page_calls_only_our_api(env) -> None:
             assert "/api/gift-market?mine=true&limit=100" in body
             assert "/api/gift-market/catalog" in body
             assert "requestModelArtwork" in body
+            assert "requestPatternTexture" in body
             assert "lottie.loadAnimation" in body
             assert "model_document_id" in body
+            assert "pattern_document_id" in body
             # Ключ идемпотентности строится по тому же шаблону, что и в клиенте.
             assert '"wg-" + action + "-" + clean' in body
             assert '"Idempotency-Key"' in body
@@ -89,13 +91,22 @@ def test_page_calls_only_our_api(env) -> None:
     run(scenario())
 
 
-def test_pattern_is_not_rendered_as_a_foreground_sticker() -> None:
+def test_pattern_is_rendered_as_a_tinted_repeating_backdrop_texture() -> None:
     body = PAGE.read_text(encoding="utf-8")
-    assert "tinted, tiled backdrop texture" in body
+    assert "tinted mask" in body and "repeat it behind the gift model" in body
+    assert ".pattern-texture" in body
+    assert "requestPatternTexture" in body
+    assert "patternTextureAsset" in body
+    assert "-webkit-mask-repeat: repeat" in body
+    assert "mask-repeat: repeat" in body
+    assert "backdrop.pattern_color" in body
+    assert "node.style.backgroundColor = color" in body
+    assert "node.style.maskImage = source" in body
+    # The pattern is a tiled texture behind the model, never a foreground sticker.
     assert "pattern-art" not in body
     assert "requestPatternArtwork" not in body
     assert "renderGiftPattern" not in body
-    # Keep the pattern's name visible as a trait; only the broken image overlay is removed.
+    # Keep the pattern's name visible as a trait as well as rendering its artwork.
     assert 'trait(traits, "symbol") || trait(traits, "pattern")' in body
 
 

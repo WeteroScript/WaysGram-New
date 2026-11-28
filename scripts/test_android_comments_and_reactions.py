@@ -8,11 +8,10 @@
 
 * у нового канала сразу есть связанная группа комментариев (`comments`, по умолчанию
   включено) — иначе у постов нет кнопки комментариев вообще;
-* каналу, созданному раньше, группу можно создать из настроек:
-  `POST /api/channels/{id}/discussion-group/create` + диалог «Обсуждение» в клиенте
-  (`WaysGramDiscussions`) с кнопкой «Создать группу», а не тупик «у вас нет групп»;
-* «Обсуждение» в настройках канала открывает этот диалог, а не штатный
-  `ChatLinkActivity`, который умеет только выбирать существующие группы;
+* каналу, созданному раньше, группу можно выбрать или создать из настроек через
+  штатный `ChatLinkActivity` с поиском и нативной строкой «Создать группу»;
+* выбор проходит через WaysGram transport: `getGroupsForDiscussion`, `createChat`
+  и `setDiscussionGroup` отображаются на backend-группы, а не на Telegram RPC;
 * серверный вайтлист реакций совпадает с палитрой приложения: `reactions.json`
   собирается из архива, а не пишется руками.
 """
@@ -44,6 +43,9 @@ class CommentsAndReactions(unittest.TestCase):
         cls.archive = zipfile.ZipFile(BytesIO(archive_bytes()))
         cls.server = SERVER.read_text(encoding="utf-8")
         cls.discussions = cls.read(JAVA + "ui/WaysGramDiscussions.java")
+        cls.chat_link = cls.read(JAVA + "ui/ChatLinkActivity.java")
+        cls.transport = cls.read(JAVA + "tgnet/WaysGramTransport.java")
+        cls.chats = cls.read(JAVA + "tgnet/WaysGramChats.java")
         cls.edit = cls.read(JAVA + "ui/ChatEditActivity.java")
         cls.strings = cls.read("WaysGram-Android/TMessagesProj/src/main/res/values/strings.xml")
 
@@ -58,15 +60,20 @@ class CommentsAndReactions(unittest.TestCase):
         self.assertIn("create_channel_discussion_group(", self.server)
 
     def test_existing_channel_can_create_a_group(self):
-        self.assertIn('/api/channels/{channel_id}/discussion-group/create', self.server)
-        self.assertIn('path + "/create"', self.discussions)
+        self.assertIn("new ChatLinkActivity(channel, true)", self.discussions)
+        self.assertIn("new GroupCreateFinalActivity(args)", self.chat_link)
+        self.assertIn("linkChat(getMessagesController().getChat(chatId), fragment);", self.chat_link)
+        self.assertIn("request instanceof TLRPC.TL_messages_createChat", self.transport)
+        self.assertIn("WaysGramChats.createChat(account", self.transport)
 
     def test_no_dead_end_without_groups(self):
-        self.assertNotIn(
-            "notice(fragment, R.string.WaysGramDiscussionGroup, R.string.WaysGramDiscussionNoGroups);\n                return;",
-            self.discussions,
-        )
-        self.assertIn("WaysGramDiscussionCreate", self.discussions)
+        self.assertNotIn("WaysGramDiscussionNoGroups", self.discussions)
+        self.assertIn("public ChatLinkActivity(long chatId, boolean chooseDiscussionGroup)", self.chat_link)
+        self.assertIn("if (info.linked_chat_id != 0 || chooseDiscussionGroup)", self.chat_link)
+        self.assertIn("if (position == createChatRow)", self.chat_link)
+        self.assertIn("R.string.DiscussionCreateGroup", self.chat_link)
+        self.assertIn("WaysGramChats.discussionGroups(account, selfId)", self.transport)
+        self.assertIn("WaysGramChats.setDiscussionGroup(account", self.transport)
 
     def test_channel_settings_open_the_waysgram_dialog(self):
         self.assertIn("WaysGramDiscussions.settings(this, currentAccount, chatId)", self.edit)
@@ -94,7 +101,7 @@ class CommentsAndReactions(unittest.TestCase):
         self.assertNotIn("WaysGramDiscussions.open(", chat)
 
     def test_strings_exist(self):
-        for name in ("WaysGramDiscussionCreate", "WaysGramDiscussionEnabled"):
+        for name in ("DiscussionCreateGroup", "WaysGramDiscussionEnabled"):
             self.assertIn(f'name="{name}"', self.strings)
 
     # -------------------------------------------------------------- реакции

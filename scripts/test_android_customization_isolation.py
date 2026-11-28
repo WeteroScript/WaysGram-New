@@ -80,8 +80,9 @@ class CustomizationIsolationChecks(unittest.TestCase):
 
     def test_tab_bar_and_indicator_stay_native(self):
         tabs = self.source("ui/MainTabsActivity.java")
-        self.assertIn("tabsView.setBackground(tabsViewBackground);", tabs)
-        self.assertNotIn("wrapBackground", tabs)
+        self.assertIn("tabsViewBackground = iBlur3FactoryGlass.create(tabsView", tabs)
+        self.assertIn("tabsView.setBackground(WaysGramCustomizationActivity.wrapBackground(", tabs)
+        self.assertIn("tabsViewBackground", tabs)
         layout = self.source("ui/MainTabsLayout.java")
         self.assertNotIn("WaysGramCustomizationActivity.drawIndicator", layout)
         glass = self.source("ui/Components/glass/GlassTabView.java")

@@ -175,10 +175,9 @@ class PlushPepeChecks(unittest.TestCase):
         sheet = self.archive.read(BASE + "ui/Gifts/GiftSheet.java").decode("utf-8")
         start = sheet.index("private void setSticker(TLRPC.Document document, Object parentObject)")
         block = sheet[start:start + 2400]
-        self.assertIn('"80_80_nolimit"', block,
-                      "ячейка «Мои подарки» должна рисовать кадр из файла модели")
-        self.assertNotIn("80_80_nolimit_pcache", block,
-                         "pcache оставлял ячейку с синтетическим артом пустой")
+        self.assertIn("WaysGramGiftNumber.isWaysGramModel(starGift)", block)
+        self.assertIn('"80_80_nolimit" : "80_80_nolimit_pcache"', block,
+                      "модель WaysGram должна рисоваться без кадра из frame cache")
 
     def test_model_square_and_caption_offset_use_one_constant(self):
         """Подпись «Название #номер» начинается под квадратом модели.

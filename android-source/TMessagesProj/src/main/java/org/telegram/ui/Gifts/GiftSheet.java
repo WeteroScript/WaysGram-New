@@ -1896,9 +1896,15 @@ public class GiftSheet extends BottomSheetWithRecyclerListView implements Notifi
             TLRPC.PhotoSize photoSize = FileLoader.getClosestPhotoSizeWithSize(document.thumbs, dp(100));
             SvgHelper.SvgDrawable svgThumb = DocumentObject.getSvgThumb(document, Theme.key_windowBackgroundGray, 0.3f);
 
+            TL_stars.StarGift starGift = parentObject instanceof TL_stars.StarGift
+                    ? (TL_stars.StarGift) parentObject
+                    : parentObject instanceof TL_stars.SavedStarGift
+                    ? ((TL_stars.SavedStarGift) parentObject).gift : null;
+            final String filter = WaysGramGiftNumber.isWaysGramModel(starGift)
+                    ? "80_80_nolimit" : "80_80_nolimit_pcache";
             imageView.setImage(
-                ImageLocation.getForDocument(document), "80_80_nolimit_pcache",
-                ImageLocation.getForDocument(photoSize, document), "80_80_nolimit_pcache",
+                ImageLocation.getForDocument(document), filter,
+                ImageLocation.getForDocument(photoSize, document), filter,
                 svgThumb,
                 parentObject
             );
@@ -2640,7 +2646,7 @@ public class GiftSheet extends BottomSheetWithRecyclerListView implements Notifi
             final float textScale = Math.min(1, dp(40) / text.getCurrentWidth());
             canvas.scale(textScale, textScale, cx, cy);
             if (shimmer) {
-                WaysGramGiftNumber.applyShimmer(text.paint, text.getCurrentWidth(), text.paint.getTextSize());
+                WaysGramGiftNumber.applyShimmer(text.paint, cx - text.getWidth() / 2f, text.getCurrentWidth());
             }
             text.draw(canvas, cx - text.getWidth() / 2f, cy + dp(1), textColor, 1f);
             if (shimmer) {

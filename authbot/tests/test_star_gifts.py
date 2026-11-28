@@ -650,6 +650,65 @@ def test_gift_market_listing_purchase_and_cancellation(env) -> None:
     run(scenario())
 
 
+def test_market_resolves_backdrop_palette_from_the_named_trait(env) -> None:
+    path, app = env
+    gift_id = "5936013938331222567"  # Plush Pepe
+    serial = "WG-000000000501"
+    attributes = {
+        "collectible_traits": {
+            "model": {"name": "WaysGram", "document_id": 9_007_199_254_741_099_123},
+            "pattern": {"name": "Diamonds", "document_id": 8_888_888_888_888_888_888},
+            # Simulate a stale preview row: the visible label is Black but the saved colors
+            # belong to a different backdrop. The named, gift-specific pool must win.
+            "backdrop": {
+                "name": "Black", "center_color": 0xF02080, "edge_color": 0xA01060,
+                "pattern_color": 0xCC0099, "text_color": 0xFFFFFF,
+            },
+        },
+    }
+    with db_split.sqlite_connect(path) as db:
+        db.execute(
+            """INSERT INTO user_gifts
+               (serial_number,gift_name,owner_telegram_id,acquired_at,telegram_gift_id,
+                gift_emoji,upgrade_level,attributes_json)
+               VALUES(?,?,101,?,?,?,?,?)""",
+            (serial, "Plush Pepe", int(time.time()), gift_id, "🐸", 1,
+             json.dumps(attributes, ensure_ascii=False)),
+        )
+        db.execute(
+            """INSERT INTO gift_market_listings
+               (serial_number,seller_telegram_id,price_grams,price_stars,currency,status,created_at)
+               VALUES(?,101,50000,0,'grams','active',?)""",
+            (serial, int(time.time())),
+        )
+        db.commit()
+
+    async def scenario() -> None:
+        async with await client_for(app) as client:
+            response = await client.get("/api/gift-market", headers=headers(102))
+            assert response.status_code == 200, response.text
+            item = next(row for row in response.json()["listings"]
+                        if row["serial_number"] == serial)
+            traits = item["attributes"]["collectible_traits"]
+            assert traits["backdrop"] == {
+                "name": "Black", "center_color": 0x363738, "edge_color": 0x0E0F0F,
+                "pattern_color": 0x6C6868, "text_color": 0x8C8F91,
+            }
+            assert item["model_document_id"] == "9007199254741099123"
+            assert item["pattern_document_id"] == "8888888888888888888"
+
+    run(scenario())
+    with db_split.sqlite_connect(path) as db:
+        stored = json.loads(db.execute(
+            "SELECT attributes_json FROM user_gifts WHERE serial_number=?", (serial,)
+        ).fetchone()[0])
+    assert stored["collectible_traits"]["backdrop"]["center_color"] == 0xF02080
+
+    legacy = {"collectible_traits": {"backdrop": "Black"}}
+    assert messenger_api._enrich_collectible_backdrop_colors(legacy, gift_id, "Plush Pepe")
+    assert legacy["collectible_traits"]["backdrop"]["pattern_color"] == 0x6C6868
+
+
 def test_legacy_gram_gift_listing_migrates_to_currency_schema(env) -> None:
     path, _app = env
 

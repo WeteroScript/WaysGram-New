@@ -569,6 +569,52 @@ def _normalise_attribute_name(value: Any) -> str:
     return " ".join(text.split()).casefold()
 
 
+def _enrich_collectible_backdrop_colors(
+    attributes: Any, gift_id: Any, gift_title: Any = "",
+) -> bool:
+    """Use the catalog palette for a named backdrop in API responses.
+
+    Older collectible records can contain only the backdrop name, while a partially synced
+    record can carry colors from a different preview row. The exact trait name plus this
+    gift's official pool is authoritative; resolving it here keeps the Fragment card and its
+    tinted pattern in agreement with the displayed backdrop trait.
+    """
+    traits = gift_upgrades.traits_of(attributes)
+    if not isinstance(traits, dict):
+        return False
+    backdrop = traits.get("backdrop")
+    if isinstance(backdrop, dict):
+        name = backdrop.get("name")
+    elif isinstance(backdrop, str):
+        name = backdrop
+    else:
+        return False
+    wanted = _normalise_attribute_name(name)
+    if not wanted:
+        return False
+    _key, pool = gift_upgrades.pool_for_gift(gift_id, gift_title)
+    if not pool:
+        return False
+    matches = [entry for entry in pool.get("backdrops") or []
+               if isinstance(entry, list) and len(entry) >= 6
+               and _normalise_attribute_name(entry[0]) == wanted]
+    if len(matches) != 1:
+        return False
+    entry = matches[0]
+    if isinstance(backdrop, str):
+        backdrop = {"name": backdrop}
+        traits["backdrop"] = backdrop
+    changed = False
+    for key, value in zip(
+        ("center_color", "edge_color", "pattern_color", "text_color"), entry[2:6]
+    ):
+        color = int(value)
+        if backdrop.get(key) != color:
+            backdrop[key] = color
+            changed = True
+    return changed
+
+
 async def _gift_attribute_rows(db: Any, gift_id: str) -> dict[str, list[dict[str, Any]]]:
     """Telegram's attribute rows of one gift, grouped by kind and in Telegram's order."""
     gift_id = str(gift_id or "").strip()
@@ -7012,6 +7058,10 @@ def build_messenger_router(
                     metadata_by_id[gift_id] = await _telegram_gift_metadata(gift_db, gift_id)
                 telegram_gift = _merge_telegram_gift_metadata(metadata_by_id[gift_id], snapshot)
                 item["telegram_gift"] = telegram_gift
+                _enrich_collectible_backdrop_colors(
+                    item["attributes"], gift_id,
+                    telegram_gift.get("title") if telegram_gift else item.get("gift_name"),
+                )
                 # Older upgrades were rolled before Telegram's attribute set was known, so
                 # their traits carry no document id: the native card then cannot play the
                 # official model and pattern. The id is restored from the local catalog and
@@ -9837,6 +9887,9 @@ def build_messenger_router(
                 item["attributes"] = json.loads(item.pop("attributes_json") or "{}")
             except (TypeError, ValueError):
                 item["attributes"] = {}
+            _enrich_collectible_backdrop_colors(
+                item["attributes"], item.get("telegram_gift_id"), item.get("gift_name"),
+            )
             item["price"] = int(item["price_stars"] or 0) if item["currency"] == "stars" else int(item["price_grams"] or 0)
             item["model_document_id"] = _collectible_model_document_id(item["attributes"])
             item["pattern_document_id"] = _collectible_pattern_document_id(item["attributes"])

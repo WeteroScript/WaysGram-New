@@ -106,8 +106,12 @@ class FragmentMiniAppChecks(unittest.TestCase):
     def test_pattern_is_not_overlaid_on_the_gift_model(self):
         # Telegram uses the pattern as a tinted background texture, not as a foreground
         # sticker. The page must keep its trait label without painting a black mask over art.
-        self.assertIn("tinted, tiled backdrop texture", self.page)
+        self.assertIn("render one vector frame as a tinted mask", self.page)
         self.assertIn('trait(traits, "symbol") || trait(traits, "pattern")', self.page)
+        self.assertIn("node.style.backgroundColor = color;", self.page)
+        self.assertIn("node.style.maskRepeat = \"repeat\";", self.page)
+        self.assertIn(".pattern-texture {", self.page)
+        self.assertIn("z-index: 0; pointer-events: none;", self.page)
         for marker in ("pattern-art", "requestPatternArtwork", "renderGiftPattern"):
             self.assertNotIn(marker, self.page)
 

@@ -33357,12 +33357,19 @@ public class ChatActivity extends BaseFragment implements
             && message.isReactionsAvailable() && !message.isSecretMedia();
     }
 
-    private boolean toggleWaysGramReaction(MessageObject message, String emoji) {
-        if (!canUseWaysGramReactions(message) || getParentActivity() == null) return false;
+    private boolean selectWaysGramReaction(View cell, MessageObject message,
+                                           ReactionsContainerLayout reactionsLayout, View fromView,
+                                           float x, float y,
+                                           ReactionsLayoutInBubble.VisibleReaction visibleReaction,
+                                           boolean fromDoubleTap, boolean bigEmoji,
+                                           boolean addToRecent, boolean withoutAnimation) {
+        if (!canUseWaysGramReactions(message) || getParentActivity() == null
+                || visibleReaction == null || visibleReaction.emojicon == null) return false;
         if (getMessagesController().isFrozen()) {
             AccountFrozenAlert.show(currentAccount);
             return false;
         }
+        String emoji = visibleReaction.emojicon;
         boolean supported = false;
         for (String allowed : WAYSGRAM_REACTIONS) if (allowed.equals(emoji)) supported = true;
         if (!supported) return false;
@@ -33387,47 +33394,106 @@ public class ChatActivity extends BaseFragment implements
             BulletinFactory.of(this).createSimpleBulletin(R.raw.e_hand_2, getString(R.string.SendReactionsIsRestrictedInThisChat)).show();
             return false;
         }
-        if (selected) {
-            for (int i = chosen.size() - 1; i >= 0; i--) if (emoji.equals(chosen.get(i).emojicon)) chosen.remove(i);
-        } else {
-            if (chosen.size() >= 3) {
-                AlertsCreator.showSimpleAlert(this, getParentActivity().getString(R.string.WaysGramReactionLimit));
-                return false;
-            }
-            chosen.add(ReactionsLayoutInBubble.VisibleReaction.fromEmojicon(emoji));
+        if (!selected && chosen.size() >= 3) {
+            AlertsCreator.showSimpleAlert(this, getParentActivity().getString(R.string.WaysGramReactionLimit));
+            return false;
         }
-        // Do not change the message optimistically: the response or refresh is authoritative.
-        waysGramReactionRequests.add(key);
-        getSendMessagesHelper().sendReaction(message, chosen, null, false, false, this,
-            () -> waysGramReactionRequests.remove(key));
-        return !selected;
-    }
 
-    private void showWaysGramReactionAnimation(View cell, MessageObject message,
-                                                ReactionsContainerLayout reactionsLayout, View fromView,
-                                                float x, float y,
-                                                ReactionsLayoutInBubble.VisibleReaction visibleReaction,
-                                                boolean bigEmoji, boolean withoutAnimation) {
-        if (withoutAnimation || message == null || visibleReaction == null) return;
-        if (cell == null) cell = findMessageCell(message.getId(), true);
-        if (cell == null) return;
         ReactionsEffectOverlay.removeCurrent(false);
-        // WaysGram's standard emoji have no Telegram reaction animation documents.
-        // The overlay's local-emoji path is available on LONG/ONLY_MOVE, not SHORT.
-        int animationType = bigEmoji
-                ? ReactionsEffectOverlay.LONG_ANIMATION
-                : ReactionsEffectOverlay.ONLY_MOVE_ANIMATION;
-        ReactionsEffectOverlay.show(ChatActivity.this, reactionsLayout, cell, fromView, x, y,
-                visibleReaction, currentAccount, animationType);
-        ReactionsEffectOverlay.startAnimation();
+        final int currentChosenReactions = chosen.size();
+        final boolean added = message.selectReaction(visibleReaction, bigEmoji, fromDoubleTap);
+        if (!selected && !added) {
+            // MessageObject also enforces the channel's per-post reaction limit.
+            // Do not send a no-op request if that local validation rejected the add.
+            return false;
+        }
+        int messageIdForCell = message.getId();
+        if (groupedMessagesMap.get(message.getGroupId()) != null) {
+            int flags = message.shouldDrawReactionsInLayout()
+                    ? MessageObject.POSITION_FLAG_BOTTOM | MessageObject.POSITION_FLAG_LEFT
+                    : MessageObject.POSITION_FLAG_BOTTOM | MessageObject.POSITION_FLAG_RIGHT;
+            MessageObject messageObject = groupedMessagesMap.get(message.getGroupId()).findMessageWithFlags(flags);
+            if (messageObject != null) {
+                messageIdForCell = messageObject.getId();
+            }
+        }
+        final int finalMessageIdForCell = messageIdForCell;
+
+        if (added) {
+            cell = findMessageCell(finalMessageIdForCell, true);
+            showMultipleReactionsPromo(cell, visibleReaction, currentChosenReactions);
+            if (!fromDoubleTap && !withoutAnimation) {
+                // WaysGram reactions use their local emoji artwork; the SHORT
+                // animation path expects Telegram reaction documents and renders blank.
+                int animationType = bigEmoji
+                        ? ReactionsEffectOverlay.LONG_ANIMATION
+                        : ReactionsEffectOverlay.ONLY_MOVE_ANIMATION;
+                ReactionsEffectOverlay.show(ChatActivity.this, reactionsLayout, cell, fromView, x, y,
+                        visibleReaction, currentAccount, animationType);
+            }
+        }
+        if (added) {
+            AndroidUtilities.makeAccessibilityAnnouncement(LocaleController.formatString(
+                    R.string.AccDescrYouReactedWith, visibleReaction.emojicon));
+        }
+
+        ArrayList<ReactionsLayoutInBubble.VisibleReaction> visibleReactions = message.getChoosenReactions();
+        waysGramReactionRequests.add(key);
+        Runnable reactionUpdate = updateReactionRunnable = new Runnable() {
+            @Override
+            public void run() {
+                if (updateReactionRunnable != null) {
+                    updateReactionRunnable = null;
+                    if (fromDoubleTap && !withoutAnimation) {
+                        doOnIdle(() -> AndroidUtilities.runOnUIThread(() -> {
+                            BaseCell reactionCell = findMessageCell(finalMessageIdForCell, true);
+                            if (added && reactionCell != null) {
+                                ReactionsEffectOverlay.show(ChatActivity.this, reactionsLayout, reactionCell,
+                                        null, x, y, visibleReaction, currentAccount,
+                                        bigEmoji ? ReactionsEffectOverlay.LONG_ANIMATION
+                                                : ReactionsEffectOverlay.ONLY_MOVE_ANIMATION);
+                                ReactionsEffectOverlay.startAnimation();
+                            }
+                        }, 50));
+                    } else if (!withoutAnimation) {
+                        doOnIdle(() -> {
+                            MessageObject messageToUpdate = message;
+                            MessageObject messageInDict = messagesDict[0].get(message.getId());
+                            if (messageInDict != null && messageInDict != message) {
+                                messageToUpdate = messageInDict;
+                                messageToUpdate.messageOwner.reactions = message.messageOwner.reactions;
+                            }
+                            updateMessageAnimated(messageToUpdate, true);
+                            ReactionsEffectOverlay.startAnimation();
+                        });
+                    }
+                    if (!withoutAnimation) {
+                        closeMenu();
+                    }
+                }
+            }
+        };
+        getSendMessagesHelper().sendReaction(message, visibleReactions, added ? visibleReaction : null,
+                bigEmoji, addToRecent, ChatActivity.this, () -> waysGramReactionRequests.remove(key));
+
+        if (fromDoubleTap || withoutAnimation) {
+            updateMessageAnimated(message, true);
+            if (fromDoubleTap && !withoutAnimation) {
+                reactionUpdate.run();
+            }
+        }
+        if (!withoutAnimation) {
+            AndroidUtilities.runOnUIThread(reactionUpdate, 50);
+        }
+        return true;
     }
 
     public void selectReaction(View cell, MessageObject primaryMessage, ReactionsContainerLayout reactionsLayout, View fromView, float x, float y, ReactionsLayoutInBubble.VisibleReaction visibleReaction, boolean fromDoubleTap, boolean bigEmoji, boolean addToRecent, boolean withoutAnimation) {
         if (org.telegram.tgnet.WaysGramTransport.ENABLED) {
             if (visibleReaction != null && visibleReaction.isStar) {
                 // Платная реакция открывает окно Stars и по одиночному нажатию, и по долгому.
-                // Раньше окно появлялось только при long press, а обычный тап уходил в
-                // toggleWaysGramReaction и молча игнорировался (у звезды нет emojicon).
+                // Звезда не имеет emojicon, поэтому её нужно обработать до обычного
+                // переключения emoji-реакций.
                 if (primaryMessage == null || getParentActivity() == null) return;
                 View starCell = cell;
                 if (starCell == null) {
@@ -33447,11 +33513,8 @@ public class ChatActivity extends BaseFragment implements
                 return;
             }
             if (visibleReaction != null && visibleReaction.emojicon != null) {
-                boolean added = toggleWaysGramReaction(primaryMessage, visibleReaction.emojicon);
-                if (added) {
-                    showWaysGramReactionAnimation(cell, primaryMessage, reactionsLayout, fromView, x, y,
-                            visibleReaction, bigEmoji, withoutAnimation);
-                }
+                selectWaysGramReaction(cell, primaryMessage, reactionsLayout, fromView, x, y,
+                        visibleReaction, fromDoubleTap, bigEmoji, addToRecent, withoutAnimation);
                 if (reactionsLayout != null) closeMenu();
             }
             return;
