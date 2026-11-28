@@ -70,6 +70,22 @@ class WaysGramClientRegressions(unittest.TestCase):
         # конструктора (adapter.update) не применит состояние вовсе.
         self.assertLess(body.index("return;"), body.index("shownCollectiblesInfo = show;"), body)
 
+    def test_emoji_effect_waits_for_a_free_overlay(self) -> None:
+        """Один эффект за раз: иначе каждый проход отрисовки добавлял второй объект."""
+        source = self.read("ui/ChatActivity.java")
+        body = self.method(
+            source,
+            "} else if (messageObject.isAnimatedAnimatedEmoji()) {",
+            "} else if (view instanceof ChatActionCell) {",
+        )
+        order = [
+            body.index("emojiAnimationsOverlay.isIdle()"),
+            body.index("emojiAnimationsOverlay.checkPosition("),
+            body.index("consumeEmojiEffect(messageObject)"),
+            body.index("emojiAnimationsOverlay.onTapItem("),
+        ]
+        self.assertEqual(order, sorted(order), body)
+
     # ------------------------------------------------- 2. «Разрешения» (маска)
 
     def _mask_tables(self) -> tuple[dict[str, int], dict[int, list[str]], str, str]:

@@ -16374,7 +16374,13 @@ public class ChatActivity extends BaseFragment implements
                     emojiAnimationsOverlay.onTapItem(messageCell, ChatActivity.this, false);
                 } else if (messageObject.isAnimatedAnimatedEmoji()) {
                     emojiAnimationsOverlay.preloadAnimation(messageCell);
-                    if (org.telegram.tgnet.WaysGramReactions.consumeEmojiEffect(messageObject)) {
+                    // Эффект одиночного эмодзи запускается только когда оверлей свободен: иначе
+                    // каждый проход отрисовки добавлял второй такой же объект, и эффект
+                    // начинался заново — «повторяется и дёргается». consumeEmojiEffect вызываем
+                    // последним, чтобы событие не сгорело, пока эффект ещё доигрывает.
+                    if (emojiAnimationsOverlay.isIdle()
+                            && emojiAnimationsOverlay.checkPosition(messageCell, chatListViewPaddingTop, chatListView.getMeasuredHeight() - blurredViewBottomOffset)
+                            && org.telegram.tgnet.WaysGramReactions.consumeEmojiEffect(messageObject)) {
                         // Появление одиночного эмодзи проигрывает его эффект, как в Telegram.
                         emojiAnimationsOverlay.onTapItem(messageCell, ChatActivity.this, false);
                     }
