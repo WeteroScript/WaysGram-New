@@ -100,6 +100,35 @@ java.util.ArrayList.isEmpty()' on a null object reference` при открыти
 
 ---
 
+### 1а. Вторая ступень того же падения: `subtitleStarsView.animate()` на null
+
+Первый NPE (`waysGramMyGifts.isEmpty()`) закрыл дорогу дальше, и после правки трейс сместился на
+следующую строку того же конструкторского вызова:
+`NullPointerException: Attempt to invoke virtual method 'android.view.ViewPropertyAnimator
+android.view.View.animate()' on a null object reference` в кадре `vg.s1.Y`.
+
+Источник — `fillItems` вызывает `setShowCollectiblesInfo(...)` (`GiftSheet.java:1229`), а тот анимирует
+`subtitleStarsView`/`subtitleCollectiblesStarsView`, создаваемые в **теле** конструктора
+(`:356`, `:368`), то есть позже `super(...)`. Худший случай совпадает: при вызове из конструктора
+`self == false`, `dialogId == 0`, `selectedTab` уже равен индексу вкладки «Коллекционные», поэтому
+`show == true`, ранний выход `if (show == shownCollectiblesInfo)` не срабатывает и выполняется
+`subtitleStarsView.animate()` на `null`.
+
+Правка: `setShowCollectiblesInfo` выходит, пока вьюхи не созданы, и **не** запоминает значение —
+конец конструктора вызывает `adapter.update(false)`, и метод отрабатывает второй раз уже с вьюхами:
+
+```java
+if (subtitleStarsView == null || subtitleCollectiblesStarsView == null) {
+    return;
+}
+```
+
+Заодно список `waysGramMyGifts` в `fillItems` заменён на локальный `waysGramGifts`
+(`waysGramMyGifts != null ? waysGramMyGifts : new ArrayList<>()`), поэтому цикл по нему тоже
+не может упасть до инициализации поля.
+
+---
+
 ## 2. Платная реакция исчезает примерно через 5 секунд
 
 **Симптом.** После отправки платной реакции чип со звёздами виден, затем пропадает примерно

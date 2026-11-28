@@ -45,12 +45,30 @@ class WaysGramClientRegressions(unittest.TestCase):
 
     # ---------------------------------------------------------------- 1. NPE
 
-    def test_gift_sheet_guards_waysgram_list_before_field_init(self) -> None:
-        """`fillItems` вызывается из конструктора суперкласса, поля класса ещё null."""
+    def test_gift_sheet_never_touches_uninitialised_fields(self) -> None:
+        """`fillItems` вызывается из конструктора суперкласса, поля класса ещё null.
+
+        Первым падал `waysGramMyGifts.isEmpty()`, после его правки — тот же кадр
+        конструктора на `subtitleStarsView.animate()`; проверяем обе ступени.
+        """
         source = self.read("ui/Gifts/GiftSheet.java")
-        self.assertIn("waysGramMyGifts != null && !waysGramMyGifts.isEmpty()", source)
-        unguarded = source.replace("waysGramMyGifts != null && !waysGramMyGifts.isEmpty()", "")
-        self.assertNotIn("waysGramMyGifts.isEmpty()", unguarded)
+        self.assertIn("waysGramMyGifts != null ? waysGramMyGifts : new ArrayList<>()", source)
+        self.assertNotIn("for (TL_stars.SavedStarGift savedStarGift : waysGramMyGifts)", source)
+        self.assertNotIn("waysGramMyGifts.isEmpty()", source)
+
+    def test_collectibles_subtitles_are_not_animated_before_the_views_exist(self) -> None:
+        source = self.read("ui/Gifts/GiftSheet.java")
+        body = self.method(
+            source,
+            "public void setShowCollectiblesInfo(boolean show) {",
+            "\n    @Override\n    public void show() {",
+        )
+        guard = body.index("subtitleStarsView == null")
+        self.assertLess(guard, body.index(".animate()"), body)
+        self.assertIn("subtitleCollectiblesStarsView == null", body)
+        # Значение не запоминается до создания вьюх: иначе повторный вызов из конца
+        # конструктора (adapter.update) не применит состояние вовсе.
+        self.assertLess(body.index("return;"), body.index("shownCollectiblesInfo = show;"), body)
 
     # ------------------------------------------------- 2. «Разрешения» (маска)
 

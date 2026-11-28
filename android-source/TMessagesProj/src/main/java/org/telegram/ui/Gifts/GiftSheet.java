@@ -738,6 +738,14 @@ public class GiftSheet extends BottomSheetWithRecyclerListView implements Notifi
     private boolean shownCollectiblesInfo;
     public void setShowCollectiblesInfo(boolean show) {
         if (show == shownCollectiblesInfo) return;
+        if (subtitleStarsView == null || subtitleCollectiblesStarsView == null) {
+            // fillItems runs from the UniversalAdapter constructor, i.e. while this sheet is
+            // still inside super(...); the subtitle views are created in the constructor body
+            // afterwards, so animating them here threw NullPointerException on View.animate().
+            // The value is not memoised on purpose: the constructor tail calls adapter.update()
+            // and this method runs again once the views exist.
+            return;
+        }
 
         shownCollectiblesInfo = show;
         subtitleStarsView.animate()
@@ -1165,9 +1173,11 @@ public class GiftSheet extends BottomSheetWithRecyclerListView implements Notifi
         }
         // fillItems is called from the UniversalAdapter constructor, which the bottom sheet
         // creates inside its own constructor, so instance fields of this class are still
-        // null here (field initializers run after super(...)). Guard the WaysGram list.
-        final boolean hasWaysGramMyGifts = waysGramMyGiftsLoading
-                || waysGramMyGifts != null && !waysGramMyGifts.isEmpty();
+        // null here (field initializers run after super(...)). Never touch them unguarded:
+        // the empty list keeps every loop below safe until adapter.update() refills the sheet.
+        final ArrayList<TL_stars.SavedStarGift> waysGramGifts =
+                waysGramMyGifts != null ? waysGramMyGifts : new ArrayList<>();
+        final boolean hasWaysGramMyGifts = waysGramMyGiftsLoading || !waysGramGifts.isEmpty();
         if (!MessagesController.getInstance(currentAccount).stargiftsBlocked
                 && (!gifts.isEmpty() || userSettings != null && !userSettings.disallow_unique_stargifts && myGifts != null && !myGifts.gifts.isEmpty()
                 || hasWaysGramMyGifts)) {
@@ -1228,7 +1238,7 @@ public class GiftSheet extends BottomSheetWithRecyclerListView implements Notifi
                         }
                     }
                 }
-                for (TL_stars.SavedStarGift savedStarGift : waysGramMyGifts) {
+                for (TL_stars.SavedStarGift savedStarGift : waysGramGifts) {
                     if (savedStarGift.gift instanceof TL_stars.TL_starGiftUnique) {
                         finalGifts.add(savedStarGift.gift);
                     }
