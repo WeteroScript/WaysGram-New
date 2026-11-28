@@ -405,6 +405,8 @@
   var openMenu = null;
 
   var COLORS = ["#6e7d63", "#4f7f53", "#7c6bb0", "#b0865a", "#4f7e96", "#a06a88"];
+  /* Официальные палитры фонов по имени трейта; грузятся один раз при старте страницы. */
+  var backdropPalettes = {};
   var artCache = {};
   var modelAssetCache = {};
   var patternTextureCache = {};
@@ -514,12 +516,38 @@
     return "#" + hex;
   }
 
+  function backdropKey(value) {
+    return String(value == null ? "" : value)
+      .replace(/[\u2019\u2018\u02bc\u00b4`\u2032]/g, "'")
+      .replace(/[\u2010\u2011\u2012\u2013\u2014\u2015\u2212\u2043]/g, "-")
+      .replace(/\u00a0/g, " ")
+      .replace(/\s+/g, " ")
+      .trim().toLowerCase();
+  }
+
+  /* Палитра принадлежит имени фона: «Black» одинаков во всех коллекциях. Строка записи
+     может прийти из чужой превью-таблицы с чужими цветами, поэтому имя — источник правды. */
+  function paletteFor(backdrop) {
+    if (!backdrop || typeof backdrop !== "object") { return null; }
+    var key = backdropKey(backdrop.name);
+    return key && backdropPalettes[key] ? backdropPalettes[key] : null;
+  }
+
+  function backdropColor(backdrop, key) {
+    var palette = paletteFor(backdrop);
+    if (palette) {
+      var hex = colorHex(palette[key]);
+      if (hex) { return hex; }
+    }
+    return colorHex(backdrop[key]);
+  }
+
   function colorFor(item) {
     var traits = item && item.attributes && item.attributes.collectible_traits;
     var backdrop = traits && traits.backdrop;
     if (backdrop && typeof backdrop === "object") {
-      var center = colorHex(backdrop.center_color);
-      var edge = colorHex(backdrop.edge_color);
+      var center = backdropColor(backdrop, "center_color");
+      var edge = backdropColor(backdrop, "edge_color");
       if (center && edge) {
         // The card is much wider than it is tall (`.big-art` is 200px high), so a circle
         // put the whole visible area inside the centre stop and the backdrop looked flat.
@@ -825,7 +853,7 @@
   function patternColorFor(item) {
     var traits = item && item.attributes && item.attributes.collectible_traits;
     var backdrop = traits && traits.backdrop;
-    return backdrop && typeof backdrop === "object" ? colorHex(backdrop.pattern_color) : "";
+    return backdrop && typeof backdrop === "object" ? backdropColor(backdrop, "pattern_color") : "";
   }
 
   function renderPatternTexture(item, node) {
@@ -1797,6 +1825,14 @@
     $("copy-fragment").addEventListener("click", function () { copy("@fragment"); });
   }
 
+  function loadBackdropPalettes() {
+    return api("/api/gift-backdrops").then(function (data) {
+      var palettes = data && data.backdrops;
+      if (!palettes || typeof palettes !== "object") { return; }
+      backdropPalettes = palettes;
+    });
+  }
+
   function start() {
     if (bridge && typeof bridge.theme === "function") {
       var theme = String(bridge.theme() || "");
@@ -1808,7 +1844,11 @@
       $("names-table").innerHTML = '<div class="empty">Откройте этот раздел в приложении WaysGram.</div>';
       return;
     }
-    showTab("usernames");
+    loadBackdropPalettes().then(function () {
+      showTab("usernames");
+    }, function () {
+      showTab("usernames");
+    });
   }
 
   if (document.readyState === "loading") {

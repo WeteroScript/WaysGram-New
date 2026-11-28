@@ -99,7 +99,8 @@ def test_pattern_is_rendered_as_a_tinted_repeating_backdrop_texture() -> None:
     assert "patternTextureAsset" in body
     assert "-webkit-mask-repeat: repeat" in body
     assert "mask-repeat: repeat" in body
-    assert "backdrop.pattern_color" in body
+    # Цвет узора берётся по имени фона (официальная палитра), а не из строки записи.
+    assert 'backdropColor(backdrop, "pattern_color")' in body
     assert "node.style.backgroundColor = color" in body
     assert "node.style.maskImage = source" in body
     # The pattern is a tiled texture behind the model, never a foreground sticker.
@@ -129,8 +130,8 @@ def test_fragment_inventory_supports_withdrawal_price_and_trait_backdrops() -> N
     assert 'id="withdraw-gift"' in body
     assert "/api/me/fragment/gifts/" in body and "/withdraw" in body
     assert "item.price_grams" in body
-    assert "backdrop.center_color" in body
-    assert "backdrop.edge_color" in body
+    assert 'backdropColor(backdrop, "center_color")' in body
+    assert 'backdropColor(backdrop, "edge_color")' in body
     assert "fragment_inventory" in body
 
 
@@ -155,3 +156,40 @@ def test_page_file_matches_the_repository_copy() -> None:
     body = PAGE.read_text(encoding="utf-8")
     assert body.startswith("<!doctype html>")
     assert body.count("<section") >= 4
+
+
+def test_backdrop_palettes_endpoint_feeds_the_card(env) -> None:
+    """Страница берёт палитру по имени фона, сервер отдаёт официальную таблицу."""
+    path, app = env
+
+    async def scenario() -> None:
+        async with await client_for(app) as client:
+            response = await client.get("/api/gift-backdrops", headers=headers(101))
+            assert response.status_code == 200, response.text
+            palettes = response.json()["backdrops"]
+            assert palettes["black"] == {
+                "center_color": 0x363738,
+                "edge_color": 0x0E0F0F,
+                "pattern_color": 0x6C6868,
+                "text_color": 0x8C8F91,
+            }
+            # Без токена раздел не открывается — страница всегда ходит с ним.
+            assert (await client.get("/api/gift-backdrops")).status_code == 401
+
+    run(scenario())
+
+
+def test_page_paints_a_backdrop_by_its_name_not_by_stored_colours(env) -> None:
+    page = PAGE.read_text(encoding="utf-8")
+    assert '/api/gift-backdrops' in page
+    assert "function paletteFor(backdrop)" in page
+    assert "function backdropColor(backdrop, key)" in page
+    color_for = page[page.index("function colorFor(item)"):page.index("/* Картинка подарка")]
+    assert 'backdropColor(backdrop, "center_color")' in color_for
+    assert 'backdropColor(backdrop, "edge_color")' in color_for
+    assert "backdrop.center_color" not in color_for
+    pattern_for = page[page.index("function patternColorFor(item)"):page.index("function renderPatternTexture(")]
+    assert 'backdropColor(backdrop, "pattern_color")' in pattern_for
+    # Палитры грузятся до первой отрисовки, иначе карточка успевает покраситься чужими цветами.
+    start = page[page.index("function start() {"):page.index('document.addEventListener("DOMContentLoaded", start)')]
+    assert 'loadBackdropPalettes().then(' in start

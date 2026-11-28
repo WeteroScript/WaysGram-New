@@ -18,6 +18,7 @@ from __future__ import annotations
 import json
 import math
 import secrets
+import unicodedata
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -161,6 +162,62 @@ def roll_special_model(gift_id: Any) -> dict[str, Any] | None:
         if roll < cumulative:
             return special_model_trait(entry)
     return None
+
+
+_palettes: dict[str, dict[str, int]] | None = None
+
+#: Quotation marks and dashes appear in both typographic and plain forms.
+_APOSTROPHES = "\u2019\u2018\u02bc\u00b4`\u2032"
+_DASHES = "\u2010\u2011\u2012\u2013\u2014\u2015\u2212\u2043"
+
+
+def palette_key(value: Any) -> str:
+    """Normalised backdrop name: the palette belongs to the name, not to the row."""
+    text = unicodedata.normalize("NFKC", str(value or ""))
+    for mark in _APOSTROPHES:
+        text = text.replace(mark, "'")
+    for mark in _DASHES:
+        text = text.replace(mark, "-")
+    return " ".join(text.replace("\u00a0", " ").split()).casefold()
+
+
+def backdrop_palettes() -> dict[str, dict[str, int]]:
+    """Official colours of every backdrop *name* across all pools.
+
+    A backdrop name is global: "Black" is ``#363738``/``#0e0f0f``/``#6c6868``/``#8c8f91`` in
+    every collection. Card rendering asks here first, so a gift whose stored row carries
+    colours from another backdrop cannot repaint the whole card in a foreign palette.
+    Names whose rows disagree are dropped rather than guessed.
+    """
+    global _palettes
+    if _palettes is not None:
+        return _palettes
+    pools, _ = _load()
+    result: dict[str, dict[str, int]] = {}
+    ambiguous: set[str] = set()
+    for pool in pools.values():
+        for entry in pool.get("backdrops") or []:
+            if not isinstance(entry, list) or len(entry) < 6:
+                continue
+            key = palette_key(entry[0])
+            if not key or key in ambiguous:
+                continue
+            try:
+                colours = {
+                    "center_color": int(entry[2]),
+                    "edge_color": int(entry[3]),
+                    "pattern_color": int(entry[4]),
+                    "text_color": int(entry[5]),
+                }
+            except (TypeError, ValueError):
+                continue
+            if key in result and result[key] != colours:
+                ambiguous.add(key)
+                result.pop(key, None)
+                continue
+            result[key] = colours
+    _palettes = result
+    return result
 
 
 def pool_for_gift(gift_id: Any, title: Any = None) -> tuple[str | None, dict[str, Any] | None]:

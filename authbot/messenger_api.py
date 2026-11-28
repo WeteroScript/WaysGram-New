@@ -9827,6 +9827,17 @@ def build_messenger_router(
             "ends_at": int(auction["ends_at"]),
         }
 
+    @router.get("/api/gift-backdrops")
+    async def gift_backdrop_palettes(authorization: str | None = Header(default=None)) -> dict[str, Any]:
+        """Официальные палитры фонов по имени трейта.
+
+        Карточка Fragment красит поле и узор по имени фона, а не по случайным цветам
+        записи: строка, подтянутая из чужой превью-таблицы, больше не может перекрасить
+        весь лот. Значения совпадают с пулами `gift_upgrade_pools.json`.
+        """
+        await current_user(authorization)
+        return {"backdrops": gift_upgrades.backdrop_palettes()}
+
     @router.get("/api/gift-market")
     async def list_gift_market(
         limit: int = Query(default=50, ge=1, le=100),

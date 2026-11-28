@@ -709,6 +709,31 @@ def test_market_resolves_backdrop_palette_from_the_named_trait(env) -> None:
     assert legacy["collectible_traits"]["backdrop"]["pattern_color"] == 0x6C6868
 
 
+def test_backdrop_palettes_are_global_by_name() -> None:
+    """Имя фона однозначно задаёт палитру во всех коллекциях.
+
+    Карточка Fragment красит поле и узор по имени трейта, поэтому таблица должна
+    отдавать официальные цвета «Black», а не цвета конкретной записи.
+    """
+    import gift_upgrades
+
+    palettes = gift_upgrades.backdrop_palettes()
+    assert len(palettes) > 40
+    black = palettes[gift_upgrades.palette_key(" Black ")]
+    assert black == {
+        "center_color": 0x363738,
+        "edge_color": 0x0E0F0F,
+        "pattern_color": 0x6C6868,
+        "text_color": 0x8C8F91,
+    }
+    # Ключи нормализованы и не содержат типографских вариантов кавычек/дефисов.
+    for key in palettes:
+        assert key == key.strip().casefold()
+        assert "\u2019" not in key and "\u2014" not in key
+    # Ни один фон не приходит с «маджентовой» заливкой из чужой превью-таблицы.
+    assert 0x7C2A58 not in {value for palette in palettes.values() for value in palette.values()}
+
+
 def test_rolled_backdrop_colours_follow_the_pool_palette() -> None:
     """Цвета ролла берутся из официальной палитры записи с этим именем.
 

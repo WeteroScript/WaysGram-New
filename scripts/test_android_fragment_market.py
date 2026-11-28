@@ -73,8 +73,10 @@ class FragmentMiniAppChecks(unittest.TestCase):
             self.assertNotIn(removed, self.page, removed)
         self.assertIn("grid-template-columns: repeat(3, 1fr)", self.page)
         self.assertIn("collectible_traits", self.page)
-        self.assertIn("backdrop.center_color", self.page)
-        self.assertIn("backdrop.edge_color", self.page)
+        # Цвета фона берутся по имени трейта из официальной таблицы палитр.
+        self.assertIn('backdropColor(backdrop, "center_color")', self.page)
+        self.assertIn('backdropColor(backdrop, "edge_color")', self.page)
+        self.assertIn("/api/gift-backdrops", self.page)
         self.assertIn('class="inventory-withdraw"', self.page)
         self.assertIn("/api/me/fragment/gifts/", self.page)
         self.assertIn("/api/telegram/gifts/", self.page)
