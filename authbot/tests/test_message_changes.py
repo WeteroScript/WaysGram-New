@@ -1,6 +1,10 @@
 import asyncio
+from io import BytesIO
+
+from PIL import Image
 
 from test_messenger_api import client_for, run
+from messenger_api import channel_chat_stars_id
 from test_star_gifts import ADMIN, env, headers  # noqa: F401  (env is a pytest fixture)
 
 
@@ -772,6 +776,11 @@ def test_group_and_channel_settings_put(env) -> None:
             gid, cid = group.json()['id'], channel.json()['id']
             group_path, channel_path = f'/api/groups/{gid}', f'/api/channels/{cid}'
             await client.post(f'{group_path}/members', headers=headers(101), json={'telegram_id': 102})
+            restricted = await client.put(
+                group_path + '/send-permissions', headers=headers(101),
+                json={'default_send_restrictions': 0, 'change_info_restricted': True},
+            )
+            assert restricted.status_code == 200
             assert (await client.get(channel_path, headers=headers(102))).json()['description'] == 'Initial'
             for path in (group_path, channel_path):
                 data = {'title': 'Renamed', 'description': 'New description'}
@@ -868,11 +877,11 @@ def test_private_channel_invite_rotation_preserves_membership(env, monkeypatch):
             assert (await client.post('/api/channels/join', headers=member, json={'invite_link': old})).status_code == 200
             assert (await client.get(path, headers=member)).status_code == 403
             assert (await client.post(path, headers=member)).status_code == 403
-            monkeypatch.setenv("WAYSGRAM_BRANDED_INVITES", "1")
             rotated = await client.post(path, headers=owner)
             assert rotated.status_code == 200
             new = rotated.json()['invite_link']
-            assert new.startswith("https://t.wg/api/channels/invites/")
+            assert new.startswith("https://t.wg/")
+            assert len(new.rsplit('/', 1)[-1]) == 22
             assert new != old
             assert (await client.get(old)).status_code == 404
             assert (await client.post('/api/channels/join', headers=guest, json={'invite_link': old})).status_code == 404
@@ -1210,7 +1219,7 @@ def test_group_mute_blocks_sending_without_removing_read_access(env):
 
 
 def test_profile_channel_and_invite_privacy(env):
-    _, app = env
+    db_path, app = env
 
     async def scenario():
         async with await client_for(app) as client:
@@ -1221,8 +1230,23 @@ def test_profile_channel_and_invite_privacy(env):
             route = '/api/me/profile-channel'
             assert (await client.put(route, headers=other, json={'channel_id': cid})).status_code == 403
             assert (await client.put(route, headers=owner, json={'channel_id': cid})).status_code == 200
+            # Аватар прикреплённого канала обязан попадать в personal_channel: иначе
+            # во вкладке «Профиль» канал показывается без картинки.
+            from io import BytesIO
+            from PIL import Image
+            buffer = BytesIO()
+            Image.new('RGB', (8, 8), (30, 90, 150)).save(buffer, format='JPEG')
+            uploaded = await client.post(
+                '/api/media/images',
+                headers={**owner, 'Content-Type': 'image/jpeg'},
+                content=buffer.getvalue(),
+            )
+            assert uploaded.status_code == 201
+            avatar = uploaded.json()['id']
+            assert (await client.put(f'/api/channels/{cid}/avatar', headers=owner, json={'media_id': avatar})).status_code == 200
             profile = await client.get('/api/users/101', headers=other)
             assert profile.json()['personal_channel']['id'] == cid
+            assert profile.json()['personal_channel']['avatar_media_id'] == avatar
             assert (await client.put(route, headers=owner, json={'channel_id': 0})).status_code == 200
             assert (await client.get('/api/users/101', headers=other)).json()['personal_channel'] is None
 
@@ -1764,11 +1788,147 @@ def test_channel_paid_reactions_are_opt_in_atomic_and_idempotent(env):
             analytics = (await client.get(base + '/analytics?days=7', headers=owner)).json()
             assert (analytics['published_posts_remaining'], analytics['paid_reaction_stars']) == (0, 5)
         async with aiosqlite.connect(path) as db:
-            # Платная реакция только списывается с отправителя: владельцу канала ничего не начисляется.
+            # Покупка атомарно списывает Stars у отправителя и зачисляет их на баланс канала.
             cur = await db.execute("SELECT telegram_id,amount FROM economy_transactions WHERE reason LIKE 'channel_paid_reaction:%' ORDER BY telegram_id")
             assert await cur.fetchall() == [(102, -5)]
             cur = await db.execute('SELECT stars FROM accounts WHERE telegram_id=102')
             assert (await cur.fetchone())[0] == 15
+            channel_stars_id = channel_chat_stars_id(channel.json()["id"])
+            cur = await db.execute('SELECT stars FROM chat_stars WHERE chat_id=?', (channel_stars_id,))
+            assert (await cur.fetchone())[0] == 5
+            cur = await db.execute("SELECT amount,balance_after FROM chat_star_transactions WHERE chat_id=? AND reason LIKE 'channel_paid_reaction:%'",
+                                   (channel_stars_id,))
+            assert await cur.fetchall() == [(5, 5)]
+
+    run(scenario())
+
+
+def test_legacy_channel_stars_are_moved_out_of_the_group_id_range(env):
+    import aiosqlite
+    import messenger_api
+
+    path, _app = env
+
+    async def scenario():
+        # Simulate the old, colliding id=1 ledger after one group and one channel both
+        # received Stars; the previous chat_stars row held their combined balance.
+        async with aiosqlite.connect(path) as db:
+            await db.execute("INSERT INTO chat_stars(chat_id,stars) VALUES(1,12)")
+            await db.execute("""INSERT INTO chat_star_transactions
+                (chat_id,amount,balance_after,reason,created_at)
+                VALUES(1,7,7,'group_message_fee:legacy',1)""")
+            await db.execute("""INSERT INTO chat_star_transactions
+                (chat_id,amount,balance_after,reason,created_at)
+                VALUES(1,5,12,'channel_paid_reaction:legacy',2)""")
+            await db.commit()
+
+        await messenger_api.init_messenger_storage(path)
+        async with aiosqlite.connect(path) as db:
+            cur = await db.execute("SELECT chat_id,stars FROM chat_stars ORDER BY chat_id")
+            assert await cur.fetchall() == [(1, 7), (1_000_000_001, 5)]
+            cur = await db.execute("SELECT chat_id,amount,balance_after FROM chat_star_transactions ORDER BY id")
+            assert await cur.fetchall() == [(1, 7, 7), (1_000_000_001, 5, 5)]
+
+    run(scenario())
+
+
+def test_personal_wallet_history_filters_and_paginates(env):
+    import aiosqlite
+
+    path, app = env
+
+    async def scenario():
+        async with aiosqlite.connect(path) as db:
+            await db.execute("DELETE FROM economy_transactions WHERE telegram_id=101")
+            await db.executemany("""INSERT INTO economy_transactions
+                (telegram_id,asset,amount,balance_after,reason,admin_id,created_at)
+                VALUES(101,?,?,?,?,NULL,?)""", [
+                ("stars", 5, 25, "history_in_1", 1),
+                ("stars", -3, 22, "history_out", 2),
+                ("stars", 7, 29, "history_in_2", 3),
+                ("grams", 2, 2, "history_gram", 4),
+            ])
+            await db.commit()
+        async with await client_for(app) as client:
+            owner = headers(101)
+            incoming = await client.get('/api/me/wallet/transactions?asset=stars&inbound=true&limit=1',
+                                        headers=owner)
+            assert incoming.status_code == 200
+            assert [row['amount'] for row in incoming.json()['transactions']] == [7]
+            cursor = incoming.json()['next_offset']
+            assert cursor is not None
+            older = await client.get(f'/api/me/wallet/transactions?asset=stars&inbound=true&limit=1&offset_id={cursor}',
+                                     headers=owner)
+            assert [row['amount'] for row in older.json()['transactions']] == [5]
+            assert older.json()['next_offset'] is None
+
+            outgoing = await client.get('/api/me/wallet/transactions?asset=stars&outbound=true',
+                                        headers=owner)
+            assert [row['amount'] for row in outgoing.json()['transactions']] == [-3]
+            grams = await client.get('/api/me/wallet/transactions?asset=grams', headers=owner)
+            assert [(row['asset'], row['amount']) for row in grams.json()['transactions']] == [('grams', 2)]
+            ascending = await client.get('/api/me/wallet/transactions?asset=stars&ascending=true&limit=1',
+                                         headers=owner)
+            assert [row['amount'] for row in ascending.json()['transactions']] == [5]
+            second = await client.get(
+                f"/api/me/wallet/transactions?asset=stars&ascending=true&limit=1&offset_id={ascending.json()['next_offset']}",
+                headers=owner,
+            )
+            assert [row['amount'] for row in second.json()['transactions']] == [-3]
+
+    run(scenario())
+
+
+def test_channel_stars_balance_is_peer_scoped_and_not_the_personal_wallet(env):
+    import aiosqlite
+
+    path, app = env
+
+    async def scenario():
+        async with aiosqlite.connect(path) as db:
+            await db.execute('UPDATE accounts SET stars=17 WHERE telegram_id=101')
+            await db.execute('UPDATE accounts SET stars=20 WHERE telegram_id=102')
+            await db.commit()
+        async with await client_for(app) as client:
+            owner, reader = headers(101), headers(102)
+            channel = await client.post('/api/channels', headers=owner,
+                                        json={'title': 'Scoped Stars', 'username': 'scoped_stars', 'is_public': True})
+            channel_id = channel.json()['id']
+            details = (await client.get(f'/api/channels/{channel_id}', headers=owner)).json()
+            group_id = details['discussion_group_id']
+            post = await client.post(f'/api/channels/{channel_id}/messages', headers=owner,
+                                     json={'body': 'Stars balance'})
+            assert post.status_code == 201, post.text
+            assert (await client.put(f'/api/channels/{channel_id}/paid-reactions', headers=owner,
+                                     json={'enabled': True})).status_code == 200
+            purchase = await client.post(
+                f"/api/channels/{channel_id}/messages/{post.json()['id']}/paid-reactions",
+                headers={**reader, 'Idempotency-Key': 'scoped-paid-reaction-0001'}, json={'stars': 5},
+            )
+            assert purchase.status_code == 200, purchase.text
+
+            channel_history = await client.get(f'/api/channels/{channel_id}/stars?limit=10', headers=owner)
+            assert channel_history.status_code == 200, channel_history.text
+            assert (channel_history.json()['stars'], channel_history.json()['overall_revenue']) == (5, 5)
+            assert [(tx['amount'], tx['reason'].split(':', 1)[0])
+                    for tx in channel_history.json()['transactions']] == [(5, 'channel_paid_reaction')]
+            # The default discussion group can have the same numeric ID as its channel;
+            # its balance and journal must still remain independent.
+            async with aiosqlite.connect(path) as db:
+                await db.execute("INSERT INTO chat_stars(chat_id,stars) VALUES(?,3)", (group_id,))
+                await db.execute("""INSERT INTO chat_star_transactions
+                    (chat_id,amount,balance_after,reason,created_at) VALUES(?,3,3,'group_message_fee:test',1)""",
+                                 (group_id,))
+                await db.commit()
+            group_history = await client.get(f'/api/groups/{group_id}/stars?limit=10', headers=owner)
+            assert group_history.status_code == 200, group_history.text
+            assert group_history.json()['stars'] == 3
+            assert [(tx['amount'], tx['balance_after'])
+                    for tx in group_history.json()['transactions']] == [(3, 3)]
+            # A short first page must end with JSON null, not a fake cursor such as "null".
+            assert group_history.json()['next_offset'] is None
+            assert (await client.get(f'/api/channels/{channel_id}/stars', headers=reader)).status_code == 403
+            assert (await client.get('/api/me/wallet', headers=owner)).json()['stars'] == 17
 
     run(scenario())
 
@@ -1906,7 +2066,7 @@ def test_channel_paid_media_requires_purchase_and_charges_once(env):
         async with aiosqlite.connect(path) as db:
             cur = await db.execute("SELECT telegram_id,amount FROM economy_transactions WHERE reason LIKE 'channel_paid_media:%' ORDER BY telegram_id")
             assert await cur.fetchall() == [(102, -5)]
-            cur = await db.execute("SELECT stars FROM chat_stars WHERE chat_id=?", (channel.json()['id'],))
+            cur = await db.execute("SELECT stars FROM chat_stars WHERE chat_id=?", (channel_chat_stars_id(channel.json()['id']),))
             assert (await cur.fetchone())[0] == 5
 
     run(scenario())
@@ -1961,8 +2121,46 @@ def test_paid_channel_subscription_expires_without_converting_to_free_membership
         async with aiosqlite.connect(path) as db:
             cur = await db.execute("SELECT telegram_id,SUM(amount),COUNT(*) FROM economy_transactions WHERE reason=? GROUP BY telegram_id ORDER BY telegram_id", (f'channel_subscription:{cid}',))
             assert await cur.fetchall() == [(102, -12, 2)]
-            cur = await db.execute("SELECT stars FROM chat_stars WHERE chat_id=?", (cid,))
+            cur = await db.execute("SELECT stars FROM chat_stars WHERE chat_id=?", (channel_chat_stars_id(cid),))
             assert (await cur.fetchone())[0] == 12
+
+    run(scenario())
+
+
+def test_reopening_a_linked_discussion_rejoins_a_channel_viewer(env):
+    _, app = env
+
+    async def scenario():
+        async with await client_for(app) as client:
+            owner, member, outsider = headers(101), headers(102), headers(ADMIN)
+            channel = await client.post('/api/channels', headers=owner,
+                                        json={'title': 'Rejoin discussion', 'is_public': False, 'comments': False})
+            cid = channel.json()['id']
+            group = await client.post('/api/groups', headers=owner, json={'title': 'Discussion'})
+            gid = group.json()['id']
+            link = f'/api/channels/{cid}/discussion-group'
+            group_messages = f'/api/groups/{gid}/messages'
+
+            assert (await client.put(link, headers=owner, json={'group_id': gid})).status_code == 200
+            assert (await client.post(f'/api/channels/{cid}/members', headers=owner,
+                                      json={'user_ids': [102]})).status_code == 201
+            opened = await client.get(link, headers=member)
+            assert opened.status_code == 200
+            assert opened.json() == {'group_id': gid, 'title': 'Discussion'}
+            assert (await client.get(group_messages, headers=member)).status_code == 200
+
+            left = await client.delete(f'/api/groups/{gid}/members/102', headers=member)
+            assert left.status_code == 200 and left.json()['removed'] is True
+            assert (await client.get(group_messages, headers=member)).status_code == 403
+
+            # Reopening the channel's discussion performs the same join operation
+            # as opening a post thread, then the linked group is accessible again.
+            reopened = await client.get(link, headers=member)
+            assert reopened.status_code == 200 and reopened.json()['group_id'] == gid
+            assert (await client.get(group_messages, headers=member)).status_code == 200
+
+            # The endpoint must not become a way to discover private channels/groups.
+            assert (await client.get(link, headers=outsider)).status_code == 404
 
     run(scenario())
 
@@ -1973,7 +2171,9 @@ def test_channel_discussion_comments_use_group_permissions_and_moderation(env):
     async def scenario():
         async with await client_for(app) as client:
             owner, member, outsider = headers(101), headers(102), headers(ADMIN)
-            channel = await client.post('/api/channels', headers=owner, json={'title': 'Discuss news', 'is_public': False})
+            # Комментарии выключены: проверяем привязку группы вручную, без
+            # автоматически созданной при создании канала.
+            channel = await client.post('/api/channels', headers=owner, json={'title': 'Discuss news', 'is_public': False, 'comments': False})
             cid = channel.json()['id']
             base = f'/api/channels/{cid}'
             post = await client.post(base + '/messages', headers=owner, json={'body': 'News'})
@@ -1988,7 +2188,10 @@ def test_channel_discussion_comments_use_group_permissions_and_moderation(env):
             assert (await client.get(link, headers=owner)).json()['title'] == 'News discussion'
             assert (await client.get(url, headers=member)).status_code == 404  # group membership alone does not grant post access
             assert (await client.post(base + '/members', headers=owner, json={'user_ids': [102, ADMIN]})).status_code == 201
-            assert (await client.get(url, headers=outsider)).status_code == 403  # channel membership alone is not enough
+            # Подписчик канала теперь автоматически попадает в группу обсуждений:
+            # иначе «Discuss» и комментарии не открывались ни у кого, кроме админов.
+            assert (await client.get(url, headers=outsider)).status_code == 200
+            assert (await client.get(group_api + '/messages', headers=outsider)).status_code == 200
             key = {**member, 'Idempotency-Key': 'channel-comment-0001'}
             first = await client.post(url, headers=key, json={'body': 'Comment'})
             assert first.status_code == 201
@@ -2063,7 +2266,7 @@ def test_channel_inbox_is_private_and_requires_current_confirmed_fee(env):
             # канала; в личный кошелёк владельца ничего не начисляется.
             cur = await db.execute("SELECT telegram_id,amount FROM economy_transactions WHERE reason LIKE 'channel_inbox:%' ORDER BY telegram_id")
             assert await cur.fetchall() == [(102, -6)]
-            cur = await db.execute("SELECT stars FROM chat_stars WHERE chat_id=?", (channel.json()['id'],))
+            cur = await db.execute("SELECT stars FROM chat_stars WHERE chat_id=?", (channel_chat_stars_id(channel.json()['id']),))
             assert (await cur.fetchone())[0] == 6
 
     run(scenario())
@@ -2119,6 +2322,8 @@ def test_group_topics_have_separate_history_and_enforce_membership_and_closure(e
             path = f"/api/groups/{group.json()['id']}"
             topics = path + '/topics'
             assert (await client.get(topics, headers=outsider)).status_code == 403
+            assert (await client.put(path + '/send-permissions', headers=owner,
+                                     json={'default_send_restrictions': 16384})).status_code == 200
             assert (await client.post(topics, headers=member, json={'title': 'Denied'})).status_code == 403
             results = [await client.post(topics, headers=owner, json={'title': title}) for title in ('Planning', 'Ideas')]
             assert [r.status_code for r in results] == [200, 200]
@@ -2385,6 +2590,9 @@ def test_topic_attachment_and_pin_are_scoped_and_permission_checked(env):
             msg = await client.post(first + '/messages', headers=owner, json={'media_id': media})
             assert msg.status_code == 201
             mid = msg.json()['id']
+            restricted = await client.put(group_url + '/send-permissions', headers=owner,
+                                          json={'default_send_restrictions': 4096})
+            assert restricted.status_code == 200, restricted.text
             assert (await client.put(first + '/pin', headers=member, json={'message_id': mid})).status_code == 403
             assert (await client.put(second + '/pin', headers=owner, json={'message_id': mid})).status_code == 404
             assert (await client.put(first + '/pin', headers=owner, json={'message_id': mid})).status_code == 200
@@ -2559,7 +2767,7 @@ def test_sponsored_placement_requires_consent_and_settles_real_stars_once(env):
             async with aiosqlite.connect(path) as db:
                 cur = await db.execute("SELECT telegram_id,amount FROM economy_transactions WHERE reason LIKE 'channel_sponsored_post:%' ORDER BY telegram_id")
                 assert await cur.fetchall() == [(102, -7)]
-                cur = await db.execute("SELECT stars FROM chat_stars WHERE chat_id=?", (channel.json()['id'],))
+                cur = await db.execute("SELECT stars FROM chat_stars WHERE chat_id=?", (channel_chat_stars_id(channel.json()['id']),))
                 assert (await cur.fetchone())[0] == 7
             another = await client.post(inbox + '/me/sponsored-offers', headers={**sponsor, 'Idempotency-Key': 'sponsored-placement-02'}, json=body)
             async with aiosqlite.connect(path) as db:
@@ -2615,5 +2823,230 @@ def test_channel_reactions_settings_are_saved_and_returned(env) -> None:
             assert (await client.put(
                 f"/api/channels/{cid}/reactions-settings", headers=headers(101), json={}
             )).status_code == 400
+
+    run(scenario())
+
+
+def test_group_default_change_info_is_persisted_and_applied(env):
+    _, app = env
+
+    async def scenario():
+        async with await client_for(app) as client:
+            owner, member = headers(101), headers(102)
+            group = await client.post('/api/groups', headers=owner,
+                                      json={'title': 'Editable group', 'member_ids': [102]})
+            assert group.status_code == 201
+            group_id = group.json()['id']
+            base = f'/api/groups/{group_id}'
+
+            initial = (await client.get(base, headers=member)).json()
+            assert initial['default_change_info_restricted'] is False
+            assert initial['can_set_location'] is True
+            assert (await client.put(base, headers=member,
+                                     json={'title': 'Members can change info'})).status_code == 200
+
+            restricted = await client.put(
+                base + '/send-permissions', headers=owner,
+                json={'default_send_restrictions': 0, 'change_info_restricted': True},
+            )
+            assert restricted.status_code == 200
+            assert restricted.json()['change_info_restricted'] is True
+            refreshed = (await client.get(base, headers=member)).json()
+            assert refreshed['default_change_info_restricted'] is True
+            assert refreshed['can_set_location'] is False
+            assert (await client.put(base, headers=member,
+                                     json={'title': 'Should be denied'})).status_code == 403
+            assert (await client.put(base + '/location', headers=member,
+                                     json={'latitude': 52.23, 'longitude': 21.01})).status_code == 403
+
+            restored = await client.put(
+                base + '/send-permissions', headers=owner,
+                json={'default_send_restrictions': 0, 'change_info_restricted': False},
+            )
+            assert restored.status_code == 200 and restored.json()['change_info_restricted'] is False
+            assert (await client.put(base, headers=member,
+                                     json={'title': 'Members can edit again'})).status_code == 200
+            assert (await client.put(
+                base + '/send-permissions', headers=owner,
+                json={'default_send_restrictions': 0, 'change_info_restricted': 'false'},
+            )).status_code == 400
+
+    run(scenario())
+
+
+def test_group_paid_messages_charge_text_and_album_once_and_return_history(env):
+    import aiosqlite
+
+    path, app = env
+
+    def image_bytes(color):
+        buffer = BytesIO()
+        Image.new('RGB', (8, 8), color).save(buffer, format='JPEG')
+        return buffer.getvalue()
+
+    async def scenario():
+        async with aiosqlite.connect(path) as db:
+            await db.execute('UPDATE accounts SET stars=20 WHERE telegram_id=102')
+            await db.commit()
+        async with await client_for(app) as client:
+            owner, member = headers(101), headers(102)
+            group = await client.post('/api/groups', headers=owner,
+                                      json={'title': 'Paid group', 'member_ids': [102]})
+            assert group.status_code == 201
+            group_id = group.json()['id']
+            base = f'/api/groups/{group_id}'
+            messages_url = base + '/messages'
+
+            setting = await client.put(base + '/paid-messages', headers=owner,
+                                       json={'enabled': True, 'stars': 3})
+            assert setting.status_code == 200 and setting.json() == {'enabled': True, 'stars': 3}
+            profile = (await client.get(base, headers=member)).json()
+            assert profile['send_paid_messages_stars'] == 3
+            assert profile['paid_messages_available'] is False
+            assert (await client.put(base + '/paid-messages', headers=member,
+                                     json={'enabled': True, 'stars': 4})).status_code == 403
+
+            single_key = 'group-fee-single-0001'
+            single_headers = {**member, 'Idempotency-Key': single_key}
+            single_body = {'body': 'Paid group message'}
+            required = await client.post(messages_url, headers=single_headers, json=single_body)
+            assert required.status_code == 402
+            assert required.json()['detail'] == {'code': 'GROUP_MESSAGE_FEE_REQUIRED', 'stars': 3}
+            wrong = await client.post(messages_url, headers=single_headers,
+                                      json={**single_body, 'approved_fee_stars': 2})
+            assert wrong.status_code == 402 and wrong.json()['detail']['stars'] == 3
+            assert (await client.post(messages_url, headers=member, json=single_body)).status_code == 400
+            single = await client.post(messages_url, headers=single_headers,
+                                       json={**single_body, 'approved_fee_stars': 3})
+            assert single.status_code == 201 and single.json()['paid_message_stars'] == 3
+            single_replay = await client.post(messages_url, headers=single_headers,
+                                              json={**single_body, 'approved_fee_stars': 3})
+            assert single_replay.status_code == 201 and single_replay.json()['id'] == single.json()['id']
+
+            uploaded_ids = []
+            for color in ((40, 80, 160), (190, 60, 35)):
+                uploaded = await client.post(
+                    '/api/media/images',
+                    headers={**member, 'Content-Type': 'image/jpeg'},
+                    content=image_bytes(color),
+                )
+                assert uploaded.status_code == 201
+                uploaded_ids.append(uploaded.json()['id'])
+
+            assert (await client.put(base + '/paid-messages', headers=owner,
+                                     json={'enabled': True, 'stars': 2})).status_code == 200
+            album_key = 'group-fee-album-0001'
+            album_headers = {**member, 'Idempotency-Key': album_key}
+            album_body = {'media_ids': uploaded_ids, 'captions': ['First paid photo', 'Second paid photo']}
+            album_required = await client.post(messages_url + '/album', headers=album_headers, json=album_body)
+            assert album_required.status_code == 402
+            assert album_required.json()['detail'] == {'code': 'GROUP_MESSAGE_FEE_REQUIRED', 'stars': 4}
+            album_wrong = await client.post(messages_url + '/album', headers=album_headers,
+                                            json={**album_body, 'approved_fee_stars': 2})
+            assert album_wrong.status_code == 402 and album_wrong.json()['detail']['stars'] == 4
+            album = await client.post(messages_url + '/album', headers=album_headers,
+                                      json={**album_body, 'approved_fee_stars': 4})
+            assert album.status_code == 201
+            album_items = album.json()['messages']
+            assert len(album_items) == 2
+            assert [item['paid_message_stars'] for item in album_items] == [2, 2]
+            replay = await client.post(messages_url + '/album', headers=album_headers,
+                                       json={**album_body, 'approved_fee_stars': 4})
+            assert replay.status_code == 201
+            assert replay.json()['first_message_id'] == album.json()['first_message_id']
+
+            history = await client.get(messages_url, headers=member)
+            assert history.status_code == 200
+            paid = {item['id']: item['paid_message_stars'] for item in history.json()['messages']}
+            assert paid[single.json()['id']] == 3
+            assert all(paid[item['id']] == 2 for item in album_items)
+            search = await client.get(messages_url + '/search?q=paid', headers=member)
+            assert search.status_code == 200
+            searched = {item['id']: item['paid_message_stars'] for item in search.json()['messages']}
+            assert searched[single.json()['id']] == 3
+            after = await client.get(messages_url + f"?after_id={single.json()['id']}", headers=member)
+            assert after.status_code == 200
+            assert [item['paid_message_stars'] for item in after.json()['messages']] == [2, 2]
+            paid_history = await client.get('/api/me/paid-messages', headers=member)
+            transactions = paid_history.json()['transactions']
+            assert len(transactions) == 3
+            assert all(item['kind'] == 'group' and item['title'] == 'Paid group' for item in transactions)
+            assert sorted(item['stars'] for item in transactions) == [2, 2, 3]
+
+            async with aiosqlite.connect(path) as db:
+                cur = await db.execute('SELECT stars FROM accounts WHERE telegram_id=102')
+                assert (await cur.fetchone())[0] == 13
+                cur = await db.execute('SELECT stars FROM chat_stars WHERE chat_id=?', (group_id,))
+                assert (await cur.fetchone())[0] == 7
+                cur = await db.execute(
+                    "SELECT COUNT(*) FROM economy_transactions WHERE telegram_id=102 AND reason LIKE ?",
+                    (f'group_message_fee:{group_id}:%',),
+                )
+                assert (await cur.fetchone())[0] == 3
+                cur = await db.execute(
+                    'SELECT COUNT(*) FROM chat_star_transactions WHERE chat_id=?', (group_id,)
+                )
+                assert (await cur.fetchone())[0] == 3
+                await db.execute('UPDATE accounts SET stars=1 WHERE telegram_id=102')
+                await db.commit()
+
+            poor_key = {**member, 'Idempotency-Key': 'group-fee-poor-0001'}
+            poor_body = {'body': 'Not enough Stars'}
+            assert (await client.post(messages_url, headers=poor_key, json=poor_body)).status_code == 402
+            poor = await client.post(messages_url, headers=poor_key,
+                                     json={**poor_body, 'approved_fee_stars': 2})
+            assert poor.status_code == 409 and poor.json()['detail'] == 'MESSAGE_FEE_INSUFFICIENT_STARS'
+            final_history = (await client.get(messages_url, headers=member)).json()['messages']
+            assert all(item['body'] != 'Not enough Stars' for item in final_history)
+
+    run(scenario())
+
+
+def test_group_stars_snapshot_preserves_balance_and_ends_short_page(env):
+    import aiosqlite
+
+    path, app = env
+
+    async def scenario():
+        async with await client_for(app) as client:
+            owner = headers(101)
+            created = await client.post('/api/groups', headers=owner,
+                                        json={'title': 'Group Stars snapshot'})
+            assert created.status_code == 201, created.text
+            group_id = created.json()['id']
+            async with aiosqlite.connect(path) as db:
+                await db.execute('INSERT INTO chat_stars(chat_id,stars) VALUES(?,?)', (group_id, 20000))
+                await db.executemany("""INSERT INTO chat_star_transactions
+                    (chat_id,amount,balance_after,reason,created_at) VALUES(?,?,?,?,?)""", [
+                    (group_id, 10000, 10000, 'group_message_fee:first', 1),
+                    (group_id, 10000, 20000, 'group_message_fee:second', 2),
+                ])
+                await db.commit()
+            snapshot = await client.get(f'/api/groups/{group_id}/stars?limit=5', headers=owner)
+            assert snapshot.status_code == 200, snapshot.text
+            body = snapshot.json()
+            assert body['stars'] == 20000
+            assert [row['amount'] for row in body['transactions']] == [10000, 10000]
+            assert body['next_offset'] is None
+
+    run(scenario())
+
+
+def test_public_channel_history_can_be_loaded_without_joining(env):
+    _, app = env
+
+    async def scenario():
+        async with await client_for(app) as client:
+            channel = await client.post('/api/channels', headers=headers(101), json={
+                'title': 'Public history', 'username': 'public_history', 'is_public': True,
+            })
+            assert channel.status_code == 201
+            channel_id = channel.json()['id']
+            post = await client.post(f'/api/channels/{channel_id}/messages', headers=headers(101),
+                                     json={'body': 'Visible without joining'})
+            assert post.status_code == 201
+            history = await client.get(f'/api/channels/{channel_id}/messages', headers=headers(102))
+            assert history.status_code == 200
+            assert [message['body'] for message in history.json()['messages']] == ['Visible without joining']
 
     run(scenario())

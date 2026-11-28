@@ -15,9 +15,21 @@ public class WaysGramMapper {
         return SECRET_NUMBER_DIGITS.clone();
     }
 
+    /**
+     * Секретное пространство WaysGram: префикс секретного номера и любые цифры после него.
+     * «+0 000 0000» — это секретный номер +00000000, а не ошибка формата: раньше такие
+     * номера не принимали ни бот при создании аккаунта, ни экран входа.
+     */
     public static boolean isSecretNumberDigits(String digits) {
-        for (String value : SECRET_NUMBER_DIGITS) {
-            if (value.equals(digits)) return true;
+        if (digits == null) {
+            return false;
+        }
+        String value = digits.replaceAll("[^0-9]", "");
+        if (value.isEmpty() || value.length() > 15) {
+            return false;
+        }
+        for (String prefix : SECRET_NUMBER_DIGITS) {
+            if (value.startsWith(prefix)) return true;
         }
         return false;
     }
@@ -50,6 +62,55 @@ public class WaysGramMapper {
         return "";
     }
 
+    /** Строка из JSON без служебного "null" и лишних пробелов. */
+    /**
+     * Строковое поле ответа без суррогатов JSON.
+     *
+     * <p>{@code JSONObject.optString(key, "")} возвращает не пустую строку, а литерал {@code "null"},
+     * когда сервер прислал {@code "username": null}: {@code JSONObject.NULL.toString()} — это
+     * {@code "null"}. Из-за этого в карточке канала появлялось «Discussion @null», а поиск по
+     * юзернейму пытался найти чат с именем null.</p>
+     */
+    static String text(JSONObject json, String key) {
+        if (json == null) {
+            return "";
+        }
+        Object raw = json.opt(key);
+        if (raw == null || raw == JSONObject.NULL) {
+            return "";
+        }
+        String value = String.valueOf(raw).trim();
+        return "null".equalsIgnoreCase(value) || "undefined".equalsIgnoreCase(value) ? "" : value;
+    }
+
+    private static String cleanName(String value) {
+        if (value == null) {
+            return "";
+        }
+        String trimmed = value.trim();
+        return "null".equalsIgnoreCase(trimmed) ? "" : trimmed;
+    }
+
+    /**
+     * Имя человека из payload. Сервер в разных ответах отдаёт разные поля, а в старых
+     * аккаунтах в {@code display_name} лежал номер телефона — такие значения именем не считаем.
+     */
+    private static String nameFromJson(JSONObject json) {
+        for (String key : new String[]{"display_name", "full_name", "name"}) {
+            String candidate = cleanName(json.optString(key, ""));
+            if (!candidate.isEmpty() && !looksLikePhone(candidate)) {
+                return candidate;
+            }
+        }
+        String first = cleanName(json.optString("first_name", ""));
+        String last = cleanName(json.optString("last_name", ""));
+        String joined = (first + " " + last).trim();
+        if (!joined.isEmpty() && !looksLikePhone(joined)) {
+            return joined;
+        }
+        return "";
+    }
+
     private static boolean looksLikePhone(String value) {
         if (TextUtils.isEmpty(value)) {
             return false;
@@ -66,6 +127,50 @@ public class WaysGramMapper {
         return digits >= 5;
     }
 
+    /** A chat avatar backed by a WaysGram media id; bytes are served through upload.getFile. */
+    public static TLRPC.ChatPhoto chatPhoto(String mediaId) {
+        if (mediaId == null || mediaId.length() < 15 || "null".equals(mediaId)) {
+            return new TLRPC.TL_chatPhotoEmpty();
+        }
+        long photoId = WaysGramMedia.register(mediaId);
+        TLRPC.TL_chatPhoto photo = new TLRPC.TL_chatPhoto();
+        photo.photo_id = photoId;
+        photo.dc_id = 2;
+        photo.photo_small = avatarLocation(-photoId, 'a');
+        photo.photo_big = avatarLocation(-photoId, 'c');
+        return photo;
+    }
+
+    /** The very same avatar as a full photo, for the profile picture viewer. */
+    public static TLRPC.Photo photo(String mediaId) {
+        if (mediaId == null || mediaId.length() < 15 || "null".equals(mediaId)) {
+            return new TLRPC.TL_photoEmpty();
+        }
+        long photoId = WaysGramMedia.register(mediaId);
+        TLRPC.TL_photo photo = new TLRPC.TL_photo();
+        photo.id = photoId;
+        photo.access_hash = photoId;
+        photo.file_reference = new byte[0];
+        photo.date = (int) (System.currentTimeMillis() / 1000);
+        photo.dc_id = 2;
+        TLRPC.TL_photoSize size = new TLRPC.TL_photoSize();
+        size.type = "x";
+        size.w = 640;
+        size.h = 640;
+        size.size = 0;
+        size.location = avatarLocation(-photoId, 'x');
+        photo.sizes.add(size);
+        return photo;
+    }
+
+    private static TLRPC.FileLocation avatarLocation(long volumeId, char localId) {
+        TLRPC.TL_fileLocationToBeDeprecated location = new TLRPC.TL_fileLocationToBeDeprecated();
+        location.volume_id = volumeId;
+        location.local_id = localId;
+        location.dc_id = 2;
+        return location;
+    }
+
     public static TLRPC.TL_user toUser(JSONObject json) {
         TLRPC.TL_user user = new TLRPC.TL_user();
         if (json == null) {
@@ -75,15 +180,15 @@ public class WaysGramMapper {
         user.access_hash = user.id;
         user.flags |= TLObject.FLAG_0;
 
-        String display = json.optString("display_name", "").trim();
-        String username = json.optString("username", "").trim();
-        // Служебные аккаунты создаются с именем-номером («+888 888 8888»): если у человека
-        // есть ник, показываем ник, а не телефон.
-        if (!username.isEmpty() && looksLikePhone(display)) {
+        String display = nameFromJson(json);
+        String username = cleanName(json.optString("username", ""));
+        // Телефон — не имя. Если сервер прислал номер вместо имени (так когда-то заводились
+        // аккаунты), показываем ник, а не цифры: в чатах должно быть имя.
+        if (display.isEmpty()) {
             display = username;
         }
         if (display.isEmpty()) {
-            display = !username.isEmpty() ? username : "User " + user.id;
+            display = "User " + user.id;
         }
         int space = display.indexOf(' ');
         if (space > 0) {
@@ -100,6 +205,35 @@ public class WaysGramMapper {
         if (!username.isEmpty()) {
             user.username = username;
             user.flags |= TLObject.FLAG_3;
+        }
+        JSONArray additionalUsernames = json.optJSONArray("usernames");
+        if (additionalUsernames != null) {
+            for (int i = 0; i < additionalUsernames.length(); i++) {
+                JSONObject item = additionalUsernames.optJSONObject(i);
+                String additional = item == null
+                        ? cleanName(additionalUsernames.optString(i, ""))
+                        : cleanName(item.optString("username", ""));
+                if (additional.isEmpty() || additional.equalsIgnoreCase(username)
+                        || (item != null && !item.optBoolean("active", true))) {
+                    continue;
+                }
+                boolean duplicate = false;
+                for (TLRPC.TL_username present : user.usernames) {
+                    if (additional.equalsIgnoreCase(present.username)) {
+                        duplicate = true;
+                        break;
+                    }
+                }
+                if (!duplicate) {
+                    TLRPC.TL_username nativeUsername = new TLRPC.TL_username();
+                    nativeUsername.username = additional;
+                    nativeUsername.active = true;
+                    user.usernames.add(nativeUsername);
+                }
+            }
+            if (!user.usernames.isEmpty()) {
+                user.flags2 |= TLObject.FLAG_0;
+            }
         }
         user.premium = true; // every WaysGram account has Premium, permanently
         String waysGramPhone = waysGramPhoneDigits(json);
@@ -150,14 +284,68 @@ public class WaysGramMapper {
         JSONObject model = traits == null ? null : traits.optJSONObject("model");
         JSONObject pattern = traits == null ? null : traits.optJSONObject("pattern");
         JSONObject backdrop = traits == null ? null : traits.optJSONObject("backdrop");
-        status.document_id = model == null ? 0 : model.optLong("document_id");
-        status.pattern_document_id = pattern == null ? 0 : pattern.optLong("document_id");
+        status.document_id = resolveWornDocument(gift, traits, "model", model);
+        status.pattern_document_id = resolveWornDocument(gift, traits, "pattern", pattern);
         status.center_color = backdrop == null ? 0 : backdrop.optInt("center_color");
         status.edge_color = backdrop == null ? 0 : backdrop.optInt("edge_color");
         status.pattern_color = backdrop == null ? 0 : backdrop.optInt("pattern_color");
         status.text_color = backdrop == null ? 0 : backdrop.optInt("text_color");
         return status;
     }
+
+    /**
+     * Документ черты носимого подарка.
+     *
+     * <p>В записи о ношении ({@code worn_gift}) идентификаторы черт могут отсутствовать:
+     * подарок улучшен до того, как сервер узнал набор атрибутов, или это старая запись.
+     * Тогда плашка профиля получала {@code pattern_document_id = 0} и узор не рисовался
+     * вообще, хотя в остальных местах приложения тот же узор уже играл. Идентификатор
+     * восстанавливается по имени черты тем же каталогом, что и в карточке подарка;
+     * результат запоминается, чтобы не искать его при каждой сборке списка чатов.</p>
+     */
+    private static long resolveWornDocument(JSONObject gift, JSONObject traits, String kind, JSONObject trait) {
+        long documentId = trait == null ? 0 : trait.optLong("document_id", 0);
+        if (documentId != 0 || traits == null || trait == null) {
+            return documentId;
+        }
+        String giftId = gift.optString("telegram_gift_id", "");
+        if (TextUtils.isEmpty(giftId)) {
+            return 0;
+        }
+        String cacheKey = giftId + "|" + kind + "|" + gift.optString("serial_number", "")
+                + "|" + org.telegram.messenger.waysgram.WaysGramGiftTraits.name(traits, kind);
+        long now = System.currentTimeMillis();
+        synchronized (WORN_DOCUMENTS) {
+            long[] cached = WORN_DOCUMENTS.get(cacheKey);
+            if (cached != null && cached[1] > now) {
+                return cached[0];
+            }
+        }
+        long resolved = 0;
+        try {
+            JSONObject relaxed = new JSONObject(traits.toString());
+            // Строгий режим запрещает поиск по имени: черта без document_id осталась бы пустой.
+            relaxed.remove("strict_artwork");
+            TLRPC.TL_document document = org.telegram.messenger.waysgram.WaysGramGiftAttributes.traitDocument(
+                    giftId, kind, relaxed, kind);
+            if (document != null) {
+                resolved = document.id;
+            }
+        } catch (Throwable error) {
+            org.telegram.messenger.FileLog.e(error);
+        }
+        synchronized (WORN_DOCUMENTS) {
+            // Неудачный поиск тоже запоминаем ненадолго: карта пересобирается часто,
+            // а каталог атрибутов мог ещё не загрузиться.
+            WORN_DOCUMENTS.put(cacheKey, new long[]{resolved, now + (resolved != 0 ? 3_600_000L : 60_000L)});
+        }
+        if (resolved != 0 && org.telegram.messenger.waysgram.WaysGramBundledArtwork.isBundled(resolved)) {
+            org.telegram.messenger.waysgram.WaysGramBundledArtwork.install();
+        }
+        return resolved;
+    }
+
+    private static final java.util.HashMap<String, long[]> WORN_DOCUMENTS = new java.util.HashMap<>();
 
     public static TLRPC.TL_peerUser peerUser(long id) {
         TLRPC.TL_peerUser peer = new TLRPC.TL_peerUser();
@@ -187,23 +375,82 @@ public class WaysGramMapper {
         return toMessage(m, selfId, org.telegram.messenger.UserConfig.selectedAccount);
     }
 
+    /** Build Telegram's native Stars service action for a Fragment payout message. */
+    private static TLRPC.Message fragmentStarsTransferMessage(JSONObject json, long selfId) {
+        if (json == null) {
+            return null;
+        }
+        long stars = json.optLong("fragment_star_transfer_stars", 0L);
+        long senderId = json.optLong("sender_id", 0L);
+        long recipientId = json.optLong("recipient_id", 0L);
+        if (stars <= 0 || senderId <= 0 || recipientId <= 0) {
+            return null;
+        }
+        long messageId = json.optLong("id", 0L);
+        int date = (int) Math.max(0L, Math.min(Integer.MAX_VALUE, json.optLong("created_at", 0L)));
+        boolean out = senderId == selfId;
+
+        TLRPC.TL_messageActionGiftStars action = new TLRPC.TL_messageActionGiftStars();
+        action.currency = "XTR";
+        // WaysGram payouts are Stars transfers, not a paid Telegram purchase.
+        // amount=0 is the in-memory discriminator used by MessageObject below.
+        action.amount = 0;
+        action.stars = stars;
+
+        TLRPC.TL_messageService message = new TLRPC.TL_messageService();
+        message.id = (int) Math.max(1L, Math.min(Integer.MAX_VALUE, messageId));
+        message.date = date;
+        message.out = out;
+        message.from_id = peerUser(senderId);
+        message.peer_id = peerUser(out ? recipientId : selfId);
+        message.dialog_id = out ? recipientId : senderId;
+        message.flags = TLRPC.MESSAGE_FLAG_HAS_FROM_ID | TLObject.FLAG_9;
+        message.action = action;
+        return message;
+    }
+
     /**
      * Gift purchases, transfers and received gifts are drawn with Telegram's
      * native gift card instead of a plain text bubble.
      */
     public static TLRPC.Message toMessage(JSONObject m, long selfId, int account) {
+        final TLRPC.Message fragmentStarsTransfer = fragmentStarsTransferMessage(m, selfId);
+        if (fragmentStarsTransfer != null) {
+            return fragmentStarsTransfer;
+        }
         final TLRPC.Message waysGramGiftMessage =
                 org.telegram.messenger.waysgram.WaysGramGiftMessages.toServiceMessage(account, m, selfId);
         if (waysGramGiftMessage != null) {
             return waysGramGiftMessage;
         }
-        return toMessage(
+        TLRPC.Message message = toMessage(
                 m.optLong("id"),
                 m.optLong("sender_id"),
                 m.optLong("recipient_id"),
                 m.optString("body", ""),
                 m.optInt("created_at"),
                 selfId);
+        readPaidMessage(message, m);
+        return message;
+    }
+
+    /**
+     * Платное сообщение: сколько звёзд списано за его отправку.
+     *
+     * <p>По этому полю штатная ячейка рисует плашку «Вы оплатили ⭐N» (или «Ⓝ от un1» у
+     * получателя). Раньше сервер сумму не хранил и не отдавал, поэтому сообщение после
+     * оплаты выглядело обычным: уведомления об оплате в переписке не было.</p>
+     */
+    public static void readPaidMessage(TLRPC.Message message, JSONObject json) {
+        if (message == null || json == null) {
+            return;
+        }
+        long stars = json.optLong("paid_message_stars", 0);
+        if (stars <= 0) {
+            return;
+        }
+        message.paid_message_stars = stars;
+        message.flags2 |= TLObject.FLAG_6;
     }
 
     /** Snapshot the selected text from the existing native reply composer. */
@@ -343,6 +590,10 @@ public class WaysGramMapper {
 
     private static void addReaction(TLRPC.TL_messageReactions reactions, String emoji, int count,
                                     JSONArray mine, java.util.HashSet<String> seen) {
+        // The server keeps the Telegram spelling (with U+FE0F), the reaction catalog —
+        // without it. Every emoji must enter TLRPC in the catalog form, otherwise the
+        // chip finds neither the texture nor the animation and falls back to the font.
+        emoji = WaysGramReactions.canonical(emoji);
         if (!WaysGramReactions.contains(emoji) || count <= 0 || !seen.add(emoji)) return;
         TLRPC.TL_reactionEmoji emojiValue = new TLRPC.TL_reactionEmoji();
         emojiValue.emoticon = emoji;
@@ -351,7 +602,7 @@ public class WaysGramMapper {
         result.count = count;
         if (mine != null) {
             for (int i = 0; i < mine.length(); i++) {
-                if (emoji.equals(mine.optString(i))) {
+                if (emoji.equals(WaysGramReactions.canonical(mine.optString(i)))) {
                     result.flags |= TLObject.FLAG_0;
                     result.chosen = true;
                     result.chosen_order = i;
@@ -368,7 +619,7 @@ public class WaysGramMapper {
             JSONObject item = recent.optJSONObject(i);
             if (item == null) continue;
             long userId = item.optLong("user_id", 0);
-            String emoji = item.optString("reaction", "");
+            String emoji = WaysGramReactions.canonical(item.optString("reaction", ""));
             if (userId <= 0 || !WaysGramReactions.contains(emoji)) continue;
             TLRPC.TL_messagePeerReaction peerReaction = new TLRPC.TL_messagePeerReaction();
             peerReaction.peer_id = peerUser(userId);
@@ -381,6 +632,30 @@ public class WaysGramMapper {
             reactions.recent_reactions.add(peerReaction);
         }
         if (!reactions.recent_reactions.isEmpty()) reactions.flags |= TLObject.FLAG_1;
+    }
+
+    /**
+     * Платная реакция канала: чип со суммой звёзд.
+     *
+     * <p>Нативный интерфейс рисует платную реакцию как обычный чип, если в результатах лежит
+     * {@link TLRPC.TL_reactionPaid}: количество — сумма звёзд, {@code chosen} — «я уже платил».
+     * Отдельной записи в {@code message_reactions} для неё нет, сервер отдаёт суммы полями
+     * {@code paid_stars} / {@code my_paid_stars}.</p>
+     */
+    private static void addPaidReaction(TLRPC.TL_messageReactions reactions, JSONObject json) {
+        long total = json.optLong("paid_stars", 0);
+        if (total <= 0) {
+            return;
+        }
+        TLRPC.TL_reactionCount result = new TLRPC.TL_reactionCount();
+        result.reaction = new TLRPC.TL_reactionPaid();
+        result.count = (int) Math.min(Integer.MAX_VALUE, total);
+        if (json.optLong("my_paid_stars", 0) > 0) {
+            result.flags |= TLObject.FLAG_0;
+            result.chosen = true;
+            result.chosen_order = 0;
+        }
+        reactions.results.add(result);
     }
 
     /** Read a history summary or an authoritative response from a set request. */
@@ -407,6 +682,7 @@ public class WaysGramMapper {
             }
         }
         addRecentReactions(reactions, json.optJSONArray("recent_reactions"));
+        addPaidReaction(reactions, json);
         return reactions;
     }
 

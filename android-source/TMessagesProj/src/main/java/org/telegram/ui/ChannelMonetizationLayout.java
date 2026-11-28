@@ -687,7 +687,13 @@ public class ChannelMonetizationLayout extends SizeNotifierFrameLayout implement
         }
         starsBalance = amount;
         starsBalanceTitle.setText(ssb);
-        starsBalanceSubtitle.setText("≈" + BillingController.getInstance().formatCurrency((long) (stars_rate * amount.amount * 100.0), "USD"));
+        if (stars_rate > 0) {
+            starsBalanceSubtitle.setText("≈" + BillingController.getInstance().formatCurrency((long) (stars_rate * amount.amount * 100.0), "USD"));
+        } else {
+            // WaysGram does not have a fiat quote. Keep the actual XTR balance visible
+            // instead of displaying a fabricated ≈$0.00 estimate.
+            starsBalanceSubtitle.setText("");
+        }
         starsBalanceEditTextContainer.setVisibility(amount.amount > 0 ? VISIBLE : GONE);
         if (starsBalanceEditTextAll) {
             starsBalanceEditTextIgnore = true;
@@ -831,9 +837,8 @@ public class ChannelMonetizationLayout extends SizeNotifierFrameLayout implement
             proceedsAvailable = true;
             balanceButton.setVisibility(balances.available_balance.amount > 0 && balances.withdrawal_enabled ? View.VISIBLE : View.GONE);
         } else {
-            if (stars_rate == 0) {
-                return;
-            }
+            // The internal Stars ledger has a real XTR balance even when no USD quote
+            // is configured. Do not skip setupBalances() just because usd_rate is zero.
             availableValue.contains2 = true;
             availableValue.crypto_amount2 = balances.available_balance;
             availableValue.amount2 = (long) (availableValue.crypto_amount2.amount * stars_rate * 100.0);

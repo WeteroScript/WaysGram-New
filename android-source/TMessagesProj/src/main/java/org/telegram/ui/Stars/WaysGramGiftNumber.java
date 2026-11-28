@@ -36,9 +36,28 @@ public final class WaysGramGiftNumber {
     /** Подпись вместо номера: ровно три знака вопроса. */
     public static final String LABEL = "#???";
 
-    private static final int COLOR_NEAR_BLACK = 0xFF05070B;
-    private static final int COLOR_DEEP_BLUE = 0xFF16233F;
-    private static final int COLOR_SHIMMER = 0xFF24406B;
+    /** Края перелива: синий, читаемый на чёрной карточке. */
+    private static final int COLOR_EDGE = 0xFF3A5FA8;
+    /** Середина перелива. */
+    private static final int COLOR_MID = 0xFF7FA3E8;
+    /** Самая светлая точка, которая проходит по «#???». */
+    private static final int COLOR_PEAK = 0xFFC9DBFF;
+
+    /**
+     * Палитра симметрична: крайние цвета одинаковые, поэтому «шов» тайла незаметен.
+     *
+     * <p>Раньше здесь были 0xFF05070B/0xFF16233F/0xFF24406B. На тёмной карточке
+     * подарка (Theme.key_dialogGiftsBackground) такой номер сливался с фоном: на
+     * скриншоте «#???» читался как чёрное пятно. Теперь перелив идёт по синим
+     * тонам с достаточной яркостью, но остаётся приглушённым.
+     */
+    private static final int[] SHIMMER_COLORS = {
+            COLOR_EDGE, COLOR_MID, COLOR_PEAK, COLOR_MID, COLOR_EDGE
+    };
+    private static final float[] SHIMMER_POSITIONS = {0f, 0.25f, 0.5f, 0.75f, 1f};
+
+    /** Один цикл перелива: за него градиент проходит ровно один период зеркального тайла. */
+    private static final long CYCLE_MS = 3600L;
 
     /** 0..1 — сдвиг градиента; общий для всех карточек, чтобы перелив шёл синхронно. */
     private static volatile float phase;
@@ -138,33 +157,49 @@ public final class WaysGramGiftNumber {
         startTicker();
     }
 
+    /**
+     * Сколько кадров цикл ещё живёт после последнего {@link #bindShimmer(View)} без единого
+     * прикреплённого вида. Вьюху могут привязать до того, как она попала в окно, поэтому
+     * цикл нельзя останавливать в тот же кадр.
+     */
+    private static final int IDLE_FRAMES_BEFORE_STOP = 4;
+
     private static void startTicker() {
         if (ticking) {
             return;
         }
         ticking = true;
         Choreographer.getInstance().postFrameCallback(new Choreographer.FrameCallback() {
+            private int idleFrames;
+
             @Override
             public void doFrame(long frameTimeNanos) {
-                // Полный цикл перелива — 2 секунды.
-                phase = (frameTimeNanos / 1_000_000L % 2000L) / 2000f;
-                boolean pending = false;
+                phase = (frameTimeNanos / 1_000_000L % CYCLE_MS) / (float) CYCLE_MS;
+                boolean alive = false;
                 for (Iterator<WeakReference<View>> iterator = targets.iterator(); iterator.hasNext(); ) {
                     View view = iterator.next().get();
                     if (view == null) {
                         iterator.remove();
                         continue;
                     }
-                    // Вид может быть ещё не прикреплён в момент bind: цикл не должен
-                    // останавливаться, иначе перелив замирает до повторного открытия карточки.
-                    pending = true;
                     if (view.isAttachedToWindow() && view.getVisibility() == View.VISIBLE) {
+                        alive = true;
                         view.postInvalidateOnAnimation();
                     }
                 }
-                if (pending) {
+                // Раньше цикл считался живым, пока существует хоть один объект View. Список
+                // подарков переиспользует ячейки, поэтому в targets копились отсоединённые
+                // вьюхи, и перерисовка шла 60 раз в секунду даже когда «#???» на экране нет:
+                // прокрутка на слабом устройстве из-за этого дёргалась.
+                if (!alive) {
+                    idleFrames++;
+                } else {
+                    idleFrames = 0;
+                }
+                if (!targets.isEmpty() && idleFrames < IDLE_FRAMES_BEFORE_STOP) {
                     Choreographer.getInstance().postFrameCallback(this);
                 } else {
+                    targets.clear();
                     ticking = false;
                 }
             }
@@ -180,16 +215,28 @@ public final class WaysGramGiftNumber {
      * Градиент перелива для произвольной кисти: используется там, где номер рисуется
      * не span-ом, а вручную (лента «#???» в ячейке подарка).
      */
-    public static void applyShimmer(@Nullable Paint paint, float width, float textSize) {
+    public static void applyShimmer(@Nullable Paint paint, float x, float width) {
         if (paint == null || width <= 0) {
             return;
         }
-        final float shift = (phase - 0.5f) * width * 1.6f;
-        paint.setShader(new LinearGradient(
-                shift, 0f, shift + width * 1.4f, Math.max(1f, textSize),
-                new int[]{COLOR_NEAR_BLACK, COLOR_DEEP_BLUE, COLOR_SHIMMER, COLOR_NEAR_BLACK},
-                new float[]{0f, 0.38f, 0.55f, 1f},
-                Shader.TileMode.CLAMP));
+        paint.setShader(shimmerShader(x, width));
+    }
+
+    /**
+     * Градиент перелива.
+     *
+     * <p>Раньше сдвиг шёл по «пиле» от -0.8 ширины к +0.8 ширины с {@code TileMode.CLAMP}:
+     * в конце цикла градиент резко возвращался в начало, и «#???» дёргался. Теперь цвета
+     * симметричны, тайл зеркальный, а за цикл сдвиг проходит ровно его период — картинка
+     * непрерывна, стыка не видно. Градиент почти горизонтальный (1 px по вертикали, чтобы
+     * шейдер не вырождался), поэтому по высоте текста ничего не отражается.
+     */
+    private static Shader shimmerShader(float x, float width) {
+        final float length = Math.max(width * 1.4f, 1f);
+        final float shift = phase * 2f * length;
+        // Вертикальный размер в 1 пиксель: градиент остаётся горизонтальным, но не вырождается.
+        return new LinearGradient(x - length + shift, 0f, x + shift, 1f,
+                SHIMMER_COLORS, SHIMMER_POSITIONS, Shader.TileMode.MIRROR);
     }
 
     /** Снимает градиент перелива с кисти. */
@@ -199,7 +246,7 @@ public final class WaysGramGiftNumber {
         }
     }
 
-    /** «#???» тёмно-синим с переливом в тёмно-чёрный. */
+    /** «#???» синим с переливом от края к светлой середине. */
     public static class NumberSpan extends ReplacementSpan {
 
         private static final float SIZE_FACTOR = 0.85f;
@@ -229,12 +276,7 @@ public final class WaysGramGiftNumber {
             if (width <= 0) {
                 return;
             }
-            final float shift = (phase - 0.5f) * width * 1.6f;
-            stroke.setShader(new LinearGradient(
-                    x + shift, y - stroke.getTextSize(), x + shift + width * 1.4f, y,
-                    new int[]{COLOR_NEAR_BLACK, COLOR_DEEP_BLUE, COLOR_SHIMMER, COLOR_NEAR_BLACK},
-                    new float[]{0f, 0.38f, 0.55f, 1f},
-                    Shader.TileMode.CLAMP));
+            stroke.setShader(shimmerShader(x, width));
             canvas.drawText(text, start, end, x, y, stroke);
         }
     }

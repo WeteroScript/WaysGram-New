@@ -47,10 +47,10 @@ class ChannelMonetizationChecks(unittest.TestCase):
     def test_posting_in_a_broadcast_channel_is_checked_before_sending(self):
         chats = self.source("tgnet/WaysGramChats.java")
         messages = self.source("tgnet/WaysGramMessages.java")
-        self.assertIn("public static void requireChannelPostRight(long channelTgId)", chats)
+        self.assertIn("public static void requireChannelPostRight(int account, long channelTgId)", chats)
         self.assertIn('throw new WaysGramApi.ApiException(403, "CHAT_WRITE_FORBIDDEN");', chats)
-        self.assertIn("requireChannelPostRight(tg);", chats)
-        self.assertIn("WaysGramChats.requireChannelPostRight(WaysGramChats.channelTg(peerId));", messages)
+        self.assertIn("requireChannelPostRight(account, tg);", chats)
+        self.assertIn("WaysGramChats.requireChannelPostRight(account, WaysGramChats.channelTg(peerId));", messages)
         # Группы проверяет сервер своими правами — их клиент не блокирует.
         self.assertIn("if (isGroupChannel(channelTgId)) {", chats)
 
@@ -73,18 +73,36 @@ class ChannelMonetizationChecks(unittest.TestCase):
         self.assertIn("request instanceof TLRPC.TL_messages_getPaidReactionPrivacy", transport)
         self.assertIn("request instanceof TLRPC.TL_messages_togglePaidReactionPrivacy", transport)
 
-    def test_paid_reaction_is_debit_only_and_reported_with_totals(self):
+    def test_paid_reaction_credits_channel_without_crediting_owner_wallet(self):
         api = self.server("messenger_api.py")
-        self.assertIn("Платная реакция только списывается с отправителя", api)
+        self.assertIn("Stars-баланс канала", api)
+        self.assertIn("await credit_chat_stars(", api)
         self.assertNotIn("for account_id, amount in ((uid, -stars), (owner, stars)):", api)
         self.assertIn('"total_stars": total_stars', api)
         self.assertIn("async def attach_paid_reactions(items: list[dict[str, Any]], channel_id: int, user_id: int)", api)
         self.assertIn('item["paid_stars"] = total', api)
 
-    def test_analytics_counts_paid_reactions_by_debits(self):
+    def test_analytics_counts_debits_and_reads_channel_stars_credit(self):
         api = self.server("messenger_api.py")
-        self.assertIn("покупки считаем по дебетам", api)
+        self.assertIn("Число покупок берём из атомарных списаний", api)
+        self.assertIn("channel_chat_stars_id(channel_id)", api)
         self.assertIn('f"channel_paid_reaction:{channel_id}:*"', api)
+
+    # ---------------------------------------------------------------- Stars history and group balances
+
+    def test_null_history_cursor_is_not_the_string_null(self):
+        economy = self.source("tgnet/WaysGramEconomy.java")
+        self.assertIn('history.isNull("next_offset")', economy)
+        self.assertIn('!"null".equalsIgnoreCase(next)', economy)
+        self.assertIn('status.next_offset = next;', economy)
+
+    def test_group_stars_balance_is_shown_without_a_fiat_quote(self):
+        layout = self.source("ui/ChannelMonetizationLayout.java")
+        setter = layout.split("private void setStarsBalance(", 1)[1].split("private Runnable setStarsBalanceButtonText", 1)[0]
+        self.assertIn("if (stars_rate > 0)", setter)
+        self.assertIn('starsBalanceSubtitle.setText("");', setter)
+        self.assertNotIn("if (stars_rate == 0) {\n                return;", layout)
+        self.assertIn("setStarsBalance(availableValue.crypto_amount2, balances.next_withdrawal_at);", layout)
 
     # ---------------------------------------------------------------- платные сообщения в канал
 
@@ -97,7 +115,7 @@ class ChannelMonetizationChecks(unittest.TestCase):
         self.assertIn("ADD COLUMN paid_messages_enabled", api)
         self.assertIn("ADD COLUMN paid_messages_stars", api)
         self.assertIn('channel["send_paid_messages_stars"] = int(channel.get("paid_messages_stars") or 0)', api)
-        self.assertIn('flag(c, "paid_messages_enabled")', chats)
+        self.assertIn('c.optLong("send_paid_messages_stars"', chats)
         self.assertIn("private static TLObject paidMessagesPrice(", transport)
         self.assertIn('"/paid-messages"', transport)
         # Без монофорума цена живёт в самом канале, иначе экран показывал бы значение по умолчанию.

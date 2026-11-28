@@ -99,6 +99,11 @@ python -c "import secrets; print(secrets.token_urlsafe(48))"
 | `INTERNAL_API_PORT` | Порт API; по умолчанию используется `PORT`, затем 8081 |
 | `PUBLIC_API_BASE_URL` | Публичный origin API для ссылок-приглашений; задай внешний HTTPS-домен, если приложение работает за reverse proxy |
 | `LOG_LEVEL` | Уровень логирования; по умолчанию `INFO` |
+| `WAYSGRAM_TON_ADDRESS` | Адрес сервисного TON-кошелька для пополнения звёзд; пусто — раздел TON в клиенте показывает «не настроено» |
+| `WAYSGRAM_STARS_PER_TON` | Курс пополнения; по умолчанию 500 звёзд за 1 TON |
+| `WAYSGRAM_TON_WATCHER_SECRET` | Секрет вотчера: без него `POST /api/internal/ton/deposits` отвечает 503 |
+| `WAYSGRAM_TON_WITHDRAWALS` | `1` включает заявки на вывод TON; по умолчанию вывод выключен |
+| `WAYSGRAM_FRAGMENT_COMMISSION_PERCENT` | Комиссия рынка юзернеймов, проценты; по умолчанию 5, допустимо 0–50 |
 
 ## Начальные балансы
 
@@ -107,6 +112,33 @@ python -c "import secrets; print(secrets.token_urlsafe(48))"
 ## API приложения WaysGram
 
 Клиентские маршруты используют Bearer-сессию. Для получения сессии пользователь должен иметь виртуальный номер и пройти CAPTCHA в AuthWaysGram_bot. Все идентификаторы пользователей в API — это реальные Telegram ID соответствующих аккаунтов WaysGram; отдельная таблица пользователей для второго backend не создаётся.
+
+### Коллекционные юзернеймы (свой Fragment)
+
+Публичного API у fragment.com нет, поэтому рынок юзернеймов работает на звёздном ledger
+WaysGram. Владение хранится в `collectibles` и заселяется из `accounts.username` при
+миграции: имя, которое уже стоит на аккаунте, нельзя «купить» у самого себя.
+
+- `GET /api/collectibles?section=market|auctions|mine` — витрина: фикс-цена, аукционы, свои имена.
+- `GET /api/collectibles/{name}` — карточка: владелец, цена, аукцион, заморозка, история смен.
+- `PUT /api/collectibles/{name}/listing` — `{"price_stars":N}`; выставить может только владелец из базы.
+- `DELETE /api/collectibles/{name}/listing` — снять с продажи.
+- `POST /api/collectibles/{name}/buy` — покупка по фикс-цене (нужен `Idempotency-Key`). Одна транзакция:
+  списание покупателю, выплата продавцу минус комиссия (`WAYSGRAM_FRAGMENT_COMMISSION_PERCENT`, по умолчанию 5 %), смена владельца и проводки
+  `username_purchase:<listing>` / `username_sale:<listing>`. После покупки имя заморожено на сутки.
+- `POST /api/collectibles/{name}/claim` — купить свободное имя у сервиса (цена от длины, `system_price`).
+- `POST /api/collectibles/{name}/auction` — `{"min_bid_stars":N,"duration_hours":H}`; `DELETE` отменяет и
+  возвращает замороженную ставку.
+- `POST /api/collectibles/{name}/bid` — ставка холдит звёзды (`username_auction_hold`), перебитая
+  возвращается; ставка в последние 5 минут продлевает торги на 5 минут. Расчёт закрывает аукцион
+  лениво при чтении карточки и в фоновом воркере, поэтому рестарт сервера ничего не теряет.
+- `GET /api/me/ton` — адрес пополнения, `memo = wg:<telegram_id>`, курс, история.
+- `POST /api/me/ton-withdraw` — `{"stars":N,"address":"..."}`; создаёт заявку в `ton_payouts`, включается
+  `WAYSGRAM_TON_WITHDRAWALS=1`.
+- `POST /api/internal/ton/deposits` — приём от вотчера (`X-WaysGram-Ton-Secret`): `memo`, `tx_hash`,
+  `amount_nanoton`. Повторный `tx_hash` отвечает 409 и звёзды второй раз не начисляет.
+
+Вотчер запускается отдельно: `WAYSGRAM_SERVER_URL=... WAYSGRAM_TON_ADDRESS=... WAYSGRAM_TON_WATCHER_SECRET=... python3 scripts/ton_watcher.py`.
 
 ### Авторизация и профиль
 
@@ -223,7 +255,8 @@ python authbot/scripts/create_gift_user_session.py --output /private/path/gift-u
 
 - `GET /api/me/wallet`, `GET /api/me/wallet/transactions` — балансы и история операций.
 - `GET /api/gifts` — каталог доступных подарков.
-- `GET /api/me/gifts`, `GET /api/me/gifts/transactions` — инвентарь и история передач.
+- `GET /api/me/gifts`, `GET /api/me/gifts/transactions` — общий инвентарь и история передач.
+- `GET /api/me/fragment/gifts` — инвентарь мини-приложения Fragment: только подарки, которые текущий владелец отправил служебному `@fragment` и которые всё ещё принадлежат ему.
 - `POST /api/gifts/{id}/purchase` — покупка за Gram. Для защиты от повторного списания поддерживается заголовок `Idempotency-Key` длиной 16–128 символов.
 - `POST /api/gifts/transfer` — передача принадлежащего пользователю подарка по серийному номеру и Telegram ID или username получателя. Поддерживает `Idempotency-Key`.
 - `POST /api/messages/gift` — атомарно передаёт собственный подарок пользователю и создаёт сообщение в ЛС со снимком атрибутов. Проверяются блокировки и запрет передачи выставленного подарка; `Idempotency-Key` предотвращает повторную передачу и создание сообщения. Передача бесплатна внутри WaysGram и не является операцией Telegram или on-chain NFT. Нативная карточка коллекционного подарка в своём профиле подключена к этому маршруту; Android runtime не проверен.

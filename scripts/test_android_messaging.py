@@ -30,7 +30,9 @@ class NativeMessagingSourceChecks(unittest.TestCase):
         custom = self.source('ui/WaysGramCustomizationActivity.java')
         launch = self.source('ui/LaunchActivity.java')
         self.assertIn('presentFragment(new WaysGramCustomizationActivity())', settings)
-        self.assertIn('tabsView.setBackground(tabsViewBackground);', self.source('ui/MainTabsActivity.java'))
+        tabs = self.source('ui/MainTabsActivity.java')
+        self.assertIn('tabsViewBackground = iBlur3FactoryGlass.create(tabsView', tabs)
+        self.assertIn('tabsView.setBackground(WaysGramCustomizationActivity.wrapBackground(', tabs)
         self.assertIn('ACTION_OPEN_DOCUMENT', custom)
         self.assertIn('https://t.wg/custom/', custom)
         self.assertIn('WaysGramCustomizationActivity.isLink(data)', launch)
@@ -103,18 +105,20 @@ class NativeMessagingSourceChecks(unittest.TestCase):
         self.assertIn('"&message_ids=" + id + "&include_peer=true"', poller)
         self.assertIn('if (!firstDelivery(account, peer, id)) return;', poller)
 
-    def test_waysgram_chat_refresh_does_not_request_telegram_boosts(self):
+    def test_stock_boost_and_statistics_rows_are_restored(self):
         chat = self.source('ui/ChatActivity.java')
         edit = self.source('ui/ChatEditActivity.java')
-        self.assertIn('!org.telegram.tgnet.WaysGramTransport.ENABLED && ChatObject.isBoostSupported(currentChat)', chat)
-        self.assertIn('!org.telegram.tgnet.WaysGramTransport.ENABLED && ChatObject.isChannelAndNotMegaGroup(currentChat) && !ChatObject.isCommunity(currentChat)', edit)
+        self.assertNotIn('!org.telegram.tgnet.WaysGramTransport.ENABLED && ChatObject.isBoostSupported(currentChat)', chat)
+        self.assertIn('if (ChatObject.isBoostSupported(currentChat)', chat)
+        self.assertNotIn('!org.telegram.tgnet.WaysGramTransport.ENABLED && ChatObject.isChannelAndNotMegaGroup(currentChat)', edit)
+        self.assertIn('if (ChatObject.isChannelAndNotMegaGroup(currentChat) && !ChatObject.isCommunity(currentChat))', edit)
 
     def test_paid_channel_reactions_require_confirmation_and_reuse_pending_key(self):
         menu = self.source('ui/ChatActivity.java')
         edit = self.source('ui/ChatEditActivity.java')
         payment = self.source('ui/WaysGramPaidReactions.java')
-        self.assertIn('WaysGramPaidReactions.showPost', menu)
-        self.assertIn('WaysGramPaidReactions.showSetting', edit)
+        self.assertNotIn('items.add(LocaleController.getString(R.string.WaysGramPaidReactions));', menu)
+        self.assertNotIn('R.string.WaysGramPaidReactions', edit)
         self.assertIn('retryKey != null ? retryKey : UUID.randomUUID().toString()', payment)
         checkout = payment.split('private static void confirm(BaseFragment', 1)[1]
         self.assertLess(checkout.index('putString(slot, key)'), checkout.index('request("POST", path'))
@@ -145,7 +149,7 @@ class NativeMessagingSourceChecks(unittest.TestCase):
         chat = self.source('ui/ChatActivity.java')
         helper = self.source('ui/WaysGramGroupIdentity.java')
         mapper = self.source('tgnet/WaysGramChats.java')
-        self.assertIn('WaysGramGroupIdentity.open(ChatActivity.this, currentAccount, currentChat.id)', chat)
+        self.assertNotIn('headerItem.lazilyAddSubItem(waysgram_group_identity', chat)
         self.assertIn('put("send_as_id", identity)', helper)
         self.assertIn('root(group) + "/identity-messages"', helper)
         self.assertIn('send(chat, account, group, token, identity, body, key)', helper)
@@ -156,8 +160,8 @@ class NativeMessagingSourceChecks(unittest.TestCase):
     def test_group_stories_use_membership_scoped_routes_and_permission_controls(self):
         chat = self.source('ui/ChatActivity.java')
         stories = self.source('ui/WaysGramGroupStories.java')
-        self.assertIn('WaysGramGroupStories.open(ChatActivity.this, currentAccount, currentChat.id)', chat)
-        self.assertIn('PICK_WAYSGRAM_GROUP_STORY', chat)
+        self.assertNotIn('headerItem.lazilyAddSubItem(waysgram_group_stories', chat)
+        self.assertNotIn('headerItem.lazilyAddSubItem(waysgram_group_identity', chat)
         self.assertIn('root(group) + "/story-settings"', stories)
         self.assertIn('data.optBoolean("can_pin")', stories)
         self.assertIn('row.optBoolean("can_delete")', stories)
@@ -175,7 +179,7 @@ class NativeMessagingSourceChecks(unittest.TestCase):
     def test_channel_giveaways_have_owner_creation_and_member_entry(self):
         chat = self.source('ui/ChatActivity.java')
         helper = self.source('ui/WaysGramPaidReactions.java')
-        self.assertIn('WaysGramPaidReactions.showGiveaways(ChatActivity.this, currentAccount, currentChat.id)', chat)
+        self.assertNotIn('headerItem.lazilyAddSubItem(waysgram_channel_giveaways', chat)
         self.assertIn('data.optBoolean("can_create")', helper)
         self.assertIn('data.optBoolean("can_enter")', helper)
         self.assertIn('path + "/" + id + "/entry"', helper)
@@ -194,9 +198,13 @@ class NativeMessagingSourceChecks(unittest.TestCase):
         transport = self.source('tgnet/WaysGramTransport.java')
         privacy = self.source('ui/PrivacySettingsActivity.java')
         helper = self.source('ui/WaysGramPaidDm.java')
-        self.assertIn('WaysGramPaidDm.settings(this, currentAccount)', privacy)
-        self.assertIn('new JSONArray(ids)', helper)
-        self.assertIn('R.string.WaysGramPaidDmConfirm, fee', helper)
+        # Цена правится на штатном экране «Сообщения», своего диалога у WaysGram нет.
+        self.assertIn('new PrivacyControlActivity(ContactsController.PRIVACY_RULES_TYPE_MESSAGES)', privacy)
+        self.assertNotIn('WaysGramPaidDm', privacy)
+        # Цену и исключения пишет штатный экран Telegram: ключ paid-messages и
+        # global privacy settings, списание по-прежнему идёт через /message-fee.
+        self.assertIn('"/api/chats/" + peer + "/message-fee"', helper)
+        self.assertIn('AlertsCreator.showPayForMessageAlert(account, peer', helper)
         self.assertIn('putInt(slot, fee).putLong(slot + ":since", since).commit()', transport)
         self.assertIn('body.put("approved_fee_stars", approvedFee)', transport)
         self.assertIn('confirmPaidText(account, send, token, changed, false', transport)
@@ -204,7 +212,7 @@ class NativeMessagingSourceChecks(unittest.TestCase):
     def test_community_boosts_use_waysgram_and_explicit_move_confirmation(self):
         chat = self.source('ui/ChatActivity.java')
         helper = self.source('ui/WaysGramPaidReactions.java')
-        self.assertIn('WaysGramPaidReactions.showCommunityBoosts(ChatActivity.this, currentAccount, currentChat.id,', chat)
+        self.assertNotIn('headerItem.lazilyAddSubItem(waysgram_community_boosts', chat)
         self.assertIn('"/api/community-boosts/" + (channel ? "channel/" : "group/")', helper)
         self.assertIn('R.string.WaysGramBoostMoveConfirm', helper)
         self.assertIn('new JSONObject().put("slow_mode_bypass", !bypass)', helper)
@@ -212,7 +220,7 @@ class NativeMessagingSourceChecks(unittest.TestCase):
     def test_group_topics_use_separate_history_and_server_management(self):
         chat = self.source('ui/ChatActivity.java')
         topics = self.source('ui/WaysGramGroupTopics.java')
-        self.assertIn('WaysGramGroupTopics.open(ChatActivity.this, currentAccount, currentChat.id)', chat)
+        self.assertNotIn('headerItem.lazilyAddSubItem(waysgram_group_topics', chat)
         forum = self.source('ui/WaysGramForumActivity.java')
         self.assertIn('"/api/groups/" + groupId + "/topics"', forum)
         self.assertIn('data.optBoolean("can_manage")', forum)
@@ -229,8 +237,8 @@ class NativeMessagingSourceChecks(unittest.TestCase):
         chat = self.source('ui/ChatActivity.java')
         edit = self.source('ui/ChatEditActivity.java')
         inbox = self.source('ui/WaysGramChannelInbox.java')
-        self.assertIn('WaysGramChannelInbox.open(ChatActivity.this, currentAccount, currentChat.id, currentChat.creator)', chat)
-        self.assertIn('WaysGramChannelInbox.settings(this, currentAccount, chatId)', edit)
+        self.assertNotIn('headerItem.lazilyAddSubItem(waysgram_channel_inbox', chat)
+        self.assertNotIn('R.string.WaysGramInboxSettings', edit)
         self.assertIn('root + "/me"', inbox)
         self.assertIn('root + "/threads/"', inbox)
         self.assertIn('if (fee > 0 || proposal) confirm(', inbox)
@@ -246,25 +254,56 @@ class NativeMessagingSourceChecks(unittest.TestCase):
         self.assertIn('actionPath + "decline"', inbox)
         self.assertIn('putBoolean(slot + ":proposal", proposal)', inbox)
 
-    def test_channel_discussions_use_owned_groups_and_real_comment_threads(self):
+    def test_channel_discussions_open_the_native_replies_thread(self):
         chat = self.source('ui/ChatActivity.java')
         editor = self.source('ui/ChatEditActivity.java')
         discussion = self.source('ui/WaysGramDiscussions.java')
-        self.assertIn('WaysGramDiscussions.open(this, currentAccount, currentChat.id, post.getId())', chat)
+        threads = self.source('tgnet/WaysGramThreads.java')
+        chats = self.source('tgnet/WaysGramChats.java')
+        transport = self.source('tgnet/WaysGramTransport.java')
+
+        self.assertNotIn('items.add(LocaleController.getString(R.string.WaysGramDiscussionGroup));', chat)
+        self.assertNotIn('WaysGramDiscussions.open(', chat,
+                         'кнопка «Прокомментировать» не должна открывать старый диалог')
+        self.assertIn('openDiscussionMessageChat(currentChat.id, message, message.getId(), linkedChatId, maxReadId, 0, null);', chat)
         self.assertIn('WaysGramDiscussions.settings(this, currentAccount, chatId)', editor)
-        self.assertIn('"owner".equals(group.optString("role"))', discussion)
+        self.assertIn('create()', discussion)
+        self.assertIn('loadFullChat(channel, 0, true)', discussion)
+        self.assertIn('new ChatLinkActivity(channel, true)', discussion)
+        self.assertIn('picker.setInfo(full)', discussion)
         self.assertIn('WaysGramChats.channelServer(channel)', discussion)
-        self.assertIn('data.optLong("next_before_id")', discussion)
-        self.assertIn('request("POST", path, payload, token, 15000, key)', discussion)
-        self.assertIn('payload.put("reply_to_id", replyToId)', discussion)
-        self.assertIn('row.optString("reply_to_body")', discussion)
+
+        # The native Telegram selector keeps search and sends its selected group
+        # through the transport bridge to the WaysGram discussion-group endpoint.
+        group_picker = self.source('ui/ChatLinkActivity.java')
+        self.assertIn('boolean chooseDiscussionGroup', group_picker)
+        self.assertIn('searchAdapter.searchDialogs(text)', group_picker)
+        self.assertIn('TL_channels_getGroupsForDiscussion', group_picker)
+        self.assertIn('showLinkAlert(chat, true)', group_picker)
+        self.assertIn('linkChat(chat, null)', group_picker)
+        self.assertIn('WaysGramChats.setDiscussionGroup(account, link.broadcast.channel_id, groupId)', transport)
+        self.assertIn('"/api/channels/" + channelServer(channelTgId) + "/discussion-group"', chats)
+
+        # The native Telegram thread screen asks for the discussion root, then its replies.
+        self.assertIn('request instanceof TLRPC.TL_messages_getDiscussionMessage', threads)
+        self.assertIn('request instanceof TLRPC.TL_messages_getReplies', threads)
+        self.assertIn('"/api/channels/" + channel + "/messages/" + req.msg_id + "/discussion"', threads)
+        self.assertIn('0, 0, 1, true, selfId, token', threads)
+        self.assertIn('int root = WaysGramChats.serverGroupId(req.msg_id);', threads)
+        self.assertIn('limit, false, selfId, token', threads)
+        self.assertIn('out.count = thread.count;', threads)
+        self.assertIn('"/api/groups/" + group', chats)
+        self.assertIn('"/threads/"', chats)
+        self.assertIn('if (addOffset != 0)', chats)
+        self.assertIn('int lastCommentClientId = clientGroupId(lastComment);', chats)
+        self.assertIn('WaysGramThreads.handle(account, request, selfId, expectedToken)', transport)
 
     def test_paid_subscription_links_require_explicit_confirm_and_stable_retry(self):
         launch = self.source('ui/LaunchActivity.java')
         editor = self.source('ui/ChatEditActivity.java')
         helper = self.source('ui/WaysGramPaidReactions.java')
         self.assertIn('wg/subscription/', launch)
-        self.assertIn('WaysGramPaidReactions.showSubscriptionSettings', editor)
+        self.assertNotIn('R.string.WaysGramSubscription', editor)
         checkout = helper.split('private static void confirmSubscription', 1)[1].split('private static void subscriptionReceipt', 1)[0]
         self.assertLess(checkout.index('putString(slot, key)'), checkout.index('request("POST", path'))
         self.assertIn('put("approved_price_stars", price), session, 15000, key', checkout)
@@ -273,9 +312,8 @@ class NativeMessagingSourceChecks(unittest.TestCase):
     def test_channel_analytics_is_owner_only_and_reads_real_revenue(self):
         editor = self.source('ui/ChatEditActivity.java')
         helper = self.source('ui/WaysGramPaidReactions.java')
-        gate = editor.split('&& ChatObject.isChannelAndNotMegaGroup(currentChat)) {\n                TextCell paidReactionsCell', 1)
-        self.assertTrue(gate[0].endswith('if (org.telegram.tgnet.WaysGramTransport.ENABLED && currentChat.creator\n                    '))
-        self.assertIn('WaysGramPaidReactions.showAnalytics', gate[1])
+        self.assertNotIn('WaysGramPaidReactions.showAnalytics', editor)
+        self.assertNotIn('R.string.WaysGramChannelAnalytics', editor)
         self.assertIn('int[] days = {7, 30, 90}', helper)
         self.assertIn('data.optLong("paid_reaction_stars")', helper)
         for metric in ("paid_media_stars", "subscription_stars", "inbox_stars", "total_revenue_stars"):
@@ -284,14 +322,14 @@ class NativeMessagingSourceChecks(unittest.TestCase):
     def test_group_analytics_uses_group_endpoint_and_activity_metrics(self):
         editor = self.source('ui/ChatEditActivity.java')
         helper = self.source('ui/WaysGramPaidReactions.java')
-        self.assertIn('WaysGramPaidReactions.showGroupAnalytics', editor)
+        self.assertNotIn('R.string.WaysGramGroupAnalytics', editor)
         self.assertIn('"/api/groups/" + group, true', helper)
         self.assertIn('data.optLong("messages_remaining"), data.optLong("unique_authors")', helper)
 
     def test_group_send_permissions_uses_supported_restrictions_mask(self):
         editor = self.source('ui/ChatEditActivity.java')
         helper = self.source('ui/WaysGramPaidReactions.java')
-        self.assertIn('WaysGramPaidReactions.showGroupSendPermissions', editor)
+        self.assertNotIn('R.string.WaysGramGroupSendPermissions', editor)
         self.assertIn('path + "/send-permissions"', helper)
         self.assertIn('put("default_send_restrictions", updated)', helper)
         self.assertIn('data.has("anti_spam_enabled")', helper)
@@ -299,8 +337,7 @@ class NativeMessagingSourceChecks(unittest.TestCase):
 
     def test_group_roster_visibility_uses_server_setting(self):
         editor = self.source('ui/ChatEditActivity.java')
-        self.assertIn('currentChat.creator && !ChatObject.isChannel(currentChat)', editor)
-        self.assertIn('groupRosterVisibility(null)', editor)
+        self.assertNotIn('groupRosterVisibility(null)', editor)
         self.assertIn('request("PUT", group + "/member-visibility"', editor)
         self.assertIn('put("members_hidden", hide)', editor)
 
@@ -401,7 +438,8 @@ class NativeMessagingSourceChecks(unittest.TestCase):
         self.assertIn('body.put("is_public", false)', profile)
         self.assertIn('WaysGramChats.CHANNEL_OFFSET) {\n                req.filter = new TLRPC.TL_channelParticipantsRecent()', users)
         self.assertIn('WaysGramInvites.channelInvite(account, id', create)
-        self.assertIn('!waysGramBroadcast && ChatObject.canManageCalls(chat)', channel_ui)
+        self.assertNotIn('waysGramBroadcast', channel_ui)
+        self.assertIn('if (ChatObject.canManageCalls(chat) && chatInfo.call == null)', channel_ui)
         self.assertIn('status.expires = lastSeen', self.source('tgnet/WaysGramMapper.java'))
 
     def test_channel_story_recorder_and_profile_use_server(self):
@@ -435,7 +473,7 @@ class NativeMessagingSourceChecks(unittest.TestCase):
         self.assertIn("showWaysGramMuteDuration(userId, rights)", self.source("ui/ProfileActivity.java"))
         profile = self.source("ui/ProfileActivity.java")
         self.assertIn("int[] bits = {1, 2, 4, 8, 16, 32}", profile)
-        self.assertIn("otherItem.addSubItem(WAYSGRAM_SLOW_MODE", profile)
+        self.assertNotIn("otherItem.addSubItem(WAYSGRAM_SLOW_MODE", profile)
 
     def test_empty_chat_dialogs_do_not_shift_peer_messages(self):
         chats = self.source('tgnet/WaysGramChats.java')
@@ -526,7 +564,7 @@ class NativeMessagingSourceChecks(unittest.TestCase):
         self.assertIn('Never erase a good local snapshot', media)
         self.assertIn('loadPinnedMessages(dialog_id, 0, 0)', chat)
         self.assertIn('full.can_pin_message = !WaysGramBotFather.is(userId)', profile)
-        self.assertIn('chat.admin_rights.pin_messages = (rights & 8) != 0', chats)
+        self.assertIn('chat.admin_rights = groupAdminRights(', chats)
         self.assertIn('rights.pin_messages = (mask & 8) != 0', chats)
 
     def test_pin_refresh_retry_and_pinned_screen_reconcile(self):
@@ -627,9 +665,11 @@ class NativeMessagingSourceChecks(unittest.TestCase):
                       '!message.isSecretMedia()', 'getMessagesController().isFrozen()',
                       'ChatObject.ACTION_SEND_REACTIONS', 'chosen.size() >= 3',
                       'reaction.documentId != 0', 'waysGramReactionRequests.contains(key)',
-                      'getSendMessagesHelper().sendReaction(message, chosen',
+                      'getSendMessagesHelper().sendReaction(message, visibleReactions',
                       'waysGramReactionRequests.remove(key)'):
             self.assertIn(guard, picker)
+        self.assertIn('if (!selected && !added)', picker)
+        self.assertIn('ArrayList<ReactionsLayoutInBubble.VisibleReaction> visibleReactions = message.getChoosenReactions();', picker)
         self.assertIn('options.isEmpty() && optionsView == null && !waysGramReactionMenu', chat)
         self.assertNotIn('showWaysGramReactionPicker', chat)
         self.assertNotIn('R.string.WaysGramReactionSelected', chat)
@@ -641,8 +681,9 @@ class NativeMessagingSourceChecks(unittest.TestCase):
         self.assertIn('waysGramPalette ? Math.min(7, getItemsCount())', panel)
         self.assertIn('(waysGramPalette || type == TYPE_STICKER_SET_EMOJI)', panel)
         self.assertIn('Emoji.getEmojiDrawable(react.emojicon)', panel)
-        self.assertIn('toggleWaysGramReaction(primaryMessage, visibleReaction.emojicon)', chat)
-        self.assertIn('isReactionsViewAvailable = !org.telegram.tgnet.WaysGramTransport.ENABLED', chat)
+        self.assertIn('selectWaysGramReaction(cell, primaryMessage, reactionsLayout', chat)
+        self.assertNotIn('isReactionsViewAvailable = !org.telegram.tgnet.WaysGramTransport.ENABLED', chat)
+        self.assertIn('isReactionsViewAvailable = !isEphemeral', chat)
         self.assertIn('imageReceiver.setImageBitmap(Emoji.getEmojiDrawable(visibleReaction.emojicon))', bubble)
         keys = {'WaysGramReactionSelected', 'WaysGramReactionNotSelected', 'WaysGramReactionPending',
                 'WaysGramReactionUnsupported', 'WaysGramReactionLimit'}
@@ -871,8 +912,12 @@ class NativeMessagingSourceChecks(unittest.TestCase):
     def test_single_sends_keep_silent_and_reject_unsupported_schedule(self):
         transport = self.source('tgnet/WaysGramTransport.java')
         chats = self.source('tgnet/WaysGramChats.java')
-        text = transport[transport.index('request instanceof TLRPC.TL_messages_sendMessage'):transport.index('request instanceof TLRPC.TL_messages_sendMedia')]
-        media = transport[transport.index('request instanceof TLRPC.TL_messages_sendMedia'):transport.index('request instanceof TLRPC.TL_messages_sendMultiMedia')]
+        handle_start = transport.index('private static TLObject handle(')
+        text_start = transport.index('} else if (request instanceof TLRPC.TL_messages_sendMessage) {', handle_start)
+        media_start = transport.index('} else if (request instanceof TLRPC.TL_messages_sendMedia) {', text_start)
+        album_start = transport.index('} else if (request instanceof TLRPC.TL_messages_sendMultiMedia) {', media_start)
+        text = transport[text_start:media_start]
+        media = transport[media_start:album_start]
         self.assertIn('WaysGramScheduled.send(account, send, selfId, expectedToken)', text)
         self.assertIn('if (send.schedule_repeat_period != 0)', text)
         self.assertIn('send.schedule_date != 0 || send.schedule_repeat_period != 0', media)
@@ -881,7 +926,7 @@ class NativeMessagingSourceChecks(unittest.TestCase):
             self.assertIn('send.silent', section)
         self.assertLess(media.index('SCHEDULE_NOT_SUPPORTED'), media.index('WaysGramMedia.uploadFor'))
         direct = transport[transport.index('private static TLObject sendTo('):transport.index('private static TLRPC.TL_error mapError')]
-        self.assertIn('nextPts(account), silent, location, contact, entities, quote)', direct)
+        self.assertIn('nextPts(account), silent, location, contact, entities, quote, card, identity, approvedFee)', direct)
         self.assertIn('body.put("silent", silent)', direct)
         self.assertGreater(direct.index('body.put("silent", silent)'), direct.index('body.put("location", location)'))
         group = chats[chats.index('public static TLObject send('):chats.index('// ----------------------------------------------------------------', chats.index('public static TLObject send('))]

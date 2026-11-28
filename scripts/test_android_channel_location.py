@@ -54,12 +54,10 @@ class ChatLocationSourceChecks(unittest.TestCase):
         self.assertEqual(chats.count('full.flags |= TLObject.FLAG_2;') >= 2, True)
         self.assertEqual(chats.count('full.can_set_location = '), 2)
 
-    def test_channel_settings_offer_the_location_row(self):
+    def test_channel_settings_use_the_stock_location_condition(self):
         editor = self.source('ui/ChatEditActivity.java')
-        self.assertIn('final boolean waysGramChannelLocation = org.telegram.tgnet.WaysGramTransport.ENABLED', editor)
-        self.assertIn('&& ChatObject.isChannelAndNotMegaGroup(currentChat);', editor)
-        self.assertIn('if ((currentChat.megagroup || waysGramChannelLocation) && (info == null || info.can_set_location)) {',
-                      editor)
+        self.assertNotIn('waysGramChannelLocation', editor)
+        self.assertIn('if (currentChat.megagroup && (info == null || info.can_set_location)) {', editor)
 
 
 if __name__ == '__main__':

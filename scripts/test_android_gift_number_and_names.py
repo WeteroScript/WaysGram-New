@@ -52,6 +52,44 @@ class ShimmerLoopChecks(unittest.TestCase):
         self.assertIn("% CYCLE_MS) / (float) CYCLE_MS", number)
         self.assertNotIn("2000L", number, "старый цикл в 2 с остался")
 
+    def test_shimmer_ticker_stops_when_nothing_is_on_screen(self):
+        """Цикл перерисовки не должен жить, пока на экране нет ни одного «#???».
+
+        Раньше он считался живым при любом непустом списке целей: прокрутка списка
+        подарков оставляла отсоединённые вьюхи, и перерисовка шла 60 раз в секунду.
+        """
+        number = self.source("ui/Stars/WaysGramGiftNumber.java")
+        self.assertNotIn("pending = true;", number)
+        self.assertIn("IDLE_FRAMES_BEFORE_STOP", number)
+        self.assertIn("if (!alive) {", number)
+        self.assertIn("targets.clear();", number)
+        self.assertIn("view.isAttachedToWindow() && view.getVisibility() == View.VISIBLE", number)
+
+    def test_palette_stays_readable_on_the_dark_gift_card(self):
+        """«#???» рисуется на тёмной карточке (Theme.key_dialogGiftsBackground).
+
+        Раньше градиент шёл от 0xFF05070B к 0xFF24406B: на скриншоте номер сливался
+        с фоном. Проверяем, что самый тёмный цвет палитры заметно светлее карточки,
+        а самая светлая точка перелива действительно светлая.
+        """
+        number = self.source("ui/Stars/WaysGramGiftNumber.java")
+        names = re.findall(r"private static final int (COLOR_[A-Z_]+) = 0x([0-9A-Fa-f]{8});", number)
+        self.assertTrue(names, "палитра перелива не найдена")
+        colors = {name: int(value, 16) for name, value in names}
+
+        def luminance(color):
+            def channel(value):
+                value /= 255.0
+                return value / 12.92 if value <= 0.03928 else ((value + 0.055) / 1.055) ** 2.4
+            return (0.2126 * channel((color >> 16) & 0xFF)
+                    + 0.7152 * channel((color >> 8) & 0xFF)
+                    + 0.0722 * channel(color & 0xFF))
+
+        darkest = min(luminance(c) for c in colors.values())
+        brightest = max(luminance(c) for c in colors.values())
+        self.assertGreater(darkest, 0.03, f"самый тёмный цвет палитры сливается с фоном: {colors}")
+        self.assertGreater(brightest, 0.45, f"перелив не даёт светлой точки: {colors}")
+
     def test_ribbon_passes_text_origin_to_gradient(self):
         sheet = self.source("ui/Gifts/GiftSheet.java")
         self.assertIn("WaysGramGiftNumber.applyShimmer(text.paint, cx - text.getWidth() / 2f, "
@@ -137,10 +175,9 @@ class PlushPepeChecks(unittest.TestCase):
         sheet = self.archive.read(BASE + "ui/Gifts/GiftSheet.java").decode("utf-8")
         start = sheet.index("private void setSticker(TLRPC.Document document, Object parentObject)")
         block = sheet[start:start + 2400]
-        self.assertIn('"80_80_nolimit"', block,
-                      "ячейка «Мои подарки» должна рисовать кадр из файла модели")
-        self.assertNotIn("80_80_nolimit_pcache", block,
-                         "pcache оставлял ячейку с синтетическим артом пустой")
+        self.assertIn("WaysGramGiftNumber.isWaysGramModel(starGift)", block)
+        self.assertIn('"80_80_nolimit" : "80_80_nolimit_pcache"', block,
+                      "модель WaysGram должна рисоваться без кадра из frame cache")
 
     def test_model_square_and_caption_offset_use_one_constant(self):
         """Подпись «Название #номер» начинается под квадратом модели.

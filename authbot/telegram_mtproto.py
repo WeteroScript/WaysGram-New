@@ -17,6 +17,7 @@ from PIL import Image, UnidentifiedImageError
 import aiosqlite
 import gift_names
 import gift_model_fallbacks
+import waysgram_gifts
 from telethon import functions, types
 from telethon.extensions import BinaryReader
 
@@ -438,14 +439,18 @@ class TelegramMTProtoGiftCatalog:
                     )
                     gift_ids = [item["gift_id"] for item in payloads]
                     placeholders_ids = ",".join("?" for _ in gift_ids)
+                    # WaysGram's own gifts are not part of Telegram's answer: their
+                    # availability belongs to the administrator, never to the sync.
                     await db.execute(
                         f"""UPDATE telegram_mtproto_gift_catalog
-                            SET is_available=0 WHERE gift_id NOT IN ({placeholders_ids})""",
+                            SET is_available=0
+                            WHERE gift_id NOT IN ({placeholders_ids}) AND is_waysgram=0""",
                         gift_ids,
                     )
                 else:
                     await db.execute(
-                        "UPDATE telegram_mtproto_gift_catalog SET is_available=0"
+                        "UPDATE telegram_mtproto_gift_catalog"
+                        " SET is_available=0 WHERE is_waysgram=0"
                     )
                 await db.execute(
                     """INSERT INTO telegram_gift_sync_state(id,last_synced_at,gift_count,source)
@@ -886,9 +891,14 @@ class TelegramMTProtoGiftCatalog:
         Manually added or sold-out gifts live only in the Bot API tables, and the shop still
         sells them, so their artwork has to be downloaded as well.
         """
+        # WaysGram's own gifts carry bundled artwork, so they are not Telegram downloads.
+        # ``COALESCE`` keeps trimmed-down schemas usable, where the marker column is absent.
         queries = (
-            "SELECT gift_id FROM telegram_mtproto_gift_catalog WHERE is_available=1 ORDER BY position",
-            "SELECT gift_id FROM telegram_gift_prices WHERE price_stars>0",
+            "SELECT gift_id FROM telegram_mtproto_gift_catalog"
+            " WHERE is_available=1 AND COALESCE(is_waysgram,0)=0 ORDER BY position",
+            "SELECT gift_id FROM telegram_gift_prices p WHERE price_stars>0"
+            " AND NOT EXISTS (SELECT 1 FROM telegram_mtproto_gift_catalog c"
+            "                 WHERE c.gift_id=p.gift_id AND COALESCE(c.is_waysgram,0)=1)",
             "SELECT gift_id FROM telegram_gift_catalog ORDER BY position",
         )
         seen: list[str] = []
@@ -928,6 +938,10 @@ class TelegramMTProtoGiftCatalog:
                 ids = await self._catalog_artwork_ids(database_path)
             state["total"] = len(ids)
             for gift_id in ids:
+                if waysgram_gifts.is_waysgram_gift(gift_id):
+                    # Their artwork is bundled with the backend, not downloaded from Telegram.
+                    state["done"] = int(state["done"]) + 1
+                    continue
                 try:
                     await self.download_sticker(gift_id, database_path)
                 except Exception:
@@ -1173,3 +1187,110 @@ class TelegramMTProtoGiftCatalog:
         while len(self._media_cache) > MAX_STICKER_CACHE_ITEMS:
             self._media_cache.popitem(last=False)
         return result
+
+
+# ---------------------------------------------------------------- экспорт реакций
+
+# Слоты `availableReaction`: рисунок и анимации. Анимированные эмодзи Telegram
+# (`application/x-tgsticker`) есть только на серверах Telegram, поэтому их нужно один раз
+# выгрузить из авторизованной сессии и положить в APK.
+REACTION_SLOTS = (
+    "static_icon",
+    "appear_animation",
+    "select_animation",
+    "activate_animation",
+    "effect_animation",
+    "around_animation",
+    "center_icon",
+)
+
+
+def _document_file_name(document: Any) -> str:
+    """Имя файла документа: официальный id Telegram + расширение по типу."""
+    document_id = _int_value(document, "id") or 0
+    mime_type = str(_value(document, "mime_type", "") or "")
+    if mime_type == "application/x-tgsticker":
+        extension = "tgs"
+    elif mime_type == "image/webp":
+        extension = "webp"
+    elif mime_type == "video/webm":
+        extension = "webm"
+    else:
+        extension = "bin"
+    return f"files/{document_id}.{extension}"
+
+
+async def export_reaction_emoji(client: Any, concurrency: int = 4) -> tuple[dict[str, Any], dict[str, bytes]]:
+    """Выгружает официальные документы реакций Telegram.
+
+    Возвращает манифест (`emoji -> документы по слотам`) и словарь `имя файла -> байты`.
+    Один и тот же документ может стоять в нескольких слотах, поэтому файлы дедуплицируются
+    по id. Скачивание идёт пачками, чтобы большой набор не растягивался на минуты.
+    """
+    response = await client(functions.messages.GetAvailableReactionsRequest(hash=0))
+    reactions = _value(response, "reactions") or []
+    manifest: dict[str, Any] = {
+        "exported_at": int(time.time()),
+        "count": len(reactions),
+        "slots": list(REACTION_SLOTS),
+        "reactions": [],
+    }
+    jobs: dict[str, Any] = {}
+    for reaction in reactions:
+        entry: dict[str, Any] = {
+            "emoji": str(_value(reaction, "reaction", "") or ""),
+            "title": str(_value(reaction, "title", "") or ""),
+            "inactive": bool(_value(reaction, "inactive", False)),
+            "documents": {},
+        }
+        for slot in REACTION_SLOTS:
+            document = _value(reaction, slot)
+            if document is None:
+                continue
+            file_name = _document_file_name(document)
+            entry["documents"][slot] = {
+                "id": _int_value(document, "id"),
+                "dc_id": _int_value(document, "dc_id"),
+                "mime_type": str(_value(document, "mime_type", "") or ""),
+                "size": _int_value(document, "size"),
+                "file": file_name,
+            }
+            jobs.setdefault(file_name, document)
+        if entry["documents"]:
+            manifest["reactions"].append(entry)
+
+    files: dict[str, bytes] = {}
+    semaphore = asyncio.Semaphore(max(1, int(concurrency)))
+
+    async def fetch(file_name: str, document: Any) -> None:
+        async with semaphore:
+            payload = await client.download_media(document, file=bytes)
+            if hasattr(payload, "getvalue"):
+                payload = payload.getvalue()
+            if not isinstance(payload, (bytes, bytearray)) or not payload:
+                raise RuntimeError(f"MTProto returned no bytes for {file_name}")
+            if len(payload) > MAX_STICKER_BYTES:
+                raise ValueError(f"Telegram document exceeds the supported size: {file_name}")
+            files[file_name] = bytes(payload)
+
+    await asyncio.gather(*(fetch(name, document) for name, document in jobs.items()))
+    manifest["files"] = len(files)
+    manifest["bytes"] = sum(len(value) for value in files.values())
+    return manifest, files
+
+
+# Загрузка на GitHub через браузер ограничена 25 МБ на файл, поэтому большой архив
+# отправляется частями: waysgram_reaction_emoji.zip.001, .002, …
+REACTION_ARCHIVE_PART_BYTES = 20 * 1024 * 1024
+
+
+def split_archive(data: bytes, limit: int = REACTION_ARCHIVE_PART_BYTES) -> list[bytes]:
+    """Режет архив на части не больше `limit` байт (пустой вход — пустой список)."""
+    if not data:
+        return []
+    size = max(1, int(limit))
+    return [data[index:index + size] for index in range(0, len(data), size)]
+
+
+def archive_part_name(index: int) -> str:
+    return f"waysgram_reaction_emoji.zip.{index:03d}"

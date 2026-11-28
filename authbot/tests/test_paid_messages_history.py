@@ -10,7 +10,7 @@ import time
 
 import aiosqlite
 
-from messenger_api import CHANNEL_INBOX_REFUND_AFTER
+from messenger_api import CHANNEL_INBOX_REFUND_AFTER, channel_chat_stars_id
 from test_messenger_api import client_for, run
 from test_star_gifts import env, headers  # noqa: F401  (env is a pytest fixture)
 
@@ -126,7 +126,7 @@ def test_chat_theme_is_stored_and_channel_stars_stay_invisible(env) -> None:
             assert "chat_stars" not in payload and "stars_balance" not in payload
             assert "chat_stars" not in (await client.get("/api/channels", headers=owner)).json()
         async with aiosqlite.connect(path) as db:
-            cur = await db.execute("SELECT stars FROM chat_stars WHERE chat_id=?", (channel_id,))
+            cur = await db.execute("SELECT stars FROM chat_stars WHERE chat_id=?", (channel_chat_stars_id(channel_id),))
             assert (await cur.fetchone())[0] == 6
             # В личный кошелёк владельца ничего не начислено.
             cur = await db.execute("SELECT stars FROM accounts WHERE telegram_id=101")

@@ -1,27 +1,38 @@
 #!/usr/bin/env python3
-"""Builds the WaysGram model animation (WebM with alpha) for the Plush Pepe gift.
+"""Builds the WaysGram Plush Pepe model animation: original motion, redrawn artwork.
 
-The artwork is ours (``preview.png`` of the gift), the motion is authored here: the
-pepe breathes and sways, a soft mint glow pulses behind it, small hearts drift upwards
-and four-point sparkles twinkle around it. Every curve completes a whole number of
-periods per loop, so the last frame joins the first one without a seam.
+The animation is derived from Telegram's *original* Plush Pepe sticker
+(``authbot/assets/gifts/5936013938331222567.tgs``).  Every sway, breath, eye and hand
+movement is rendered from that file by ``rlottie`` with the original 60 fps timing and
+the original bezier easing, so the loop is "1 в 1" with the other Plush Pepe models.
 
-Why WebM and not TGS: the animation is one raster layer, and the app's Lottie renderer
-(``tlottie``) draws vector frames only — a Lottie file with an image layer stays empty
-on the card. A WebM with an alpha channel is played by the regular video stack.
+Only the artwork is changed:
+
+* the pink heart becomes the WaysGram red heart and keeps the sticker's own stacking:
+  the left hands (1 and 2) are in front of the heart, the right hand (15) is behind it,
+  exactly as in the original file, so no piece of an arm floats on the heart;
+* the «WaysGram» wordmark is attached to the heart analytically: its size is measured
+  once and its position every frame comes from the heart layer transform (body + heart),
+  so the letters cannot jitter or drift over the heart;
+* a black outer contour is added around the whole silhouette (the contour that was
+  lost in the earlier, hand-drawn glow/hearts animation).
+
+The result is WebM with alpha.  The app's Lottie renderer draws vector frames only,
+so a Lottie file with a raster layer stays empty on the gift card; VP9 WebM with
+``ALPHA_MODE`` is played by the regular video stack.
 
 Usage:
     python3 scripts/build_waysgram_gift_model_webm.py \\
-        --art authbot/assets/gift_models/5936013938331222567/preview.png \\
-        --out authbot/assets/gift_models/5936013938331222567/waysgram.webm \\
-        --raw apk-source/TMessagesProj/src/main/res/raw/waysgram_model.webm
+        --raw /path/to/WaysGram-Android/TMessagesProj/src/main/res/raw/waysgram_model.webm
 
 FFmpeg is taken from ``--ffmpeg``, ``$FFMPEG``, ``imageio_ffmpeg`` or ``PATH``.
-Requires Pillow.
+Requires Pillow and ``rlottie-python``.
 """
 from __future__ import annotations
 
 import argparse
+import copy
+import gzip
 import hashlib
 import json
 import math
@@ -29,26 +40,30 @@ import os
 import pathlib
 import shutil
 import subprocess
-import sys
 import tempfile
+from typing import Any
 
-SIZE = 512
-SUPERSAMPLE = 2
-FPS = 30
-SECONDS = 3.0
-FRAMES = int(round(FPS * SECONDS))
+ROOT = pathlib.Path(__file__).resolve().parents[1]
+GIFT_ID = "5936013938331222567"
+DEFAULT_TGS = ROOT / "authbot" / "assets" / "gifts" / f"{GIFT_ID}.tgs"
+DEFAULT_OUT = ROOT / "authbot" / "assets" / "gift_models" / GIFT_ID / "waysgram.webm"
 
-#: Art is scaled so its content fills almost the whole frame: the model used to look small
-#: because the drawing occupied barely half of the canvas.
-ART_FILL = 0.93
+# Original heart is magenta; the WaysGram heart is bright red.  These are the exact
+# fill/stroke colours of the bundled TGS (rounded to avoid float formatting drift).
+FILL_PINK_TO_RED = {
+    (0.508099, 0.0, 0.387796, 1.0): (0.62, 0.012, 0.02, 1.0),
+    (0.767386, 0.0, 0.585690, 1.0): (0.98, 0.10, 0.10, 1.0),
+    (0.658824, 0.0, 0.501961, 1.0): (0.84, 0.035, 0.045, 1.0),
+    (0.509804, 0.0, 0.388235, 1.0): (0.62, 0.012, 0.02, 1.0),
+}
+# Lottie stores gradient colours as flat [offset, r, g, b, ...] arrays.
+GRADIENT_PINK_TO_RED = {
+    (0.838, 0.311, 0.765): (0.96, 0.12, 0.14),
+    (0.919, 0.655, 0.882): (1.0, 0.48, 0.48),
+}
 
-MINT = (118, 226, 158)
-HEART = (226, 59, 78)
-HEART_LIGHT = (255, 128, 146)
-SPARKLE = (214, 255, 226)
 
-
-def _ffmpeg(explicit: str | None) -> str:
+def ffmpeg_binary(explicit: str | None) -> str:
     if explicit:
         return explicit
     if os.environ.get("FFMPEG"):
@@ -65,244 +80,392 @@ def _ffmpeg(explicit: str | None) -> str:
     raise SystemExit("ffmpeg is required: pass --ffmpeg, set $FFMPEG or install imageio-ffmpeg")
 
 
-def load_art(path: pathlib.Path):
-    from PIL import Image
-
-    art = Image.open(path).convert("RGBA")
-    bbox = art.getchannel("A").point(lambda v: 255 if v > 16 else 0).getbbox()
-    if bbox is None:
-        raise SystemExit(f"{path} is fully transparent")
-    art = art.crop(bbox)
-    canvas = SIZE * SUPERSAMPLE
-    # Content should cover ART_FILL of the frame; keep the artwork's own aspect ratio.
-    scale = canvas * ART_FILL / max(art.width, art.height)
-    resized = art.resize(
-        (max(1, round(art.width * scale)), max(1, round(art.height * scale))),
-        Image.LANCZOS,
-    )
-    base = Image.new("RGBA", (canvas, canvas), (0, 0, 0, 0))
-    base.paste(resized, ((canvas - resized.width) // 2, (canvas - resized.height) // 2), resized)
-    return base
+def load_composition(path: pathlib.Path) -> dict[str, Any]:
+    return json.loads(gzip.decompress(path.read_bytes()).decode("utf-8"))
 
 
-def transformed(img, sx: float, sy: float, rotation_deg: float, dx: float, dy: float):
-    """Scale + rotate + translate around the centre, with a bicubic resample."""
-    from PIL import Image
+def redraw_heart(data: dict[str, Any]) -> dict[str, Any]:
+    """Returns a copy of the TGS with a WaysGram-red heart instead of the pink one."""
+    heart = next((layer for layer in data["layers"] if layer.get("nm") == "heart"), None)
+    if heart is None:
+        raise SystemExit("original Plush Pepe TGS has no 'heart' layer")
 
-    w, h = img.size
-    cx, cy = w / 2.0, h / 2.0
-    th = math.radians(rotation_deg)
-    cos_t, sin_t = math.cos(th), math.sin(th)
-    a, b = cos_t * sx, -sin_t * sy
-    d, e = sin_t * sx, cos_t * sy
-    det = a * e - b * d
-    if abs(det) < 1e-9:
-        return img
-    n11, n12 = e / det, -b / det
-    n21, n22 = -d / det, a / det
-    tx = cx - (n11 * (cx + dx) + n12 * (cy + dy))
-    ty = cy - (n21 * (cx + dx) + n22 * (cy + dy))
-    return img.transform(
-        (w, h), Image.AFFINE, (n11, n12, tx, n21, n22, ty), resample=Image.BICUBIC
-    )
+    def patch(node: Any) -> None:
+        if isinstance(node, dict):
+            for value in node.values():
+                patch(value)
+        elif isinstance(node, list):
+            if all(isinstance(value, (int, float)) for value in node):
+                for i in range(len(node) - 3):
+                    key = tuple(round(float(v), 6) for v in node[i:i + 4])
+                    if key in FILL_PINK_TO_RED:
+                        node[i:i + 4] = list(FILL_PINK_TO_RED[key])
+                for i in range(len(node) - 2):
+                    key = tuple(round(float(v), 3) for v in node[i:i + 3])
+                    if key in GRADIENT_PINK_TO_RED:
+                        node[i:i + 3] = list(GRADIENT_PINK_TO_RED[key])
+            else:
+                for value in node:
+                    patch(value)
 
-
-#: Radial falloff mask, built once per pixel and reused for every frame.
-_GLOW_RADIUS = 192
-_GLOW_MASK = None
-
-
-def _glow_mask():
-    global _GLOW_MASK
-    from PIL import Image
-
-    if _GLOW_MASK is not None:
-        return _GLOW_MASK
-    mask = Image.new("L", (_GLOW_RADIUS * 2, _GLOW_RADIUS * 2), 0)
-    pixels = mask.load()
-    for y in range(_GLOW_RADIUS * 2):
-        dy = (y - _GLOW_RADIUS) / _GLOW_RADIUS
-        for x in range(_GLOW_RADIUS * 2):
-            dx = (x - _GLOW_RADIUS) / _GLOW_RADIUS
-            r2 = dx * dx + dy * dy
-            if r2 >= 1.0:
-                continue
-            pixels[x, y] = int(255 * math.exp(-3.4 * r2) * (1.0 - r2))
-    _GLOW_MASK = mask
-    return mask
+    patch(heart)
+    return data
 
 
-def glow_layer(canvas: int, cx: float, cy: float, radius: float, alpha: float):
-    from PIL import Image
-
-    mask = _glow_mask().point(lambda v: int(v * alpha))
-    size = max(2, int(round(radius * 2)))
-    mask = mask.resize((size, size), Image.BILINEAR)
-    layer = Image.new("RGBA", (canvas, canvas), MINT + (0,))
-    layer.paste(MINT + (255,), (int(cx - size / 2), int(cy - size / 2)), mask)
-    return layer
-
-
-def heart_points(cx: float, cy: float, size: float):
-    points = []
-    steps = 48
-    for i in range(steps):
-        u = 2.0 * math.pi * i / steps
-        x = 16 * math.sin(u) ** 3
-        y = -(13 * math.cos(u) - 5 * math.cos(2 * u) - 2 * math.cos(3 * u) - math.cos(4 * u))
-        points.append((cx + x * size / 32.0, cy + y * size / 32.0))
-    return points
+# The three hands of the original Plush Pepe TGS, split exactly as the sticker stacks
+# them: hands 1 and 2 are above the heart, hand 15 is below it.  Drawing all three on
+# top left a detached piece of the right hand floating on the heart (device report).
+HAND_INDICES = {1, 2, 15}
+FRONT_HAND_INDICES = {1, 2}
+BEHIND_HAND_INDICES = {15}
+#: Слой сердца: по нему считается, куда ставить надпись и какая его часть не закрыта руками.
+HEART_INDEX = 3
 
 
-def star_points(cx: float, cy: float, radius: float):
-    points = []
-    for i in range(8):
-        angle = math.pi / 2.0 + i * math.pi / 4.0
-        r = radius if i % 2 == 0 else radius * 0.20
-        points.append((cx + math.cos(angle) * r, cy - math.sin(angle) * r))
-    return points
+def subset_shapes(data: dict[str, Any], *, keep: set[int] | None = None,
+                  drop: set[int] | tuple[int, ...] = ()) -> dict[str, Any]:
+    """Keeps every layer transform but hides the shapes of the other layer group.
+
+    Emptying ``shapes`` (instead of deleting layers) preserves parenting, so the
+    hands stay exactly where the original animation puts them in both renders.
+    """
+    result = copy.deepcopy(data)
+    for layer in result["layers"]:
+        ind = layer.get("ind")
+        wanted = (keep is None or ind in keep) and ind not in set(drop)
+        if not wanted:
+            layer["shapes"] = []
+    return result
 
 
-def draw_overlay(canvas: int, t: float):
-    """Hearts (behind the body) and sparkles (in front of it)."""
-    from PIL import Image, ImageDraw
+def heart_transform(data: dict[str, Any], frame: int, offset: int) -> tuple[float, float, float, float]:
+    """Where the wordmark has to sit: heart anchor in screen space + its rotation."""
+    layers = {layer["ind"]: layer for layer in data["layers"]}
+    heart = next(layer for layer in data["layers"] if layer.get("nm") == "heart")
+    body = layers[heart["parent"]]
 
-    behind = Image.new("RGBA", (canvas, canvas), (0, 0, 0, 0))
-    front = Image.new("RGBA", (canvas, canvas), (0, 0, 0, 0))
-    k = canvas / SIZE
+    body_rotation = value_at(body["ks"]["r"], frame + offset)
+    body_position = value_at(body["ks"]["p"], frame + offset)
+    body_scale = value_at(body["ks"]["s"], frame + offset)
+    heart_rotation = value_at(heart["ks"]["r"], frame + offset)
+    heart_position = value_at(heart["ks"]["p"], frame + offset)
+    body_anchor = body["ks"]["a"]["k"][:2]
+    if isinstance(body_rotation, list):
+        body_rotation = body_rotation[0]
+    if isinstance(heart_rotation, list):
+        heart_rotation = heart_rotation[0]
 
-    # Three hearts rise one full loop per period, so their end state is their start state.
-    # They float in front of the body: a heart half-hidden behind the outline reads as a
-    # smudge on the edge of the artwork.
-    for index, (base_x, phase, size, color) in enumerate(
-        ((0.15, 0.18, 34.0, HEART), (0.85, 0.52, 28.0, HEART_LIGHT), (0.30, 0.82, 24.0, HEART))
+    sx, sy = body_scale[0] / 100.0, body_scale[1] / 100.0
+    x = (heart_position[0] - body_anchor[0]) * sx
+    y = (heart_position[1] - body_anchor[1]) * sy
+    angle = math.radians(body_rotation)
+    cx = body_position[0] + x * math.cos(angle) - y * math.sin(angle)
+    cy = body_position[1] + x * math.sin(angle) + y * math.cos(angle)
+    return cx, cy, body_rotation + heart_rotation, (sx + sy) / 2.0
+
+
+def wordmark() -> "Any":
+    """Надпись «WaysGram» для сердца.
+
+    Рисуется один раз в «сердечном» масштабе, а каждый кадр только поворачивается и
+    переносится трансформом слоя сердца — поэтому надпись намертво прикреплена к сердцу
+    и не дёргается от кадра к кадру.
+    """
+    from PIL import Image, ImageDraw, ImageFont
+
+    try:
+        font = ImageFont.truetype("DejaVuSans-Bold.ttf", 46)
+    except OSError:
+        font = ImageFont.load_default()
+
+    image = Image.new("RGBA", (520, 150), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(image)
+    x, y = 10, 34
+    draw.text((x + 5, y + 5), "WaysGram", font=font, fill=(38, 38, 42, 255),
+              stroke_width=6, stroke_fill=(38, 38, 42, 255))
+    draw.text((x, y), "WaysGram", font=font, fill=(252, 252, 252, 255),
+              stroke_width=5, stroke_fill=(48, 48, 52, 255))
+    bbox = image.getbbox()
+    if bbox:
+        image = image.crop(bbox)
+    shear = 0.16
+    sheared = Image.new("RGBA", (image.width + round(image.height * shear), image.height), (0, 0, 0, 0))
+    sheared.paste(image, (0, 0), image)
+    return sheared.transform(sheared.size, Image.AFFINE, (1, shear, 0, 0, 1, 0),
+                             resample=Image.BICUBIC)
+
+
+def bezier(progress: float, x1: float, y1: float, x2: float, y2: float) -> float:
+    low, high = 0.0, 1.0
+    for _ in range(24):
+        mid = (low + high) / 2.0
+        x = 3 * (1 - mid) ** 2 * mid * x1 + 3 * (1 - mid) * mid * mid * x2 + mid ** 3
+        if x < progress:
+            low = mid
+        else:
+            high = mid
+    mid = (low + high) / 2.0
+    return 3 * (1 - mid) ** 2 * mid * y1 + 3 * (1 - mid) * mid * mid * y2 + mid ** 3
+
+
+def value_at(prop: dict[str, Any], frame: float) -> Any:
+    """Lottie keyframe value at ``frame`` (with the file's original easing)."""
+    keys = prop.get("k")
+    if prop.get("a") == 0 or not isinstance(keys, list) or not keys or not isinstance(keys[0], dict):
+        return keys
+    if "t" not in keys[0]:
+        return keys
+    for start, end in zip(keys, keys[1:]):
+        if start["t"] <= frame <= end["t"]:
+            u = (frame - start["t"]) / max(1e-9, end["t"] - start["t"])
+            out, inc = start.get("o", {}), start.get("i", {})
+            ox, oy = out.get("x", 0.333), out.get("y", 0.0)
+            ix, iy = inc.get("x", 0.667), inc.get("y", 1.0)
+            if isinstance(ox, list):
+                ox = ox[0]
+            if isinstance(oy, list):
+                oy = oy[0]
+            if isinstance(ix, list):
+                ix = ix[0]
+            if isinstance(iy, list):
+                iy = iy[0]
+            progress = bezier(u, float(ox), float(oy), float(ix), float(iy))
+            a, b = start.get("s", end.get("s")), end.get("s", start.get("s"))
+            if isinstance(a, list) and isinstance(b, list):
+                return [a[i] + (b[i] - a[i]) * progress for i in range(min(len(a), len(b)))]
+            if isinstance(a, (int, float)) and isinstance(b, (int, float)):
+                return a + (b - a) * progress
+            return a
+    return keys[-1].get("s", keys[-1])
+
+
+def render_frames(data: dict[str, Any], tgs: pathlib.Path, folder: pathlib.Path,
+                  *, want_preview: pathlib.Path | None = None) -> tuple[int, int]:
+    from PIL import Image, ImageChops, ImageFilter
+    from rlottie_python import LottieAnimation
+
+    base_tgs = folder / "plush_pepe_base.tgs"
+    behind_tgs = folder / "plush_pepe_hand_behind.tgs"
+    hands_tgs = folder / "plush_pepe_hands.tgs"
+    heart_tgs = folder / "plush_pepe_heart.tgs"
+    for target, payload in (
+        (base_tgs, subset_shapes(data, drop=HAND_INDICES | {HEART_INDEX})),
+        (behind_tgs, subset_shapes(data, keep=BEHIND_HAND_INDICES)),
+        (hands_tgs, subset_shapes(data, keep=FRONT_HAND_INDICES)),
+        (heart_tgs, subset_shapes(data, keep={HEART_INDEX})),
     ):
-        u = (t + phase) % 1.0
-        alpha = math.sin(math.pi * u) ** 1.3
-        if alpha <= 0.02:
-            continue
-        y = (0.74 - 0.52 * u) * canvas
-        x = (base_x + 0.028 * math.sin(2.0 * math.pi * u + index)) * canvas
-        points = heart_points(x, y, size * k * (0.80 + 0.30 * alpha))
-        ImageDraw.Draw(front).polygon(points, fill=color + (int(240 * alpha),))
+        target.write_bytes(gzip.compress(
+            json.dumps(payload, separators=(",", ":")).encode("utf-8"), mtime=0))
+    animation = LottieAnimation.from_tgs(str(base_tgs))
+    behind_animation = LottieAnimation.from_tgs(str(behind_tgs))
+    hands_animation = LottieAnimation.from_tgs(str(hands_tgs))
+    heart_animation = LottieAnimation.from_tgs(str(heart_tgs))
 
-    # Sparkles twinkle twice per period.
-    for base_x, base_y, phase, radius in (
-        (0.16, 0.24, 0.25, 13.0),
-        (0.84, 0.30, 0.60, 11.0),
-        (0.10, 0.62, 0.45, 9.0),
-        (0.90, 0.66, 0.10, 10.0),
-        (0.50, 0.10, 0.35, 8.0),
-    ):
-        u = (2.0 * t + phase) % 1.0
-        alpha = math.sin(math.pi * u) ** 2
-        if alpha <= 0.03:
-            continue
-        x, y = base_x * canvas, base_y * canvas
-        draw = ImageDraw.Draw(front)
-        draw.polygon(star_points(x, y, radius * k * (0.55 + 0.65 * alpha)), fill=SPARKLE + (int(230 * alpha),))
-        draw.ellipse(
-            (x - 2.2 * k, y - 2.2 * k, x + 2.2 * k, y + 2.2 * k),
-            fill=(255, 255, 255, int(255 * alpha)),
-        )
-    return behind, front
+    width, height = animation.lottie_animation_get_size()
+    fps = int(round(animation.lottie_animation_get_framerate()))
+    count = int(animation.lottie_animation_get_totalframe())
+    if hands_animation.lottie_animation_get_totalframe() != count:
+        raise SystemExit("hand and body animations have different lengths")
+    offset = int(data.get("ip", 0))
+    logo = wordmark()
+    wordmark_inside = 1.0
 
+    # Надпись крепится к сердцу в локальных координатах сердечного слоя: один раз
+    # измеряем видимую рамку сердца, дальше каждый кадр только применяем трансформ
+    # слоя (позиция, поворот, масштаб). Раньше размер и центр считались по пиксельной
+    # рамке каждого кадра, из-за чего буквы «дышали» и дрожали.
+    heart_layer = next(layer for layer in data["layers"] if layer.get("nm") == "heart")
+    heart_anchor = heart_layer["ks"]["a"]["k"][:2]
+    first_center_x, first_center_y, first_rotation, first_scale = heart_transform(data, 0, offset)
+    first_box = heart_animation.render_pillow_frame(0).convert("RGBA").getchannel("A").getbbox()
+    if first_box is None:
+        raise SystemExit("the heart layer renders empty")
+    first_w = (first_box[2] - first_box[0]) / first_scale
+    first_h = (first_box[3] - first_box[1]) / first_scale
+    logo_scale = min(first_w * 0.66 / logo.width, first_h * 0.34 / logo.height)
+    logo_scaled = logo.resize((max(1, round(logo.width * logo_scale)),
+                               max(1, round(logo.height * logo_scale))), Image.LANCZOS)
 
-def render_frames(art, folder: pathlib.Path) -> list[pathlib.Path]:
-    from PIL import Image
+    def local_point(local_x: float, local_y: float, rotation: float, scale: float,
+                    centre_x: float, centre_y: float) -> tuple[float, float]:
+        theta = math.radians(rotation)
+        dx = (local_x - heart_anchor[0]) * scale
+        dy = (local_y - heart_anchor[1]) * scale
+        return (centre_x + dx * math.cos(theta) - dy * math.sin(theta),
+                centre_y + dx * math.sin(theta) + dy * math.cos(theta))
 
-    canvas = SIZE * SUPERSAMPLE
-    paths = []
-    for index in range(FRAMES):
-        t = index / FRAMES
-        phase = 2.0 * math.pi * t
-        breathe = math.sin(phase)
-        sx = 1.0 + 0.024 * breathe
-        sy = 1.0 + 0.050 * breathe
-        dy = -9.0 * SUPERSAMPLE * breathe
-        rotation = 2.0 * math.sin(phase - 0.9)
+    # Надпись — ровно в середине сердца и ПОД кистями (1 и 2): так просили с устройства,
+    # даже с учётом того, что полоса рук проходит через середину сердца и буквы частично
+    # скрыты. Точка постоянна и считается в координатах сердца, поэтому надпись не
+    # болтается; обрезка по силуэту сердца держит её «прямо на сердце».
+    local_center_x = heart_anchor[0] + ((first_box[0] + first_box[2]) / 2 - first_center_x) / first_scale
+    sample_frames = sorted({min(count - 1, round(count * k / 8)) for k in range(8)})
+    samples = []
+    for sample in sample_frames:
+        samples.append((
+            heart_transform(data, sample, offset),
+            heart_animation.render_pillow_frame(sample).convert("RGBA").getchannel("A"),
+            hands_animation.render_pillow_frame(sample).convert("RGBA").getchannel("A"),
+        ))
 
-        frame = Image.new("RGBA", (canvas, canvas), (0, 0, 0, 0))
-        glow = glow_layer(
-            canvas,
-            canvas / 2.0,
-            canvas * 0.54,
-            canvas * (0.42 + 0.025 * breathe),
-            0.30 + 0.07 * breathe,
-        )
-        frame = Image.alpha_composite(frame, glow)
-        behind, front = draw_overlay(canvas, t)
+    def visible_share(local_y: float) -> float:
+        """Какая доля букв видна на худшем из проверенных кадров (0…1)."""
+        worst = 1.0
+        for (centre_x, centre_y, rotation, scale), heart_mask, hand_mask in samples:
+            px, py = local_point(local_center_x, local_y, rotation, scale, centre_x, centre_y)
+            text = logo_scaled.rotate(rotation, resample=Image.BICUBIC, expand=True)
+            layer = Image.new("L", heart_mask.size, 0)
+            layer.paste(text.getchannel("A"), (round(px - text.width / 2), round(py - text.height / 2)))
+            letters = sum(1 for value in layer.getdata() if value > 8)
+            if not letters:
+                return 0.0
+            inside = ImageChops.multiply(layer, heart_mask.point(lambda v: 255 if v > 8 else 0))
+            hidden = ImageChops.multiply(inside, hand_mask.point(lambda v: 255 if v > 8 else 0))
+            visible = (sum(1 for value in inside.getdata() if value > 8)
+                       - sum(1 for value in hidden.getdata() if value > 8)) / letters
+            worst = min(worst, visible)
+            if worst < 0.02:
+                break
+        return worst
+
+    LOCAL_MIDDLE = 0.50
+    local_center_y = heart_anchor[1] + (first_box[1] + first_h * LOCAL_MIDDLE * first_scale - first_center_y) / first_scale
+    best_share = visible_share(local_center_y)
+
+    for index in range(count):
+        body = animation.render_pillow_frame(index).convert("RGBA")
+        behind = behind_animation.render_pillow_frame(index).convert("RGBA")
+        hands = hands_animation.render_pillow_frame(index).convert("RGBA")
+        heart = heart_animation.render_pillow_frame(index).convert("RGBA")
+        heart_center_x, heart_center_y, rotation, scale = heart_transform(data, index, offset)
+        # The contour follows the complete silhouette, including every hand.
+        solid = Image.alpha_composite(Image.alpha_composite(Image.alpha_composite(body, behind), hands),
+                                      heart).getchannel("A").point(lambda value: 255 if value > 18 else 0)
+        contour_mask = solid.filter(ImageFilter.MaxFilter(9)).filter(ImageFilter.GaussianBlur(0.7))
+        contour = Image.new("RGBA", body.size, (0, 0, 0, 0))
+        contour.paste((6, 10, 5, 255), (0, 0), contour_mask)
+        frame = Image.alpha_composite(contour, body)
+
+        # Порядок слоёв — как в исходном стикере: контур → тело → правая кисть (15)
+        # → сердце → надпись → левые кисти (1, 2). Правая кисть остаётся за сердцем,
+        # иначе на нём висел оторванный кусок руки (это и заметили на устройстве).
         frame = Image.alpha_composite(frame, behind)
-        frame = Image.alpha_composite(frame, transformed(art, sx, sy, rotation, 0.0, dy))
-        frame = Image.alpha_composite(frame, front)
+        frame = Image.alpha_composite(frame, heart)
 
-        out = folder / f"frame_{index:03d}.png"
-        frame.resize((SIZE, SIZE), Image.LANCZOS).save(out, optimize=False)
-        paths.append(out)
-    return paths
+        # Надпись «WaysGram» — на сердце и намертво: размер постоянный, положение и
+        # наклон берутся из трансформа сердечного слоя этого кадра.
+        heart_alpha = heart.getchannel("A")
+        theta = math.radians(rotation)
+        offset_x = (local_center_x - heart_anchor[0]) * scale
+        offset_y = (local_center_y - heart_anchor[1]) * scale
+        centre_x = heart_center_x + offset_x * math.cos(theta) - offset_y * math.sin(theta)
+        centre_y = heart_center_y + offset_x * math.sin(theta) + offset_y * math.cos(theta)
+        text = logo_scaled
+        if text.width != max(1, round(logo_scaled.width * scale)) or text.height != max(1, round(logo_scaled.height * scale)):
+            text = logo_scaled.resize((max(1, round(logo_scaled.width * scale)),
+                                       max(1, round(logo_scaled.height * scale))), Image.LANCZOS)
+        text = text.rotate(rotation, resample=Image.BICUBIC, expand=True)
+        layer = Image.new("RGBA", frame.size, (0, 0, 0, 0))
+        layer.paste(text, (round(centre_x - text.width / 2), round(centre_y - text.height / 2)), text)
+        # Сколько букв попадает в силуэт сердца: единица значит, что надпись читается целиком.
+        raw_alpha = layer.getchannel("A")
+        letters = sum(1 for value in raw_alpha.getdata() if value > 8)
+        # Обрезаем строго по сердцу: буквы не должны вылезать на тело и на лапы.
+        layer.putalpha(ImageChops.multiply(raw_alpha, heart_alpha.point(lambda v: 255 if v > 8 else 0)))
+        if letters:
+            kept = sum(1 for value in layer.getchannel("A").getdata() if value > 8)
+            wordmark_inside = min(wordmark_inside, kept / letters)
+        # Передние кисти (1, 2) лежат на сердце, как в оригинале, и перекрывают надпись:
+        # по просьбе с устройства надпись идёт ПОД руками.
+        frame = Image.alpha_composite(frame, layer)
+        frame = Image.alpha_composite(frame, hands)
+
+        frame.save(folder / f"frame_{index:04d}.png", optimize=False)
+        if want_preview is not None and index == 0:
+            frame.save(want_preview)
+
+    return (width, height), fps, wordmark_inside, best_share
 
 
-def encode(ffmpeg: str, frames: pathlib.Path, target: pathlib.Path) -> None:
+def normalize_webm(path: pathlib.Path) -> None:
+    """Zero the random Matroska SegmentUID so rebuilds are byte-for-byte reproducible."""
+    raw = bytearray(path.read_bytes())
+    # EBML Info/Segment UID elements live in the header, well before frame data.
+    for marker, size in ((b"\x73\xc5\x88", 8), (b"\x63\xc5\x88", 8), (b"\x73\xa4\x88", 8),
+                         (b"\x73\xa4\x90", 16)):
+        start = 0
+        while True:
+            at = raw.find(marker, start, 1024)
+            if at < 0:
+                break
+            raw[at + 3:at + 3 + size] = b"\x00" * size
+            start = at + 3 + size
+    path.write_bytes(bytes(raw))
+
+
+def encode(ffmpeg: str, frames: pathlib.Path, target: pathlib.Path, fps: int) -> None:
     target.parent.mkdir(parents=True, exist_ok=True)
-    command = [
-        ffmpeg, "-y", "-hide_banner", "-loglevel", "error",
-        "-framerate", str(FPS), "-i", str(frames / "frame_%03d.png"),
-        "-c:v", "libvpx-vp9",
-        "-pix_fmt", "yuva420p",
-        "-b:v", "0", "-crf", "32",
-        "-row-mt", "1", "-auto-alt-ref", "1",
-        "-an", "-metadata:s:v:0", "alpha_mode=1",
-        str(target),
-    ]
-    subprocess.run(command, check=True)
+    subprocess.run([
+        ffmpeg, "-y", "-hide_banner", "-loglevel", "error", "-fflags", "+bitexact",
+        "-framerate", str(fps), "-i", str(frames / "frame_%04d.png"),
+        "-c:v", "libvpx-vp9", "-pix_fmt", "yuva420p",
+        "-b:v", "0", "-crf", "33", "-threads", "1", "-row-mt", "0",
+        "-auto-alt-ref", "0",
+        "-an", "-metadata:s:v:0", "alpha_mode=1", str(target),
+    ], check=True)
+    normalize_webm(target)
 
 
-def update_manifest(webm: pathlib.Path, manifest: pathlib.Path) -> dict:
+def update_manifest(webm: pathlib.Path, manifest: pathlib.Path) -> dict[str, str]:
     payload = json.loads(manifest.read_text(encoding="utf-8"))
-    raw = webm.read_bytes()
-    digest = hashlib.sha256(raw).hexdigest()
+    data = webm.read_bytes()
+    digest = hashlib.sha256(data).hexdigest()
     for model in payload.get("models", []):
         if model.get("file") == webm.name:
             model["sha256"] = digest
-            model["bytes"] = len(raw)
+            model["bytes"] = len(data)
             model["mime_type"] = "video/webm"
     payload["source"] = (
-        "WaysGram original artwork, authored loop (breathing, sway, glow, hearts, sparkles) "
-        "encoded as WebM with alpha - the app's Lottie renderer draws vector frames only"
+        "Original Plush Pepe TGS motion (60 fps, 3 s, original bezier easing) rendered "
+        "with rlottie; red WaysGram heart held by the arms, wordmark attached to the heart, "
+        "a restored black contour; "
+        "encoded as WebM with alpha"
     )
     manifest.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    return {"sha256": digest, "bytes": len(raw)}
+    return {"sha256": digest, "bytes": str(len(data))}
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--art", required=True, type=pathlib.Path,
-                        help="transparent PNG of the WaysGram artwork")
-    parser.add_argument("--out", required=True, type=pathlib.Path,
-                        help="WebM written for the server gift assets")
+    parser.add_argument("--tgs", type=pathlib.Path, default=DEFAULT_TGS,
+                        help="original Plush Pepe gift sticker (gzipped Lottie)")
+    parser.add_argument("--preview", type=pathlib.Path,
+                        default=DEFAULT_OUT.parent / "preview.png")
+    parser.add_argument("--out", type=pathlib.Path, default=DEFAULT_OUT)
     parser.add_argument("--raw", type=pathlib.Path,
                         help="copy of the WebM bundled in the APK (res/raw)")
-    parser.add_argument("--manifest", type=pathlib.Path,
-                        help="manifest.json to refresh (defaults to the one next to --out)")
+    parser.add_argument("--manifest", type=pathlib.Path, default=DEFAULT_OUT.parent / "manifest.json")
     parser.add_argument("--ffmpeg", help="ffmpeg executable")
     args = parser.parse_args()
 
-    art = load_art(args.art)
+    data = redraw_heart(load_composition(args.tgs))
     with tempfile.TemporaryDirectory(prefix="waysgram-model-") as tmp:
         folder = pathlib.Path(tmp)
-        render_frames(art, folder)
-        encode(_ffmpeg(args.ffmpeg), folder, args.out)
+        size, fps, wordmark_inside, wordmark_visible = render_frames(
+            data, args.tgs, folder, want_preview=args.preview)
+        encode(ffmpeg_binary(args.ffmpeg), folder, args.out, fps)
 
     if args.raw:
         args.raw.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(args.out, args.raw)
 
-    manifest = args.manifest or args.out.parent / "manifest.json"
-    info = {"bytes": args.out.stat().st_size, "sha256": ""}
-    if manifest.is_file():
-        info.update(update_manifest(args.out, manifest))
+    info = {"bytes": str(args.out.stat().st_size), "sha256": ""}
+    if args.manifest.is_file():
+        info.update(update_manifest(args.out, args.manifest))
     print(f"{args.out}: {info['bytes']} bytes, sha256 {info['sha256']}")
-    print(f"{FRAMES} frames, {FPS} fps, {SIZE}x{SIZE}, loop {SECONDS:g}s")
+    print(f"{size[0]}x{size[1]}, {fps} fps, original 3 s Plush Pepe loop; "
+          f"wordmark inside the heart on {wordmark_inside * 100:.1f}% of the worst frame; "
+          f"visible under the hands on {wordmark_visible * 100:.1f}%")
 
 
 if __name__ == "__main__":

@@ -1,6 +1,10 @@
 #!/usr/bin/env python3
 """Builds the WaysGram gift-model sticker (.tgs) for Plush Pepe.
 
+.. deprecated::
+   The shipped model is now WebM; use ``scripts/build_waysgram_gift_model_webm.py``.
+   This script is kept only for the earlier PNG-in-TGS experiment.
+
 The animation is not invented: the body layer's motion of the *original* Plush Pepe gift
 sticker is reused verbatim, so the WaysGram model moves exactly like the stock Pepe —
 same frames, same easing, same 3-second loop. Only the artwork is ours.

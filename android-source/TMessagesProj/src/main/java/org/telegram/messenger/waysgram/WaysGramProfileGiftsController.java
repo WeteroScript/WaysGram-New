@@ -106,15 +106,21 @@ public final class WaysGramProfileGiftsController {
         }
     }
 
-    private Runnable inventoryVisibilityChanged;
+    private Runnable inventoryUpdatedListener;
     private boolean hasVisibleGifts;
 
     public boolean hasVisibleGifts() {
         return hasVisibleGifts;
     }
 
-    public void setInventoryVisibilityChanged(Runnable listener) {
-        inventoryVisibilityChanged = listener;
+    public void setInventoryUpdatedListener(Runnable listener) {
+        inventoryUpdatedListener = listener;
+    }
+
+    private void notifyInventoryUpdated() {
+        if (inventoryUpdatedListener != null) {
+            inventoryUpdatedListener.run();
+        }
     }
 
     public void dispose() {
@@ -166,9 +172,13 @@ public final class WaysGramProfileGiftsController {
                         container.replaceWaysGramInventory(nativeGifts);
                     }
                     boolean visible = !nativeGifts.isEmpty();
-                    if (hasVisibleGifts != visible) {
-                        hasVisibleGifts = visible;
-                        if (inventoryVisibilityChanged != null) inventoryVisibilityChanged.run();
+                    boolean visibilityChanged = hasVisibleGifts != visible;
+                    hasVisibleGifts = visible;
+                    // The tab previews can change while the tab remains visible (gift order,
+                    // new gifts, or an animation document becoming available), so publish data
+                    // updates as well as visibility changes.
+                    if (changed || visibilityChanged) {
+                        notifyInventoryUpdated();
                     }
                     downloadGiftAnimations(inventory);
                     if (pendingRefresh) {
@@ -284,9 +294,14 @@ public final class WaysGramProfileGiftsController {
                     ? 0 : Math.max(0, telegramGift.optInt("upgrade_variants", 0));
             boolean isCollectible = upgradeLevel > 0 || (traits != null && traits.length() > 0);
             int sellRefund = Math.max(0, item.optInt("sell_refund", 0));
-            // The WaysGram API refunds a share of the paid price, so the price itself is the
-            // refund scaled back up; the native card shows it in its value row.
-            int paidPrice = sellRefund > 0
+            // «Ценность» подарка — уплаченная за него цена, её и отдаёт сервер владельцу.
+            // Раньше цена выводилась из возврата при продаже, а возврат есть только пока
+            // подарок можно продать (7 дней и не выставлен на продажу): у старых подарков
+            // карточка показывала «Value ⭐0».
+            int purchasePrice = Math.max(0, item.optInt("purchase_price", 0));
+            int paidPrice = purchasePrice > 0
+                    ? purchasePrice
+                    : sellRefund > 0
                     ? (int) Math.min(Integer.MAX_VALUE, (long) sellRefund * 100L / Math.max(1, SELL_REFUND_PERCENT))
                     : 0;
             boolean isListed = optBooleanLike(item, "is_listed");
@@ -346,10 +361,17 @@ public final class WaysGramProfileGiftsController {
                 TLRPC.TL_document modelDocument = WaysGramGiftAttributes.traitDocument(
                         telegramGiftIdText, WaysGramGiftAttributes.MODEL, traits, "model"
                 );
-                if (modelDocument == null && WaysGramBundledArtwork.isBundledName(model)) {
-                    // Анимация эксклюзивной модели WaysGram лежит в приложении: даже если
-                    // сеть ещё не отдала документ, подарок не должен оставаться без модели.
-                    modelDocument = WaysGramBundledArtwork.document();
+                // Анимация эксклюзивной модели WaysGram лежит в приложении и является
+                // единственным источником правды для неё: серверный документ может быть не
+                // скачан, устарел или отсутствовать вовсе, а ячейка «Мои подарки» без файла
+                // на диске остаётся пустой карточкой с фоном. Поэтому встроенный арт всегда
+                // побеждает, если подарок несёт модель WaysGram.
+                if (WaysGramBundledArtwork.isBundledName(model)
+                        || (modelDocument != null && WaysGramBundledArtwork.isBundled(modelDocument.id))) {
+                    TLRPC.TL_document bundled = WaysGramBundledArtwork.document();
+                    if (bundled != null) {
+                        modelDocument = bundled;
+                    }
                 }
                 TLRPC.TL_document patternDocument = WaysGramGiftAttributes.traitDocument(
                         telegramGiftIdText, WaysGramGiftAttributes.PATTERN, traits, "pattern"
@@ -847,8 +869,61 @@ public final class WaysGramProfileGiftsController {
             return;
         }
         ArrayList<TL_stars.SavedStarGift> nativeGifts = toNativeGifts(lastInventory, lastGiftAccount, false);
+        // A pin can be changed while model/pattern documents are still downloading. The
+        // rebuild below must not resurrect the old profile_pinned value from lastInventory:
+        // carry the state of the live cards forward, pinned ones first.
+        restoreLivePinState(nativeGifts);
         container.replaceWaysGramInventory(nativeGifts);
         updateProfileCover(nativeGifts);
+        // The first three usable animation documents may have appeared without any inventory
+        // JSON change; refresh the profile tab label after rebuilding the native gift objects.
+        notifyInventoryUpdated();
+    }
+
+    /**
+     * Preserves the pin/visibility state of cards the user has already changed while an
+     * asynchronous artwork rebuild is in flight. Keeps the cached JSON in sync so later
+     * rebuilds cannot bring the stale flag back, and puts pinned gifts at the front.
+     */
+    private void restoreLivePinState(ArrayList<TL_stars.SavedStarGift> nativeGifts) {
+        if (nativeGifts == null || nativeGifts.isEmpty() || container == null || lastInventory == null) {
+            return;
+        }
+        ArrayList<TL_stars.SavedStarGift> live = container.getWaysGramGifts();
+        if (live == null || live.isEmpty()) {
+            return;
+        }
+        java.util.HashMap<Long, TL_stars.SavedStarGift> liveById = new java.util.HashMap<>();
+        for (TL_stars.SavedStarGift gift : live) {
+            if (gift != null && gift.saved_id > 0) liveById.put(gift.saved_id, gift);
+        }
+        java.util.HashMap<Long, TL_stars.SavedStarGift> rebuiltById = new java.util.HashMap<>();
+        for (TL_stars.SavedStarGift gift : nativeGifts) {
+            if (gift == null) continue;
+            rebuiltById.put(gift.saved_id, gift);
+            TL_stars.SavedStarGift current = liveById.get(gift.saved_id);
+            if (current != null) {
+                gift.pinned_to_top = current.pinned_to_top;
+                gift.unsaved = current.unsaved;
+            }
+        }
+        java.util.Collections.sort(nativeGifts, (a, b) -> {
+            boolean ap = a != null && a.pinned_to_top && !a.unsaved;
+            boolean bp = b != null && b.pinned_to_top && !b.unsaved;
+            return Boolean.compare(!ap, !bp);
+        });
+        try {
+            for (int i = 0; i < lastInventory.length(); i++) {
+                JSONObject item = lastInventory.optJSONObject(i);
+                if (item == null) continue;
+                TL_stars.SavedStarGift gift = rebuiltById.get(item.optLong("id", 0));
+                if (gift == null) continue;
+                item.put("profile_pinned", gift.pinned_to_top && !gift.unsaved);
+                item.put("profile_hidden", gift.unsaved);
+            }
+        } catch (org.json.JSONException ignored) {
+            // A malformed cached row is skipped; the native cards are already correct.
+        }
     }
 
     private void updateProfileCover(ArrayList<TL_stars.SavedStarGift> nativeGifts) {

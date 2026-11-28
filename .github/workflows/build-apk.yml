@@ -20,14 +20,107 @@ on:
       - "Procfile"
       - "runtime.txt"
   workflow_dispatch:
+    inputs:
+      source_ref:
+        description: "Optional source commit to rebuild for diagnostics"
+        required: false
+        type: string
+      diagnostics_only:
+        description: "Build without publishing a release"
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   # The release step below publishes the APK as an asset: artifacts cannot be resumed and a
   # dropped download leaves a truncated zip ("invalid stored block lengths").
   contents: write
   pull-requests: write
+  actions: read
 
 jobs:
+  publish-apk:
+    name: Publish APK release
+    # Runs only after a successful build and publishes the APK of *this* run.
+    # Workflow artifacts need a GitHub login to download; a release asset does not,
+    # can be resumed and has the checksum next to it.
+    needs: build
+    if: ${{ !inputs.diagnostics_only }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Download APK built in this run
+        uses: actions/download-artifact@v4
+        with:
+          name: WaysGram-New-APK-${{ github.run_number }}
+          path: /tmp/waysgram-apk
+
+      - name: Publish release asset
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -uo pipefail
+          APK=/tmp/waysgram-apk/app.apk
+          if [ ! -s "$APK" ]; then
+            echo "::error::artifact has no app.apk"
+            ls -la /tmp/waysgram-apk || true
+            exit 1
+          fi
+          cp "$APK" WaysGram.apk
+          # The artifact has travelled through the artifact store: check the zip CRCs of
+          # the copy that will be published, so a corrupted upload fails here instead of
+          # on a phone with "Bad file CRC value".
+          unzip -tq WaysGram.apk || { echo "::error::APK zip CRC check failed"; exit 1; }
+          python3 -c 'import sys, zipfile; bad = zipfile.ZipFile("WaysGram.apk").testzip(); bad and sys.exit("corrupt entry: " + bad)' \
+            || { echo "::error::APK zip CRC check failed (python)"; exit 1; }
+          sha256sum WaysGram.apk > WaysGram.apk.sha256
+          SHA="$(cut -d' ' -f1 WaysGram.apk.sha256)"
+          SIZE="$(stat -c '%s' WaysGram.apk)"
+          echo "::notice::APK ${SIZE} bytes sha256 ${SHA}"
+          TAG="apk-waysgram-${GITHUB_RUN_NUMBER}"
+          # If the link keeps dropping, the same bytes are also published in 24 MB parts:
+          # cat WaysGram.apk.part* > WaysGram.apk
+          rm -f WaysGram.apk.part* && split -b 24M -d -a 2 WaysGram.apk WaysGram.apk.part
+          gh release delete "$TAG" --repo "$GITHUB_REPOSITORY" --yes --cleanup-tag >/dev/null 2>&1 || true
+          NOTES="APK of build ${GITHUB_RUN_NUMBER} (commit ${GITHUB_SHA:0:7}, branch ${GITHUB_REF_NAME}).
+
+          Size: ${SIZE} bytes
+          SHA-256: ${SHA}
+
+          Download: https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/WaysGram.apk
+
+          If the download keeps breaking (install fails with \"Bad file CRC value\"), the same
+          file is attached in parts:
+
+            gh release download ${TAG} -p 'WaysGram.apk.part*' -D parts
+            cat parts/WaysGram.apk.part* > WaysGram.apk
+            sha256sum WaysGram.apk   # must equal the SHA-256 above"
+          if ! OUT="$(gh release create "$TAG" WaysGram.apk WaysGram.apk.sha256 WaysGram.apk.part* \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "WaysGram APK - build ${GITHUB_RUN_NUMBER}" \
+              --prerelease \
+              --notes "$NOTES" 2>&1)"; then
+            # Logs are not reachable from the sandbox, annotations are.
+            printf '%s\n' "$OUT" | while IFS= read -r line; do
+              printf '::error::%s\n' "${line//%/%25}"
+            done
+            exit 1
+          fi
+          # Download the published asset back and compare it byte for byte with what was
+          # built: this is the file users install, so it must be verified end to end.
+          rm -rf /tmp/verify && mkdir -p /tmp/verify
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --pattern WaysGram.apk --dir /tmp/verify
+          GOT="$(sha256sum /tmp/verify/WaysGram.apk | cut -d' ' -f1)"
+          GOT_SIZE="$(stat -c '%s' /tmp/verify/WaysGram.apk)"
+          if [ "$GOT" != "$SHA" ] || [ "$GOT_SIZE" != "$SIZE" ]; then
+            echo "::error::published asset differs: expected $SIZE bytes/$SHA, got $GOT_SIZE bytes/$GOT"
+            exit 1
+          fi
+          unzip -tq /tmp/verify/WaysGram.apk
+          echo "::notice::verified asset ${SIZE} bytes sha256 ${SHA}"
+          echo "Published https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/WaysGram.apk (${SIZE} bytes, ${SHA})"
+
   build:
     name: Build Afat release APK
     runs-on: ubuntu-latest
@@ -37,6 +130,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
+          ref: ${{ inputs.source_ref || github.sha }}
           fetch-depth: 1
 
       - name: Reconstruct and extract uploaded source archive
@@ -254,6 +348,52 @@ jobs:
             -Dorg.gradle.jvmargs="-Xmx5g -XX:MaxMetaspaceSize=1g -Dfile.encoding=UTF-8" \
             :TMessagesProj_App:assembleAfatRelease 2>&1 | tee /tmp/build.log
 
+      - name: Share obfuscated crash class mappings
+        if: ${{ always() && inputs.diagnostics_only }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path("TMessagesProj_App/build/outputs/mapping/afatRelease/mapping.txt")
+          if not path.is_file():
+              Path("/tmp/r8-mappings.md").write_text(
+                  "### R8 crash mapping unavailable\n\n"
+                  f"Build mapping file was not created: `{path}`.\n",
+                  encoding="utf-8",
+              )
+              raise SystemExit(0)
+
+          lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+          targets = (
+              "org.telegram.ui.Components.g71",
+              "org.telegram.ui.Components.za",
+          )
+          output = ["### R8 mappings for reported crash classes\n"]
+          for target in targets:
+              found = False
+              for index, line in enumerate(lines):
+                  if not line.endswith(f" -> {target}:"):
+                      continue
+                  found = True
+                  output.append(f"#### `{target}`\n")
+                  output.append("```text\n")
+                  output.append(line + "\n")
+                  for member in lines[index + 1:]:
+                      if member and not member[0].isspace():
+                          break
+                      output.append(member + "\n")
+                  output.append("```\n")
+              if not found:
+                  output.append(f"- `{target}` was not present in this mapping.\n")
+
+          Path("/tmp/r8-mappings.md").write_text("\n".join(output), encoding="utf-8")
+          PY
+          gh api "repos/${GITHUB_REPOSITORY}/commits/${GITHUB_SHA}/comments" \
+            -F body=@/tmp/r8-mappings.md >/dev/null
+
       - name: Report compile errors on the pull request
         if: failure()
         env:
@@ -269,8 +409,12 @@ jobs:
             echo '```'
             if [ -s "$file" ]; then
               grep -E "^e: |error: |FAILED|Execution failed|What went wrong|Caused by" "$file" | head -40
+              # javac prints the offending symbol and its location on the following lines;
+              # without them a "cannot find symbol" is impossible to act on.
+              echo '--- javac context ---'
+              grep -A8 -E "error: |^e: " "$file" | head -120
               echo '...'
-              tail -n 60 "$file"
+              tail -n 40 "$file"
             else
               echo "no gradle output captured"
             fi
@@ -282,7 +426,7 @@ jobs:
           # must reach them.
           if [ -s "$file" ]; then
             {
-              grep -E '(^e: |error:|Error:|FAILED|What went wrong|Caused by|OutOfMemory|Could not (resolve|create|find)|Unresolved)' "$file" | head -25 || true
+              grep -E '(^e: |error:|Error:|FAILED|What went wrong|Caused by|OutOfMemory|Could not (resolve|create|find)|Unresolved|symbol:|location:)' "$file" | head -40 || true
               # Groovy/Kotlin DSL failures point at the script that broke the configuration.
               grep -E '\.gradle(\.kts)?' "$file" | grep -viE '^(Download|Downloading|Caching)' | head -15 || true
               if ! grep -qE '(^e: |error:|Error:|FAILED|What went wrong|Caused by)' "$file"; then
@@ -299,6 +443,32 @@ jobs:
           if [ -n "${number:-}" ] && [ "$number" != "null" ]; then
             gh pr comment "$number" --body-file /tmp/report.md || true
           fi
+
+      - name: Publish build diagnostics as a commit comment
+        # Журнал сборки лежит в артефакте, а артефакты недоступны без GitHub-логина
+        # (и редиректят на хранилище, которое из агентской песочницы закрыто).
+        # Комментарий к коммиту читается через api.github.com, поэтому реальные
+        # строки компилятора видны сразу, без скачивания логов.
+        if: failure()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -uo pipefail
+          file=/tmp/javac.log
+          [ -s "$file" ] || file=/tmp/build.log
+          if [ ! -s "$file" ]; then
+            echo "no build log captured"
+            exit 0
+          fi
+          {
+            printf '### Диагностика сборки: run %s, commit %s\n\n```\n' "${{ github.run_number }}" "${GITHUB_SHA:0:7}"
+            grep -nE 'error:|^e: |FAILED|What went wrong|Could not|symbol:|location:|required:|found:' "$file" | head -80 || true
+            printf '\n--- хвост журнала ---\n'
+            tail -n 60 "$file"
+            printf '\n```\n'
+          } > /tmp/diagnostics.md
+          gh api "repos/${GITHUB_REPOSITORY}/commits/${GITHUB_SHA}/comments" \
+            -F body=@/tmp/diagnostics.md >/dev/null || echo "commit comment failed"
 
       - name: Upload build logs
         if: always()
@@ -327,7 +497,14 @@ jobs:
             exit 1
           fi
 
-          "$BUILD_TOOLS/apksigner" verify --verbose --print-certs "$APK"
+          CERTS="$("$BUILD_TOOLS/apksigner" verify --verbose --print-certs "$APK")"
+          printf '%s\\n' "$CERTS"
+          # Свой release-ключ WaysGram, а не публичный ключ Telegram: иначе APK снова
+          # попадает под «известный тестовый сертификат» в Play Protect.
+          if ! grep -Fq "CN=WaysGram" <<< "$CERTS"; then
+            echo "::error::APK is not signed with the WaysGram release key"
+            exit 1
+          fi
           # An APK is a zip: a corrupted archive must fail here, not on the phone with
           # "invalid stored block lengths".
           unzip -tq "$APK"

@@ -19,8 +19,8 @@ public final class WaysGramPins {
             t.scope = "dm"; t.id = selfId;
         } else if (peer instanceof TLRPC.TL_inputPeerUser && peer.user_id > 0) {
             t.scope = "dm"; t.id = peer.user_id;
-        } else if (peer instanceof TLRPC.TL_inputPeerChat && peer.chat_id > 0) {
-            t.scope = "group"; t.id = peer.chat_id; t.group = true;
+        } else if (WaysGramChats.isGroup(peer) && WaysGramChats.groupPeerId(peer) > 0) {
+            t.scope = "group"; t.id = WaysGramChats.groupPeerId(peer); t.group = true;
         } else if (peer instanceof TLRPC.TL_inputPeerChannel && WaysGramChats.channelServer(peer.channel_id) > 0) {
             t.scope = "channel"; t.id = WaysGramChats.channelServer(peer.channel_id); t.channel = true;
         } else throw new WaysGramApi.ApiException(400, "PEER_ID_INVALID");
@@ -266,13 +266,13 @@ public final class WaysGramPins {
         out.count = page.optInt("total_count");
         if (t.group) {
             JSONObject group = get(account, "/api/groups/" + t.id, token);
-            out.chats.add(WaysGramChats.toChat(group, selfId));
+            out.chats.add(WaysGramChats.toMegagroup(account, group, selfId));
             WaysGramChats.Snapshot users = new WaysGramChats.Snapshot();
             users.addUsers(group.optJSONArray("members"));
             out.users.addAll(users.users);
         } else if (t.channel) {
             JSONObject channel = get(account, "/api/channels/" + t.id, token);
-            out.chats.add(WaysGramChats.toChannel(channel, selfId, WaysGramChats.joinedChannels(account).contains(t.id)));
+            out.chats.add(WaysGramChats.toChannel(account, channel, selfId, WaysGramChats.joinedChannels(account).contains(t.id)));
         } else {
             out.users.add(WaysGramMapper.toSelfUser(get(account, "/api/me", token), null));
             if (t.id != selfId) out.users.add(WaysGramMapper.toUser(get(account, "/api/users/" + t.id, token)));

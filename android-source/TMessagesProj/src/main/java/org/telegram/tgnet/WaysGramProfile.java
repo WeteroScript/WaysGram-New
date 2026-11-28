@@ -326,7 +326,7 @@ public class WaysGramProfile {
         }
         JSONObject personal = json.optJSONObject("personal_channel");
         if (personal != null && personal.optLong("id") > 0) {
-            TLRPC.Chat chat = WaysGramChats.toChannel(personal, selfId, userId == selfId);
+            TLRPC.Chat chat = WaysGramChats.toChannel(account, personal, selfId, userId == selfId);
             full.personal_channel_id = chat.id;
             full.flags2 |= TLObject.FLAG_6;
             out.chats.add(chat);
@@ -345,7 +345,7 @@ public class WaysGramProfile {
             if (channel == null || channel.optString("username").isEmpty()) continue;
             boolean owner = channel.optLong("owner_telegram_id") == selfId;
             if (owner || !ownerOnly && (channel.optInt("is_admin") != 0 || channel.optBoolean("is_admin"))) {
-                out.chats.add(WaysGramChats.toChannel(channel, selfId, true));
+                out.chats.add(WaysGramChats.toChannel(account, channel, selfId, true));
             }
         }
         return out;
@@ -388,8 +388,47 @@ public class WaysGramProfile {
         if (key instanceof TLRPC.TL_inputPrivacyKeyVoiceMessages) return "voice";
         if (key instanceof TLRPC.TL_inputPrivacyKeyForwards) return "forwards";
         if (key instanceof TLRPC.TL_inputPrivacyKeyStarGiftsAutoSave) return "gift-autosave";
+        // «Платные сообщения» живут на экране приватности «Сообщения»: без этого ключа
+        // экран получал METHOD_NOT_SUPPORTED и переключатель ничего не сохранял.
+        if (key instanceof TLRPC.TL_inputPrivacyKeyNoPaidMessages) return "paid-messages";
         if (key instanceof TLRPC.TL_inputPrivacyKeyStatusTimestamp) return "last-seen";
         return null;
+    }
+
+    private static TLRPC.GlobalPrivacySettings readGlobalPrivacy(JSONObject data) {
+        TLRPC.TL_globalPrivacySettings settings = new TLRPC.TL_globalPrivacySettings();
+        settings.archive_and_mute_new_noncontact_peers = data.optBoolean("archive_and_mute_new_noncontact_peers");
+        settings.keep_archived_unmuted = data.optBoolean("keep_archived_unmuted");
+        settings.keep_archived_folders = data.optBoolean("keep_archived_folders");
+        settings.hide_read_marks = data.optBoolean("hide_read_marks");
+        settings.new_noncontact_peers_require_premium = data.optBoolean("new_noncontact_peers_require_premium");
+        settings.display_gifts_button = data.optBoolean("display_gifts_button", true);
+        long paid = data.optLong("noncontact_peers_paid_stars", 0);
+        if (paid > 0) {
+            settings.noncontact_peers_paid_stars = paid;
+            settings.flags |= TLObject.FLAG_5;
+        }
+        return settings;
+    }
+
+    /** Глобальные настройки приватности: скрытые галочки, архив, платные сообщения, подарки. */
+    public static TLObject globalPrivacy(int account, TLRPC.GlobalPrivacySettings rules) throws WaysGramApi.ApiException {
+        if (rules == null) {
+            return readGlobalPrivacy(WaysGramApi.get(account, "/api/me/privacy/global"));
+        }
+        JSONObject body = new JSONObject();
+        try {
+            body.put("archive_and_mute_new_noncontact_peers", rules.archive_and_mute_new_noncontact_peers)
+                    .put("keep_archived_unmuted", rules.keep_archived_unmuted)
+                    .put("keep_archived_folders", rules.keep_archived_folders)
+                    .put("hide_read_marks", rules.hide_read_marks)
+                    .put("new_noncontact_peers_require_premium", rules.new_noncontact_peers_require_premium)
+                    .put("display_gifts_button", rules.display_gifts_button)
+                    .put("noncontact_peers_paid_stars", (rules.flags & TLObject.FLAG_5) != 0 ? rules.noncontact_peers_paid_stars : 0);
+        } catch (org.json.JSONException e) {
+            throw new WaysGramApi.ApiException(400, "PRIVACY_RULE_INVALID");
+        }
+        return readGlobalPrivacy(WaysGramApi.put(account, "/api/me/privacy/global", body));
     }
 
     public static TLObject privacy(int account, long selfId, String setting, java.util.List<TLRPC.InputPrivacyRule> rules) throws WaysGramApi.ApiException {
@@ -465,7 +504,7 @@ public class WaysGramProfile {
         WaysGramChats.setJoined(account, created.optLong("id"), true);
         TLRPC.TL_updates updates = new TLRPC.TL_updates();
         updates.date = (int) (System.currentTimeMillis() / 1000);
-        updates.chats.add(WaysGramChats.toChannel(created, selfId, true));
+        updates.chats.add(WaysGramChats.toChannel(account, created, selfId, true));
         return updates;
     }
 

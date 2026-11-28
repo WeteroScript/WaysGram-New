@@ -62,6 +62,9 @@ import com.android.billingclient.api.BillingClient;
 import com.android.billingclient.api.ProductDetails;
 import com.android.billingclient.api.QueryProductDetailsParams;
 
+import org.json.JSONArray;
+import org.json.JSONObject;
+
 import org.telegram.messenger.AndroidUtilities;
 import org.telegram.messenger.BillingController;
 import org.telegram.messenger.BirthdayController;
@@ -83,6 +86,9 @@ import org.telegram.messenger.SvgHelper;
 import org.telegram.messenger.UserConfig;
 import org.telegram.messenger.UserObject;
 import org.telegram.messenger.Utilities;
+import org.telegram.messenger.waysgram.WaysGramGiftCatalogClient;
+import org.telegram.messenger.waysgram.WaysGramProfileGiftsController;
+import org.telegram.messenger.waysgram.WaysGramSessionStore;
 import org.telegram.messenger.utils.Choreographer60FpsContent;
 import org.telegram.messenger.utils.DrawableUtils;
 import org.telegram.messenger.utils.tlutils.AmountUtils;
@@ -179,6 +185,9 @@ public class GiftSheet extends BottomSheetWithRecyclerListView implements Notifi
     private final ArrayList<GiftPremiumBottomSheet.GiftTier> premiumTiers = new ArrayList<>();
 
     private final StarsController.GiftsList myGifts;
+    private final ArrayList<TL_stars.SavedStarGift> waysGramMyGifts = new ArrayList<>();
+    private boolean waysGramMyGiftsLoading;
+    private boolean waysGramMyGiftsRequestStarted;
     private int TAB_ALL = -1;
     private int TAB_MY_GIFTS = -1;
     private int TAB_LIMITED = -1;
@@ -522,6 +531,22 @@ public class GiftSheet extends BottomSheetWithRecyclerListView implements Notifi
                         WaysGramGiftAdmin.show(getContext(), currentAccount, (TL_stars.TL_starGift) gift, resourcesProvider);
                         return;
                     }
+                    if (selectedTab == TAB_MY_GIFTS) {
+                        String waysGramSerial = waysGramGiftSerial(gift);
+                        if (waysGramSerial != null) {
+                            TL_stars.SavedStarGift waysGramGift = null;
+                            for (TL_stars.SavedStarGift savedGift : waysGramMyGifts) {
+                                if (waysGramSerial.equals(waysGramGiftSerial(savedGift.gift))) {
+                                    waysGramGift = savedGift;
+                                    break;
+                                }
+                            }
+                            if (waysGramGift != null) {
+                                openWaysGramTransfer(waysGramGift);
+                            }
+                            return;
+                        }
+                    }
                     if (myGifts != null && selectedTab == TAB_MY_GIFTS) {
                         TL_stars.SavedStarGift savedStarGift = null;
                         for (TL_stars.SavedStarGift g : myGifts.gifts) {
@@ -691,6 +716,7 @@ public class GiftSheet extends BottomSheetWithRecyclerListView implements Notifi
             }
         });
 
+        loadWaysGramMyGifts();
         updatePremiumTiers();
         adapter.update(false);
         updateTitle();
@@ -863,6 +889,135 @@ public class GiftSheet extends BottomSheetWithRecyclerListView implements Notifi
         }
     }
 
+    private void openWaysGramTransfer(TL_stars.SavedStarGift gift) {
+        final long ownerId = UserConfig.getInstance(currentAccount).getClientUserId();
+        if (gift == null || self || dialogId <= 0 || dialogId == ownerId) {
+            return;
+        }
+        StarGiftSheet sheet = new StarGiftSheet(getContext(), currentAccount, ownerId, resourcesProvider) {
+            @Override
+            public BulletinFactory getBulletinFactory() {
+                return BulletinFactory.of(GiftSheet.this.container, GiftSheet.this.resourcesProvider);
+            }
+        }.set(gift, null);
+        sheet.openWaysGramTransferTo(dialogId, () -> {
+            if (closeParentSheet != null) {
+                closeParentSheet.run(false);
+            }
+            GiftSheet.this.dismiss();
+        });
+    }
+
+    private void loadWaysGramMyGifts() {
+        if (!org.telegram.tgnet.WaysGramTransport.ENABLED || dialogId <= 0 || self || waysGramMyGiftsRequestStarted) {
+            return;
+        }
+        final WaysGramSessionStore sessionStore = WaysGramSessionStore.getInstance(
+                getContext().getApplicationContext(), currentAccount);
+        if (!sessionStore.hasSession()) {
+            return;
+        }
+        waysGramMyGiftsRequestStarted = true;
+        waysGramMyGiftsLoading = true;
+        final WaysGramGiftCatalogClient client = new WaysGramGiftCatalogClient(sessionStore);
+        client.loadMyGifts(new WaysGramGiftCatalogClient.InventoryCallback() {
+            @Override
+            public void onLoaded(JSONArray gifts) {
+                AndroidUtilities.runOnUIThread(() -> {
+                    client.close();
+                    waysGramMyGiftsLoading = false;
+                    if (isDismissed()) {
+                        return;
+                    }
+                    waysGramMyGifts.clear();
+                    waysGramMyGifts.addAll(transferableWaysGramGifts(gifts));
+                    if (adapter != null) {
+                        adapter.update(true);
+                    }
+                });
+            }
+
+            @Override
+            public void onError(String message) {
+                AndroidUtilities.runOnUIThread(() -> {
+                    client.close();
+                    waysGramMyGiftsLoading = false;
+                    if (isDismissed()) {
+                        return;
+                    }
+                    if (adapter != null) {
+                        adapter.update(true);
+                    }
+                    if (isShown()) {
+                        String error = TextUtils.isEmpty(message)
+                                ? "Не удалось загрузить подарки WaysGram" : message;
+                        BulletinFactory.of(container, resourcesProvider)
+                                .createSimpleBulletin(R.raw.error, error).show();
+                    }
+                });
+            }
+        });
+    }
+
+    private ArrayList<TL_stars.SavedStarGift> transferableWaysGramGifts(JSONArray inventory) {
+        ArrayList<TL_stars.SavedStarGift> result = new ArrayList<>();
+        if (inventory == null) {
+            return result;
+        }
+
+        final long currentUserId = UserConfig.getInstance(currentAccount).getClientUserId();
+        final HashSet<String> unavailableSerials = new HashSet<>();
+        for (int i = 0; i < inventory.length(); i++) {
+            JSONObject item = inventory.optJSONObject(i);
+            if (item == null) {
+                continue;
+            }
+            String serial = item.optString("serial_number", "").trim().toUpperCase(Locale.ROOT);
+            boolean cannotTransfer = jsonBoolean(item, "is_listed")
+                    || jsonBoolean(item, "is_auctioned")
+                    || jsonBoolean(item, "refunded")
+                    || item.has("can_transfer") && !jsonBoolean(item, "can_transfer")
+                    || item.has("transferable") && !jsonBoolean(item, "transferable")
+                    || item.optLong("owner_id", currentUserId) != currentUserId;
+            if (cannotTransfer && !serial.isEmpty()) {
+                unavailableSerials.add(serial);
+            }
+        }
+
+        for (TL_stars.SavedStarGift gift : WaysGramProfileGiftsController.toNativeGifts(inventory, currentAccount)) {
+            if (gift == null || gift.refunded || !(gift.gift instanceof TL_stars.TL_starGiftUnique)) {
+                continue;
+            }
+            String serial = waysGramGiftSerial(gift.gift);
+            if (serial != null && !unavailableSerials.contains(serial)) {
+                result.add(gift);
+            }
+        }
+        return result;
+    }
+
+    private static boolean jsonBoolean(JSONObject object, String key) {
+        Object value = object == null ? null : object.opt(key);
+        if (value instanceof Boolean) {
+            return (Boolean) value;
+        } else if (value instanceof Number) {
+            return ((Number) value).intValue() != 0;
+        } else if (value instanceof String) {
+            String text = ((String) value).trim();
+            return "true".equalsIgnoreCase(text) || "1".equals(text);
+        }
+        return false;
+    }
+
+    private static String waysGramGiftSerial(TL_stars.StarGift gift) {
+        if (!(gift instanceof TL_stars.TL_starGiftUnique)
+                || TextUtils.isEmpty(gift.slug) || !gift.slug.startsWith("waysgram://")) {
+            return null;
+        }
+        String serial = gift.slug.substring("waysgram://".length()).trim().toUpperCase(Locale.ROOT);
+        return serial.matches("WG-[A-F0-9]{12}") ? serial : null;
+    }
+
     private void updatePremiumTiers() {
         premiumTiers.clear();
         if (premiumTiers.isEmpty() && options != null && !options.isEmpty()) {
@@ -955,6 +1110,9 @@ public class GiftSheet extends BottomSheetWithRecyclerListView implements Notifi
     }
 
     public void fillItems(ArrayList<UItem> items, UniversalAdapter adapter) {
+        final boolean wasMyTab = TAB_MY_GIFTS >= 0 && selectedTab == TAB_MY_GIFTS;
+        final boolean wasCollectiblesTab = TAB_COLLECTIBLES >= 0 && selectedTab == TAB_COLLECTIBLES;
+        final boolean wasAllTab = TAB_ALL >= 0 && selectedTab == TAB_ALL;
         boolean pushedTopView = false;
         if (!self && dialogId >= 0 && !(userSettings != null && userSettings.disallow_premium_gifts)) {
             items.add(UItem.asCustom(topView));
@@ -1005,7 +1163,10 @@ public class GiftSheet extends BottomSheetWithRecyclerListView implements Notifi
                 }
             }
         }
-        if (!MessagesController.getInstance(currentAccount).stargiftsBlocked && (!gifts.isEmpty() || userSettings != null && !userSettings.disallow_unique_stargifts && myGifts != null && !myGifts.gifts.isEmpty())) {
+        final boolean hasWaysGramMyGifts = waysGramMyGiftsLoading || !waysGramMyGifts.isEmpty();
+        if (!MessagesController.getInstance(currentAccount).stargiftsBlocked
+                && (!gifts.isEmpty() || userSettings != null && !userSettings.disallow_unique_stargifts && myGifts != null && !myGifts.gifts.isEmpty()
+                || hasWaysGramMyGifts)) {
             if (!pushedTopView) {
                 items.add(UItem.asCustom(topView));
             } else {
@@ -1025,12 +1186,13 @@ public class GiftSheet extends BottomSheetWithRecyclerListView implements Notifi
             }
 
             final ArrayList<CharSequence> tabs = new ArrayList<>();
-            TAB_ALL = TAB_IN_STOCK = TAB_LIMITED = TAB_MY_GIFTS = -1;
+            TAB_ALL = TAB_IN_STOCK = TAB_LIMITED = TAB_MY_GIFTS = TAB_COLLECTIBLES = -1;
             if (!gifts.isEmpty()) {
                 TAB_ALL = tabs.size();
                 tabs.add(getString(R.string.Gift2TabAll));
             }
-            if ((userSettings == null || !userSettings.disallow_unique_stargifts) && myGiftsHaveUnique) {
+            if (((userSettings == null || !userSettings.disallow_unique_stargifts) && myGiftsHaveUnique)
+                    || hasWaysGramMyGifts) {
                 TAB_MY_GIFTS = tabs.size();
                 tabs.add(getString(R.string.Gift2TabMine));
             }
@@ -1039,15 +1201,30 @@ public class GiftSheet extends BottomSheetWithRecyclerListView implements Notifi
             if (browseCollectibles && !browseTabApplied) {
                 browseTabApplied = true;
                 selectedTab = TAB_COLLECTIBLES;
+            } else if (wasMyTab) {
+                selectedTab = TAB_MY_GIFTS >= 0 ? TAB_MY_GIFTS : TAB_COLLECTIBLES;
+            } else if (wasCollectiblesTab) {
+                selectedTab = TAB_COLLECTIBLES;
+            } else if (wasAllTab) {
+                selectedTab = TAB_ALL >= 0 ? TAB_ALL : TAB_COLLECTIBLES;
+            } else if (selectedTab < 0 || selectedTab >= tabs.size()) {
+                selectedTab = TAB_COLLECTIBLES;
             }
 
             items.add(Tabs.Factory.asTabs(1, tabs, selectedTab, this::selectTab));
             setShowCollectiblesInfo(selectedTab == TAB_COLLECTIBLES && !self && dialogId >= 0);
 
             final ArrayList<TL_stars.StarGift> finalGifts;
-            if (myGifts != null && selectedTab == TAB_MY_GIFTS) {
+            if (selectedTab == TAB_MY_GIFTS) {
                 finalGifts = new ArrayList<>();
-                for (TL_stars.SavedStarGift savedStarGift : myGifts.gifts) {
+                if (myGifts != null && (userSettings == null || !userSettings.disallow_unique_stargifts)) {
+                    for (TL_stars.SavedStarGift savedStarGift : myGifts.gifts) {
+                        if (savedStarGift.gift instanceof TL_stars.TL_starGiftUnique) {
+                            finalGifts.add(savedStarGift.gift);
+                        }
+                    }
+                }
+                for (TL_stars.SavedStarGift savedStarGift : waysGramMyGifts) {
                     if (savedStarGift.gift instanceof TL_stars.TL_starGiftUnique) {
                         finalGifts.add(savedStarGift.gift);
                     }
@@ -1077,12 +1254,15 @@ public class GiftSheet extends BottomSheetWithRecyclerListView implements Notifi
                 items.subList(firstGift, items.size()).sort((a, b) -> priceDescending
                         ? Long.compare(shopPrice(b), shopPrice(a)) : Long.compare(shopPrice(a), shopPrice(b)));
             }
-            if (selectedTab == TAB_MY_GIFTS && myGifts != null && !myGifts.endReached) {
-                myGifts.load();
-                items.add(UItem.asFlicker(4, FlickerLoadingView.STAR_GIFT).setSpanCount(1));
-                items.add(UItem.asFlicker(5, FlickerLoadingView.STAR_GIFT).setSpanCount(1));
-                items.add(UItem.asFlicker(6, FlickerLoadingView.STAR_GIFT).setSpanCount(1));
-            } else if (selectedTab != TAB_MY_GIFTS && s.giftsLoading) {
+            boolean loadingMyGifts = false;
+            if (selectedTab == TAB_MY_GIFTS) {
+                if (myGifts != null && !myGifts.endReached) {
+                    myGifts.load();
+                    loadingMyGifts = true;
+                }
+                loadingMyGifts |= waysGramMyGiftsLoading;
+            }
+            if (loadingMyGifts || selectedTab != TAB_MY_GIFTS && s.giftsLoading) {
                 items.add(UItem.asFlicker(4, FlickerLoadingView.STAR_GIFT).setSpanCount(1));
                 items.add(UItem.asFlicker(5, FlickerLoadingView.STAR_GIFT).setSpanCount(1));
                 items.add(UItem.asFlicker(6, FlickerLoadingView.STAR_GIFT).setSpanCount(1));
@@ -1716,9 +1896,15 @@ public class GiftSheet extends BottomSheetWithRecyclerListView implements Notifi
             TLRPC.PhotoSize photoSize = FileLoader.getClosestPhotoSizeWithSize(document.thumbs, dp(100));
             SvgHelper.SvgDrawable svgThumb = DocumentObject.getSvgThumb(document, Theme.key_windowBackgroundGray, 0.3f);
 
+            TL_stars.StarGift starGift = parentObject instanceof TL_stars.StarGift
+                    ? (TL_stars.StarGift) parentObject
+                    : parentObject instanceof TL_stars.SavedStarGift
+                    ? ((TL_stars.SavedStarGift) parentObject).gift : null;
+            final String filter = WaysGramGiftNumber.isWaysGramModel(starGift)
+                    ? "80_80_nolimit" : "80_80_nolimit_pcache";
             imageView.setImage(
-                ImageLocation.getForDocument(document), "80_80_nolimit_pcache",
-                ImageLocation.getForDocument(photoSize, document), "80_80_nolimit_pcache",
+                ImageLocation.getForDocument(document), filter,
+                ImageLocation.getForDocument(photoSize, document), filter,
                 svgThumb,
                 parentObject
             );
@@ -2272,7 +2458,7 @@ public class GiftSheet extends BottomSheetWithRecyclerListView implements Notifi
                     } else if (a.object instanceof TL_stars.StarGift && b.object instanceof TL_stars.StarGift) {
                         final TL_stars.StarGift ag = (TL_stars.StarGift) a.object;
                         final TL_stars.StarGift bg = (TL_stars.StarGift) b.object;
-                        return ag.id == bg.id;
+                        return ag.id == bg.id && TextUtils.equals(ag.slug, bg.slug);
                     } else if (a.object instanceof TL_stars.SavedStarGift && b.object instanceof TL_stars.SavedStarGift) {
                         final TL_stars.SavedStarGift ag = (TL_stars.SavedStarGift) a.object;
                         final TL_stars.SavedStarGift bg = (TL_stars.SavedStarGift) b.object;
@@ -2460,7 +2646,7 @@ public class GiftSheet extends BottomSheetWithRecyclerListView implements Notifi
             final float textScale = Math.min(1, dp(40) / text.getCurrentWidth());
             canvas.scale(textScale, textScale, cx, cy);
             if (shimmer) {
-                WaysGramGiftNumber.applyShimmer(text.paint, text.getCurrentWidth(), text.paint.getTextSize());
+                WaysGramGiftNumber.applyShimmer(text.paint, cx - text.getWidth() / 2f, text.getCurrentWidth());
             }
             text.draw(canvas, cx - text.getWidth() / 2f, cy + dp(1), textColor, 1f);
             if (shimmer) {

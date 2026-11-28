@@ -834,7 +834,7 @@ public class UserSelectorBottomSheet extends BottomSheetWithRecyclerListView imp
     private int addSection(ArrayList<SelectorAdapter.Item> items, CharSequence title, ArrayList<TLRPC.User> users, boolean addSelectAll) {
         addSelectAll = false;
         int h = 0;
-        if (users.isEmpty()) {
+        if (users == null || users.isEmpty()) {
             return h;
         }
         List<Item> userItems = new ArrayList<>();

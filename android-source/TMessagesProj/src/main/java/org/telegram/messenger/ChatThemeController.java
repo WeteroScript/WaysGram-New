@@ -801,6 +801,10 @@ public class ChatThemeController extends BaseController {
 
 
         boolean finalApplyOnRequest = applyOnRequest;
+        // WaysGram отвечает пустым updates (см. WaysGramExtras.setChatWallpaper), поэтому
+        // штатная ветка «обои применены» ниже не срабатывает: она единственная, где клиент
+        // сохраняет chatFull.wallpaper и пишет chatWallpaper_<account>_<dialog> в prefs.
+        final boolean[] wallpaperApplied = new boolean[1];
         return ConnectionsManager.getInstance(currentAccount).sendRequest(req, (response, error) -> AndroidUtilities.runOnUIThread(() -> {
             if (response instanceof TLRPC.Updates) {
                 TLRPC.Updates res = (TLRPC.Updates) response;
@@ -840,10 +844,14 @@ public class ChatThemeController extends BaseController {
                                     getMessagesStorage().updateChatInfo(chatFull, false);
                                     NotificationCenter.getInstance(currentAccount).postNotificationName(NotificationCenter.chatInfoDidLoad, chatFull, 0, false, false);
                                 }
+                                wallpaperApplied[0] = true;
                             }
                             break;
                         }
                     }
+                }
+                if (!wallpaperApplied[0] && finalApplyOnRequest) {
+                    applyWaysGramWallpaper(dialogId, req, userFull, chatFull);
                 }
                 MessagesController.getInstance(currentAccount).processUpdateArray(res.updates, res.users, res.chats, false, res.date);
                 if (callback != null) {
@@ -852,6 +860,49 @@ public class ChatThemeController extends BaseController {
                 NotificationCenter.getInstance(currentAccount).postNotificationName(NotificationCenter.wallpaperSettedToUser);
             }
         }));
+    }
+
+    /**
+     * Обои, которые только что отправили на сервер WaysGram.
+     *
+     * <p>Настоящий Telegram присылает в ответе `updateNewMessage` со служебным сообщением
+     * «обои изменены», и именно из него клиент берёт {@code chatFull.wallpaper}. WaysGram
+     * служебных сообщений не заводит и отвечает пустым `TL_updates`: обои применялись только
+     * на экране выбора, а после переоткрытия чата пропадали — в профиле чата фон снова
+     * стандартный. Здесь сохраняем ровно те настройки, что ушли на сервер, в тот же вид, в
+     * каком их отдаёт карточка чата ({@code WaysGramChats.wallpaper}).</p>
+     */
+    private void applyWaysGramWallpaper(long dialogId, TLRPC.TL_messages_setChatWallPaper req,
+                                        TLRPC.UserFull userFull, TLRPC.ChatFull chatFull) {
+        if (!org.telegram.tgnet.WaysGramTransport.ENABLED) {
+            return;
+        }
+        // Обои-картинка: файл уже загружен на сервер, поэтому берём его, а не градиент.
+        TLRPC.WallPaper wallpaper = org.telegram.tgnet.WaysGramWallpapers.fromInput(currentAccount, req.wallpaper, req.settings);
+        if (wallpaper == null) {
+            if (req.settings == null) {
+                return;
+            }
+            TLRPC.TL_wallPaperNoFile noFile = new TLRPC.TL_wallPaperNoFile();
+            noFile.id = 0;
+            noFile.dark = Theme.isCurrentThemeDark();
+            noFile.settings = req.settings;
+            noFile.flags = TLObject.setFlag(noFile.flags, TLObject.FLAG_2, true);
+            wallpaper = noFile;
+        }
+        // Prefs — резервный источник `getDialogWallpaper`, когда карточка чата ещё не загружена.
+        saveChatWallpaper(dialogId, wallpaper);
+        if (userFull != null) {
+            userFull.wallpaper = wallpaper;
+            userFull.flags |= 16777216;
+            getMessagesStorage().updateUserInfo(userFull, false);
+            NotificationCenter.getInstance(currentAccount).postNotificationName(NotificationCenter.userInfoDidLoad, dialogId, userFull);
+        } else if (chatFull != null) {
+            chatFull.wallpaper = wallpaper;
+            chatFull.flags2 |= 128;
+            getMessagesStorage().updateChatInfo(chatFull, false);
+            NotificationCenter.getInstance(currentAccount).postNotificationName(NotificationCenter.chatInfoDidLoad, chatFull, 0, false, false);
+        }
     }
 
     private final Map<Long, String> usedGiftThemesByUsers = new HashMap<>();

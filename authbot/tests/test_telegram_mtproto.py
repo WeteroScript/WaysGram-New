@@ -244,7 +244,8 @@ def test_mtproto_gift_catalog_persists_flags_and_downloads_sticker(tmp_path: Pat
                           limited_per_user,auction,availability_remains,availability_total,
                           upgrade_stars,auction_slug,gifts_per_round,sticker_emoji,
                           sticker_document_id,sticker_mime_type
-                   FROM telegram_mtproto_gift_catalog"""
+                   FROM telegram_mtproto_gift_catalog
+                   WHERE COALESCE(is_waysgram,0)=0"""
             ).fetchone()
             sync_state = db.execute(
                 "SELECT source,gift_count FROM telegram_gift_sync_state WHERE id=1"

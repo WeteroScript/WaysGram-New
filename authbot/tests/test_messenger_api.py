@@ -25,6 +25,7 @@ sys.path.insert(0, str(ROOT))
 
 import bot as bot_module
 import messenger_api
+import waysgram_gifts
 from messenger_api import build_messenger_router, init_messenger_storage
 from telegram_mtproto import TelegramMTProtoGiftCatalog
 
@@ -3132,12 +3133,13 @@ def test_telegram_gift_catalog_sync_and_sticker_proxy(api_env, monkeypatch) -> N
             assert payload["source"] == "telegram_bot_api"
             assert payload["scope"] == "gifts_available_to_authbot"
             assert payload["currency"] == "stars"
-            # The app storefront only lists offers after AuthBot configures price and stock.
-            assert payload["count"] == 0
+            # Telegram's offers appear only after AuthBot configures price and stock;
+            # WaysGram's own gift is on sale out of the box.
+            assert [gift["id"] for gift in payload["gifts"]] == [waysgram_gifts.GIFT_ID]
             # The legacy all=1 switch is ignored; private admin inventory remains in AuthBot only.
             full_catalog = await client.get("/api/telegram/gifts?all=1", headers=auth)
             assert full_catalog.status_code == 200
-            assert full_catalog.json()["count"] == 0
+            assert [gift["id"] for gift in full_catalog.json()["gifts"]] == [waysgram_gifts.GIFT_ID]
             edit_attempt = await client.patch(
                 "/api/telegram/gifts/gift_123",
                 headers=auth,
@@ -3151,9 +3153,11 @@ def test_telegram_gift_catalog_sync_and_sticker_proxy(api_env, monkeypatch) -> N
 
             catalog = await client.get("/api/telegram/gifts", headers=auth)
             payload = catalog.json()
-            assert payload["count"] == 1
+            # Telegram's priced gift plus WaysGram's own gift, which is always on sale.
+            assert payload["count"] == 2
+            assert payload["gifts"][-1]["id"] == waysgram_gifts.GIFT_ID
 
-            gift = payload["gifts"][0]
+            gift = next(item for item in payload["gifts"] if item["id"] == "gift_123")
             assert gift["price_stars"] == 40
             assert gift["remaining"] == 3
             assert gift["telegram_star_count"] == 25
@@ -3282,13 +3286,14 @@ def test_mtproto_gift_catalog_api_and_sticker_proxy(api_env) -> None:
             assert payload["source"] == "telegram_mtproto"
             assert payload["scope"] == "telegram_full_mtproto_catalog"
             assert payload["currency"] == "stars"
-            assert payload["count"] == 0  # hidden until the administrator prices it
+            # Telegram's gift is hidden until the administrator prices it; ours is not.
+            assert [gift["id"] for gift in payload["gifts"]] == [waysgram_gifts.GIFT_ID]
             with db_split.sqlite_connect(path) as db:
                 db.execute(
                     "INSERT INTO telegram_gift_prices(gift_id,price_stars,supply,sold,updated_at) VALUES('987654321',60,5,0,1)"
                 )
             payload = (await client.get("/api/telegram/gifts", headers=auth)).json()
-            assert payload["count"] == 1
+            assert [gift["id"] for gift in payload["gifts"]] == ["987654321", waysgram_gifts.GIFT_ID]
 
             gift = payload["gifts"][0]
             assert gift["id"] == "987654321"
@@ -3395,7 +3400,7 @@ def test_private_channels_hide_content_until_invite_join(api_env) -> None:
             private = created.json()
             assert private["is_public"] is False
             assert private["username"] == ""
-            assert private["invite_link"].startswith("http://test/api/channels/invites/")
+            assert private["invite_link"].startswith("https://t.wg/")
             channel_id = private["id"]
 
             private_post = await client.post(
@@ -4057,10 +4062,8 @@ def test_private_channel_invite_uses_configured_public_api_base_url(api_env, mon
             )
             assert response.status_code == 201
             invite_link = response.json()["invite_link"]
-            assert invite_link.startswith(
-                "https://bot-1793554244-6434-weterochina.bothost.tech/api/channels/invites/"
-            )
-            assert "http://test" not in invite_link
+            assert invite_link.startswith("https://t.wg/")
+            assert "bot-1793554244" not in invite_link
 
     run(scenario())
 
@@ -5038,6 +5041,11 @@ def test_pinned_messages_cover_direct_group_and_channel_permissions(api_env) -> 
             )
             assert group_post.status_code == 201
             group_message_id = group_post.json()["id"]
+            restricted_pins = await client.put(
+                f"/api/groups/{group_id}/send-permissions", headers=owner,
+                json={"default_send_restrictions": 4096},
+            )
+            assert restricted_pins.status_code == 200, restricted_pins.text
             denied_group = await client.post(
                 "/api/pins", headers=member,
                 json={"scope": "group", "peer_id": group_id, "message_id": group_message_id},
@@ -5466,9 +5474,9 @@ def test_group_invites_enforce_expiry_usage_limits_and_admin_permissions(api_env
             )
             assert invite.status_code == 201
             invite_link = invite.json()["invite_link"]
-            assert invite_link.startswith("/api/groups/invites/") is False
-            token = invite_link.rsplit("/", 1)[-1]
-            assert len(token) >= 20
+            assert invite_link == "https://t.wg/invite_group"
+            token = invite.json()["invite_token"]
+            assert len(token) == 22
 
             with db_split.sqlite_connect(path) as db:
                 stored_hash = db.execute(
@@ -5485,7 +5493,7 @@ def test_group_invites_enforce_expiry_usage_limits_and_admin_permissions(api_env
 
             joined = await client.post(
                 "/api/groups/join", headers=guest,
-                json={"invite_link": invite_link},
+                json={"invite_token": token},
             )
             assert joined.status_code == 200
             assert joined.json()["joined"] is True
@@ -5500,7 +5508,7 @@ def test_group_invites_enforce_expiry_usage_limits_and_admin_permissions(api_env
 
             exhausted = await client.post(
                 "/api/groups/join", headers=member,
-                json={"invite_link": invite_link},
+                json={"invite_token": token},
             )
             assert exhausted.status_code == 410
 
@@ -5514,12 +5522,12 @@ def test_group_invites_enforce_expiry_usage_limits_and_admin_permissions(api_env
                 json={"expires_in_hours": 24},
             )
             assert second_invite.status_code == 201
-            second_token = second_invite.json()["invite_link"].rsplit("/", 1)[-1]
+            second_token = second_invite.json()["invite_token"]
             revoked = await client.delete(
                 f"/api/groups/{group_id}/invites/{second_token}", headers=admin,
             )
             assert revoked.status_code == 200
-            assert (await client.get(second_invite.json()["invite_link"])).status_code == 404
+            assert (await client.get(f"/api/groups/invites/{second_token}")).status_code == 404
             revoked_join = await client.post(
                 "/api/groups/join", headers=member,
                 json={"invite_token": second_token},
@@ -5532,13 +5540,13 @@ def test_group_invites_enforce_expiry_usage_limits_and_admin_permissions(api_env
                 json={"expires_in_hours": 1},
             )
             assert expiring.status_code == 201
-            expiring_token = expiring.json()["invite_link"].rsplit("/", 1)[-1]
+            expiring_token = expiring.json()["invite_token"]
             with db_split.sqlite_connect(path) as db:
                 db.execute(
                     "UPDATE group_invites SET expires_at=? WHERE token_hash=?",
                     (int(time.time()) - 1, hashlib.sha256(expiring_token.encode()).hexdigest()),
                 )
-            expired_preview = await client.get(expiring.json()["invite_link"])
+            expired_preview = await client.get(f"/api/groups/invites/{expiring_token}")
             assert expired_preview.status_code == 404
             expired_join = await client.post(
                 "/api/groups/join", headers=member,
@@ -5599,15 +5607,18 @@ def test_group_invite_join_requests_require_admin_approval(api_env) -> None:
             assert invite.status_code == 201
             assert invite.json()["require_approval"] is True
             link = invite.json()["invite_link"]
-            token = link.rsplit("/", 1)[-1]
+            assert link == "https://t.wg/approval_group"
+            token = invite.json()["invite_token"]
 
-            preview = await client.get(link)
+            # Public groups use their username as the share link; invite-specific
+            # settings are exercised with the token returned alongside the link.
+            preview = await client.get(f"/api/groups/invites/{token}")
             assert preview.status_code == 200
             assert preview.json()["require_approval"] is True
 
             request = await client.post(
                 "/api/groups/join", headers=guest,
-                json={"invite_link": link},
+                json={"invite_token": token},
             )
             assert request.status_code == 200
             assert request.json()["join_requested"] is True
@@ -5634,7 +5645,7 @@ def test_group_invite_join_requests_require_admin_approval(api_env) -> None:
             next_page = await client.get(f"/api/groups/{group_id}/join-requests", headers=admin,
                                          params={"after_date": item["requested_at"], "after_user": item["telegram_id"]})
             assert next_page.json()["count"] == 1 and next_page.json()["requests"] == []
-            other_token = permanent.json()["invite_link"].rsplit("/", 1)[-1]
+            other_token = permanent.json()["invite_token"]
             empty = await client.get(f"/api/groups/{group_id}/join-requests", headers=admin,
                                      params={"invite_token": other_token})
             assert empty.json()["count"] == 0
@@ -5679,7 +5690,7 @@ def test_group_invite_join_requests_require_admin_approval(api_env) -> None:
                 json={"expires_in_hours": 24, "require_approval": True},
             )
             assert declined_invite.status_code == 201
-            declined_token = declined_invite.json()["invite_link"].rsplit("/", 1)[-1]
+            declined_token = declined_invite.json()["invite_token"]
             declined_request = await client.post(
                 "/api/groups/join", headers=member,
                 json={"invite_token": declined_token},
@@ -6975,7 +6986,9 @@ def test_bundled_original_plush_pepe_artwork_and_manual_inventory(api_env) -> No
 
             catalog = await client.get("/api/telegram/gifts", headers={"Authorization": f"Bearer {token}"})
             assert catalog.status_code == 200
-            assert catalog.json()["gifts"][0]["title"] == "Plush Pepe"
+            listed = catalog.json()["gifts"]
+            # Sold-out Telegram gifts sort after the available ones, so find it by id.
+            assert next(g for g in listed if g["id"] == gift_id)["title"] == "Plush Pepe"
             bought = await client.post(f"/api/telegram/gifts/{gift_id}/purchase",
                                        headers={"Authorization": f"Bearer {token}"},
                                        json={"recipient_id": 88160})
@@ -9600,24 +9613,58 @@ def test_channel_post_comments_open_native_discussion_thread(api_env) -> None:
             root = body["root_message_id"]
             assert root > 0 and body["group_id"] == group_id and body["comments_count"] == 0
 
-            # Первый комментарий цепляется к корню треда.
-            comment = await client.post(f"/api/channels/{channel_id}/messages/{post_id}/comments",
-                                        headers=reader, json={"body": "Первый"})
+            empty_replies = await client.get(
+                f"/api/groups/{group_id}/threads/{root}/replies", headers=owner)
+            assert empty_replies.status_code == 200 and empty_replies.json()["ids"] == []
+
+            # Обычный канал-подписчик открывает native discussion; это же добавляет
+            # его в привязанную группу до отправки через обычный group-message API.
+            reader_discussion = await client.get(
+                f"/api/channels/{channel_id}/messages/{post_id}/discussion", headers=reader)
+            assert reader_discussion.status_code == 200, reader_discussion.text
+            assert reader_discussion.json()["root_message_id"] == root
+
+            # Native UI отправляет reply на корневое сообщение через /groups/{id}/messages.
+            comment = await client.post(f"/api/groups/{group_id}/messages", headers=reader,
+                                        json={"body": "Первый", "reply_to_id": root})
             assert comment.status_code == 201, comment.text
             comment_id = comment.json()["id"]
 
+            # И ответ на комментарий, и ответ напрямую корню попадают в тот же native-тред.
+            nested = await client.post(f"/api/groups/{group_id}/messages", headers=owner,
+                                       json={"body": "Вложенный ответ", "reply_to_id": comment_id})
+            assert nested.status_code == 201, nested.text
+            nested_id = nested.json()["id"]
+            reply = await client.post(f"/api/groups/{group_id}/messages", headers=owner,
+                                      json={"body": "Ответ на корень", "reply_to_id": root})
+            assert reply.status_code == 201, reply.text
+            reply_id = reply.json()["id"]
+            ordinary = await client.post(f"/api/groups/{group_id}/messages", headers=owner,
+                                         json={"body": "Обычное сообщение без ответа"})
+            assert ordinary.status_code == 201, ordinary.text
+
             after = (await client.get(f"/api/channels/{channel_id}/messages", headers=owner)).json()["messages"]
             row = next(item for item in after if item["id"] == post_id)
-            assert row["comments_count"] == 1 and row["last_comment_id"] == comment_id
+            assert row["comments_count"] == 3 and row["last_comment_id"] == reply_id
 
             thread = await client.get(f"/api/groups/{group_id}/threads/{root}/replies", headers=owner)
             assert thread.status_code == 200, thread.text
-            assert thread.json()["ids"] == [root, comment_id]
-
-            # Ответ на корень — тоже валидный комментарий.
-            reply = await client.post(f"/api/channels/{channel_id}/messages/{post_id}/comments",
-                                      headers=owner, json={"body": "Ответ на корень", "reply_to_id": root})
-            assert reply.status_code == 201, reply.text
+            assert thread.json()["ids"] == [comment_id, nested_id, reply_id]
+            assert ordinary.json()["id"] not in thread.json()["ids"]
+            window = await client.get(
+                f"/api/groups/{group_id}/threads/{root}/replies?offset_id={reply_id}&add_offset=-2&limit=2",
+                headers=owner)
+            assert window.status_code == 200, window.text
+            assert window.json()["ids"] == [comment_id, nested_id]
+            root_only = await client.get(
+                f"/api/groups/{group_id}/threads/{root}/replies?include_root=true&limit=1", headers=owner)
+            assert root_only.status_code == 200, root_only.text
+            assert root_only.json()["ids"] == [root]
+            root_page = await client.get(f"/api/groups/{group_id}/messages?message_ids={root}", headers=owner)
+            assert root_page.status_code == 200, root_page.text
+            root_message = root_page.json()["messages"][0]
+            assert root_message["discussion_channel_id"] == channel_id
+            assert root_message["discussion_post_id"] == post_id
 
             # Посторонний без членства в группе тред не откроет.
             outsider = {"Authorization": "Bearer thread-outsider"}
@@ -9788,5 +9835,47 @@ def test_public_channel_post_search_finds_posts_and_skips_private(api_env) -> No
             empty = (await client.get("/api/channels/posts/search", headers=reader,
                                       params={"q": "nothing-like-this"})).json()
             assert empty["messages"] == []
+
+    run(scenario())
+
+
+def test_share_links_use_twg_username_or_short_invite_code(api_env) -> None:
+    path, _auth_store, _fake_bot, app = api_env
+    for user_id, username in [
+        (89911, "short_links_owner"),
+        (89912, "short_links_guest"),
+    ]:
+        add_account(api_env, user_id, username)
+        add_session(path, user_id, f"short-links-{user_id}")
+
+    async def scenario() -> None:
+        owner = {"Authorization": "Bearer short-links-89911"}
+        guest = {"Authorization": "Bearer short-links-89912"}
+        async with await client_for(app) as client:
+            public = await client.post("/api/groups", headers=owner,
+                                       json={"title": "Public link room", "username": "public_link_room"})
+            assert public.status_code == 201
+            invite = await client.post(f"/api/groups/{public.json()['id']}/invites", headers=owner,
+                                       json={"expires_in_hours": 24})
+            assert invite.status_code == 201
+            assert invite.json()["invite_link"] == "https://t.wg/public_link_room"
+            preview = await client.get(invite.json()["invite_link"])
+            assert preview.status_code == 200 and preview.json()["group_id"] == public.json()["id"]
+            joined = await client.post("/api/groups/join", headers=guest,
+                                       json={"invite_link": invite.json()["invite_link"]})
+            assert joined.status_code == 200 and joined.json()["joined"] is True
+
+            private = await client.post("/api/channels", headers=owner,
+                                        json={"title": "Private link room", "is_public": False})
+            assert private.status_code == 201
+            link = private.json()["invite_link"]
+            assert link.startswith("https://t.wg/")
+            code = link.rsplit("/", 1)[-1]
+            assert code == private.json()["invite_token"]
+            assert len(code) == 22 and code.replace("_", "").replace("-", "").isalnum()
+            preview = await client.get(link)
+            assert preview.status_code == 200 and preview.json()["channel_id"] == private.json()["id"]
+            legacy = await client.get(f"/api/channels/invites/{code}")
+            assert legacy.status_code == 200 and legacy.json()["channel_id"] == private.json()["id"]
 
     run(scenario())

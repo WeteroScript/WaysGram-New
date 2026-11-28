@@ -4599,6 +4599,11 @@ public class MessageObject {
         return chat;
     }
 
+    private static boolean isFragmentStarsTransfer(TLRPC.TL_messageActionGiftStars action) {
+        return action != null && action.amount == 0 && action.stars > 0
+                && "XTR".equalsIgnoreCase(action.currency);
+    }
+
     public void updateMessageText() {
         updateMessageText(MessagesController.getInstance(currentAccount).getUsers(), MessagesController.getInstance(currentAccount).getChats(), null, null);
     }
@@ -5192,22 +5197,38 @@ public class MessageObject {
                         }
                     }
                 } else if (messageOwner.action instanceof TLRPC.TL_messageActionGiftStars) {
-                    if (fromObject instanceof TLRPC.User && ((TLRPC.User) fromObject).self) {
-                        TLRPC.User user = getUser(users, sUsers, messageOwner.peer_id.user_id);
-                        messageText = replaceWithLink(AndroidUtilities.replaceTags(getString(R.string.ActionGiftOutbound)), "un1", user);
-                    } else if (fromObject instanceof TLRPC.User && UserObject.isService(((TLRPC.User) fromObject).id)) {
-                        messageText = TextUtils.replace(AndroidUtilities.replaceTags(getString(R.string.ActionGiftInbound)), new String[] {"un1"}, new CharSequence[]{ getString(R.string.StarsTransactionUnknown) });
-                    } else {
-                        messageText = replaceWithLink(AndroidUtilities.replaceTags(getString(R.string.ActionGiftInbound)), "un1", fromObject);
-                    }
-                    int i = messageText.toString().indexOf("un2");
-                    if (i != -1) {
-                        SpannableStringBuilder sb = SpannableStringBuilder.valueOf(messageText);
-                        CharSequence price = BillingController.getInstance().formatCurrency(messageOwner.action.amount, messageOwner.action.currency);
-                        if ((messageOwner.action.flags & 1) != 0) {
-                            price = String.format("%.2f", (messageOwner.action.cryptoAmount * Math.pow(10, -9))) + " " + messageOwner.action.cryptoCurrency + " (~ " + price + ")";
+                    TLRPC.TL_messageActionGiftStars giftStarsAction =
+                            (TLRPC.TL_messageActionGiftStars) messageOwner.action;
+                    boolean fragmentStarsTransfer = isFragmentStarsTransfer(giftStarsAction);
+                    if (fragmentStarsTransfer) {
+                        messageText = replaceWithLink(
+                                AndroidUtilities.replaceTags(getString(R.string.ActionFragmentStarsTransferInbound)),
+                                "un1", fromObject);
+                        int i = messageText.toString().indexOf("un2");
+                        if (i != -1) {
+                            SpannableStringBuilder sb = SpannableStringBuilder.valueOf(messageText);
+                            int count = (int) Math.min(Integer.MAX_VALUE, giftStarsAction.stars);
+                            CharSequence stars = LocaleController.formatPluralStringSpaced("FragmentStarsCount", count);
+                            messageText = sb.replace(i, i + 3, stars);
                         }
-                        messageText = sb.replace(i, i + 3, price);
+                    } else {
+                        if (fromObject instanceof TLRPC.User && ((TLRPC.User) fromObject).self) {
+                            TLRPC.User user = getUser(users, sUsers, messageOwner.peer_id.user_id);
+                            messageText = replaceWithLink(AndroidUtilities.replaceTags(getString(R.string.ActionGiftOutbound)), "un1", user);
+                        } else if (fromObject instanceof TLRPC.User && UserObject.isService(((TLRPC.User) fromObject).id)) {
+                            messageText = TextUtils.replace(AndroidUtilities.replaceTags(getString(R.string.ActionGiftInbound)), new String[] {"un1"}, new CharSequence[]{ getString(R.string.StarsTransactionUnknown) });
+                        } else {
+                            messageText = replaceWithLink(AndroidUtilities.replaceTags(getString(R.string.ActionGiftInbound)), "un1", fromObject);
+                        }
+                        int i = messageText.toString().indexOf("un2");
+                        if (i != -1) {
+                            SpannableStringBuilder sb = SpannableStringBuilder.valueOf(messageText);
+                            CharSequence price = BillingController.getInstance().formatCurrency(messageOwner.action.amount, messageOwner.action.currency);
+                            if ((messageOwner.action.flags & 1) != 0) {
+                                price = String.format("%.2f", (messageOwner.action.cryptoAmount * Math.pow(10, -9))) + " " + messageOwner.action.cryptoCurrency + " (~ " + price + ")";
+                            }
+                            messageText = sb.replace(i, i + 3, price);
+                        }
                     }
                 } else if (messageOwner.action instanceof TLRPC.TL_messageActionGiftCode && ((TLRPC.TL_messageActionGiftCode) messageOwner.action).boost_peer != null) {
                     messageText = getString(R.string.BoostingReceivedGiftNoName);
@@ -6789,6 +6810,7 @@ public class MessageObject {
                 contentType = 1;
                 type = TYPE_GIFT_PREMIUM;
             } else if (messageOwner.action instanceof TLRPC.TL_messageActionGiftStars || messageOwner.action instanceof TLRPC.TL_messageActionStarGift || messageOwner.action instanceof TLRPC.TL_messageActionPrizeStars || messageOwner.action instanceof TLRPC.TL_messageActionStarGiftUnique && ((TLRPC.TL_messageActionStarGiftUnique) messageOwner.action).refunded || messageOwner.action instanceof TLRPC.TL_messageActionGiftTon) {
+                // Fragment transfers also use Telegram's native Stars gift-card renderer.
                 contentType = 1;
                 type = TYPE_GIFT_STARS;
             } else if (messageOwner.action instanceof TLRPC.TL_messageActionChatEditPhoto || messageOwner.action instanceof TLRPC.TL_messageActionUserUpdatedPhoto) {

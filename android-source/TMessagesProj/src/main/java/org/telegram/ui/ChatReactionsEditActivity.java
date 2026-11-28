@@ -52,6 +52,13 @@ public class ChatReactionsEditActivity extends BaseFragment implements Notificat
     private RecyclerView.Adapter listAdapter;
 
     private TextCheckCell enableReactionsCell;
+    private TextCheckCell paidReactionsCell;
+    /**
+     * Платные реакции канала. Раньше их можно было только увидеть в списке настроек
+     * (`ChatEditActivity.updateReactionsCell`), но не включить: в этом редакторе
+     * переключателя не было вовсе, хотя серверный маршрут и поле запроса есть.
+     */
+    private boolean paidReactionsEnabled;
     private ArrayList<TLRPC.TL_availableReaction> availableReactions = new ArrayList();
     LinearLayout contorlsLayout;
 
@@ -125,6 +132,24 @@ public class ChatReactionsEditActivity extends BaseFragment implements Notificat
                 setCheckedEnableReactionCell(enableReactionsCell.isChecked() ? SELECT_TYPE_NONE : SELECT_TYPE_SOME, true);
             });
             ll.addView(enableReactionsCell, LayoutHelper.createLinear(LayoutHelper.MATCH_PARENT, LayoutHelper.WRAP_CONTENT));
+
+            TLRPC.ChatFull channelFull = getMessagesController().getChatFull(chatId);
+            paidReactionsEnabled = channelFull != null && channelFull.paid_reactions_available;
+            paidReactionsCell = new TextCheckCell(context);
+            paidReactionsCell.setHeight(56);
+            paidReactionsCell.setTextAndCheck(LocaleController.getString(R.string.ChannelEnablePaidReactions), paidReactionsEnabled, true);
+            paidReactionsCell.setBackgroundColor(Theme.getColor(paidReactionsEnabled ? Theme.key_windowBackgroundChecked : Theme.key_windowBackgroundUnchecked));
+            paidReactionsCell.setOnClickListener(v -> {
+                paidReactionsEnabled = !paidReactionsEnabled;
+                paidReactionsCell.setChecked(paidReactionsEnabled);
+                int clr = Theme.getColor(paidReactionsEnabled ? Theme.key_windowBackgroundChecked : Theme.key_windowBackgroundUnchecked);
+                if (paidReactionsEnabled) {
+                    paidReactionsCell.setBackgroundColorAnimated(true, clr);
+                } else {
+                    paidReactionsCell.setBackgroundColorAnimatedReverse(clr);
+                }
+            });
+            ll.addView(paidReactionsCell, LayoutHelper.createLinear(LayoutHelper.MATCH_PARENT, LayoutHelper.WRAP_CONTENT));
         }
 
         HeaderCell headerCell = new HeaderCell(context);
@@ -325,7 +350,8 @@ public class ChatReactionsEditActivity extends BaseFragment implements Notificat
     @Override
     public void onFragmentDestroy() {
         super.onFragmentDestroy();
-        getMessagesController().setChatReactions(chatId, selectedType, chatReactions);
+        getMessagesController().setChatReactions(chatId, selectedType, chatReactions,
+                isChannel ? paidReactionsEnabled : null);
         getNotificationCenter().removeObserver(this, NotificationCenter.reactionsDidLoad);
         getNotificationCenter().removeObserver(this, NotificationCenter.dialogDeleted);
     }

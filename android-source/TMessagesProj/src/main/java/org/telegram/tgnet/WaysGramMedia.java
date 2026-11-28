@@ -55,8 +55,21 @@ public class WaysGramMedia {
         return id;
     }
 
+    /**
+     * Идентификатор медиа по числовому id.
+     *
+     * <p>Аватары во {@code TL_photo}/{@code TL_chatPhoto} собираются с отрицательным
+     * {@code volume_id} (`-photoId`, см. {@code WaysGramMapper.avatarLocation}), а сам файл
+     * регистрируется по положительному id. Без этой проверки знака большой аватар в профиле
+     * канала не находился вовсе: {@code upload.getFile} возвращал null и картинка оставалась
+     * пустой.</p>
+     */
     public static String mediaIdFor(long id) {
-        return prefs().getString("m_" + id, null);
+        String found = prefs().getString("m_" + id, null);
+        if (found == null && id < 0) {
+            found = prefs().getString("m_" + (-id), null);
+        }
+        return found;
     }
 
     public static File cacheFile(String mediaId) {
@@ -236,8 +249,25 @@ public class WaysGramMedia {
         // Repair older recordings produced by WaysGram before it stored the media kind.
         String lowerName = name == null ? "" : name.toLowerCase(java.util.Locale.ROOT);
         if (TextUtils.isEmpty(kind) && mime != null && mime.startsWith("video/") && lowerName.startsWith("round_video_")) kind = "video_note";
+        // Старые записи и истории без media_kind оставались документом без
+        // TL_documentAttributeVideo: такой файл не проигрывался («App was unable to
+        // play this video»). Тип берём из самого mime.
+        if (!forceDocument && TextUtils.isEmpty(kind) && mime != null && mime.startsWith("video/")) kind = "video";
         if (TextUtils.isEmpty(kind) && mime != null && mime.startsWith("audio/") && lowerName.startsWith("audio_recording_voice_")) kind = "voice";
         if (info == null) info = new JSONObject();
+        /*
+         * media_kind говорит «видео», но mime пуст или не video/* — так выглядят старые
+         * записи и часть историй. Документ без TL_documentAttributeVideo плеер открыть не
+         * может: отсюда «App was unable to play this video. Try to play it with external
+         * player?». Верим типу записи, а не заголовку, который мог не сохраниться.
+         */
+        boolean videoKind = "video".equals(kind) || "video_note".equals(kind) || "gif".equals(kind);
+        if (videoKind && (mime == null || !mime.startsWith("video/"))) {
+            if (mime != null && !mime.isEmpty()) {
+                FileLog.d("WaysGram: media " + mediaId + " has kind " + kind + " but mime " + mime);
+            }
+            mime = "video/mp4";
+        }
         double duration = info.optDouble("duration", 0);
         int width = info.optInt("width", 0), height = info.optInt("height", 0);
         if ((duration <= 0 || ((kind.equals("video") || kind.equals("video_note") || kind.equals("gif")) && (width <= 0 || height <= 0)))
@@ -273,7 +303,7 @@ public class WaysGramMedia {
                 } catch (IllegalArgumentException ignored) { }
             }
             doc.attributes.add(audio);
-        } else if ((kind.equals("video") || kind.equals("video_note") || kind.equals("gif")) && mime != null && mime.startsWith("video/")) {
+        } else if (videoKind && mime != null && mime.startsWith("video/")) {
             if (kind.equals("gif")) doc.attributes.add(new TLRPC.TL_documentAttributeAnimated());
             TLRPC.TL_documentAttributeVideo video = new TLRPC.TL_documentAttributeVideo();
             video.round_message = kind.equals("video_note");
@@ -333,7 +363,10 @@ if (!TextUtils.isEmpty(coverMediaId) && kind.equals("video")) {
      */
     public static TLRPC.Message attach(int account, TLRPC.Message message, JSONObject json) {
         WaysGramMapper.applyExtras(message, json,
-                message.peer_id instanceof TLRPC.TL_peerChat ? WaysGramChats.GROUP_MESSAGE_OFFSET : 0);
+                message.peer_id instanceof TLRPC.TL_peerChat
+                        || (message.peer_id instanceof TLRPC.TL_peerChannel
+                            && WaysGramChats.isGroupChannel(((TLRPC.TL_peerChannel) message.peer_id).channel_id))
+                        ? WaysGramChats.GROUP_MESSAGE_OFFSET : 0);
         if (WaysGramCards.attach(message, json.optJSONObject("card"), json.optInt("id"))) return message;
         JSONObject contact = json.optJSONObject("contact");
         String contactName = contact != null ? contact.optString("name", "") : json.optString("contact_name", "");

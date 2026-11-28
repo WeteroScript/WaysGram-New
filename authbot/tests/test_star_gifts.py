@@ -11,7 +11,9 @@ from fastapi import FastAPI
 
 import bot as bot_module
 import db_split
+import fragment_deposit
 import messenger_api
+import waysgram_gifts
 from messenger_api import build_messenger_router, init_messenger_storage
 from test_messenger_api import FakeBot, add_account, add_session, client_for, run
 
@@ -64,13 +66,17 @@ def test_gifts_are_hidden_until_admin_sets_price_and_supply(env) -> None:
     async def scenario() -> None:
         async with await client_for(app) as client:
             hidden = (await client.get("/api/telegram/gifts", headers=headers(101))).json()
-            assert hidden["count"] == 0
+            # Only WaysGram's own gift is on sale by default; Telegram's gifts wait for the
+            # administrator to set a price and a stock.
+            assert [gift["id"] for gift in hidden["gifts"]] == [waysgram_gifts.GIFT_ID]
+            assert hidden["gifts"][0]["price_stars"] == 5000
+            assert hidden["gifts"][0]["supply"] == 1000
             # The app storefront never exposes unlisted catalog entries, even via all=1
             # or when the authenticated WaysGram account is also an AuthBot administrator.
             full = (await client.get("/api/telegram/gifts?all=1", headers=headers(101))).json()
-            assert full["count"] == 0
+            assert [gift["id"] for gift in full["gifts"]] == [waysgram_gifts.GIFT_ID]
             everything = (await client.get("/api/telegram/gifts?all=1", headers=headers(ADMIN))).json()
-            assert everything["count"] == 0
+            assert [gift["id"] for gift in everything["gifts"]] == [waysgram_gifts.GIFT_ID]
 
             # Price and stock are managed only through the AuthBot Telegram admin panel,
             # not through authenticated app REST sessions, even for the admin account.
@@ -81,7 +87,8 @@ def test_gifts_are_hidden_until_admin_sets_price_and_supply(env) -> None:
             await bot_module.set_telegram_gift_values("g1", price=40, supply=2)
 
             shown = (await client.get("/api/telegram/gifts", headers=headers(101))).json()
-            assert [g["id"] for g in shown["gifts"]] == ["g1"]
+            # Telegram's catalogue keeps its order; our own gift is listed after it.
+            assert [g["id"] for g in shown["gifts"]] == ["g1", waysgram_gifts.GIFT_ID]
             assert shown["gifts"][0]["price_stars"] == 40 and shown["gifts"][0]["remaining"] == 2
             assert (await client.patch("/api/admin/telegram-gifts/g1", headers=headers(ADMIN), json={"price_stars": -1})).status_code in (404, 405)
 
@@ -186,7 +193,7 @@ def test_buying_a_gift_charges_stars_and_reduces_stock(env) -> None:
             assert sold_out.status_code == 409
             assert (await client.get("/api/me", headers=headers(101))).json()["stars"] == 5000 - 80
             gone = (await client.get("/api/telegram/gifts", headers=headers(101))).json()
-            assert gone["count"] == 0
+            assert [gift["id"] for gift in gone["gifts"]] == [waysgram_gifts.GIFT_ID]
 
     run(scenario())
 
@@ -390,6 +397,7 @@ def test_removed_telegram_gift_cannot_be_purchased(env, monkeypatch: pytest.Monk
             inventory = (await client.get("/api/me/gifts", headers=headers(101))).json()["gifts"]
             assert len(inventory) == 1 and inventory[0]["telegram_gift_id"] == "g1"
             archived_admin_rows = await bot_module.telegram_gift_rows()
+            # Own gifts have their own AuthBot screen, so the Telegram list stays Telegram's.
             assert {str(row["id"]) for row in archived_admin_rows} == {"g1", "g2"}
 
         connection = db_split.sqlite_connect(path)
@@ -570,6 +578,18 @@ def test_gift_market_listing_purchase_and_cancellation(env) -> None:
             assert market.json()["listings"][0]["listing_id"] == listing_id
             assert market.json()["listings"][0]["price_grams"] == 7
             assert market.json()["listings"][0]["attributes"]["collectible_traits"] == traits
+            catalog = await client.get("/api/gift-market/catalog", headers=headers(102))
+            assert catalog.status_code == 200, catalog.text
+            collection = next(item for item in catalog.json()["collections"]
+                              if item["name"] == listed.json()["gift_name"])
+            assert collection["count"] == 1
+            model_name = traits["model"]["name"]
+            filtered_market = await client.get(
+                "/api/gift-market", headers=headers(102),
+                params={"collection": collection["name"], "model": model_name},
+            )
+            assert filtered_market.status_code == 200, filtered_market.text
+            assert filtered_market.json()["count"] == 1, (collection, model_name, filtered_market.json(), catalog.json())
 
             purchased = await client.post(
                 f"/api/gift-market/{listing_id}/purchase",
@@ -577,26 +597,46 @@ def test_gift_market_listing_purchase_and_cancellation(env) -> None:
             )
             assert purchased.status_code == 201
             assert purchased.json()["grams_balance"] == 8
+            seller_messages = (await client.get(
+                f"/api/messages?with={fragment_deposit.FRAGMENT_TELEGRAM_ID}",
+                headers=headers(101),
+            )).json()["messages"]
+            assert not any(message.get("fragment_star_transfer_stars") for message in seller_messages)
             assert (await client.get("/api/me", headers=headers(101))).json()["grams"] == 22
             assert (await client.get("/api/me", headers=headers(102))).json()["grams"] == 8
             buyer_inventory = (await client.get("/api/me/gifts", headers=headers(102))).json()["gifts"]
+            assert buyer_inventory == []
+            fragment_inventory = (await client.get(
+                "/api/me/fragment/gifts", headers=headers(102)
+            )).json()["gifts"]
+            assert len(fragment_inventory) == 1 and fragment_inventory[0]["serial_number"] == serial
+            assert fragment_inventory[0]["attributes"]["collectible_traits"] == traits
+            assert fragment_inventory[0]["fragment_inventory"] is True
+            purchase_chat = (await client.get(
+                f"/api/messages?with={fragment_deposit.FRAGMENT_TELEGRAM_ID}", headers=headers(102)
+            )).json()["messages"]
+            assert any("добавлен в инвентарь Fragment" in message["body"]
+                       for message in purchase_chat)
+            withdrawn = await client.post(
+                f"/api/me/fragment/gifts/{serial}/withdraw",
+                headers={**headers(102), "Idempotency-Key": "market-gift-withdraw-0001"},
+                json={},
+            )
+            assert withdrawn.status_code == 201, withdrawn.text
+            buyer_inventory = (await client.get("/api/me/gifts", headers=headers(102))).json()["gifts"]
             assert len(buyer_inventory) == 1 and buyer_inventory[0]["serial_number"] == serial
             assert buyer_inventory[0]["attributes"]["collectible_traits"] == traits
-            saved = await client.get("/api/messages?with=102", headers=headers(102))
-            purchase_receipts = [
-                message for message in saved.json()["messages"]
-                if message.get("gift_serial_number") == serial
-            ]
-            assert len(purchase_receipts) == 1
-            assert purchase_receipts[0]["gift_name"] == buyer_inventory[0]["gift_name"]
-            assert purchase_receipts[0]["gift_telegram_gift_id"] == "g1"
-            assert purchase_receipts[0]["body"] == ""
-            assert purchase_receipts[0]["gift_upgrade_level"] == 1
-            market_attributes = purchase_receipts[0]["gift_attributes"]
-            assert market_attributes["event_type"] == "purchase"
-            assert market_attributes["native_action"] == "star_gift_purchase"
-            assert market_attributes["price_grams"] == 7
-            assert market_attributes["currency"] == "grams"
+            transfer_chat = (await client.get(
+                f"/api/messages?with={fragment_deposit.FRAGMENT_TELEGRAM_ID}", headers=headers(102)
+            )).json()["messages"]
+            gift_cards = [message for message in transfer_chat
+                          if message.get("gift_serial_number") == serial]
+            assert len(gift_cards) == 1
+            assert gift_cards[0]["gift_name"] == buyer_inventory[0]["gift_name"]
+            assert gift_cards[0]["gift_telegram_gift_id"] == "g1"
+            assert gift_cards[0]["body"] == "Подарок WaysGram"
+            assert gift_cards[0]["gift_upgrade_level"] == 1
+            market_attributes = gift_cards[0]["gift_attributes"]
             assert market_attributes["upgrade_level"] == 1
             assert market_attributes["collectible_traits"] == traits
             assert (await client.get("/api/gift-market", headers=headers(101))).json()["count"] == 0
@@ -606,6 +646,168 @@ def test_gift_market_listing_purchase_and_cancellation(env) -> None:
                 f"/api/gift-market/{listing_id}/purchase",
                 headers=headers(102),
             )).status_code == 404
+
+    run(scenario())
+
+
+def test_market_resolves_backdrop_palette_from_the_named_trait(env) -> None:
+    path, app = env
+    gift_id = "5936013938331222567"  # Plush Pepe
+    serial = "WG-000000000501"
+    attributes = {
+        "collectible_traits": {
+            "model": {"name": "WaysGram", "document_id": 9_007_199_254_741_099_123},
+            "pattern": {"name": "Diamonds", "document_id": 8_888_888_888_888_888_888},
+            # Simulate a stale preview row: the visible label is Black but the saved colors
+            # belong to a different backdrop. The named, gift-specific pool must win.
+            "backdrop": {
+                "name": "Black", "center_color": 0xF02080, "edge_color": 0xA01060,
+                "pattern_color": 0xCC0099, "text_color": 0xFFFFFF,
+            },
+        },
+    }
+    with db_split.sqlite_connect(path) as db:
+        db.execute(
+            """INSERT INTO user_gifts
+               (serial_number,gift_name,owner_telegram_id,acquired_at,telegram_gift_id,
+                gift_emoji,upgrade_level,attributes_json)
+               VALUES(?,?,101,?,?,?,?,?)""",
+            (serial, "Plush Pepe", int(time.time()), gift_id, "🐸", 1,
+             json.dumps(attributes, ensure_ascii=False)),
+        )
+        db.execute(
+            """INSERT INTO gift_market_listings
+               (serial_number,seller_telegram_id,price_grams,price_stars,currency,status,created_at)
+               VALUES(?,101,50000,0,'grams','active',?)""",
+            (serial, int(time.time())),
+        )
+        db.commit()
+
+    async def scenario() -> None:
+        async with await client_for(app) as client:
+            response = await client.get("/api/gift-market", headers=headers(102))
+            assert response.status_code == 200, response.text
+            item = next(row for row in response.json()["listings"]
+                        if row["serial_number"] == serial)
+            traits = item["attributes"]["collectible_traits"]
+            assert traits["backdrop"] == {
+                "name": "Black", "center_color": 0x363738, "edge_color": 0x0E0F0F,
+                "pattern_color": 0x6C6868, "text_color": 0x8C8F91,
+            }
+            assert item["model_document_id"] == "9007199254741099123"
+            assert item["pattern_document_id"] == "8888888888888888888"
+
+    run(scenario())
+    with db_split.sqlite_connect(path) as db:
+        stored = json.loads(db.execute(
+            "SELECT attributes_json FROM user_gifts WHERE serial_number=?", (serial,)
+        ).fetchone()[0])
+    assert stored["collectible_traits"]["backdrop"]["center_color"] == 0xF02080
+
+    legacy = {"collectible_traits": {"backdrop": "Black"}}
+    assert messenger_api._enrich_collectible_backdrop_colors(legacy, gift_id, "Plush Pepe")
+    assert legacy["collectible_traits"]["backdrop"]["pattern_color"] == 0x6C6868
+
+
+def test_legacy_gram_gift_listing_migrates_to_currency_schema(env) -> None:
+    path, _app = env
+
+    async def scenario() -> None:
+        async with aiosqlite.connect(path) as db:
+            await db.execute("DROP INDEX IF EXISTS messenger.idx_gift_market_status_time")
+            await db.execute("DROP INDEX IF EXISTS messenger.idx_gift_market_seller")
+            await db.execute("DROP TABLE messenger.gift_market_listings")
+            await db.execute("""CREATE TABLE messenger.gift_market_listings (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                serial_number TEXT NOT NULL UNIQUE,
+                seller_telegram_id INTEGER NOT NULL,
+                price_grams INTEGER NOT NULL CHECK(price_grams > 0),
+                status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active','sold','cancelled')),
+                buyer_telegram_id INTEGER,
+                created_at INTEGER NOT NULL,
+                sold_at INTEGER
+            )""")
+            await db.execute(
+                "INSERT INTO gift_market_listings(serial_number,seller_telegram_id,price_grams,status,created_at) "
+                "VALUES('WG-LEGACY0001',101,77,'active',123)"
+            )
+            await db.commit()
+
+        await init_messenger_storage(path)
+
+        async with aiosqlite.connect(path) as db:
+            cur = await db.execute(
+                "SELECT price_grams,price_stars,currency,status FROM gift_market_listings "
+                "WHERE serial_number='WG-LEGACY0001'"
+            )
+            assert tuple(await cur.fetchone()) == (77, 0, "grams", "active")
+
+    run(scenario())
+
+
+def test_gift_market_stars_sale_credits_seller_and_sends_matching_native_card(env) -> None:
+    path, app = env
+
+    async def scenario() -> None:
+        await bot_module.set_telegram_gift_values("g1", price=20, supply=1)
+        async with aiosqlite.connect(path) as db:
+            await db.execute("UPDATE accounts SET stars=1000,grams=0 WHERE telegram_id IN (101,102)")
+            await db.commit()
+        async with await client_for(app) as client:
+            gift = await client.post("/api/telegram/gifts/g1/purchase", headers=headers(101), json={})
+            assert gift.status_code == 201, gift.text
+            serial = gift.json()["gift"]["serial_number"]
+            listed = await client.post(
+                f"/api/gifts/{serial}/list", headers=headers(101),
+                json={"currency": "stars", "price": 17},
+            )
+            assert listed.status_code == 201, listed.text
+            assert listed.json()["price_stars"] == 17
+            assert listed.json()["price_grams"] == 0
+            assert listed.json()["currency"] == "stars"
+
+            market = await client.get("/api/gift-market", headers=headers(102))
+            listing = market.json()["listings"][0]
+            assert listing["currency"] == "stars"
+            assert listing["price"] == 17 and listing["price_stars"] == 17
+
+            purchase = await client.post(
+                f"/api/gift-market/{listed.json()['listing_id']}/purchase",
+                headers=headers(102),
+            )
+            assert purchase.status_code == 201, purchase.text
+            assert purchase.json()["currency"] == "stars"
+            assert purchase.json()["price_stars"] == 17
+            assert purchase.json()["stars_balance"] == 983
+            assert (await client.get("/api/me", headers=headers(101))).json()["stars"] == 997
+            assert (await client.get("/api/me", headers=headers(102))).json()["stars"] == 983
+            assert (await client.get("/api/me", headers=headers(101))).json()["grams"] == 0
+            assert (await client.get("/api/me", headers=headers(102))).json()["grams"] == 0
+            fragment_inventory = (await client.get(
+                "/api/me/fragment/gifts", headers=headers(102)
+            )).json()["gifts"]
+            assert fragment_inventory[0]["is_listed"] == 0
+
+            seller_messages = (await client.get(
+                f"/api/messages?with={fragment_deposit.FRAGMENT_TELEGRAM_ID}",
+                headers=headers(101),
+            )).json()["messages"]
+            transfer = next(message for message in seller_messages
+                            if message.get("fragment_star_transfer_stars"))
+            assert transfer["fragment_star_transfer_stars"] == 17
+            assert "подарка" in transfer["body"] and "17" in transfer["body"]
+
+            withdrawn = await client.post(
+                f"/api/me/fragment/gifts/{serial}/withdraw",
+                headers={**headers(102), "Idempotency-Key": "star-market-withdraw-0001"},
+                json={},
+            )
+            assert withdrawn.status_code == 201, withdrawn.text
+            buyer_messages = (await client.get(
+                f"/api/messages?with={fragment_deposit.FRAGMENT_TELEGRAM_ID}",
+                headers=headers(102),
+            )).json()["messages"]
+            assert not any(message.get("fragment_star_transfer_stars") for message in buyer_messages)
 
     run(scenario())
 
@@ -2842,6 +3044,7 @@ def test_heart_locket_offline_models_match_exact_traits_without_changing_databas
             by_serial = lambda i: items[f'WG-{i:012X}']['attributes']['collectible_traits']['model']
             model = by_serial(0)
             assert model['name'] == 'Mirror' and model['document_id'] < 0
+            assert items['WG-000000000000']['model_document_id'] == str(model['document_id'])
             assert by_serial(1)['name'] == 'Queen Bee' and by_serial(1)['document_id'] < 0
             assert by_serial(2)['document_id'] == 123456
             assert 'document_id' not in by_serial(3)

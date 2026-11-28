@@ -65,7 +65,8 @@ public class WaysGramPoller {
         WaysGramTyping.stop(account);
     }
 
-    static boolean isRunning(int account) {
+    /** Пуллер уже доставляет сообщения этого аккаунта: push-плашка не нужна. */
+    public static boolean isRunning(int account) {
         return flag(account).get();
     }
 
@@ -258,7 +259,7 @@ public class WaysGramPoller {
                 JSONObject details = WaysGramApi.get(account, "/api/groups/" + id);
                 snapshot.addUsers(details.optJSONArray("members"));
                 ArrayList<TLRPC.Chat> chats = new ArrayList<>();
-                chats.add(WaysGramChats.toChat(details, selfId));
+                chats.add(WaysGramChats.toMegagroup(account, details, selfId));
                 deliver(account, snapshot.users, chats, fresh);
             }
         }
@@ -317,7 +318,7 @@ public class WaysGramPoller {
             }
             if (!fresh.isEmpty()) {
                 ArrayList<TLRPC.Chat> chats = new ArrayList<>();
-                chats.add(WaysGramChats.toChannel(c, selfId, true));
+                chats.add(WaysGramChats.toChannel(account, c, selfId, true));
                 deliver(account, new ArrayList<>(), chats, fresh);
             }
         }
@@ -458,6 +459,11 @@ public class WaysGramPoller {
             }
             return;
         }
+        if (kind.equals("chat_changed")) {
+            // Права, аватар, название или состав чата изменились на другом устройстве.
+            WaysGramChats.chatChanged(account, scope, e.optLong("chat_id"));
+            return;
+        }
         if (kind.equals("pin") || kind.equals("unpin") || kind.equals("pin_local") || kind.equals("unpin_local")) {
             long dialogId;
             if (scope.equals("dm")) {
@@ -467,7 +473,7 @@ public class WaysGramPoller {
                 dialogId = -e.optLong("chat_id");
             } else if (scope.equals("channel")) {
                 long id = e.optLong("chat_id");
-                if (!joined.contains(id) && WaysGramChats.cachedChat(WaysGramChats.channelTg(id)) == null) return;
+                if (!joined.contains(id) && WaysGramChats.cachedChat(account, WaysGramChats.channelTg(id)) == null) return;
                 dialogId = -WaysGramChats.channelTg(id);
             } else return;
             if (dialogId == 0) return;
@@ -509,14 +515,15 @@ public class WaysGramPoller {
                 TLRPC.Message message = WaysGramMessages.fetchGroup(account, groupId, messageId, selfId);
                 if (message != null) out.add(WaysGramCards.update(message));
             } else if (kind.equals("delete")) {
-                TL_update.TL_updateDeleteMessages u = new TL_update.TL_updateDeleteMessages();
+                TL_update.TL_updateDeleteChannelMessages u = new TL_update.TL_updateDeleteChannelMessages();
+                u.channel_id = groupId;
                 u.messages.add(WaysGramChats.clientGroupId(messageId));
                 out.add(u);
             }
         } else if (scope.equals("channel")) {
             long serverId = e.optLong("chat_id");
             if (!joined.contains(serverId) && !(kind.equals("reaction")
-                    && WaysGramChats.cachedChat(WaysGramChats.channelTg(serverId)) != null)) {
+                    && WaysGramChats.cachedChat(account, WaysGramChats.channelTg(serverId)) != null)) {
                 return;
             }
             if (kind.equals("reaction")) {

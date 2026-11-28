@@ -43,6 +43,38 @@ def test_group_color_and_profile_color_are_stored_and_validated(env) -> None:
     run(scenario())
 
 
+def test_group_emoji_status_and_sticker_sets_round_trip(env) -> None:
+    _, app = env
+
+    async def scenario() -> None:
+        async with await client_for(app) as client:
+            owner = headers(101)
+            group = await client.post('/api/groups', headers=owner, json={'title': 'Group style'})
+            gid = group.json()['id']
+            root = f'/api/groups/{gid}'
+            settings = root + '/settings'
+            applied = await client.put(settings, headers=owner, json={
+                'emoji_status_id': 123456789,
+                'sticker_set_id': 234567890,
+                'sticker_set_access_hash': -345678901,
+                'emoji_set_id': 456789012,
+                'emoji_set_access_hash': 567890123,
+            })
+            assert applied.status_code == 200, applied.text
+            profile = await client.get(root, headers=owner)
+            assert profile.status_code == 200, profile.text
+            assert profile.json()['emoji_status_id'] == 123456789
+            assert profile.json()['sticker_set_id'] == 234567890
+            assert profile.json()['sticker_set_access_hash'] == -345678901
+            assert profile.json()['emoji_set_id'] == 456789012
+            assert profile.json()['emoji_set_access_hash'] == 567890123
+            for broken in ({'emoji_status_id': -1}, {'sticker_set_id': True},
+                           {'emoji_set_access_hash': 2**63}):
+                assert (await client.put(settings, headers=owner, json=broken)).status_code == 400
+
+    run(scenario())
+
+
 def test_channel_color_is_still_channel_scoped(env) -> None:
     path, app = env
 

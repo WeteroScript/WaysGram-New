@@ -58,11 +58,12 @@ class ChatThemesChecks(unittest.TestCase):
         self.assertIn("setChatThemeEmoticon(TLRPC.ChatTheme.ofEmoticon(emoticon))", chat)
 
     def test_chat_stars_balance_is_never_displayed(self):
-        # В клиенте нет ни поля, ни экрана с балансом звёзд канала: он только копится.
-        wg = [name for name in self.names
-              if name.endswith(".java") and ("/WaysGram" in name or "/waysgram/" in name or "/tgnet/WaysGram" in name)]
-        self.assertTrue(wg)
-        for name in wg:
+        # Backend adapters may name the ledger in comments or API routes; only UI code
+        # must remain free of a chat-owned balance display.
+        ui = [name for name in self.names
+              if name.endswith(".java") and "/TMessagesProj/src/main/java/org/telegram/ui/" in name]
+        self.assertTrue(ui)
+        for name in ui:
             text = self.archive.read(name).decode("utf-8", "ignore")
             self.assertNotIn("chat_stars", text, name)
             self.assertNotIn("chatStars", text, name)

@@ -25,7 +25,7 @@ public class WaysGramSharedMedia {
         Target(TLRPC.InputPeer peer, long self) throws WaysGramApi.ApiException {
             if (peer instanceof TLRPC.TL_inputPeerSelf) { scope = "dm"; id = self; }
             else if (peer instanceof TLRPC.TL_inputPeerUser) { scope = "dm"; id = peer.user_id; }
-            else if (peer instanceof TLRPC.TL_inputPeerChat) { scope = "group"; id = peer.chat_id; group = true; }
+            else if (WaysGramChats.isGroup(peer)) { scope = "group"; id = WaysGramChats.groupPeerId(peer); group = true; }
             else if (peer instanceof TLRPC.TL_inputPeerChannel) { scope = "channel"; id = WaysGramChats.channelServer(peer.channel_id); channel = true; }
             if (id <= 0 || ("dm".equals(scope) && WaysGramBotFather.is(id)))
                 throw new WaysGramApi.ApiException(400, "MEDIA_PEER_NOT_SUPPORTED");
@@ -77,13 +77,13 @@ public class WaysGramSharedMedia {
         if (out.count < 0) throw new WaysGramApi.ApiException(502, "MEDIA_PAGE_INVALID");
         if (target.group) {
             JSONObject group = get(account, "/api/groups/" + target.id, token);
-            out.chats.add(WaysGramChats.toChat(group, self));
+            out.chats.add(WaysGramChats.toMegagroup(account, group, self));
             WaysGramChats.Snapshot snapshot = new WaysGramChats.Snapshot();
             snapshot.addUsers(group.optJSONArray("members"));
             out.users.addAll(snapshot.users);
         } else if (target.channel) {
             JSONObject channel = get(account, "/api/channels/" + target.id, token);
-            out.chats.add(WaysGramChats.toChannel(channel, self, WaysGramChats.joinedChannels(account).contains(target.id)));
+            out.chats.add(WaysGramChats.toChannel(account, channel, self, WaysGramChats.joinedChannels(account).contains(target.id)));
         } else {
             out.users.add(WaysGramMapper.toSelfUser(get(account, "/api/me", token), null));
             if (target.id != self) out.users.add(WaysGramMapper.toUser(get(account, "/api/users/" + target.id, token)));

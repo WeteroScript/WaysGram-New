@@ -10,7 +10,7 @@ drawn in addition to them.
 | Upgrade price | 25 Stars (same as every WaysGram upgrade) |
 | Model name | `WaysGram` |
 | Drop chance | **0.05 %** — one upgrade in 2000 (`one_in: 2000`) |
-| Artwork | `authbot/assets/gift_models/5936013938331222567/waysgram.tgs` |
+| Artwork | `authbot/assets/gift_models/5936013938331222567/waysgram.webm` (rendered from the official Plush Pepe TGS) |
 | Document id | `-5936013938331222567` (synthetic, local to WaysGram only) |
 | Number in UI | `#???` instead of the real `#913` |
 
@@ -39,23 +39,24 @@ The motion is not invented — it is the motion of the **original Plush Pepe gif
 | Pivot | below the frame (ground pivot), like the original body layer |
 | Easing | the original `i`/`o` bezier curves, verbatim |
 
-Only the artwork is ours: a transparent PNG inset to 80 % of the 512 canvas, so the ±5° sway
-stays inside the frame instead of clipping. The generated `.tgs` is a gzipped Lottie
-composition with that PNG layer — no glow, sparkles or other invented effects.
+Only the artwork is ours: the heart is repainted WaysGram red, the `WaysGram` wordmark is
+painted onto it and follows the original heart layer, and a real black outer contour is added
+around the silhouette (the earlier model had lost it). The frames are rendered from the real
+TGS with `rlottie`, so no glow, hearts, sparkles or other invented animation effects remain.
+Because the art is raster, the result is WebM with alpha, not TGS: the app's Lottie renderer
+draws vector frames only.
 
-Reproduce it with `scripts/build_waysgram_gift_model.py`:
+Reproduce it with `scripts/build_waysgram_gift_model_webm.py`:
 
 ```bash
-python3 scripts/build_waysgram_gift_model.py \
-    --original /path/to/plush_pepe.tgs \
-    --art authbot/assets/gift_models/5936013938331222567/preview.png
+python3 scripts/build_waysgram_gift_model_webm.py \
+    --raw /path/to/WaysGram-Android/TMessagesProj/src/main/res/raw/waysgram_model.webm
 ```
 
 The file is served by `GET /api/telegram/gifts/{gift_id}/attributes/{document_id}` from the
 pinned pack, exactly like the Heart Locket fallbacks. `gift_model_fallbacks` loads every
 `assets/gift_models/<gift_id>/` directory instead of only the Heart Locket one, so a new pack
-needs just a `manifest.json` and its `.tgs` files (`preview.png` is the raw artwork, not the
-sticker).
+needs just a `manifest.json` and its sticker file (`preview.png` is the poster, not the sticker).
 
 ## Artwork bundled in the app
 
@@ -65,7 +66,7 @@ only draw it after the artwork has been downloaded into the shared sticker folde
 `upload.getFile`. Until that first download landed (or after the app data was cleared) the gift
 cell stayed empty — the model had nothing to draw.
 
-The same animation is therefore shipped inside the APK as `res/raw/waysgram_model.tgs` and
+The same animation is therefore shipped inside the APK as `res/raw/waysgram_model.webm` and
 `WaysGramBundledArtwork.install()` copies it into the sticker folder once per launch (it is
 called from `WaysGramGiftDocuments.stickerFile(...)`, the single accessor used by attributes,
 gift cards and the transport). The model then plays through the ordinary media stack, offline,

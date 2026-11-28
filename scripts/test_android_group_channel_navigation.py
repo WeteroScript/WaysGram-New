@@ -49,14 +49,40 @@ class GroupChannelNavigationChecks(unittest.TestCase):
         self.assertNotIn('String username = c.optString("username", "");', chats)
         self.assertNotIn('String username = g.optString("username", "");', chats)
 
-    def test_discussion_row_does_not_duplicate_and_opens_waysgram_linking(self):
+    def test_linked_chat_row_navigates_from_both_sides(self):
+        # Канал открывает группу обсуждений, а группа показывает/открывает свой канал.
         edit = self.source("ui/ChatEditActivity.java")
         self.assertNotIn("TextCell discussionCell = new TextCell(context);", edit)
         self.assertNotIn("TextCell inboxCell = new TextCell(context);", edit)
+        self.assertIn("WaysGramDiscussions.openGroup(this, currentAccount, chatId, info.linked_chat_id)", edit)
+        self.assertIn("WaysGramDiscussions.openChannel(this, info.linked_chat_id)", edit)
+        self.assertIn("WaysGramDiscussions.groupSettings(this, currentAccount, chatId);", edit)
+        self.assertIn("!isChannel && info.linked_chat_id == 0 && !currentChat.creator", edit)
+        self.assertIn("if (isChannel) {", edit)
+        self.assertIn("info != null && info.linked_chat_id != 0", edit)
+        # Управление привязкой канала осталось по долгому нажатию; группа не передаёт
+        # свой id в channel discussion endpoint.
+        self.assertIn("linkedCell.setOnLongClickListener", edit)
+        self.assertIn("WaysGramTransport.ENABLED && isChannel", edit)
         self.assertIn("WaysGramDiscussions.settings(this, currentAccount, chatId);", edit)
-        self.assertIn("if (org.telegram.tgnet.WaysGramTransport.ENABLED) {", edit)
-        # Нативный экран привязки остаётся доступен для сборок без WaysGram-транспорта.
         self.assertIn("ChatLinkActivity fragment = new ChatLinkActivity(chatId);", edit)
+
+    def test_group_full_profile_exposes_its_linked_channel_and_group_type(self):
+        chats = self.source("tgnet/WaysGramChats.java")
+        full = chats.split("public static TLRPC.TL_messages_chatFull fullChat(", 1)[1].split(
+            "private static void addMember", 1)[0]
+        self.assertIn("full.can_set_username = ownerId == selfId;", full)
+        self.assertIn("full.linked_chat_id = channelTg(linkedChannelId);", full)
+        self.assertIn("out.chats.add(toChannel(account, linkedChannel", full)
+        discussions = self.source("ui/WaysGramDiscussions.java")
+        self.assertIn("static void openChannel(BaseFragment fragment, long channel)", discussions)
+
+    def test_linked_group_candidates_follow_server_member_permission(self):
+        chats = self.source("tgnet/WaysGramChats.java")
+        candidates = chats.split("public static TLRPC.TL_messages_chats discussionGroups(", 1)[1].split(
+            "public static TLObject setDiscussionGroup(", 1)[0]
+        self.assertIn('(group.optInt("default_send_restrictions") & 32768) == 0', candidates)
+        self.assertIn('(group.optInt("admin_rights") & 1) != 0', candidates)
 
     def test_username_value_falls_back_to_chat_title(self):
         edit = self.source("ui/ChatEditActivity.java")
@@ -65,7 +91,7 @@ class GroupChannelNavigationChecks(unittest.TestCase):
 
     def test_stories_work_for_groups_and_channels(self):
         stories = self.source("tgnet/WaysGramStories.java")
-        self.assertIn("private static boolean isStoryPeer(TLRPC.InputPeer peer) {", stories)
+        self.assertIn("private static boolean isChat(TLRPC.InputPeer peer) {", stories)
         self.assertIn("peer.channel_id > 0;", stories)
         self.assertIn('return "/api/groups/" + peerId + "/stories";', stories)
         self.assertIn('return "/api/channels/" + WaysGramChats.channelServer(peerId) + "/stories";', stories)

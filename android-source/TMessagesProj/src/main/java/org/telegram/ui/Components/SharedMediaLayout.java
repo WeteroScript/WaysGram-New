@@ -6874,6 +6874,7 @@ public class SharedMediaLayout extends FrameLayout implements NotificationCenter
     }
 
     private long giftsLastHash;
+    private long waysGramGiftsLastHash;
     private boolean wasReordering;
     private int firstTab = -1;
     public void loadWaysGramProfileCover() {
@@ -6890,7 +6891,7 @@ public class SharedMediaLayout extends FrameLayout implements NotificationCenter
             waysGramGiftsController = new WaysGramProfileGiftsController(
                     getContext(), profileActivity, waysGramGiftsContainer,
                     waysGramProfileOwnerId());
-            waysGramGiftsController.setInventoryVisibilityChanged(() -> updateTabs(true));
+            waysGramGiftsController.setInventoryUpdatedListener(() -> updateTabs(true));
             waysGramGiftsContainer.setWaysGramGiftUpdatedListener(waysGramGiftsController::refresh);
             waysGramGiftsContainer.setInventoryBottomInset(pagesPaddingBottom);
             if (lastVisibleHeight > 0) waysGramGiftsContainer.setVisibleHeight(lastVisibleHeight);
@@ -6940,6 +6941,9 @@ public class SharedMediaLayout extends FrameLayout implements NotificationCenter
         boolean hasPhotoVideoTab = !isStoriesView() && (hasMedia[0] > 0
                 || waysGramProfileOwner > 0 && org.telegram.tgnet.WaysGramTransport.ENABLED);
         if (hasWaysGramGifts != scrollSlidingTextTabStrip.hasTab(TAB_WAYSGRAM_GIFTS)) {
+            changed++;
+        } else if (hasWaysGramGifts && waysGramGiftsContainer != null
+                && waysGramGiftsLastHash != waysGramGiftsContainer.getLastEmojisHash()) {
             changed++;
         }
         if (hasGifts != scrollSlidingTextTabStrip.hasTab(TAB_GIFTS)) {
@@ -7108,8 +7112,16 @@ public class SharedMediaLayout extends FrameLayout implements NotificationCenter
                 }
             }
             if (hasWaysGramGifts) {
-                tabs.add(new Pair(TAB_WAYSGRAM_GIFTS, getString(waysGramProfileOwner == profileActivity.getUserConfig().getClientUserId()
-                        ? R.string.WaysGramMyGifts : R.string.WaysGramGifts)));
+                final int titleRes = waysGramProfileOwner == profileActivity.getUserConfig().getClientUserId()
+                        ? R.string.WaysGramMyGifts : R.string.WaysGramGifts;
+                final CharSequence previews = waysGramGiftsContainer != null
+                        ? waysGramGiftsContainer.getLastEmojis(null)
+                        : "";
+                tabs.add(new Pair(TAB_WAYSGRAM_GIFTS,
+                        TextUtils.concat(getString(titleRes), previews)));
+                waysGramGiftsLastHash = waysGramGiftsContainer != null
+                        ? waysGramGiftsContainer.getLastEmojisHash()
+                        : 0;
             }
             if (scrollSlidingTextTabStrip.isReordering()) {
                 final Utilities.CallbackReturn<Integer, Boolean> has = id -> {

@@ -48,7 +48,7 @@ class GroupSendAsSourceChecks(unittest.TestCase):
         self.assertIn('TLRPC.TL_sendAsPeer', chats)
         self.assertIn('TLRPC.TL_peerChat', chats)
         self.assertIn('TLRPC.TL_peerChannel', chats)
-        self.assertIn('toChannel(item, selfId, true)', chats)
+        self.assertIn('toChannel(account, item, selfId, true)', chats)
 
     def test_selected_identity_reaches_group_send(self):
         transport = self.source('tgnet/WaysGramTransport.java')

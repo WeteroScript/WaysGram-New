@@ -5,23 +5,73 @@ import org.json.JSONArray;
 import org.json.JSONException;
 
 public final class WaysGramInvites {
+    /** Код приглашения без известного типа: {@code wg/invites/<code>} из ссылки t.wg/<code>. */
+    private static final java.util.regex.Pattern UNKNOWN_KIND = java.util.regex.Pattern.compile(
+            "wg/invites/([A-Za-z0-9_-]{20,128})");
+
     private static String path(String hash) throws WaysGramApi.ApiException {
         if (hash != null && hash.matches("wg/(groups|channels)/[A-Za-z0-9_-]{20,128}")) {
             String[] parts = hash.split("/");
             return "/api/" + parts[1] + "/invites/" + parts[2];
         }
+        java.util.regex.Matcher unified = UNKNOWN_KIND.matcher(hash == null ? "" : hash);
+        if (unified.matches()) {
+            // Тип приглашения клиенту неизвестен: короткая ссылка t.wg/<код> не говорит,
+            // группа это или канал. Сервер отвечает по двум отдельным путям, поэтому
+            // оба варианта пробуются по очереди.
+            return "/api/invites/" + unified.group(1);
+        }
         throw new WaysGramApi.ApiException(400, "INVITE_HASH_INVALID");
+    }
+
+    /** Помечает ответ типом приглашения; JSONException тут не бывает на практике. */
+    private static void markScope(JSONObject json, String scope) {
+        try {
+            json.put("__scope", scope);
+        } catch (JSONException ignored) {
+            // optString("__scope") тогда вернёт пустую строку и сработает запасной вариант.
+        }
+    }
+
+    private static boolean unknownKind(String path) {
+        return path.startsWith("/api/invites/");
+    }
+
+    /** Приглашение по неизвестному типу: сначала группа, потом канал. */
+    private static JSONObject resolveUnknown(int account, String path, boolean join) throws WaysGramApi.ApiException {
+        String token = path.substring(path.lastIndexOf('/') + 1);
+        WaysGramApi.ApiException first = null;
+        for (String scope : new String[]{"groups", "channels"}) {
+            try {
+                if (join) {
+                    JSONObject body = new JSONObject();
+                    try { body.put("invite_token", token); }
+                    catch (JSONException e) { throw new WaysGramApi.ApiException(400, "INVITE_HASH_INVALID"); }
+                    JSONObject joined = WaysGramApi.post(account, "/api/" + scope + "/join", body);
+                    markScope(joined, scope);
+                    return joined;
+                }
+                JSONObject preview = WaysGramApi.get(account, "/api/" + scope + "/invites/" + token);
+                markScope(preview, scope);
+                return preview;
+            } catch (WaysGramApi.ApiException e) {
+                if (first == null) first = e;
+            }
+        }
+        throw first == null ? new WaysGramApi.ApiException(400, "INVITE_HASH_INVALID") : first;
     }
 
     static TLObject preview(int account, String hash) throws WaysGramApi.ApiException {
         String path = path(hash);
+        boolean unknown = unknownKind(path);
         JSONObject json;
         try {
-            json = WaysGramApi.get(account, path);
+            json = unknown ? resolveUnknown(account, path, false) : WaysGramApi.get(account, path);
         } catch (WaysGramApi.ApiException e) {
             if (e.status == 404 || e.status == 410) throw new WaysGramApi.ApiException(400, "INVITE_HASH_EXPIRED");
             throw e;
         }
+        if (unknown) path = "/api/" + json.optString("__scope", "groups") + "/invites/";
         TLRPC.TL_chatInvite invite = new TLRPC.TL_chatInvite();
         invite.title = json.optString("title");
         invite.participants_count = json.optInt("member_count");
@@ -33,14 +83,22 @@ public final class WaysGramInvites {
 
     static TLObject join(int account, String hash, long selfId) throws WaysGramApi.ApiException {
         String path = path(hash);
-        boolean channel = path.startsWith("/api/channels/");
+        boolean unknown = unknownKind(path);
+        boolean channel = !unknown && path.startsWith("/api/channels/");
         String base = channel ? "/api/channels" : "/api/groups";
-        JSONObject body = new JSONObject();
-        try { body.put("invite_token", path.substring(path.lastIndexOf('/') + 1)); }
-        catch (JSONException e) { throw new WaysGramApi.ApiException(400, "INVITE_HASH_INVALID"); }
         JSONObject joined;
-        try { joined = WaysGramApi.post(account, base + "/join", body); }
-        catch (WaysGramApi.ApiException e) {
+        try {
+            if (unknown) {
+                joined = resolveUnknown(account, path, true);
+                channel = "channels".equals(joined.optString("__scope"));
+                base = channel ? "/api/channels" : "/api/groups";
+            } else {
+                JSONObject body = new JSONObject();
+                try { body.put("invite_token", path.substring(path.lastIndexOf('/') + 1)); }
+                catch (JSONException e) { throw new WaysGramApi.ApiException(400, "INVITE_HASH_INVALID"); }
+                joined = WaysGramApi.post(account, base + "/join", body);
+            }
+        } catch (WaysGramApi.ApiException e) {
             if (e.status == 404 || e.status == 410) throw new WaysGramApi.ApiException(400, "INVITE_HASH_EXPIRED");
             throw e;
         }
@@ -51,9 +109,9 @@ public final class WaysGramInvites {
         updates.date = (int) (System.currentTimeMillis() / 1000);
         if (channel) {
             WaysGramChats.setJoined(account, id, true);
-            updates.chats.add(WaysGramChats.toChannel(chat, selfId, true));
+            updates.chats.add(WaysGramChats.toChannel(account, chat, selfId, true));
         } else {
-            updates.chats.add(WaysGramChats.toChat(chat, selfId));
+            updates.chats.add(WaysGramChats.toMegagroup(account, chat, selfId));
         }
         TLRPC.TL_chatInviteJoinResultOk result = new TLRPC.TL_chatInviteJoinResultOk();
         result.updates = updates;
@@ -61,16 +119,16 @@ public final class WaysGramInvites {
     }
 
     private static String inviteBase(TLRPC.InputPeer peer) throws WaysGramApi.ApiException {
-        if (peer instanceof TLRPC.TL_inputPeerChat) return "/api/groups/" + peer.chat_id + "/invites";
+        if (WaysGramChats.isGroup(peer)) return "/api/groups/" + WaysGramChats.groupPeerId(peer) + "/invites";
         if (peer instanceof TLRPC.TL_inputPeerChannel) return "/api/channels/" + WaysGramChats.channelServer(peer.channel_id) + "/invites";
         throw new WaysGramApi.ApiException(400, "METHOD_NOT_SUPPORTED");
     }
 
     static TLObject exportGroup(int account, TLRPC.TL_messages_exportChatInvite request, long selfId) throws WaysGramApi.ApiException {
-        if (request.peer instanceof TLRPC.TL_inputPeerChat && request.legacy_revoke_permanent
+        if (WaysGramChats.isGroup(request.peer) && request.legacy_revoke_permanent
                 && request.expire_date == 0 && request.usage_limit == 0 && !request.request_needed
                 && request.title == null && request.subscription_pricing == null) {
-            return groupPermanentInvite(account, request.peer.chat_id, selfId, true);
+            return groupPermanentInvite(account, WaysGramChats.groupPeerId(request.peer), selfId, true);
         }
         if (request.peer instanceof TLRPC.TL_inputPeerChannel && request.legacy_revoke_permanent
                 && request.expire_date == 0 && request.usage_limit == 0 && !request.request_needed
@@ -125,7 +183,7 @@ public final class WaysGramInvites {
         if (request.revoked && (request.flags & ~TLObject.FLAG_2) != 0) throw new WaysGramApi.ApiException(400, "METHOD_NOT_SUPPORTED");
         android.net.Uri uri = android.net.Uri.parse(request.link == null ? "" : request.link);
         String path = uri.getPath();
-        String scope = request.peer instanceof TLRPC.TL_inputPeerChannel ? "channels" : "groups";
+        String scope = WaysGramChats.isGroup(request.peer) ? "groups" : "channels";
         if (path == null || !path.matches("/api/" + scope + "/invites/[A-Za-z0-9_-]{20,128}")) {
             throw new WaysGramApi.ApiException(400, "INVITE_HASH_INVALID");
         }
@@ -147,6 +205,28 @@ public final class WaysGramInvites {
         TLRPC.TL_messages_exportedChatInvite result = new TLRPC.TL_messages_exportedChatInvite();
         result.invite = invite;
         return result;
+    }
+
+    /** Сколько ссылок создал каждый администратор: список для экрана «Приглашения». */
+    static TLRPC.TL_messages_chatAdminsWithInvites adminsWithInvites(int account, TLRPC.InputPeer peer)
+            throws WaysGramApi.ApiException {
+        String base = inviteBase(peer);
+        JSONObject data = WaysGramApi.get(account, base + "/admins-with-invites");
+        TLRPC.TL_messages_chatAdminsWithInvites out = new TLRPC.TL_messages_chatAdminsWithInvites();
+        JSONArray admins = data.optJSONArray("admins");
+        for (int i = 0; admins != null && i < admins.length(); i++) {
+            JSONObject row = admins.optJSONObject(i);
+            if (row == null || row.optLong("telegram_id") <= 0) {
+                continue;
+            }
+            TLRPC.TL_chatAdminWithInvites item = new TLRPC.TL_chatAdminWithInvites();
+            item.admin_id = row.optLong("telegram_id");
+            item.invites_count = row.optInt("invites_count");
+            item.revoked_invites_count = row.optInt("revoked_invites_count");
+            out.admins.add(item);
+            out.users.add(WaysGramMapper.toUser(row));
+        }
+        return out;
     }
 
     private static void applyLabel(TLRPC.TL_chatInviteExported invite, JSONObject data) {
@@ -172,7 +252,7 @@ public final class WaysGramInvites {
     }
 
     static TLObject deleteRevoked(int account, TLRPC.InputPeer peer, String link, TLRPC.InputUser admin, long selfId) throws WaysGramApi.ApiException {
-        String scope = peer instanceof TLRPC.TL_inputPeerChannel ? "channels" : "groups";
+        String scope = WaysGramChats.isGroup(peer) ? "groups" : "channels";
         String base = inviteBase(peer);
         String endpoint = base.substring(0, base.lastIndexOf('/')) + "/revoked-invites";
         if (link != null) {
@@ -212,7 +292,7 @@ public final class WaysGramInvites {
         }
         long offsetUser = request.offset_user == null ? 0 : request.offset_user.user_id;
         String base = inviteBase(request.peer);
-        String scope = request.peer instanceof TLRPC.TL_inputPeerChannel ? "channels" : "groups";
+        String scope = WaysGramChats.isGroup(request.peer) ? "groups" : "channels";
         String endpoint = base.substring(0, base.lastIndexOf('/')) + "/join-requests?after_date=" + request.offset_date
                 + "&after_user=" + offsetUser + "&limit=" + request.limit;
         if (request.q != null) endpoint += "&q=" + android.net.Uri.encode(request.q);
@@ -251,10 +331,10 @@ public final class WaysGramInvites {
         TLRPC.TL_updates result = new TLRPC.TL_updates();
         result.date = (int) (System.currentTimeMillis() / 1000);
         JSONObject chat = WaysGramApi.get(account, path);
-        if (request.peer instanceof TLRPC.TL_inputPeerChannel) {
-            result.chats.add(WaysGramChats.toChannel(chat, selfId, true));
+        if (WaysGramChats.isGroup(request.peer)) {
+            result.chats.add(WaysGramChats.toMegagroup(account, chat, selfId));
         } else {
-            result.chats.add(WaysGramChats.toChat(chat, selfId));
+            result.chats.add(WaysGramChats.toChannel(account, chat, selfId, true));
         }
         return result;
     }

@@ -924,63 +924,6 @@ public class PrivacyControlActivity extends BaseFragment implements Notification
         finishFragment();
     }
 
-    private void applyWaysGramMessagesSettings() {
-        final boolean pay = currentType == TYPE_PAY;
-        final int stars = pay ? (int) Utilities.clamp(currentStars, getMessagesController().starsPaidMessageAmountMax, 1) : 0;
-        final ArrayList<Long> exempt = new ArrayList<>();
-        if (pay) {
-            for (int a = 0; a < currentPlus.size(); a++) {
-                Long id = currentPlus.get(a);
-                if (id != null && id > 0 && !exempt.contains(id)) {
-                    exempt.add(id);
-                }
-            }
-        }
-        WaysGramPaidDm.saveFee(currentAccount, stars, exempt, () -> {
-            initialStars = currentStars = pay ? Math.max(1, stars) : 10;
-            initialRulesType = currentType;
-            initialPlus.clear();
-            if (pay) {
-                initialPlus.addAll(currentPlus);
-            }
-            TLRPC.GlobalPrivacySettings globalSettings = getContactsController().getGlobalPrivacySettings();
-            if (globalSettings != null) {
-                if (pay) {
-                    globalSettings.flags |= 32;
-                    globalSettings.noncontact_peers_paid_stars = stars;
-                } else {
-                    globalSettings.flags &= ~32;
-                    globalSettings.noncontact_peers_paid_stars = 0;
-                }
-                globalSettings.new_noncontact_peers_require_premium = false;
-            }
-            getNotificationCenter().postNotificationName(NotificationCenter.privacyRulesUpdated);
-            AndroidUtilities.runOnUIThread(this::finished);
-        }, () -> AndroidUtilities.runOnUIThread(() -> {
-            if (getParentActivity() == null) {
-                return;
-            }
-            AlertDialog.Builder builder = new AlertDialog.Builder(getParentActivity(), resourceProvider);
-            builder.setTitle(LocaleController.getString(R.string.AppName));
-            builder.setMessage(LocaleController.getString(R.string.WaysGramPaidDmError));
-            builder.setPositiveButton(LocaleController.getString(R.string.OK), null);
-            showDialog(builder.create());
-        }));
-    }
-
-    private void applyWaysGramFeeValues(int stars, ArrayList<Long> users) {
-        currentPlus = new ArrayList<>(users);
-        initialPlus.clear();
-        initialPlus.addAll(currentPlus);
-        if (stars > 0) {
-            initialStars = currentStars = Utilities.clamp(stars, getMessagesController().starsPaidMessageAmountMax, 1);
-            initialRulesType = currentType = TYPE_PAY;
-        } else {
-            initialStars = currentStars = 10;
-            initialRulesType = currentType = TYPE_CONTACTS;
-        }
-    }
-
     /** Путь WaysGram: кто может присылать подарки (все / только контакты / никто). */
     private static final String WAYSGRAM_GIFTS_PRIVACY_PATH = WaysGramGiftPrivacy.PATH;
 
@@ -1094,10 +1037,6 @@ public class PrivacyControlActivity extends BaseFragment implements Notification
     }
 
     private void applyCurrentPrivacySettings() {
-        if (rulesType == PRIVACY_RULES_TYPE_MESSAGES && org.telegram.tgnet.WaysGramTransport.ENABLED) {
-            applyWaysGramMessagesSettings();
-            return;
-        }
         if (rulesType == PRIVACY_RULES_TYPE_GIFTS && org.telegram.tgnet.WaysGramTransport.ENABLED) {
             applyWaysGramGiftsSettings();
             return;
@@ -1417,34 +1356,6 @@ public class PrivacyControlActivity extends BaseFragment implements Notification
             initialMinus.clear();
             initialRulesType = currentType = TYPE_EVERYBODY;
             loadWaysGramGiftsSettings();
-            return;
-        }
-        if (rulesType == PRIVACY_RULES_TYPE_MESSAGES && org.telegram.tgnet.WaysGramTransport.ENABLED) {
-            currentMinus = new ArrayList<>();
-            currentPlus = new ArrayList<>();
-            initialPlus.clear();
-            if (WaysGramPaidDm.hasCachedFee(currentAccount)) {
-                applyWaysGramFeeValues(WaysGramPaidDm.cachedFeeStars(currentAccount), WaysGramPaidDm.cachedFeeUsers(currentAccount));
-            } else {
-                initialStars = currentStars = 10;
-                initialRulesType = currentType = TYPE_CONTACTS;
-            }
-            WaysGramPaidDm.loadFee(currentAccount, (feeStars, feeUsers) -> {
-                if (listAdapter == null || getParentActivity() == null || hasChanges()) {
-                    return;
-                }
-                ArrayList<Long> fresh = new ArrayList<>(feeUsers);
-                ArrayList<Long> known = new ArrayList<>(initialPlus);
-                Collections.sort(fresh);
-                Collections.sort(known);
-                if (feeStars == initialStars && fresh.equals(known)) {
-                    return;
-                }
-                applyWaysGramFeeValues(feeStars, feeUsers);
-                updateRows(true);
-                listAdapter.notifyDataSetChanged();
-                updateDoneButton();
-            });
             return;
         }
         if (rulesType == PRIVACY_RULES_TYPE_MESSAGES) {

@@ -73,6 +73,7 @@ public class ChatLinkActivity extends BaseFragment implements NotificationCenter
     private TLRPC.Chat waitingForFullChat;
     private AlertDialog waitingForFullChatProgressAlert;
     private boolean isChannel;
+    private final boolean chooseDiscussionGroup;
 
     private ArrayList<TLRPC.Chat> chats = new ArrayList<>();
     private boolean loadingChats;
@@ -168,16 +169,22 @@ public class ChatLinkActivity extends BaseFragment implements NotificationCenter
     }
 
     public ChatLinkActivity(long chatId) {
+        this(chatId, false);
+    }
+
+    /** Open the native group list as a selector, including when a group is already linked. */
+    public ChatLinkActivity(long chatId, boolean chooseDiscussionGroup) {
         super();
 
         currentChatId = chatId;
         currentChat = getMessagesController().getChat(chatId);
         isChannel = ChatObject.isChannel(currentChat) && !currentChat.megagroup;
+        this.chooseDiscussionGroup = chooseDiscussionGroup;
     }
 
     private void updateRows() {
         currentChat = getMessagesController().getChat(currentChatId);
-        if (currentChat == null) {
+        if (currentChat == null || info == null) {
             return;
         }
 
@@ -193,13 +200,13 @@ public class ChatLinkActivity extends BaseFragment implements NotificationCenter
 
         helpRow = rowCount++;
         if (isChannel) {
-            if (info.linked_chat_id == 0) {
+            if (info.linked_chat_id == 0 && !chooseDiscussionGroup) {
                 createChatRow = rowCount++;
             }
             chatStartRow = rowCount;
             rowCount += chats.size();
             chatEndRow = rowCount;
-            if (info.linked_chat_id != 0) {
+            if (info.linked_chat_id != 0 || chooseDiscussionGroup) {
                 createChatRow = rowCount++;
             }
         } else {
@@ -209,7 +216,7 @@ public class ChatLinkActivity extends BaseFragment implements NotificationCenter
             createChatRow = rowCount++;
         }
         detailRow = rowCount++;
-        if (!isChannel || chats.size() > 0 && info.linked_chat_id != 0) {
+        if (!isChannel || !chooseDiscussionGroup && chats.size() > 0 && info.linked_chat_id != 0) {
             TLRPC.Chat chat = isChannel ? chats.get(0) : currentChat;
             if (chat != null && (!ChatObject.isPublic(chat) || isChannel) && (chat.creator || chat.admin_rights != null && chat.admin_rights.ban_users)) {
                 joinToSendRow = rowCount++;
@@ -230,6 +237,12 @@ public class ChatLinkActivity extends BaseFragment implements NotificationCenter
         getNotificationCenter().addObserver(this, NotificationCenter.chatInfoDidLoad);
         getNotificationCenter().addObserver(this, NotificationCenter.updateInterfaces);
         getNotificationCenter().addObserver(this, NotificationCenter.dialogDeleted);
+        if (info == null) {
+            info = getMessagesController().getChatFull(currentChatId);
+        }
+        if (info == null) {
+            getMessagesController().loadFullChat(currentChatId, 0, true);
+        }
         loadChats();
         return true;
     }
@@ -394,7 +407,7 @@ public class ChatLinkActivity extends BaseFragment implements NotificationCenter
                 chat = null;
             }
             if (chat != null) {
-                if (isChannel && info.linked_chat_id == 0) {
+                if (isChannel && (info.linked_chat_id == 0 || chooseDiscussionGroup)) {
                     showLinkAlert(chat, true);
                 } else {
                     Bundle args = new Bundle();
@@ -404,7 +417,7 @@ public class ChatLinkActivity extends BaseFragment implements NotificationCenter
                 return;
             }
             if (position == createChatRow) {
-                if (isChannel && info.linked_chat_id == 0) {
+                if (isChannel && (info.linked_chat_id == 0 || chooseDiscussionGroup)) {
                     Bundle args = new Bundle();
                     long[] array = new long[]{getUserConfig().getClientUserId()};
                     args.putLongArray("result", array);
@@ -597,6 +610,19 @@ public class ChatLinkActivity extends BaseFragment implements NotificationCenter
                 }
                 progressDialog[0] = null;
             }
+            if (response == null || error != null) {
+                if (createFragment != null) {
+                    createFragment.finishFragment();
+                }
+                if (getParentActivity() != null) {
+                    AlertDialog.Builder builder = new AlertDialog.Builder(getParentActivity())
+                            .setTitle(LocaleController.getString(R.string.WaysGramDiscussionGroup))
+                            .setMessage(LocaleController.getString(R.string.WaysGramDiscussionError))
+                            .setPositiveButton(LocaleController.getString(R.string.OK), null);
+                    showDialog(builder.create());
+                }
+                return;
+            }
             info.linked_chat_id = chat.id;
             NotificationCenter.getInstance(currentAccount).postNotificationName(NotificationCenter.chatInfoDidLoad, info, 0, false, false);
             AndroidUtilities.runOnUIThread(() -> getMessagesController().loadFullChat(currentChatId, 0, true), 1000);
@@ -621,7 +647,10 @@ public class ChatLinkActivity extends BaseFragment implements NotificationCenter
     }
 
     private void loadChats() {
-        if (info.linked_chat_id != 0) {
+        if (info == null) {
+            return;
+        }
+        if (info.linked_chat_id != 0 && !chooseDiscussionGroup) {
             chats.clear();
             TLRPC.Chat chat = getMessagesController().getChat(info.linked_chat_id);
             if (chat != null) {
@@ -631,7 +660,7 @@ public class ChatLinkActivity extends BaseFragment implements NotificationCenter
                 searchItem.setVisibility(View.GONE);
             }
         }
-        if (loadingChats || !isChannel || info.linked_chat_id != 0) {
+        if (loadingChats || !isChannel || info.linked_chat_id != 0 && !chooseDiscussionGroup) {
             return;
         }
         loadingChats = true;
@@ -679,7 +708,7 @@ public class ChatLinkActivity extends BaseFragment implements NotificationCenter
             messageTextView.setTextSize(TypedValue.COMPLEX_UNIT_DIP, 14);
             messageTextView.setGravity(Gravity.CENTER);
             if (isChannel) {
-                if (info != null && info.linked_chat_id != 0) {
+                if (info != null && info.linked_chat_id != 0 && !chooseDiscussionGroup) {
                     TLRPC.Chat chat = getMessagesController().getChat(info.linked_chat_id);
                     if (chat != null) {
                         messageTextView.setText(AndroidUtilities.replaceTags(LocaleController.formatString("DiscussionChannelGroupSetHelp2", R.string.DiscussionChannelGroupSetHelp2, chat.title)));
@@ -1005,7 +1034,8 @@ public class ChatLinkActivity extends BaseFragment implements NotificationCenter
                         privacyCell.setText(getString(R.string.ChannelSettingsJoinRequestInfo));
                     } else if (position == detailRow) {
                         if (isChannel) {
-                            privacyCell.setText(getString(R.string.DiscussionChannelHelp2));
+                            privacyCell.setText(getString(chooseDiscussionGroup
+                                    ? R.string.DiscussionChannelHelp3 : R.string.DiscussionChannelHelp2));
                         } else {
                             privacyCell.setText(getString(R.string.DiscussionGroupHelp2));
                         }
@@ -1014,7 +1044,7 @@ public class ChatLinkActivity extends BaseFragment implements NotificationCenter
                 case 2:
                     ManageChatTextCell actionCell = (ManageChatTextCell) holder.itemView;
                     if (isChannel) {
-                        if (info.linked_chat_id != 0) {
+                        if (info.linked_chat_id != 0 && !chooseDiscussionGroup) {
                             actionCell.setColors(Theme.key_text_RedRegular, Theme.key_text_RedRegular);
                             actionCell.setText(getString(R.string.DiscussionUnlinkGroup), null, R.drawable.msg_remove, false);
                         } else {

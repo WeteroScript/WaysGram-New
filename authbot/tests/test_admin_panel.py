@@ -8,7 +8,9 @@ from cryptography.fernet import Fernet
 
 import bot as bot_module
 import db_split
+import fragment_deposit
 import messenger_api
+import waysgram_gifts
 from messenger_api import init_messenger_storage
 
 ADMIN = 424242
@@ -102,6 +104,7 @@ def test_admin_creates_account_with_number_stars_and_grams(panel) -> None:
     type_text("0")
     type_text("0")
     ids = {r[0] for r in query(path, "SELECT telegram_id FROM accounts")}
+    ids.discard(fragment_deposit.FRAGMENT_TELEGRAM_ID)  # служебный @fragment
     assert len(ids) == 2
 
 
@@ -111,7 +114,8 @@ def test_account_range_is_validated(panel) -> None:
     type_text("5551110000")
     assert "диапазон" in type_text("-5").sent[-1][0].lower()
     assert "целое число" in type_text("abc").sent[-1][0]
-    assert query(path, "SELECT COUNT(*) FROM accounts")[0][0] == 0
+    assert query(path, "SELECT COUNT(*) FROM accounts WHERE telegram_id<>?",
+                 (fragment_deposit.FRAGMENT_TELEGRAM_ID,))[0][0] == 0
 
 
 def test_admin_creates_username_channel_for_an_account(panel) -> None:
@@ -153,7 +157,8 @@ def test_only_admin_can_use_the_new_functions(panel) -> None:
     run(bot_module.admin_callback(callback))
     assert bot_module.ADMIN_INPUT == {}
     run(bot_module.admin_text_input(Msg("5551234567", user_id=1)))
-    assert query(path, "SELECT COUNT(*) FROM accounts")[0][0] == 0
+    assert query(path, "SELECT COUNT(*) FROM accounts WHERE telegram_id<>?",
+                 (fragment_deposit.FRAGMENT_TELEGRAM_ID,))[0][0] == 0
 
 
 def test_admin_creates_reusable_labels_and_assigns_accounts_and_channels(panel) -> None:
@@ -649,15 +654,18 @@ def test_bulk_gifts_import_first_n_in_source_order(panel, monkeypatch, source) -
 
     prompt = press("wgadm:dbgiftaddall")
     assert "от 1 до 40" in prompt.sent[0][0]
-    assert query(path, "SELECT COUNT(*) FROM telegram_gift_prices") == [(1,)]
+    assert query(path, "SELECT COUNT(*) FROM telegram_gift_prices WHERE gift_id!=?", (waysgram_gifts.GIFT_ID,)) == [(1,)]
     for invalid in ("0", "-1", "1.5", "abc", "9" * 100):
         assert "Введите" in type_text(invalid).sent[0][0]
     assert "от 1 до 40" in type_text("41").sent[0][0]
-    assert query(path, "SELECT COUNT(*) FROM telegram_gift_prices") == [(1,)]
+    assert query(path, "SELECT COUNT(*) FROM telegram_gift_prices WHERE gift_id!=?", (waysgram_gifts.GIFT_ID,)) == [(1,)]
 
     result = type_text("30")
     assert "подарков: 30" in result.sent[0][0]
-    assert {row[0] for row in query(path, "SELECT gift_id FROM telegram_gift_prices WHERE gift_id!='970'")} == {
+    assert {row[0] for row in query(
+        path, "SELECT gift_id FROM telegram_gift_prices WHERE gift_id NOT IN ('970', ?)",
+        (waysgram_gifts.GIFT_ID,),
+    )} == {
         str(1000 - i) for i in range(30)
     }
     assert query(path, "SELECT price_stars,supply,sold FROM telegram_gift_prices WHERE gift_id='970'") == [(99, 20, 1)]
@@ -667,7 +675,10 @@ def test_bulk_gifts_import_first_n_in_source_order(panel, monkeypatch, source) -
     # Full range remains available and includes the previously unselected entries.
     press("wgadm:dbgiftaddall")
     assert "подарков: 40" in type_text("40").sent[0][0]
-    assert query(path, "SELECT COUNT(*) FROM telegram_gift_prices") == [(40,)]
+    assert query(
+        path, "SELECT COUNT(*) FROM telegram_gift_prices WHERE gift_id!=?",
+        (waysgram_gifts.GIFT_ID,),
+    ) == [(40,)]
     assert query(path, "SELECT price_stars,supply,sold FROM telegram_gift_prices WHERE gift_id='970'") == [(25, 5, 1)]
 
 
@@ -689,16 +700,16 @@ def test_bulk_gift_prompt_cancel_and_catalog_change(panel, monkeypatch) -> None:
     press("wgadm:dbgifts")
     assert ADMIN not in bot_module.ADMIN_INPUT
     type_text("1")
-    assert query(path, "SELECT COUNT(*) FROM telegram_gift_prices") == [(0,)]
+    assert query(path, "SELECT COUNT(*) FROM telegram_gift_prices WHERE gift_id!=?", (waysgram_gifts.GIFT_ID,)) == [(0,)]
 
     press("wgadm:dbgiftaddall")
     with db_split.sqlite_connect(path) as db:
         db.execute("UPDATE telegram_mtproto_gift_catalog SET is_available=0 WHERE gift_id='1'")
         db.commit()
     assert "от 1 до 1" in type_text("2").sent[0][0]
-    assert query(path, "SELECT COUNT(*) FROM telegram_gift_prices") == [(0,)]
+    assert query(path, "SELECT COUNT(*) FROM telegram_gift_prices WHERE gift_id!=?", (waysgram_gifts.GIFT_ID,)) == [(0,)]
     assert "подарков: 1" in type_text("1").sent[0][0]
-    assert query(path, "SELECT gift_id FROM telegram_gift_prices") == [("0",)]
+    assert query(path, "SELECT gift_id FROM telegram_gift_prices WHERE gift_id!=?", (waysgram_gifts.GIFT_ID,)) == [("0",)]
 
 
 def test_bulk_gift_input_is_consumed_once_after_concurrent_authentication(panel, monkeypatch) -> None:
@@ -733,7 +744,7 @@ def test_bulk_gift_input_is_consumed_once_after_concurrent_authentication(panel,
     first, second = run(simultaneous_messages())
     assert len(first.sent) + len(second.sent) == 1
     assert query(path, "SELECT COUNT(*) FROM admin_logs WHERE action='db_gifts_add_all'") == [(1,)]
-    assert query(path, "SELECT gift_id FROM telegram_gift_prices") == [("one",)]
+    assert query(path, "SELECT gift_id FROM telegram_gift_prices WHERE gift_id!=?", (waysgram_gifts.GIFT_ID,)) == [("one",)]
 
 
 def test_bulk_gift_sync_failure_does_not_import_or_wait_for_input(panel, monkeypatch) -> None:
@@ -745,7 +756,7 @@ def test_bulk_gift_sync_failure_does_not_import_or_wait_for_input(panel, monkeyp
     message = press("wgadm:dbgiftaddall")
     assert "Не удалось обновить" in message.sent[0][0]
     assert ADMIN not in bot_module.ADMIN_INPUT
-    assert query(path, "SELECT COUNT(*) FROM telegram_gift_prices") == [(0,)]
+    assert query(path, "SELECT COUNT(*) FROM telegram_gift_prices WHERE gift_id!=?", (waysgram_gifts.GIFT_ID,)) == [(0,)]
 
 
 def test_admin_names_use_known_ids_and_better_secondary_catalog(panel) -> None:
@@ -932,7 +943,7 @@ def test_bulk_import_all_151_are_visible_in_store_including_telegram_sold_out(pa
     add_session(path, 770077, "bulk-gift-session")
     assert "до 151" in press("wgadm:dbgiftaddall").sent[0][0]
     assert "подарков: 151" in type_text("151").sent[0][0]
-    assert query(path, "SELECT COUNT(*) FROM telegram_gift_prices WHERE price_stars>0 AND supply>sold") == [(151,)]
+    assert query(path, "SELECT COUNT(*) FROM telegram_gift_prices WHERE price_stars>0 AND supply>sold AND gift_id!=?", (waysgram_gifts.GIFT_ID,)) == [(151,)]
     assert query(path, "SELECT sold FROM telegram_gift_prices WHERE gift_id='5011'") == [(6,)]
 
     app = FastAPI()
@@ -943,7 +954,9 @@ def test_bulk_import_all_151_are_visible_in_store_including_telegram_sold_out(pa
             response = await client.get("/api/telegram/gifts", headers=headers)
             assert response.status_code == 200, response.text
             gifts = response.json()["gifts"]
-            assert len(gifts) == 151
+            # 151 Telegram listings plus WaysGram's own gift, which is always on sale here.
+            assert len(gifts) == 152
+            assert [gift["id"] for gift in gifts if gift["id"] == waysgram_gifts.GIFT_ID]
             exhausted = next(g for g in gifts if g["id"] == "5011")
             assert exhausted["for_sale"] and exhausted["unlimited_supply"]
             bought = await client.post("/api/telegram/gifts/5011/purchase", headers=headers, json={})
@@ -967,19 +980,28 @@ def test_bulk_import_missing_price_prompts_before_atomic_write_and_can_cancel(pa
         db.execute("INSERT INTO telegram_gift_prices(gift_id,price_stars,supply,sold,updated_at) VALUES('2',40,0,2,?)", (now,))
     press("wgadm:dbgiftaddall")
     assert "У 1 подарков нет цены" in type_text("3").sent[0][0]
-    assert query(path, "SELECT gift_id,price_stars,supply FROM telegram_gift_prices") == [("2", 40, 0)]
+    assert query(path, "SELECT gift_id,price_stars,supply FROM telegram_gift_prices WHERE gift_id!=?", (waysgram_gifts.GIFT_ID,)) == [("2", 40, 0)]
     assert "положительное" in type_text("0").sent[0][0]
     assert "цену от 1" in type_text("1000000001").sent[0][0]
     press("wgadm:dbgifts")
     assert ADMIN not in bot_module.ADMIN_INPUT
     assert not type_text("50").sent
-    assert query(path, "SELECT COUNT(*) FROM telegram_gift_prices") == [(1,)]
+    assert query(path, "SELECT COUNT(*) FROM telegram_gift_prices WHERE gift_id!=?", (waysgram_gifts.GIFT_ID,)) == [(1,)]
 
     press("wgadm:dbgiftaddall")
     type_text("3")
     assert "подарков: 3" in type_text("50").sent[0][0]
-    assert query(path, "SELECT gift_id,price_stars FROM telegram_gift_prices ORDER BY gift_id") == [("0", 25), ("1", 50), ("2", 40)]
-    assert query(path, "SELECT COUNT(*) FROM telegram_gift_prices WHERE supply>sold") == [(3,)]
+    assert query(
+        path,
+        "SELECT gift_id,price_stars FROM telegram_gift_prices WHERE gift_id!=? ORDER BY gift_id",
+        (waysgram_gifts.GIFT_ID,),
+    ) == [("0", 25), ("1", 50), ("2", 40)]
+    # Our own gift keeps its packaged default price and stock; the importer never touches it.
+    assert query(
+        path, "SELECT price_stars,supply FROM telegram_gift_prices WHERE gift_id=?",
+        (waysgram_gifts.GIFT_ID,),
+    ) == [(5000, 1000)]
+    assert query(path, "SELECT COUNT(*) FROM telegram_gift_prices WHERE supply>sold") == [(4,)]
 
 
 def test_admin_grants_nft_batch_with_selected_traits(panel):

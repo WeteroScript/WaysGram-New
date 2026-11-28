@@ -20,6 +20,7 @@ import httpx
 from aiogram import Bot, Dispatcher, F, Router
 from aiogram.filters import Command, CommandStart
 from aiogram.types import (
+    BufferedInputFile,
     CallbackQuery,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
@@ -34,9 +35,15 @@ from pydantic import BaseModel, Field
 import uvicorn
 from cryptography.fernet import Fernet, InvalidToken
 import gift_upgrades
+import waysgram_gifts
 from messenger_api import _assign_unique_number, _gift_attribute_rows, _gift_supports_upgrade, _normalise_attribute_name
 from messenger_api import build_messenger_router, init_messenger_storage, sync_telegram_gifts, _telegram_gift_metadata
-from telegram_mtproto import TelegramMTProtoGiftCatalog
+from telegram_mtproto import (
+    TelegramMTProtoGiftCatalog,
+    archive_part_name,
+    export_reaction_emoji,
+    split_archive,
+)
 
 # All secrets are read only from hosting environment variables.
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
@@ -1618,6 +1625,7 @@ def admin_home_keyboard(actor_id: int | None = None) -> InlineKeyboardMarkup:
         [("📊 Статистика", "wgadm:stats")],
         [("👥 Аккаунты", "wgadm:accounts"), ("🎁 Подарки", "wgadm:gifts")],
         [("🎁 Подарки Telegram (цены и остатки)", "wgadm:tggifts")],
+        [("🎩 Подарки WaysGram (свои модели)", "wgadm:wggifts")],
         [("🏷 Метки", "wgadm:labels")],
         [("➕ Создать аккаунт", "wgadm:newacct"), ("🏷 Создать юзернейм", "wgadm:newuname")],
         [("📦 Инвентарь", "wgadm:inventory"), ("🧾 Операции", "wgadm:transactions")],
@@ -1950,7 +1958,10 @@ async def admin_refresh_gift_catalog_count() -> int:
         cur = await db.execute("SELECT source FROM telegram_gift_sync_state WHERE id=1")
         state = await cur.fetchone()
         table = "telegram_mtproto_gift_catalog" if state and state[0] == "telegram_mtproto" else "telegram_gift_catalog"
-        cur = await db.execute(f"SELECT COUNT(*) FROM {table} WHERE is_available=1")
+        cur = await db.execute(
+            f"SELECT COUNT(*) FROM {table} WHERE is_available=1"
+            + (" AND COALESCE(is_waysgram,0)=0" if table == "telegram_mtproto_gift_catalog" else "")
+        )
         return int((await cur.fetchone())[0])
 
 
@@ -1978,7 +1989,10 @@ async def admin_add_first_telegram_gifts(limit: int, fallback_price: int | None 
         state = await cur.fetchone()
         source = str(state["source"]) if state else "telegram_bot_api"
         table = "telegram_mtproto_gift_catalog" if source == "telegram_mtproto" else "telegram_gift_catalog"
-        cur = await db.execute(f"SELECT COUNT(*) FROM {table} WHERE is_available=1")
+        cur = await db.execute(
+            f"SELECT COUNT(*) FROM {table} WHERE is_available=1"
+            + (" AND COALESCE(is_waysgram,0)=0" if source == "telegram_mtproto" else "")
+        )
         total = int((await cur.fetchone())[0])
         if not 1 <= limit <= total:
             raise GiftCountOutOfRange(total)
@@ -1987,7 +2001,8 @@ async def admin_add_first_telegram_gifts(limit: int, fallback_price: int | None 
                 """SELECT gift_id,stars,limited,sold_out,
                           availability_remains AS remaining_stock
                    FROM telegram_mtproto_gift_catalog
-                   WHERE is_available=1 ORDER BY position,gift_id LIMIT ?""", (limit,)
+                   WHERE is_available=1 AND COALESCE(is_waysgram,0)=0
+                   ORDER BY position,gift_id LIMIT ?""", (limit,)
             )
         else:
             cur = await db.execute(
@@ -2168,6 +2183,9 @@ async def telegram_gift_rows() -> list[dict[str, Any]]:
             table = catalogs.get(catalog_source)
             if table is None:
                 continue
+            # Own gifts have their own screen; this list stays Telegram's catalogue.
+            own_filter = "\n                    WHERE COALESCE(g.is_waysgram,0)=0" \
+                if catalog_source == "telegram_mtproto" else ""
             cur = await db.execute(
                 f"""SELECT g.gift_id AS id,g.title AS title,
                            g.sticker_emoji AS sticker_emoji,g.sticker_set_name AS sticker_set_name,
@@ -2176,7 +2194,7 @@ async def telegram_gift_rows() -> list[dict[str, Any]]:
                            COALESCE(p.sold,0) AS sold,
                            g.is_available AS telegram_available
                     FROM {table} g
-                    LEFT JOIN telegram_gift_prices p ON p.gift_id=g.gift_id"""
+                    LEFT JOIN telegram_gift_prices p ON p.gift_id=g.gift_id{own_filter}"""
             )
             for row in await cur.fetchall():
                 gift_id = str(row["id"])
@@ -2282,26 +2300,110 @@ async def admin_telegram_gifts_page(page: int) -> tuple[str, InlineKeyboardMarku
     return body, admin_keyboard(keyboard)
 
 
+async def admin_waysgram_gift_row(gift_id: str) -> dict[str, Any] | None:
+    """The catalogue row of an own gift, with the administrator's price and stock."""
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute(
+            """SELECT c.gift_id AS id,c.title AS title,c.is_available AS listed,
+                      COALESCE(p.price_stars,0) AS price_stars,
+                      COALESCE(p.supply,0) AS supply,
+                      COALESCE(p.sold,0) AS sold
+               FROM telegram_mtproto_gift_catalog c
+               LEFT JOIN telegram_gift_prices p ON p.gift_id=c.gift_id
+               WHERE c.gift_id=?""",
+            (gift_id,),
+        )
+        row = await cur.fetchone()
+    return dict(row) if row else None
+
+
+async def admin_waysgram_gifts_page() -> tuple[str, InlineKeyboardMarkup]:
+    """Own gifts of this server: their models are bundled, nothing comes from Telegram."""
+    rows = []
+    for gift_id in waysgram_gifts.GIFTS:
+        row = await admin_waysgram_gift_row(gift_id)
+        if row:
+            rows.append(row)
+    lines = [
+        "Подарки WaysGram (собственные)",
+        "",
+        "Модели улучшения встроены в сервер. Цена, остаток и видимость в каталоге "
+        "меняются здесь; каталог Telegram эти записи не затрагивает.",
+        "",
+    ]
+    for row in rows:
+        remaining = max(int(row["supply"]) - int(row["sold"]), 0)
+        lines.append(
+            f"{row['title']}: {row['price_stars']} Stars, остаток {remaining}, "
+            f"{'в каталоге' if int(row['listed']) else 'вне каталога'}"
+        )
+    body = "\n".join(lines)
+    keyboard = [[(
+        f"{row['title']} · {row['price_stars']} Stars · "
+        f"{'в каталоге' if int(row['listed']) else 'вне каталога'}",
+        f"wgadm:tggift:{row['id']}",
+    )] for row in rows]
+    keyboard.append([("⬅️ В меню", "wgadm:home")])
+    return body, admin_keyboard(keyboard)
+
+
 async def admin_telegram_gift_card(gift_id: str) -> tuple[str, InlineKeyboardMarkup] | None:
-    row = next((r for r in await telegram_gift_rows() if str(r["id"]) == gift_id), None)
-    if not row:
-        return None
-    remaining = max(int(row["supply"]) - int(row["sold"]), 0)
-    if row.get("catalog_source") == "waysgram_manual":
-        telegram_status = "метаданные Telegram не найдены; запись создана в WaysGram только по ID"
+    own = waysgram_gifts.is_waysgram_gift(gift_id)
+    if own:
+        row = await admin_waysgram_gift_row(gift_id)
+        if not row:
+            return None
+        remaining = max(int(row["supply"]) - int(row["sold"]), 0)
+        listed = bool(row["listed"])
+        telegram_status = ("собственный подарок WaysGram; модели встроены в сервер, "
+                           "каталог Telegram его не знает")
     else:
-        telegram_status = "доступен в текущем каталоге Telegram" if row.get("telegram_available") else "сохранён в истории (в Telegram больше не продаётся)"
+        row = next((r for r in await telegram_gift_rows() if str(r["id"]) == gift_id), None)
+        if not row:
+            return None
+        remaining = max(int(row["supply"]) - int(row["sold"]), 0)
+        listed = False
+        if row.get("catalog_source") == "waysgram_manual":
+            telegram_status = "метаданные Telegram не найдены; запись создана в WaysGram только по ID"
+        else:
+            telegram_status = "доступен в текущем каталоге Telegram" if row.get("telegram_available") else "сохранён в истории (в Telegram больше не продаётся)"
     body = (
-        f"Подарок {row['title']}\n\nID: {row['id']}\nИсточник данных: {row.get('catalog_source', 'telegram')}\n"
+        f"Подарок {row['title']}\n\nID: {row['id']}\nИсточник данных: "
+        f"{'waysgram' if own else row.get('catalog_source', 'telegram')}\n"
         f"Статус Telegram: {telegram_status}\nЦена WaysGram: {row['price_stars']} Stars\n"
         f"Всего в продаже WaysGram: {row['supply']}\nПродано: {row['sold']}\nОсталось: {remaining}\n"
         f"Статус WaysGram: {'в магазине' if int(row['price_stars']) > 0 and remaining > 0 else 'скрыт'}"
     )
-    return body, admin_keyboard([
+    buttons = [
         [("Цена (Stars)", f"wgadm:tgprice:{gift_id}"), ("Остаток (шт.)", f"wgadm:tgsupply:{gift_id}")],
-        [("Скрыть (цена 0, остаток 0)", f"wgadm:tghide:{gift_id}")],
-        [("⬅️ К списку", "wgadm:tggifts")],
-    ])
+    ]
+    if own:
+        body += (
+            f"\nВ каталоге: {'да' if listed else 'нет'}"
+            "\nУлучшение: 25 Stars; 14 собственных моделей, узоры и фоны — как в Telegram."
+        )
+        buttons.append([(
+            "Убрать из каталога" if listed else "Вернуть в каталог",
+            f"wgadm:tglist:{gift_id}",
+        )])
+    buttons.append([("Скрыть (цена 0, остаток 0)", f"wgadm:tghide:{gift_id}")])
+    buttons.append([("⬅️ К списку", "wgadm:wggifts" if own else "wgadm:tggifts")])
+    return body, admin_keyboard(buttons)
+
+
+async def set_waysgram_gift_listed(gift_id: str, listed: bool, *, actor_id: int | None = None) -> None:
+    """Shows or hides a WaysGram-exclusive gift in the app storefront."""
+    actor_id = ADMIN_ID if actor_id is None else actor_id
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        await db.execute("BEGIN IMMEDIATE")
+        await waysgram_gifts.set_listed(db, gift_id, listed)
+        await db.execute(
+            "INSERT INTO admin_logs(admin_id,action,target,details,created_at) VALUES(?,?,?,?,?)",
+            (actor_id, "waysgram_gift_catalog", gift_id[:120],
+             "listed=1" if listed else "listed=0", int(time.time())),
+        )
+        await db.commit()
 
 
 async def set_telegram_gift_values(gift_id: str, price: int | None = None, supply: int | None = None, *, actor_id: int | None = None) -> None:
@@ -2356,7 +2458,8 @@ async def admin_create_account(number: str, stars: int, grams: int, *, actor_id:
         await db.execute(
             """INSERT INTO accounts(telegram_id,virtual_number,username,display_name,stars,grams,created_at,updated_at)
                VALUES(?,?,?,?,?,?,?,?)""",
-            (account_id, number, "", number, stars, grams, now, now),
+            # Номер телефона именем не считаем: иначе шторка показывает «+00000000».
+            (account_id, number, "", name_or_empty(number), stars, grams, now, now),
         )
         for asset, amount in (("stars", stars), ("grams", grams)):
             if amount:
@@ -2416,6 +2519,56 @@ async def admin_create_username_channel(username: str, owner_id: int, *, actor_i
         )
         await db.commit()
     return channel_id
+
+
+@router.message(Command("exportreactions"))
+async def export_reactions_handler(message: Message) -> None:
+    """Одноразовая выгрузка официальных документов реакций Telegram в ZIP.
+
+    Анимированные эмодзи реакций (`application/x-tgsticker`) приходят только с серверов
+    Telegram, поэтому их нельзя достать из публичных репозиториев. Сессия, которая уже
+    подключена для моделей подарков, выгружает набор в архив: его кладут в APK.
+    """
+    if (not message.from_user or not is_private_admin_chat(message)
+            or not await is_authbot_admin(message.from_user.id)):
+        await message.answer("Доступ запрещён.")
+        return
+    client = mtproto_gift_user_client or mtproto_client
+    if client is None:
+        await message.answer(
+            "Нет подключённой MTProto-сессии: задайте TELEGRAM_API_ID, TELEGRAM_API_HASH "
+            "и WAYSGRAM_GIFT_USER_SESSION."
+        )
+        return
+    status = await message.answer("Собираю документы реакций из Telegram…")
+    try:
+        manifest, files = await export_reaction_emoji(client)
+    except Exception as exc:  # noqa: BLE001 - оператору нужен текст ошибки, а не трейс
+        log.warning("reaction emoji export failed", exc_info=True)
+        await status.edit_text(f"Не получилось выгрузить реакции: {type(exc).__name__}: {exc}")
+        return
+    import io
+    import zipfile
+
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("manifest.json", json.dumps(manifest, ensure_ascii=False, indent=1))
+        for name, payload in files.items():
+            archive.writestr(name, payload)
+    archive_bytes = buffer.getvalue()
+    parts = split_archive(archive_bytes)
+    await status.edit_text(
+        f"Готово: {manifest.get('count', 0)} реакций, {manifest.get('files', 0)} файлов, "
+        f"{len(archive_bytes) / 1048576:.1f} МБ"
+        + (f", частей: {len(parts)}" if len(parts) > 1 else "")
+        + "."
+    )
+    for index, part in enumerate(parts, start=1):
+        name = "waysgram_reaction_emoji.zip" if len(parts) == 1 else archive_part_name(index)
+        caption = "Официальные документы реакций Telegram для APK WaysGram."
+        if len(parts) > 1:
+            caption = f"Часть {index} из {len(parts)}. Официальные документы реакций Telegram."
+        await message.answer_document(BufferedInputFile(part, filename=name), caption=caption)
 
 
 @router.message(Command("admin"))
@@ -2885,8 +3038,14 @@ async def admin_callback(callback: CallbackQuery) -> None:
     elif action == "dbgifthideall":
         now = int(time.time())
         async with aiosqlite.connect(DATABASE_PATH) as db:
+            # "All" means Telegram's catalogue: WaysGram's own gifts are managed on their
+            # own screen and must not disappear from the shop behind the administrator's back.
             await db.execute(
-                "UPDATE telegram_gift_prices SET price_stars=0,supply=0,updated_at=?",
+                """UPDATE telegram_gift_prices SET price_stars=0,supply=0,updated_at=?
+                   WHERE gift_id NOT IN (
+                       SELECT gift_id FROM telegram_mtproto_gift_catalog
+                       WHERE COALESCE(is_waysgram,0)=1
+                   )""",
                 (now,),
             )
             await db.commit()
@@ -3272,6 +3431,9 @@ async def admin_callback(callback: CallbackQuery) -> None:
         page = int(parts[2]) if len(parts) >= 3 and parts[2].lstrip("-").isdigit() else 0
         body, keyboard = await admin_telegram_gifts_page(page)
         await callback.message.answer(body, reply_markup=keyboard)
+    elif action == "wggifts":
+        body, keyboard = await admin_waysgram_gifts_page()
+        await callback.message.answer(body, reply_markup=keyboard)
     elif action == "tgadd":
         ADMIN_INPUT[actor_id] = ("tgadd_id", None)
         await callback.message.answer("Отправьте Telegram Gift ID. Проверю текущий и сохранённый исторический каталог; доступность покупки в Telegram не важна.")
@@ -3292,6 +3454,17 @@ async def admin_callback(callback: CallbackQuery) -> None:
         card = await admin_telegram_gift_card(parts[2])
         if card:
             await callback.message.answer(card[0], reply_markup=card[1])
+    elif action == "tglist" and len(parts) == 3:
+        gift_id = parts[2]
+        if not waysgram_gifts.is_waysgram_gift(gift_id):
+            await callback.message.answer("Это не собственный подарок WaysGram.")
+        else:
+            async with aiosqlite.connect(DATABASE_PATH) as db:
+                listed = await waysgram_gifts.is_listed(db, gift_id)
+            await set_waysgram_gift_listed(gift_id, not listed, actor_id=actor_id)
+            card = await admin_telegram_gift_card(gift_id)
+            if card:
+                await callback.message.answer(card[0], reply_markup=card[1])
     elif action == "newacct":
         ADMIN_INPUT[actor_id] = ("newacct_number", None)
         await callback.message.answer(

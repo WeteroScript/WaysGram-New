@@ -1266,7 +1266,7 @@ public class ChatActivity extends BaseFragment implements
     public final static int OPTION_SEND_MONEY = 117;
     private static final int OPTION_WAYSGRAM_PAID_REACTIONS = 118;
     private static final int OPTION_WAYSGRAM_PAID_MEDIA = 119;
-    private static final int OPTION_WAYSGRAM_COMMENTS = 120;
+    private static final int OPTION_WAYSGRAM_DISCUSSIONS = 120;
     private static final int PICK_WAYSGRAM_PAID_MEDIA = 6173;
     private int waysGramPaidMediaPost;
     private long waysGramPaidMediaChannel;
@@ -1716,6 +1716,8 @@ public class ChatActivity extends BaseFragment implements
     private static final int waysgram_group_identity = 79;
     private static final int waysgram_channel_giveaways = 77;
     private static final int waysgram_community_boosts = 80;
+    private static final int waysgram_paid_history = 81;
+    private static final int waysgram_channel_topics = 82;
 
     private final static int chat_menu_topic_create = 73;
 
@@ -2811,13 +2813,20 @@ public class ChatActivity extends BaseFragment implements
             dialog_id = -chatId;
             if (ChatObject.isChannel(currentChat)) {
                 if (ChatObject.isNotInChat(currentChat) && !ChatObject.isMonoForum(currentChat) && !isThreadChat() && !isInScheduleMode()) {
-                    waitingForGetDifference = true;
-                    getMessagesController().startShortPoll(currentChat, classGuid, false, isGettingDifference -> {
-                        waitingForGetDifference = isGettingDifference;
-                        if (!waitingForGetDifference) {
-                            firstLoadMessages();
-                        }
-                    });
+                    if (org.telegram.tgnet.WaysGramTransport.ENABLED && !TextUtils.isEmpty(currentChat.username)) {
+                        // WaysGram has no Telegram channel-difference state endpoint.
+                        // A public channel's history is available over GET /messages and
+                        // must not wait for an updateDifference request to establish channel pts.
+                        waitingForGetDifference = false;
+                    } else {
+                        waitingForGetDifference = true;
+                        getMessagesController().startShortPoll(currentChat, classGuid, false, isGettingDifference -> {
+                            waitingForGetDifference = isGettingDifference;
+                            if (!waitingForGetDifference) {
+                                firstLoadMessages();
+                            }
+                        });
+                    }
                 } else {
                     getMessagesController().startShortPoll(currentChat, classGuid, false);
                 }
@@ -3828,6 +3837,10 @@ public class ChatActivity extends BaseFragment implements
                     if (currentChat != null && !ChatObject.isChannel(currentChat)) {
                         WaysGramGroupTopics.open(ChatActivity.this, currentAccount, currentChat.id);
                     }
+                } else if (id == waysgram_channel_topics) {
+                    if (currentChat != null && ChatObject.isChannelAndNotMegaGroup(currentChat)) {
+                        WaysGramGroupTopics.openChannel(ChatActivity.this, currentAccount, currentChat.id);
+                    }
                 } else if (id == waysgram_channel_giveaways) {
                     if (currentChat != null) WaysGramPaidReactions.showGiveaways(ChatActivity.this, currentAccount, currentChat.id);
                 } else if (id == waysgram_community_boosts) {
@@ -3839,6 +3852,9 @@ public class ChatActivity extends BaseFragment implements
                     if (currentChat != null && ChatObject.isChannelAndNotMegaGroup(currentChat)) {
                         WaysGramChannelInbox.open(ChatActivity.this, currentAccount, currentChat.id, currentChat.creator);
                     }
+                } else if (id == waysgram_paid_history) {
+                    // Та же лента, что и «Мои звёзды → История» в Telegram.
+                    WaysGramPaidHistory.show(ChatActivity.this, currentAccount);
                 } else if (id == open_direct) {
                     if (currentChat == null) return;
                     presentFragment(ChatActivity.of(-currentChat.linked_monoforum_id));
@@ -4599,22 +4615,6 @@ public class ChatActivity extends BaseFragment implements
             closeTopicItem.setVisibility(currentChat != null && ChatObject.canManageTopic(currentAccount, currentChat, forumTopic) && forumTopic != null && !forumTopic.closed ? View.VISIBLE : View.GONE);
         }
 
-        // WaysGram-only entry points live after the stock items: the Telegram menu keeps its
-        // original order and positions, the extra rows are always at the end of the list.
-        if (headerItem != null && org.telegram.tgnet.WaysGramTransport.ENABLED
-                && chatMode == MODE_DEFAULT && currentChat != null) {
-            if (ChatObject.isChannelAndNotMegaGroup(currentChat)) {
-                headerItem.lazilyAddSubItem(waysgram_channel_giveaways, R.drawable.msg_stats, getString(R.string.WaysGramGiveaways));
-                headerItem.lazilyAddSubItem(waysgram_channel_inbox, R.drawable.msg_markunread,
-                        getString(currentChat.creator ? R.string.WaysGramInboxTitle : R.string.WaysGramInboxWriteChannel));
-                headerItem.lazilyAddSubItem(waysgram_community_boosts, R.drawable.msg_stats, getString(R.string.WaysGramCommunityBoosts));
-            } else if (!ChatObject.isChannel(currentChat) && !ChatObject.isLeftFromChat(currentChat)) {
-                headerItem.lazilyAddSubItem(waysgram_group_stories, R.drawable.msg_stats, getString(R.string.WaysGramGroupStories));
-                headerItem.lazilyAddSubItem(waysgram_group_identity, R.drawable.msg_stats, getString(R.string.WaysGramGroupIdentity));
-                headerItem.lazilyAddSubItem(waysgram_group_topics, R.drawable.msg_topics, getString(R.string.WaysGramTopics));
-                headerItem.lazilyAddSubItem(waysgram_community_boosts, R.drawable.msg_stats, getString(R.string.WaysGramCommunityBoosts));
-            }
-        }
         menu.setVisibility(inMenuMode ? View.GONE : View.VISIBLE);
 
         updateTitle(false);
@@ -16374,6 +16374,10 @@ public class ChatActivity extends BaseFragment implements
                     emojiAnimationsOverlay.onTapItem(messageCell, ChatActivity.this, false);
                 } else if (messageObject.isAnimatedAnimatedEmoji()) {
                     emojiAnimationsOverlay.preloadAnimation(messageCell);
+                    if (org.telegram.tgnet.WaysGramReactions.consumeEmojiEffect(messageObject)) {
+                        // Появление одиночного эмодзи проигрывает его эффект, как в Telegram.
+                        emojiAnimationsOverlay.onTapItem(messageCell, ChatActivity.this, false);
+                    }
                 }
             } else if (view instanceof ChatActionCell) {
                 ChatActionCell cell = (ChatActionCell) view;
@@ -19849,7 +19853,8 @@ public class ChatActivity extends BaseFragment implements
         } else if (currentUser != null) {
             if (currentUser.self) {
                 avatarContainer.setTitle(LocaleController.getString(R.string.SavedMessages));
-            } else if (!MessagesController.isSupportUser(currentUser) && getContactsController().contactsDict.get(currentUser.id) == null && (getContactsController().contactsDict.size() != 0 || !getContactsController().isLoadingContacts())) {
+            } else if (!org.telegram.tgnet.WaysGramTransport.ENABLED && !MessagesController.isSupportUser(currentUser) && getContactsController().contactsDict.get(currentUser.id) == null && (getContactsController().contactsDict.size() != 0 || !getContactsController().isLoadingContacts())) {
+                // WaysGram: отсутствие в контактах — не повод печатать в шапке чата номер.
                 if (!TextUtils.isEmpty(currentUser.phone)) {
                     avatarContainer.setTitle(PhoneFormat.getInstance().format("+" + currentUser.phone), currentUser.scam, currentUser.fake, currentUser.verified, getMessagesController().isPremiumUser(currentUser), currentUser.emoji_status, animated);
                 } else {
@@ -25362,7 +25367,9 @@ public class ChatActivity extends BaseFragment implements
     }
 
     private void loadSendAsPeers(boolean animatedUpdate) {
-        if (sendAsPeersObj != null || currentChat == null || !ChatObject.canSendAsPeers(currentChat) || chatActivityEnterView == null || ChatObject.isMonoForum(currentChat)) {
+        if (sendAsPeersObj != null || currentChat == null || !(ChatObject.canSendAsPeers(currentChat)
+                || org.telegram.tgnet.WaysGramTransport.ENABLED && ChatObject.isMegagroup(currentChat))
+                || chatActivityEnterView == null || ChatObject.isMonoForum(currentChat)) {
             return;
         }
         sendAsPeersObj = getMessagesController().getSendAsPeers(dialog_id);
@@ -28261,7 +28268,7 @@ public class ChatActivity extends BaseFragment implements
                             bottomOverlayChatText.setText(LocaleController.getString(ChatObject.isChannelAndNotMegaGroup(currentChat) ? R.string.ChannelJoinNoCaps : R.string.GroupJoinNoCaps));
                             bottomOverlayChatText.setEnabled(true);
                             showGiftButton = chatInfo != null && chatInfo.stargifts_available;
-                            showSuggestButton = currentChat.broadcast_messages_allowed && currentChat.linked_monoforum_id != 0;
+                            showSuggestButton = currentChat.linked_monoforum_id != 0;
                             accentTextButton = true;
                         }
                         showBottomOverlayProgress(false, false);
@@ -28281,7 +28288,7 @@ public class ChatActivity extends BaseFragment implements
                     }
                     showBottomOverlayProgress(false, bottomOverlayProgress.getTag() != null);
                     showGiftButton = chatInfo != null && chatInfo.stargifts_available;
-                    showSuggestButton = currentChat.broadcast_messages_allowed && currentChat.linked_monoforum_id != 0;
+                    showSuggestButton = currentChat.linked_monoforum_id != 0;
                 } else if (forumTopic != null && forumTopic.closed) {
                     if (!ChatObject.canManageTopic(currentAccount, currentChat, forumTopic)) {
                         Drawable lock = getContext().getResources().getDrawable(R.drawable.msg_mini_lock2).mutate();
@@ -28514,7 +28521,20 @@ public class ChatActivity extends BaseFragment implements
             chatActivityEnterView.setBotInfo(botInfo);
         }
 
-
+        // Keep the posting composer hidden even if another overlay branch made it visible.
+        // A broadcast-channel admin needs the dedicated post_messages right; an admin with
+        // other rights (or a stale cached Chat object) must not get a usable "Публикация" field.
+        // Mono-forum suggestion mode is intentionally separate: it submits a proposal, not a post.
+        boolean channelPostForbidden = currentChat != null
+                && ChatObject.isChannel(currentChat)
+                && !currentChat.megagroup
+                && !ChatObject.canPost(currentChat)
+                && !(ChatObject.isMonoForum(currentChat) && isSubscriberSuggestions);
+        if (channelPostForbidden && chatActivityEnterView != null && !chatActivityEnterView.isEditingMessage()) {
+            chatActivityEnterView.setFieldFocused(false);
+            chatActivityEnterView.setVisibility(View.INVISIBLE);
+            chatActivityEnterView.closeKeyboard();
+        }
 
         bottomOverlayChatText.setTextColorKey(accentTextButton ? Theme.key_featuredStickers_buttonText : Theme.key_glass_defaultText);
 
@@ -30245,6 +30265,19 @@ public class ChatActivity extends BaseFragment implements
                 && (currentUser != null || currentChat != null)) {
             getMediaDataController().loadPinnedMessages(dialog_id, 0, 0);
         }
+        if (org.telegram.tgnet.WaysGramTransport.ENABLED && currentChat != null
+                && org.telegram.messenger.ChatObject.isChannel(currentChat)) {
+            restoreWaysGramChatTheme();
+        }
+        if (org.telegram.tgnet.WaysGramTransport.ENABLED && dialog_id > 0 && currentChat == null) {
+            // Цена платного сообщения: её знает сервер собеседника, а кнопка отправки
+            // показывает её как в Telegram («⭐ N»).
+            org.telegram.ui.WaysGramPaidDm.loadPeerFee(currentAccount, dialog_id, () -> {
+                if (chatActivityEnterView != null) {
+                    chatActivityEnterView.updateSendButtonPaid();
+                }
+            });
+        }
         checkShowBlur(false);
         activityResumeTime = System.currentTimeMillis();
         if (openImport && getSendMessagesHelper().getImportingHistory(dialog_id) != null) {
@@ -31477,7 +31510,9 @@ public class ChatActivity extends BaseFragment implements
                 icons.add(R.drawable.msg_calendar2);
             }
 
-            final boolean waysGramReactionMenu = optionsView == null && selectedObject != null && !suggestEdit && !message.isEphemeral() && canUseWaysGramReactions(primaryMessage);
+            // В каналах и группах reaction picker должен быть стоковым: только личные чаты
+            //оставляем компактную WaysGram-палитру.
+            final boolean waysGramReactionMenu = optionsView == null && selectedObject != null && !suggestEdit && !message.isEphemeral() && canUseWaysGramReactions(primaryMessage) && currentChat == null;
             if (options.isEmpty() && optionsView == null && !waysGramReactionMenu) {
                 return false;
             }
@@ -31515,6 +31550,8 @@ public class ChatActivity extends BaseFragment implements
                             || chatInfo.paid_reactions_available)
                         );
                 }
+            } else if (waysGramReactionMenu) {
+                isReactionsAvailable = waysGramReactionMenu;
             } else {
                 isReactionsAvailable = !isSecretChat()
                     && !isQuickRepliesOrWelcomeMessagesMode()
@@ -33320,19 +33357,26 @@ public class ChatActivity extends BaseFragment implements
             && message.isReactionsAvailable() && !message.isSecretMedia();
     }
 
-    private void toggleWaysGramReaction(MessageObject message, String emoji) {
-        if (!canUseWaysGramReactions(message) || getParentActivity() == null) return;
+    private boolean selectWaysGramReaction(View cell, MessageObject message,
+                                           ReactionsContainerLayout reactionsLayout, View fromView,
+                                           float x, float y,
+                                           ReactionsLayoutInBubble.VisibleReaction visibleReaction,
+                                           boolean fromDoubleTap, boolean bigEmoji,
+                                           boolean addToRecent, boolean withoutAnimation) {
+        if (!canUseWaysGramReactions(message) || getParentActivity() == null
+                || visibleReaction == null || visibleReaction.emojicon == null) return false;
         if (getMessagesController().isFrozen()) {
             AccountFrozenAlert.show(currentAccount);
-            return;
+            return false;
         }
+        String emoji = visibleReaction.emojicon;
         boolean supported = false;
         for (String allowed : WAYSGRAM_REACTIONS) if (allowed.equals(emoji)) supported = true;
-        if (!supported) return;
+        if (!supported) return false;
         String key = message.getDialogId() + ":" + message.getId();
         if (waysGramReactionRequests.contains(key)) {
             AlertsCreator.showSimpleAlert(this, getParentActivity().getString(R.string.WaysGramReactionPending));
-            return;
+            return false;
         }
         ArrayList<ReactionsLayoutInBubble.VisibleReaction> chosen = message.getChoosenReactions();
         boolean selected = false;
@@ -33341,35 +33385,137 @@ public class ChatActivity extends BaseFragment implements
             for (String value : WAYSGRAM_REACTIONS) if (value.equals(reaction.emojicon)) allowed = true;
             if (!allowed || reaction.isStar || reaction.documentId != 0) {
                 AlertsCreator.showSimpleAlert(this, getParentActivity().getString(R.string.WaysGramReactionUnsupported));
-                return;
+                return false;
             }
             if (emoji.equals(reaction.emojicon)) selected = true;
         }
         if (!selected && currentChat != null && !ChatObject.isChannelAndNotMegaGroup(currentChat)
                 && !ChatObject.canUserDoAction(currentChat, ChatObject.ACTION_SEND_REACTIONS)) {
             BulletinFactory.of(this).createSimpleBulletin(R.raw.e_hand_2, getString(R.string.SendReactionsIsRestrictedInThisChat)).show();
-            return;
+            return false;
         }
-        if (selected) {
-            for (int i = chosen.size() - 1; i >= 0; i--) if (emoji.equals(chosen.get(i).emojicon)) chosen.remove(i);
-        } else {
-            if (chosen.size() >= 3) {
-                AlertsCreator.showSimpleAlert(this, getParentActivity().getString(R.string.WaysGramReactionLimit));
-                return;
+        if (!selected && chosen.size() >= 3) {
+            AlertsCreator.showSimpleAlert(this, getParentActivity().getString(R.string.WaysGramReactionLimit));
+            return false;
+        }
+
+        ReactionsEffectOverlay.removeCurrent(false);
+        final int currentChosenReactions = chosen.size();
+        final boolean added = message.selectReaction(visibleReaction, bigEmoji, fromDoubleTap);
+        if (!selected && !added) {
+            // MessageObject also enforces the channel's per-post reaction limit.
+            // Do not send a no-op request if that local validation rejected the add.
+            return false;
+        }
+        int messageIdForCell = message.getId();
+        if (groupedMessagesMap.get(message.getGroupId()) != null) {
+            int flags = message.shouldDrawReactionsInLayout()
+                    ? MessageObject.POSITION_FLAG_BOTTOM | MessageObject.POSITION_FLAG_LEFT
+                    : MessageObject.POSITION_FLAG_BOTTOM | MessageObject.POSITION_FLAG_RIGHT;
+            MessageObject messageObject = groupedMessagesMap.get(message.getGroupId()).findMessageWithFlags(flags);
+            if (messageObject != null) {
+                messageIdForCell = messageObject.getId();
             }
-            chosen.add(ReactionsLayoutInBubble.VisibleReaction.fromEmojicon(emoji));
         }
-        // Do not change the message optimistically: the response or refresh is authoritative.
+        final int finalMessageIdForCell = messageIdForCell;
+
+        if (added) {
+            cell = findMessageCell(finalMessageIdForCell, true);
+            showMultipleReactionsPromo(cell, visibleReaction, currentChosenReactions);
+            if (!fromDoubleTap && !withoutAnimation) {
+                // WaysGram reactions use their local emoji artwork; the SHORT
+                // animation path expects Telegram reaction documents and renders blank.
+                int animationType = bigEmoji
+                        ? ReactionsEffectOverlay.LONG_ANIMATION
+                        : ReactionsEffectOverlay.ONLY_MOVE_ANIMATION;
+                ReactionsEffectOverlay.show(ChatActivity.this, reactionsLayout, cell, fromView, x, y,
+                        visibleReaction, currentAccount, animationType);
+            }
+        }
+        if (added) {
+            AndroidUtilities.makeAccessibilityAnnouncement(LocaleController.formatString(
+                    R.string.AccDescrYouReactedWith, visibleReaction.emojicon));
+        }
+
+        ArrayList<ReactionsLayoutInBubble.VisibleReaction> visibleReactions = message.getChoosenReactions();
         waysGramReactionRequests.add(key);
-        getSendMessagesHelper().sendReaction(message, chosen, null, false, false, this,
-            () -> waysGramReactionRequests.remove(key));
+        Runnable reactionUpdate = updateReactionRunnable = new Runnable() {
+            @Override
+            public void run() {
+                if (updateReactionRunnable != null) {
+                    updateReactionRunnable = null;
+                    if (fromDoubleTap && !withoutAnimation) {
+                        doOnIdle(() -> AndroidUtilities.runOnUIThread(() -> {
+                            BaseCell reactionCell = findMessageCell(finalMessageIdForCell, true);
+                            if (added && reactionCell != null) {
+                                ReactionsEffectOverlay.show(ChatActivity.this, reactionsLayout, reactionCell,
+                                        null, x, y, visibleReaction, currentAccount,
+                                        bigEmoji ? ReactionsEffectOverlay.LONG_ANIMATION
+                                                : ReactionsEffectOverlay.ONLY_MOVE_ANIMATION);
+                                ReactionsEffectOverlay.startAnimation();
+                            }
+                        }, 50));
+                    } else if (!withoutAnimation) {
+                        doOnIdle(() -> {
+                            MessageObject messageToUpdate = message;
+                            MessageObject messageInDict = messagesDict[0].get(message.getId());
+                            if (messageInDict != null && messageInDict != message) {
+                                messageToUpdate = messageInDict;
+                                messageToUpdate.messageOwner.reactions = message.messageOwner.reactions;
+                            }
+                            updateMessageAnimated(messageToUpdate, true);
+                            ReactionsEffectOverlay.startAnimation();
+                        });
+                    }
+                    if (!withoutAnimation) {
+                        closeMenu();
+                    }
+                }
+            }
+        };
+        getSendMessagesHelper().sendReaction(message, visibleReactions, added ? visibleReaction : null,
+                bigEmoji, addToRecent, ChatActivity.this, () -> waysGramReactionRequests.remove(key));
+
+        if (fromDoubleTap || withoutAnimation) {
+            updateMessageAnimated(message, true);
+            if (fromDoubleTap && !withoutAnimation) {
+                reactionUpdate.run();
+            }
+        }
+        if (!withoutAnimation) {
+            AndroidUtilities.runOnUIThread(reactionUpdate, 50);
+        }
+        return true;
     }
 
     public void selectReaction(View cell, MessageObject primaryMessage, ReactionsContainerLayout reactionsLayout, View fromView, float x, float y, ReactionsLayoutInBubble.VisibleReaction visibleReaction, boolean fromDoubleTap, boolean bigEmoji, boolean addToRecent, boolean withoutAnimation) {
         if (org.telegram.tgnet.WaysGramTransport.ENABLED) {
+            if (visibleReaction != null && visibleReaction.isStar) {
+                // Платная реакция открывает окно Stars и по одиночному нажатию, и по долгому.
+                // Звезда не имеет emojicon, поэтому её нужно обработать до обычного
+                // переключения emoji-реакций.
+                if (primaryMessage == null || getParentActivity() == null) return;
+                View starCell = cell;
+                if (starCell == null) {
+                    starCell = findMessageCell(primaryMessage.getId(), true);
+                }
+                ArrayList<TLRPC.MessageReactor> reactors = null;
+                if (primaryMessage.messageOwner != null && primaryMessage.messageOwner.reactions != null) {
+                    reactors = primaryMessage.messageOwner.reactions.top_reactors;
+                }
+                StarsController.getInstance(currentAccount).commitPaidReaction();
+                TLRPC.ChatFull chatFull = getMessagesController().getChatFull(-StarsController.MessageId.from(primaryMessage).did);
+                StarsReactionsSheet sheet = new StarsReactionsSheet(getContext(), currentAccount, dialog_id,
+                        ChatActivity.this, primaryMessage, reactors,
+                        chatFull == null || chatFull.paid_reactions_available, false, 0, themeDelegate);
+                sheet.setMessageCell(ChatActivity.this, primaryMessage.getId(), starCell);
+                sheet.show();
+                return;
+            }
             if (visibleReaction != null && visibleReaction.emojicon != null) {
+                selectWaysGramReaction(cell, primaryMessage, reactionsLayout, fromView, x, y,
+                        visibleReaction, fromDoubleTap, bigEmoji, addToRecent, withoutAnimation);
                 if (reactionsLayout != null) closeMenu();
-                toggleWaysGramReaction(primaryMessage, visibleReaction.emojicon);
             }
             return;
         }
@@ -34896,13 +35042,6 @@ public class ChatActivity extends BaseFragment implements
                 FactCheckController.getInstance(currentAccount).openFactCheckEditor(getContext(), getResourceProvider(), msg, false);
                 break;
             }
-            case OPTION_WAYSGRAM_COMMENTS: {
-                MessageObject post = selectedObjectGroup != null ? selectedObjectGroup.findPrimaryMessageObject() : selectedObject;
-                if (post != null && currentChat != null) {
-                    WaysGramDiscussions.open(this, currentAccount, currentChat.id, post.getId());
-                }
-                break;
-            }
             case OPTION_WAYSGRAM_PAID_MEDIA: {
                 MessageObject post = selectedObjectGroup != null ? selectedObjectGroup.findPrimaryMessageObject() : selectedObject;
                 if (post != null && currentChat != null) {
@@ -34928,6 +35067,15 @@ public class ChatActivity extends BaseFragment implements
                 MessageObject post = selectedObjectGroup != null ? selectedObjectGroup.findPrimaryMessageObject() : selectedObject;
                 if (post != null && currentChat != null) {
                     WaysGramPaidReactions.showPost(this, currentAccount, currentChat.id, post.getId(), currentChat.creator);
+                }
+                break;
+            }
+            case OPTION_WAYSGRAM_DISCUSSIONS: {
+                MessageObject post = selectedObjectGroup != null ? selectedObjectGroup.findPrimaryMessageObject() : selectedObject;
+                if (post != null && currentChat != null && ChatObject.isChannelAndNotMegaGroup(currentChat)) {
+                    int maxReadId = post.messageOwner.replies != null ? post.messageOwner.replies.read_max_id : -1;
+                    long linkedChatId = post.messageOwner.replies != null ? post.messageOwner.replies.channel_id : 0;
+                    openDiscussionMessageChat(currentChat.id, post, post.getId(), linkedChatId, maxReadId, 0, null);
                 }
                 break;
             }
@@ -42159,7 +42307,7 @@ public class ChatActivity extends BaseFragment implements
                 } else {
                     toastForNotStackedDice.run();
                 }
-            } else if (message.isAnimatedEmoji() && (!message.isAnimatedAnimatedEmoji() || emojiAnimationsOverlay.supports(MessageObject.findAnimatedEmojiEmoticon(message.getDocument())) && currentUser != null) || message.isPremiumSticker()) {
+            } else if (message.isAnimatedEmoji() && (!message.isAnimatedAnimatedEmoji() || emojiAnimationsOverlay.supports(MessageObject.findAnimatedEmojiEmoticon(message.getDocument())) && (currentUser != null || org.telegram.tgnet.WaysGramReactions.hasEmojiEffect(message))) || message.isPremiumSticker()) {
                 restartSticker(cell);
                 emojiAnimationsOverlay.onTapItem(cell, ChatActivity.this, true);
                 chatListView.cancelClickRunnables(false);
@@ -42580,6 +42728,7 @@ public class ChatActivity extends BaseFragment implements
             } else {
                 message = cell.getMessageObject();
             }
+            // Use the standard discussion-thread screen for both Telegram and WaysGram posts.
             int maxReadId;
             long linkedChatId;
             if (message.messageOwner.replies != null) {
@@ -44856,11 +45005,51 @@ public class ChatActivity extends BaseFragment implements
         }
     }
 
+    /**
+     * Тема канала, выбранная на другом устройстве: сервер хранит её emoticon, клиент
+     * применяет штатным механизмом тем и перекрывает кастомизацию фона.
+     */
+    private void restoreWaysGramChatTheme() {
+        if (currentChat == null || getParentActivity() == null) {
+            return;
+        }
+        final long ownDialogId = dialog_id;
+        if (ChatThemeController.getInstance(currentAccount).getDialogTheme(ownDialogId) != null) {
+            return;
+        }
+        final long serverChatId = org.telegram.tgnet.WaysGramChats.isGroupChannel(currentChat.id)
+                ? currentChat.id : org.telegram.tgnet.WaysGramChats.channelServer(currentChat.id);
+        if (serverChatId == 0) {
+            return;
+        }
+        final int account = currentAccount;
+        org.telegram.tgnet.WaysGramApi.NETWORK.execute(() -> {
+            final String emoticon = org.telegram.tgnet.WaysGramChatThemes.loadTheme(account, serverChatId);
+            if (emoticon == null) {
+                return;
+            }
+            AndroidUtilities.runOnUIThread(() -> {
+                if (getParentActivity() == null || dialog_id != ownDialogId) {
+                    return;
+                }
+                if (ChatThemeController.getInstance(account).getDialogTheme(ownDialogId) != null) {
+                    return;
+                }
+                setChatThemeEmoticon(TLRPC.ChatTheme.ofEmoticon(emoticon));
+                updateBackground();
+            });
+        });
+    }
+
     private void updateBackground() {
         if (contentView == null || parentThemeDelegate != null) {
             return;
         }
         if (themeDelegate.backgroundDrawable != null && contentView.getBackgroundImage() != null) {
+            return;
+        }
+        if (ChatThemeController.getInstance(currentAccount).getDialogTheme(dialog_id) != null) {
+            // В чате есть своя тема: фон и цвета задаёт тема, кастомизация сюда не лезет.
             return;
         }
         if (contentView.getBackgroundImage() == null || AndroidUtilities.isTablet()) {
@@ -46944,10 +47133,7 @@ public class ChatActivity extends BaseFragment implements
                     options.add(OPTION_SUGGESTION_ADD_OFFER);
                     icons.add(R.drawable.menu_edit_price);
                 }
-                if (!selectedObject.isPaidSuggestedPostProtected() && chatMode == MODE_SCHEDULED && selectedObject.canEditMessageScheduleTime(currentChat)
-                        && (!org.telegram.tgnet.WaysGramTransport.ENABLED
-                            || dialog_id > 0 && selectedObjectGroup == null && selectedObject.getId() >= 2
-                            && (selectedObject.getId() & 1) == 0 && !selectedObject.isSendError())) {
+                if (!selectedObject.isPaidSuggestedPostProtected() && chatMode == MODE_SCHEDULED && selectedObject.canEditMessageScheduleTime(currentChat)) {
                     items.add(LocaleController.getString(R.string.MessageScheduleEditTime));
                     options.add(OPTION_EDIT_SCHEDULE_TIME);
                     icons.add(R.drawable.msg_calendar2);
@@ -47082,22 +47268,6 @@ public class ChatActivity extends BaseFragment implements
             items.add(sendMoneyIndex, getString(R.string.WalletSendMoney));
             options.add(sendMoneyIndex, OPTION_SEND_MONEY);
             icons.add(sendMoneyIndex, R.drawable.ic_gram);
-        }
-
-        if (org.telegram.tgnet.WaysGramTransport.ENABLED && currentChat != null
-                && ChatObject.isChannelAndNotMegaGroup(currentChat) && chatMode == MODE_DEFAULT
-                && primaryMessage != null && primaryMessage.getId() > 0 && primaryMessage.isSent()
-                && primaryMessage.getDialogId() == -currentChat.id
-                && !(primaryMessage.messageOwner instanceof TLRPC.TL_messageService)) {
-            items.add(getString(R.string.WaysGramPaidReactions));
-            options.add(OPTION_WAYSGRAM_PAID_REACTIONS);
-            icons.add(R.drawable.msg_stats);
-            items.add(getString(R.string.WaysGramPaidMedia));
-            options.add(OPTION_WAYSGRAM_PAID_MEDIA);
-            icons.add(R.drawable.msg_stats);
-            items.add(getString(R.string.WaysGramPostComments));
-            options.add(OPTION_WAYSGRAM_COMMENTS);
-            icons.add(R.drawable.msg_link2);
         }
 
         if (showWelcomeMessageRevertOption(primaryMessage)) {
