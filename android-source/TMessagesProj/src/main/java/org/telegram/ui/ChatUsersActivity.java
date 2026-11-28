@@ -896,6 +896,7 @@ public class ChatUsersActivity extends BaseFragment implements NotificationCente
                     }
 
                     checkBoxCell.setChecked(!checkBoxCell.isChecked(), true);
+                    updateSendMediaAggregate();
                     AndroidUtilities.updateVisibleRows(listView);
                     DiffCallback diffCallback = saveState();
                     updateRows();
@@ -1224,6 +1225,10 @@ public class ChatUsersActivity extends BaseFragment implements NotificationCente
                     } else {
                         if (position == sendMessagesRow) {
                             defaultBannedRights.send_plain = !defaultBannedRights.send_plain;
+                            // TLRPC выводит send_messages из send_plain/send_media/send_stickers:
+                            // держим флаги синхронными, иначе снятый запрет текста возвращался
+                            // из устаревшего send_messages при записи маски.
+                            defaultBannedRights.send_messages = defaultBannedRights.send_plain;
                             if (sendMediaEmbededLinksRow >= 0) {
                                 listViewAdapter.notifyItemChanged(sendMediaEmbededLinksRow);
                             }
@@ -3877,6 +3882,20 @@ public class ChatUsersActivity extends BaseFragment implements NotificationCente
             }
             return null;
         }
+    }
+
+    /**
+     * send_media — телеграмный агрегат «запрещены все медиа». Пересчитываем его из шести
+     * переключателей, чтобы одиночный запрет (например, только фото) не выглядел как запрет
+     * всего медиа и чтобы запись маски не возвращала снятые ограничения.
+     */
+    private void updateSendMediaAggregate() {
+        defaultBannedRights.send_media = defaultBannedRights.send_photos
+                && defaultBannedRights.send_videos
+                && defaultBannedRights.send_roundvideos
+                && defaultBannedRights.send_audios
+                && defaultBannedRights.send_voices
+                && defaultBannedRights.send_docs;
     }
 
     private void setSendMediaEnabled(boolean enabled) {

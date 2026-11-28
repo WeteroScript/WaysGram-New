@@ -412,9 +412,19 @@ public class EmojiAnimationsOverlay implements NotificationCenter.NotificationCe
                     i--;
                 } else if (drawingObject.imageReceiver.getLottieAnimation() != null && drawingObject.imageReceiver.getLottieAnimation().isRunning()) {
                     drawingObject.wasPlayed = true;
-                } else if (drawingObject.imageReceiver.getLottieAnimation() != null && !drawingObject.imageReceiver.getLottieAnimation().isRunning()) {
-                    drawingObject.imageReceiver.getLottieAnimation().setCurrentFrame(0, true);
-                    drawingObject.imageReceiver.getLottieAnimation().start();
+                } else if (drawingObject.imageReceiver.getLottieAnimation() != null) {
+                    if (drawingObject.wasPlayed) {
+                        // Однократный эффект не должен перезапускаться сам: lottie
+                        // останавливается на последнем кадре раньше порога удаления, и
+                        // прежний безусловный restart прокручивал эффект заново с нуля —
+                        // отсюда «повторное проигрывание» и дёрганье при скролле.
+                        drawingObject.removing = true;
+                        drawingObject.removeProgress = 1f;
+                    } else {
+                        // Анимация ещё не стартовала (например, генерируется кэш):
+                        // запускаем её, но не отматываем уже сыгранный эффект назад.
+                        drawingObject.imageReceiver.getLottieAnimation().start();
+                    }
                 }
             }
             if (drawingObjects.isEmpty()) {

@@ -398,6 +398,8 @@ jobs:
           PY
       - name: Run Android source contract checks (no Gradle build)
         run: python3 scripts/test_android_messaging.py
+      - name: Run Android client regression checks
+        run: python3 scripts/test_android_waysgram_client_regressions.py
       - name: Commit updated source archive
         env:
           HEAD_REF: ${{ github.event.pull_request.head.ref || github.ref_name }}

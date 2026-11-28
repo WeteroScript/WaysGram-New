@@ -279,13 +279,19 @@ public class WaysGramMessages {
         }
         TLRPC.TL_peerChannel peer = new TLRPC.TL_peerChannel();
         peer.channel_id = tg;
-        TLRPC.TL_messageReactions reactions = new TLRPC.TL_messageReactions();
+        TLRPC.TL_messageReactions reactions = null;
         for (int i = 0; i < messages.length(); i++) {
             JSONObject message = messages.optJSONObject(i);
             if (message != null && message.optInt("id", 0) == messageId) {
                 reactions = WaysGramMapper.readReactions(message);
                 break;
             }
+        }
+        if (reactions == null) {
+            // An empty page is not "no reactions": applying it would erase the star that
+            // was just paid for. Fail loudly so the pending amount is rolled back instead
+            // of the chip silently disappearing from the message.
+            throw new WaysGramApi.ApiException(502, "REACTION_RESPONSE_INVALID");
         }
         TLRPC.TL_updates result = new TLRPC.TL_updates();
         result.date = (int) (System.currentTimeMillis() / 1000);

@@ -12282,7 +12282,11 @@ def build_messenger_router(
             if target is None:
                 raise HTTPException(404, "CHANNEL_POST_NOT_FOUND")
             owner, enabled, banned = target
-            if not enabled or banned or owner == uid:
+            # The channel owner may react to its own posts: Telegram offers the same
+            # button to the author and the stars simply land on the channel balance.
+            # Rejecting the author made the client show a pending star and then roll it
+            # back five seconds later, which looked like "the reaction disappears".
+            if not enabled or banned:
                 raise HTTPException(403, "PAID_REACTIONS_UNAVAILABLE")
             now = int(time.time())
             reason = f"channel_paid_reaction:{channel_id}:{message_id}"
@@ -20942,6 +20946,16 @@ def build_messenger_router(
                         " AND NOT EXISTS (SELECT 1 FROM channel_post_discussions d "
                         "WHERE d.group_id=group_messages.group_id AND d.root_message_id=group_messages.id)"
                     )
+                    # The pre-history floor hides everything sent before a member joined.
+                    # Explicit ids are asked for by exact reference (quote, reply, thread
+                    # root), so the floor must not hide the referenced discussion root:
+                    # otherwise /messages?message_ids= answers with nothing while
+                    # /threads/{root}/replies returns the root, and the client reports the
+                    # post as deleted from the discussion group.
+                    floor_filter = "id>?" if selected_ids is None else (
+                        "(id>? OR EXISTS (SELECT 1 FROM channel_post_discussions cd "
+                        "WHERE cd.group_id=group_messages.group_id AND cd.root_message_id=group_messages.id))"
+                    )
                     selected_limit = limit if selected_ids is None else len(selected_ids)
                     cur = await db.execute(
                         """SELECT id,group_id,CASE WHEN send_as_id IS NULL THEN sender_telegram_id ELSE 0 END AS sender_id,
@@ -20962,7 +20976,7 @@ def build_messenger_router(
                                   group_messages.paid_message_stars AS paid_message_stars,
                                   (SELECT d.channel_id FROM channel_post_discussions d WHERE d.group_id=group_messages.group_id AND d.root_message_id=group_messages.id) AS discussion_channel_id,
                                   (SELECT d.post_id FROM channel_post_discussions d WHERE d.group_id=group_messages.group_id AND d.root_message_id=group_messages.id) AS discussion_post_id
-                           FROM group_messages WHERE group_id=? AND topic_id IS NULL AND (?=0 OR id<?) AND id>?""" + discussion_filter + id_filter + " ORDER BY id DESC LIMIT ?",
+                           FROM group_messages WHERE group_id=? AND topic_id IS NULL AND (?=0 OR id<?) AND """ + floor_filter + discussion_filter + id_filter + " ORDER BY id DESC LIMIT ?",
                         (group_id, before_id, before_id, history_floor) + tuple(selected_ids or ()) + (selected_limit,),
                     )
                 rows = await cur.fetchall()

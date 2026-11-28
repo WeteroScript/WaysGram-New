@@ -159,6 +159,12 @@ public class ReactionsLayoutInBubble {
         if (reaction instanceof TLRPC.TL_reactionCustomEmoji && reaction1 instanceof TLRPC.TL_reactionCustomEmoji) {
             return ((TLRPC.TL_reactionCustomEmoji) reaction).document_id == ((TLRPC.TL_reactionCustomEmoji) reaction1).document_id;
         }
+        if (reaction instanceof TLRPC.TL_reactionPaid && reaction1 instanceof TLRPC.TL_reactionPaid) {
+            // Paid reactions have no emoji identity: every paid count is the same chip.
+            // Without this the state of the star (chosen, last drawn position) was lost on
+            // each authoritative update and the chip visibly rebuilt itself.
+            return true;
+        }
         return false;
     }
 

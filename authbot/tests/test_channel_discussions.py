@@ -119,3 +119,56 @@ def test_linked_peer_default_restriction_applies_to_group_members(env) -> None:
             assert owner_unlink.status_code == 200, owner_unlink.text
 
     run(scenario())
+
+
+def test_discussion_root_survives_pre_history_floor_for_explicit_ids(env) -> None:
+    """Ссылочный запрос по id возвращает корень обсуждения даже при скрытой предистории.
+
+    Клиент загружает корень через `/messages?message_ids=`, а комментарии — через
+    `/threads/{root}/replies`. Пока floor отсекал корень, первый запрос отвечал пусто,
+    и пост выглядел удалённым из группы обсуждения.
+    """
+    path, app = env
+
+    async def scenario() -> None:
+        async with await client_for(app) as client:
+            owner, subscriber = headers(101), headers(102)
+            channel = await client.post(
+                "/api/channels", headers=owner,
+                json={"title": "Pre-history", "username": "pre_history_channel", "is_public": True},
+            )
+            assert channel.status_code == 201, channel.text
+            cid = channel.json()["id"]
+            group = await client.post("/api/groups", headers=owner, json={"title": "Pre-history chat"})
+            assert group.status_code == 201, group.text
+            gid = group.json()["id"]
+            assert (await client.put(f"/api/channels/{cid}/discussion-group", headers=owner,
+                                     json={"group_id": gid})).status_code == 200
+
+            post = await client.post(f"/api/channels/{cid}/messages", headers=owner, json={"body": "old post"})
+            assert post.status_code == 201, post.text
+            pid = post.json()["id"]
+            assert (await client.put(f"/api/groups/{gid}/settings", headers=owner,
+                                     json={"pre_history_hidden": True})).status_code == 200
+
+            # Подписчик вступает в группу обсуждений уже после публикации поста.
+            discussion = await client.get(f"/api/channels/{cid}/messages/{pid}/discussion", headers=subscriber)
+            assert discussion.status_code == 200, discussion.text
+            root = discussion.json()["root_message_id"]
+            assert root > 0
+
+            replies = await client.get(f"/api/groups/{gid}/threads/{root}/replies?include_root=true",
+                                       headers=subscriber)
+            assert replies.status_code == 200, replies.text
+            assert replies.json()["ids"] == [root]
+
+            messages = await client.get(f"/api/groups/{gid}/messages?message_ids={root}", headers=subscriber)
+            assert messages.status_code == 200, messages.text
+            assert [item["id"] for item in messages.json()["messages"]] == [root]
+
+            # Обычная история по-прежнему скрывает старые сообщения от новичка.
+            history = await client.get(f"/api/groups/{gid}/messages", headers=subscriber)
+            assert history.status_code == 200, history.text
+            assert history.json()["messages"] == []
+
+    run(scenario())

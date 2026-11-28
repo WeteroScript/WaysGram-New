@@ -521,7 +521,10 @@
       var center = colorHex(backdrop.center_color);
       var edge = colorHex(backdrop.edge_color);
       if (center && edge) {
-        return "radial-gradient(circle at 50% 40%, " + center + " 0%, " + edge + " 100%)";
+        // The card is much wider than it is tall (`.big-art` is 200px high), so a circle
+        // put the whole visible area inside the centre stop and the backdrop looked flat.
+        // An ellipse keeps the centre/edge ratio of Telegram's own card.
+        return "radial-gradient(ellipse at 50% 32%, " + center + " 0%, " + edge + " 96%)";
       }
       if (center || edge) { return center || edge; }
     }
@@ -533,8 +536,9 @@
 
   /* Картинка подарка: обычный <img> не может передать Authorization, поэтому качаем blob. */
   function artwork(giftId, img, emojiNode) {
-    if (!giftId) { return; }
+    if (!giftId || !img) { return; }
     var key = String(giftId);
+    if (img.dataset.modelShown === "1") { return; }
     if (artCache[key]) {
       img.src = artCache[key];
       img.hidden = false;
@@ -551,6 +555,8 @@
         if (!/^image\//.test(blob.type)) { throw new Error("not an image"); }
         var url = URL.createObjectURL(blob);
         artCache[key] = url;
+        // The official model may have been revealed while this sticker was loading.
+        if (img.dataset.modelShown === "1") { return; }
         img.src = url;
         img.hidden = false;
         if (emojiNode) { emojiNode.hidden = true; }
@@ -731,16 +737,26 @@
       if (generation !== modelRenderGeneration
           || !document.documentElement.contains(node)) { return; }
       node.classList.add("active");
-      if (img) { img.hidden = true; }
+      if (img) {
+        img.hidden = true;
+        // The collected card is composed here: the backdrop gradient plus this model.
+        // The catalogue sticker must not be shown on top of it afterwards, otherwise a
+        // slow sticker response repaints the card with its baked-in colour.
+        img.dataset.modelShown = "1";
+      }
       if (emojiNode) { emojiNode.hidden = true; }
     }
     function fallback() {
       if (!node || generation !== modelRenderGeneration) { return; }
       node.classList.remove("active");
       node.innerHTML = "";
+      if (img) { delete img.dataset.modelShown; }
       if (img && img.getAttribute("src")) {
         img.hidden = false;
         if (emojiNode) { emojiNode.hidden = true; }
+      } else if (img && item && item.telegram_gift_id) {
+        // No official model: the catalogue sticker is the only artwork left.
+        artwork(item.telegram_gift_id, img, emojiNode);
       } else if (emojiNode) {
         emojiNode.hidden = false;
       }

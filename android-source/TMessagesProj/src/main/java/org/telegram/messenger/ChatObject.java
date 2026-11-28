@@ -1669,7 +1669,10 @@ public class ChatObject {
             case ACTION_SEND:
                 return rights.send_messages;
             case ACTION_SEND_MEDIA:
-                return rights.send_media;
+                // send_media is only the aggregate "all media denied". A granular photo ban
+                // still has to disable the media attach screen, as it did before the mask
+                // stopped treating the photo bit as that aggregate.
+                return rights.send_media || rights.send_photos;
             case ACTION_SEND_STICKERS:
                 return rights.send_stickers;
             case ACTION_EMBED_LINKS:

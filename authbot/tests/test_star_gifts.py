@@ -709,6 +709,31 @@ def test_market_resolves_backdrop_palette_from_the_named_trait(env) -> None:
     assert legacy["collectible_traits"]["backdrop"]["pattern_color"] == 0x6C6868
 
 
+def test_rolled_backdrop_colours_follow_the_pool_palette() -> None:
+    """Цвета ролла берутся из официальной палитры записи с этим именем.
+
+    Живая строка Telegram может нести цвета другого backdrop-а (в отчёте — маджента под
+    именем «Black»); карточка Fragment рисует именно эти цвета, поэтому ролл их сверяет.
+    """
+    import gift_upgrades
+
+    pool = {
+        "models": [["Gucci Leap", 1]],
+        "patterns": [["Diamonds", 1]],
+        "backdrops": [["Black", 1000, 0x363738, 0x0E0F0F, 0x6C6868, 0x8C8F91]],
+    }
+    magenta = {"name": "Black", "permille": 0, "center_color": 0x802A59,
+               "edge_color": 0x311A2C, "pattern_color": 0x711E4C, "text_color": 0xFFD0D6}
+    traits = gift_upgrades.roll_traits(pool, 1, live={"backdrop": [dict(magenta), dict(magenta)]},
+                                       gift_id="")
+    backdrop = traits["backdrop"]
+    assert backdrop["name"] == "Black"
+    assert (
+        backdrop["center_color"], backdrop["edge_color"],
+        backdrop["pattern_color"], backdrop["text_color"],
+    ) == (0x363738, 0x0E0F0F, 0x6C6868, 0x8C8F91)
+
+
 def test_legacy_gram_gift_listing_migrates_to_currency_schema(env) -> None:
     path, _app = env
 

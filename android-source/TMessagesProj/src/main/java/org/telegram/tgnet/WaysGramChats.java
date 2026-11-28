@@ -1231,14 +1231,13 @@ public class WaysGramChats {
         rights.change_info = changeInfoRestricted;
         rights.send_messages = (mask & 1) != 0;
         rights.send_plain = (mask & 1) != 0;
-        rights.send_inline = (mask & 1) != 0;
         rights.send_photos = (mask & 2) != 0;
-        rights.send_media = (mask & 2) != 0;
         rights.send_videos = (mask & 4) != 0;
         rights.send_audios = (mask & 8) != 0;
         rights.send_stickers = (mask & 16) != 0;
         rights.send_gifs = (mask & 16) != 0;
         rights.send_games = (mask & 16) != 0;
+        rights.send_inline = (mask & 16) != 0;
         rights.send_docs = (mask & 32) != 0;
         rights.send_voices = (mask & 64) != 0;
         rights.send_roundvideos = (mask & 128) != 0;
@@ -1251,25 +1250,34 @@ public class WaysGramChats {
         rights.manage_topics = (mask & 16384) != 0;
         rights.manage_linked_peers = (mask & 32768) != 0;
         /*
+         * send_media в Telegram — агрегат «запрещены все медиа». Считаем его из шести
+         * медиа-битов, а не из бита 2: иначе запрет только фото выставлял агрегат, и снять
+         * этот запрет было нельзя — запись маски снова добавляла бит 2 из send_media.
+         */
+        rights.send_media = rights.send_photos && rights.send_videos && rights.send_roundvideos
+                && rights.send_audios && rights.send_voices && rights.send_docs;
+        /*
          * Флаги берём в проводном виде — по ним сравниваются права, — но решения интерфейса
-         * («можно ли отправлять») остаются по исходной маске: TLRPC выводит send_messages и
-         * send_media из детальных флагов, и после проводной нормализации запрет сообщений
-         * выглядел бы снятым.
+         * («можно ли отправлять») остаются по исходной маске: TLRPC выводит send_messages
+         * из send_plain/send_media/send_stickers, и после проводной нормализации запрет
+         * сообщений выглядел бы снятым.
          */
         TLRPC.TL_chatBannedRights stable = normalized(rights);
         stable.send_messages |= (mask & 1) != 0;
-        stable.send_media |= (mask & 2) != 0;
+        stable.send_plain |= (mask & 1) != 0;
+        stable.send_inline |= (mask & 16) != 0;
+        stable.send_media |= rights.send_media;
         return stable;
     }
 
     static int sendRestrictionMask(TLRPC.TL_chatBannedRights rights) {
         if (rights == null) return 0;
         int mask = 0;
-        if (rights.send_messages || rights.send_plain || rights.send_inline) mask |= 1;
-        if (rights.send_media || rights.send_photos) mask |= 2;
+        if (rights.send_plain || rights.send_messages) mask |= 1;
+        if (rights.send_photos) mask |= 2;
         if (rights.send_videos) mask |= 4;
         if (rights.send_audios) mask |= 8;
-        if (rights.send_stickers || rights.send_gifs || rights.send_games) mask |= 16;
+        if (rights.send_stickers || rights.send_gifs || rights.send_games || rights.send_inline) mask |= 16;
         if (rights.send_docs) mask |= 32;
         if (rights.send_voices) mask |= 64;
         if (rights.send_roundvideos) mask |= 128;
@@ -1281,6 +1289,14 @@ public class WaysGramChats {
         if (rights.edit_rank) mask |= 8192;
         if (rights.manage_topics) mask |= 16384;
         if (rights.manage_linked_peers) mask |= 32768;
+        /*
+         * Старые объекты прав могут нести только агрегат send_media («всё медиа запрещено»).
+         * Разворачиваем его в шесть битов лишь когда ни один детальный флаг не выставлен:
+         * иначе снятый запрет фото возвращался бы из устаревшего агрегата.
+         */
+        if (rights.send_media && (mask & (2 | 4 | 8 | 32 | 64 | 128)) == 0) {
+            mask |= 2 | 4 | 8 | 32 | 64 | 128;
+        }
         return mask;
     }
 

@@ -345,6 +345,32 @@ def _live_slot(live: Any, kind: str) -> dict[str, Any] | None:
     return result
 
 
+def _align_backdrop_colors(backdrop: dict[str, Any], entries: list[list[Any]]) -> dict[str, Any]:
+    """Keeps the four colours equal to the official palette of the backdrop's name.
+
+    Telegram's live rows are authoritative for the name, but a partially synced row can
+    carry the colours of another backdrop: the Fragment card then paints a magenta field
+    under a "Black" label. The static pool is the source of truth for
+    ``[name, chance, centre, edge, pattern, text]``.
+    """
+    name = str(backdrop.get("name") or "").strip().casefold()
+    if not name:
+        return backdrop
+    matches = [
+        entry for entry in entries
+        if isinstance(entry, list) and len(entry) >= 6
+        and str(entry[0] or "").strip().casefold() == name
+    ]
+    if len(matches) != 1:
+        return backdrop
+    entry = matches[0]
+    for key, value in zip(
+        ("center_color", "edge_color", "pattern_color", "text_color"), entry[2:6]
+    ):
+        backdrop[key] = int(value)
+    return backdrop
+
+
 def roll_traits(
         pool: dict[str, Any],
         now: int,
@@ -388,7 +414,9 @@ def roll_traits(
     special = roll_special_model(gift_id)
     model = special or live_hits["model"] or pool_slot(models)
     pattern = live_hits["pattern"] or pool_slot(patterns)
-    backdrop = live_hits["backdrop"] or pool_slot(backdrops, colored=True)
+    backdrop = _align_backdrop_colors(
+        live_hits["backdrop"] or pool_slot(backdrops, colored=True), backdrops
+    )
     used = sum(1 for hit in live_hits.values() if hit is not None)
     result = {
         "version": TRAITS_VERSION,

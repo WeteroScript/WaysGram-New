@@ -1803,6 +1803,47 @@ def test_channel_paid_reactions_are_opt_in_atomic_and_idempotent(env):
     run(scenario())
 
 
+
+def test_channel_owner_can_react_to_own_post(env):
+    """Владелец канала тоже может платить за реакцию: звёзды уходят на баланс канала.
+
+    Раньше сервер отвечал 403 `PAID_REACTIONS_UNAVAILABLE` автору поста. Клиент успевал
+    показать оптимистичную звезду и через 5 секунд откатывал её — со стороны это
+    выглядело как «платная реакция пропадает».
+    """
+    import aiosqlite
+
+    path, app = env
+
+    async def scenario():
+        async with aiosqlite.connect(path) as db:
+            await db.execute('UPDATE accounts SET stars=20 WHERE telegram_id=101')
+            await db.commit()
+        async with await client_for(app) as client:
+            owner = headers(101)
+            channel = await client.post('/api/channels', headers=owner,
+                                        json={'title': 'Own posts', 'username': 'own_paid_posts', 'is_public': True})
+            base = f"/api/channels/{channel.json()['id']}"
+            post = await client.post(base + '/messages', headers=owner, json={'body': 'Mine'})
+            assert (await client.put(base + '/paid-reactions', headers=owner, json={'enabled': True})).status_code == 200
+            url = base + f"/messages/{post.json()['id']}/paid-reactions"
+            sent = await client.post(url, headers={**owner, 'Idempotency-Key': 'owner-paid-reaction-0001'},
+                                     json={'stars': 3})
+            assert sent.status_code == 200, sent.text
+            assert sent.json() == {'stars': 3, 'balance_after': 17, 'total_stars': 3}
+            assert (await client.get(url, headers=owner)).json() == {'total_stars': 3, 'my_stars': 3}
+            listed = (await client.get(base + '/messages?message_ids=' + str(post.json()['id']),
+                                       headers=owner)).json()['messages']
+            assert [(item['paid_stars'], item['my_paid_stars']) for item in listed] == [(3, 3)]
+        async with aiosqlite.connect(path) as db:
+            cur = await db.execute('SELECT stars FROM accounts WHERE telegram_id=101')
+            assert (await cur.fetchone())[0] == 17
+            channel_stars_id = channel_chat_stars_id(channel.json()["id"])
+            cur = await db.execute('SELECT stars FROM chat_stars WHERE chat_id=?', (channel_stars_id,))
+            assert (await cur.fetchone())[0] == 3
+
+    run(scenario())
+
 def test_legacy_channel_stars_are_moved_out_of_the_group_id_range(env):
     import aiosqlite
     import messenger_api

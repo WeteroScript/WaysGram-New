@@ -1163,7 +1163,11 @@ public class GiftSheet extends BottomSheetWithRecyclerListView implements Notifi
                 }
             }
         }
-        final boolean hasWaysGramMyGifts = waysGramMyGiftsLoading || !waysGramMyGifts.isEmpty();
+        // fillItems is called from the UniversalAdapter constructor, which the bottom sheet
+        // creates inside its own constructor, so instance fields of this class are still
+        // null here (field initializers run after super(...)). Guard the WaysGram list.
+        final boolean hasWaysGramMyGifts = waysGramMyGiftsLoading
+                || waysGramMyGifts != null && !waysGramMyGifts.isEmpty();
         if (!MessagesController.getInstance(currentAccount).stargiftsBlocked
                 && (!gifts.isEmpty() || userSettings != null && !userSettings.disallow_unique_stargifts && myGifts != null && !myGifts.gifts.isEmpty()
                 || hasWaysGramMyGifts)) {
