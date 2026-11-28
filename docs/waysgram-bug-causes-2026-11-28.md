@@ -1,6 +1,7 @@
 # Разбор шести дефектов WaysGram: причины и точки в коде
 
-Документ фиксирует **только диагностику**: ни один файл приложения, сервера или тестов не изменён.
+Диагностическая часть ниже написана до правок; исправления и их проверка — в разделе
+«Что исправлено» (коммит `3bf95d4`).
 Все ссылки — `файл:строка` по состоянию ветки `arena/14d0f8a0-waysgram-new` (база `3398397`).
 Android-код читался в мирроре `android-source/`; источником правды для сборки остаются
 `WaysGram-Android.zip.part1…part5` (см. `docs/android-source-mirror.md`), поэтому правки придётся
@@ -378,6 +379,33 @@ fallback-палитра `colorFor`, а именно непрозрачная к�
 
 ---
 
+## Что исправлено (коммит `3bf95d4`)
+
+| № | Правка | Точки |
+|---|---|---|
+| 1 | `fillItems` не трогает `waysGramMyGifts`, пока список не загружен (адаптер создаётся внутри `BottomSheetWithRecyclerListView.<init>`) | `GiftSheet.java:1164-1172` |
+| 2 | владельцу канала разрешена платная реакция на свой пост; клиент больше не откатывает оптимистичную звезду на пустом ответе | `messenger_api.py:12285-12290`, `WaysGramMessages.java` (`sendPaidReaction`: `REACTION_RESPONSE_INVALID` вместо NPE), `ReactionsLayoutInBubble.equalsTLReaction` (paid == paid) |
+| 3 | маска прав: `1=текст`, `2=фото`, `4=видео`, `8=аудио`, `16=стикеры/gif/игры/inline`, `32=документы`, `64=голосовые`, `128=кружки`; `send_media` — производное «все шесть медиа запрещены», а не алиас одного бита | `WaysGramChats.java` (`bannedRightsFor`/`sendRestrictionMask`), `ChatUsersActivity.java` (`updateSendMediaAggregate`, синхронизация `send_messages`/`send_plain`), `ChatObject.java` (`ACTION_SEND_MEDIA`) |
+| 4 | явно запрошенный `message_ids` больше не режется `group_history_floor`, если это корень `channel_post_discussions` | `messenger_api.py:20946-20960` |
+| 5 | однократный emoji-эффект не перезапускается сам: вместо `setCurrentFrame(0,true)+start()` объект уходит в `removing` | `EmojiAnimationsOverlay.java:412-430` |
+| 6 | палитра backdrop выравнивается по пулу при ролле, а каталог-стикер не закрашивает уже показанную 3D-модель; градиент карточки — эллипс, а не круг | `gift_upgrades.py:348-372` (+ вызов в `roll_traits`), `fragment.html` (`reveal`/`fallback`/`artwork`, `colorFor`) |
+
+Тесты, закрепляющие правки (все зелёные):
+
+* `tests/test_star_gifts.py::test_rolled_backdrop_colours_follow_the_pool_palette`
+* `tests/test_message_changes.py` — расширенный набор «Разрешений»
+* `tests/test_channel_discussions.py` — корень обсуждения в `message_ids`
+* `tests/test_fragment_webapp.py`, `tests/test_fragment_deposit.py`
+* `scripts/test_android_waysgram_client_regressions.py` — читает **собранные** `WaysGram-Android.zip.part*`,
+  проверяет NPE-гард, таблицу битов и round-trip 15 масок, синхронизацию `send_media`,
+  пустую страницу платной реакции, идентичность paid-чипа и отсутствие `setCurrentFrame(0,true)` в `draw()`.
+  Запускается в CI шагом «Run Android client regression checks» (`authbot.yml`).
+
+Android-правки лежат и в мирроре `android-source/`, и в архиве: после каждой правки нужен
+`python3 scripts/repack_android_source.py <пути…>`, иначе сборка возьмёт старое.
+
+---
+
 ## Приложение: чем проверялось
 
 | Проверка | Результат |
@@ -390,4 +418,26 @@ fallback-палитра `colorFor`, а именно непрозрачная к�
 | PIL по скриншоту карточки | углы `#311a2c`/`#802a59`, узор `#711e4c` — не палитра Black |
 | `python -m pytest docs/diagnostics/2026-11-28/probe_*.py -q` | три пробы проходят (они печатают ответы API, а не проверяют ожидания); см. `docs/diagnostics/2026-11-28/README.md` |
 
-Ни один дефект пока не исправлен; документ фиксирует причины и точки вмешательства.
+| `pytest` после правок | `test_star_gifts.py`, `test_message_changes.py`, `test_channel_discussions.py`, `test_fragment_webapp.py`, `test_fragment_deposit.py`, `test_channel_multi_session_rights.py` — зелёные |
+| `pytest -q -k backdrop` | 2 passed (палитра backdrop) |
+| `python -m pytest scripts/test_android_waysgram_client_regressions.py -q` | 7 passed |
+| `gh workflow run build-apk.yml -f diagnostics_only=true` | сборка APK из ветки — проверка компиляции Java-правок |
+
+### Известные красные тесты (были красными до правок)
+
+В базе красные три теста, все — один корень: в репозитории сознательно принято, что участник группы
+**может** менять информацию, пока владелец не включит «Изменять информацию» в «Разрешениях»
+(`chat_groups.default_change_info_restricted` по умолчанию `0`; это прямо закреплено
+`tests/test_message_changes.py::test_group_default_change_info_is_persisted_and_applied`).
+Старые тесты ждут обратного — телеграмного дефолта «участникам запрещено»:
+
+| Тест | Что ждёт | Что получает |
+|---|---|---|
+| `test_chat_rights_masking.py::test_member_without_appointment_has_no_group_rights` | `PUT /api/groups/{id}` → 403 | 200 (`group_can_change_info` пускает участника при флаге `0`) |
+| `test_chat_location.py::test_group_location_requires_change_info_right` | `PUT /api/groups/{id}/location` → 403 | 200 (то же) |
+| `test_messenger_api.py::test_channel_and_group_avatar_can_be_set_only_by_managers` | `PUT /api/groups/{id}/avatar` → 403 | 404 `Изображение не найдено` — участник прошёл проверку прав и упал на владельце картинки |
+
+Проверено прогоном базового коммита `7a26f0d` без наших изменений: те же три падения. Дефекты 1–6
+их не касаются. Развязка — либо перевести тесты на новый контракт (владелец запрещает флагом), либо
+сделать `default_change_info_restricted` по умолчанию `1`, как в Telegram, и переписать
+`test_group_default_change_info_is_persisted_and_applied`. Это продуктовое решение, поэтому код не тронут.
