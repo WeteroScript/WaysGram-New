@@ -83,6 +83,12 @@ class CustomizationIsolationChecks(unittest.TestCase):
         self.assertIn("tabsViewBackground = iBlur3FactoryGlass.create(tabsView", tabs)
         self.assertIn("tabsView.setBackground(WaysGramCustomizationActivity.wrapBackground(", tabs)
         self.assertIn("tabsViewBackground", tabs)
+        customization = self.source("ui/WaysGramCustomizationActivity.java")
+        wrapper = customization.split("wrapBackground(int account, View view,", 1)[1].split(
+            "private static void invalidateBackdrops()", 1
+        )[0]
+        self.assertIn("registerBackdrop(view)", wrapper)
+        self.assertIn("return ordinary;", wrapper)
         layout = self.source("ui/MainTabsLayout.java")
         self.assertNotIn("WaysGramCustomizationActivity.drawIndicator", layout)
         glass = self.source("ui/Components/glass/GlassTabView.java")
