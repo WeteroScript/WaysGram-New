@@ -146,6 +146,11 @@ def test_sale_transfers_ownership_and_pays_the_seller(env) -> None:
             assert card["owner"]["telegram_id"] == 102
             assert card["mine"] is True
             assert card["frozen"] is True
+            assert card["purchase_currency"] == "stars"
+            assert card["purchase_price_stars"] == 100
+            assert card["purchase_price_grams"] == 0
+            # Asking price remains independent from the buyer's historic purchase.
+            assert card["price_stars"] == 0
 
             # Комиссия 5 %: покупатель отдал 100, продавец получил 95.
             assert await balances(path, 102, 101) == {102: 900, 101: 95}
@@ -213,6 +218,9 @@ def test_username_gram_sale_debits_and_pays_grams_without_a_stars_card(env) -> N
             assert bought.json()["sale_currency"] == "grams"
             assert bought.json()["sale_price_grams"] == 100
             assert bought.json()["payout_grams"] == 95
+            assert bought.json()["purchase_currency"] == "grams"
+            assert bought.json()["purchase_price_stars"] == 0
+            assert bought.json()["purchase_price_grams"] == 100
             assert await gram_balances(path, 102, 101) == {102: 900, 101: 95}
             assert await balances(path, 102, 101) == {102: 0, 101: 0}
             assert query(
@@ -356,6 +364,9 @@ def test_free_name_is_added_as_an_additional_profile_username(env) -> None:
             )
             assert claimed.status_code == 200, claimed.text
             assert claimed.json()["owner"]["telegram_id"] == 101
+            assert claimed.json()["purchase_currency"] == "stars"
+            assert claimed.json()["purchase_price_stars"] == fragment_market.system_price("zhenya")
+            assert claimed.json()["price_stars"] == 0
             assert await balances(path, 101) == {101: 20_000 - fragment_market.system_price("zhenya")}
             names = await usernames(path)
             assert names[101] == "buyer"

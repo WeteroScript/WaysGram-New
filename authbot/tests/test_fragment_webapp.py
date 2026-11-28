@@ -80,15 +80,23 @@ def test_page_calls_only_our_api(env) -> None:
             assert "/api/gift-market?mine=true&limit=100" in body
             assert "/api/gift-market/catalog" in body
             assert "requestModelArtwork" in body
-            assert "requestPatternArtwork" in body
             assert "lottie.loadAnimation" in body
             assert "model_document_id" in body
-            assert "pattern_document_id" in body
             # Ключ идемпотентности строится по тому же шаблону, что и в клиенте.
             assert '"wg-" + action + "-" + clean' in body
             assert '"Idempotency-Key"' in body
 
     run(scenario())
+
+
+def test_pattern_is_not_rendered_as_a_foreground_sticker() -> None:
+    body = PAGE.read_text(encoding="utf-8")
+    assert "tinted, tiled backdrop texture" in body
+    assert "pattern-art" not in body
+    assert "requestPatternArtwork" not in body
+    assert "renderGiftPattern" not in body
+    # Keep the pattern's name visible as a trait; only the broken image overlay is removed.
+    assert 'trait(traits, "symbol") || trait(traits, "pattern")' in body
 
 
 def test_gift_filters_own_listings_and_refresh_interval(env) -> None:

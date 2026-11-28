@@ -71,12 +71,21 @@ public final class WaysGramFragment {
         }
         TL_fragment.TL_collectibleInfo info = new TL_fragment.TL_collectibleInfo();
         info.purchase_date = card.optInt("purchase_date");
-        // Telegram Stars use the three-letter XTR code supported by BillingController.
-        // This market has no separate TON/fiat price, so leave those fields empty.
-        info.currency = "XTR";
-        info.amount = card.optLong("price_stars");
-        info.crypto_currency = "";
-        info.crypto_amount = 0;
+        String purchaseCurrency = card.optString("purchase_currency", "");
+        if ("grams".equalsIgnoreCase(purchaseCurrency)) {
+            // Gram is an in-app purchase unit, not XTR or TON. Keep it in the
+            // native collectible's crypto-price fields so we never display ⭐ 0.
+            info.currency = "";
+            info.amount = 0;
+            info.crypto_currency = "GRAM";
+            info.crypto_amount = card.optLong("purchase_price_grams");
+        } else {
+            // Telegram Stars use the three-letter XTR code supported by BillingController.
+            info.currency = "XTR";
+            info.amount = card.optLong("purchase_price_stars");
+            info.crypto_currency = "";
+            info.crypto_amount = 0;
+        }
         String url = card.optString("share_url");
         info.url = TextUtils.isEmpty(url) ? "https://waysgram.app/" + path(name) : url;
         return info;

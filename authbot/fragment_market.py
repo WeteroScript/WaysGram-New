@@ -554,6 +554,19 @@ async def _history(db: Any, collectible_id: int, limit: int = 10) -> list[dict[s
     return [dict(row) for row in await cur.fetchall()]
 
 
+async def _latest_collectible_purchase(
+    db: Any, collectible_id: int, owner_id: int,
+) -> aiosqlite.Row | None:
+    """Return the last paid transfer that made this account the current owner."""
+    cur = await db.execute(
+        "SELECT price_stars,price_grams,currency,kind,created_at"
+        " FROM collectible_transfers WHERE collectible_id=? AND to_telegram_id=?"
+        " AND kind IN ('sale','auction','claim') ORDER BY id DESC LIMIT 1",
+        (int(collectible_id), int(owner_id)),
+    )
+    return await cur.fetchone()
+
+
 async def _balance(db: Any, telegram_id: int) -> int:
     cur = await db.execute("SELECT stars FROM accounts WHERE telegram_id=?", (int(telegram_id),))
     row = await cur.fetchone()
@@ -684,6 +697,8 @@ async def card(db: Any, name: str, viewer_id: int | None = None,
     listing = await _active_listing(db, collectible_id)
     auction = await _active_auction(db, collectible_id)
     last = await _last_auction(db, collectible_id)
+    purchase = (await _latest_collectible_purchase(db, collectible_id, int(owner_id))
+                if owner_id is not None else None)
     frozen_until = int(row["transfer_frozen_until"] or 0)
     entity = None
     if owner_id is not None:
@@ -706,6 +721,11 @@ async def card(db: Any, name: str, viewer_id: int | None = None,
         "free": owner_id is None and not reserved,
         "reserved": reserved,
         "system_price_stars": system_price(key),
+        # Keep the active asking price separate from what the current owner paid.
+        # Fragment's native collectible sheet uses purchase_* to describe acquisition.
+        "purchase_price_stars": int(purchase["price_stars"] or 0) if purchase is not None else 0,
+        "purchase_price_grams": int(purchase["price_grams"] or 0) if purchase is not None else 0,
+        "purchase_currency": str(purchase["currency"] or "") if purchase is not None else "",
         "price_stars": (int(listing["price_stars"] or 0)
                         if listing is not None and str(listing["currency"]) == "stars"
                         else (0 if owner_id is not None or reserved else system_price(key))),

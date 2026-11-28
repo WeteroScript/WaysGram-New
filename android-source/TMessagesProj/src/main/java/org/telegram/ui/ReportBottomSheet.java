@@ -245,6 +245,10 @@ public class ReportBottomSheet extends BottomSheet {
         return true;
     }
 
+    private static boolean hasMessageIds(ArrayList<Integer> ids) {
+        return ids != null && !ids.isEmpty();
+    }
+
     private void submitOption(final CharSequence optionText, final byte[] option, final String comment) {
         TLObject request;
         if (sponsored) {
@@ -264,7 +268,7 @@ public class ReportBottomSheet extends BottomSheet {
         } else if (ephemeral) {
             TL_ephemeral.TL_reportMessage req = new TL_ephemeral.TL_reportMessage();
             req.peer = MessagesController.getInstance(currentAccount).getInputPeer(dialogId);
-            if (messageIds != null && !messageIds.isEmpty()) {
+            if (hasMessageIds(messageIds)) {
                 req.id = messageIds.get(0);
             }
             req.message = comment == null ? "" : comment;
@@ -603,7 +607,7 @@ public class ReportBottomSheet extends BottomSheet {
                     items.add(item);
                     height += 40;
 
-                    if (messageIds != null && !messageIds.isEmpty()) {
+                    if (hasMessageIds(messageIds)) {
                         items.add(UItem.asShadow(LocaleController.getString(messageIds.size() > 1 ? R.string.Report2CommentInfoMany : R.string.Report2CommentInfo)));
                     } else if (DialogObject.isUserDialog(dialogId)) {
                         items.add(UItem.asShadow(LocaleController.getString(R.string.Report2CommentInfoUser)));
@@ -859,7 +863,7 @@ public class ReportBottomSheet extends BottomSheet {
         } else if (ephemeral) {
             TL_ephemeral.TL_reportMessage req = new TL_ephemeral.TL_reportMessage();
             req.peer = MessagesController.getInstance(currentAccount).getInputPeer(dialogId);
-            if (!messageIds.isEmpty()) {
+            if (hasMessageIds(messageIds)) {
                 req.id = messageIds.get(0);
             }
             req.message = TextUtils.isEmpty(message) ? "" : message;

@@ -4599,6 +4599,11 @@ public class MessageObject {
         return chat;
     }
 
+    private static boolean isFragmentStarsTransfer(TLRPC.TL_messageActionGiftStars action) {
+        return action != null && action.amount == 0 && action.stars > 0
+                && "XTR".equalsIgnoreCase(action.currency);
+    }
+
     public void updateMessageText() {
         updateMessageText(MessagesController.getInstance(currentAccount).getUsers(), MessagesController.getInstance(currentAccount).getChats(), null, null);
     }
@@ -5194,9 +5199,7 @@ public class MessageObject {
                 } else if (messageOwner.action instanceof TLRPC.TL_messageActionGiftStars) {
                     TLRPC.TL_messageActionGiftStars giftStarsAction =
                             (TLRPC.TL_messageActionGiftStars) messageOwner.action;
-                    boolean fragmentStarsTransfer = giftStarsAction.amount == 0
-                            && giftStarsAction.stars > 0
-                            && "XTR".equalsIgnoreCase(giftStarsAction.currency);
+                    boolean fragmentStarsTransfer = isFragmentStarsTransfer(giftStarsAction);
                     if (fragmentStarsTransfer) {
                         messageText = replaceWithLink(
                                 AndroidUtilities.replaceTags(getString(R.string.ActionFragmentStarsTransferInbound)),
@@ -6807,6 +6810,7 @@ public class MessageObject {
                 contentType = 1;
                 type = TYPE_GIFT_PREMIUM;
             } else if (messageOwner.action instanceof TLRPC.TL_messageActionGiftStars || messageOwner.action instanceof TLRPC.TL_messageActionStarGift || messageOwner.action instanceof TLRPC.TL_messageActionPrizeStars || messageOwner.action instanceof TLRPC.TL_messageActionStarGiftUnique && ((TLRPC.TL_messageActionStarGiftUnique) messageOwner.action).refunded || messageOwner.action instanceof TLRPC.TL_messageActionGiftTon) {
+                // Fragment transfers also use Telegram's native Stars gift-card renderer.
                 contentType = 1;
                 type = TYPE_GIFT_STARS;
             } else if (messageOwner.action instanceof TLRPC.TL_messageActionChatEditPhoto || messageOwner.action instanceof TLRPC.TL_messageActionUserUpdatedPhoto) {

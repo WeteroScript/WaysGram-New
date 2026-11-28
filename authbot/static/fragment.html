@@ -165,16 +165,6 @@
   .tile .model-art img, .big-art .model-art img {
     display: block; width: 100%; height: 100%; object-fit: contain;
   }
-  .tile .pattern-art, .big-art .pattern-art {
-    position: absolute; inset: 5%; display: flex; align-items: center; justify-content: center;
-    visibility: hidden; opacity: 0; transition: opacity .15s ease; z-index: 2; pointer-events: none;
-  }
-  .tile .pattern-art.active, .big-art .pattern-art.active { visibility: visible; opacity: 1; }
-  .tile .pattern-art svg, .tile .pattern-art video,
-  .big-art .pattern-art svg, .big-art .pattern-art video,
-  .tile .pattern-art img, .big-art .pattern-art img {
-    display: block; width: 100%; height: 100%; object-fit: contain;
-  }
   .tile .price { display: flex; align-items: center; gap: 4px; font-size: 12px; font-weight: 700; }
   .tile .price .grow { flex: 1; }
   .tile .price .state { font-size: 11px; font-weight: 600; }
@@ -559,25 +549,15 @@
       .catch(function () { /* остаётся эмодзи */ });
   }
 
+  // Telegram's pattern document is a tinted, tiled backdrop texture, not another sticker
+  // layer on top of the gift. Until the mini-app reproduces that renderer, only show the
+  // full model document; drawing the raw pattern as foreground creates an opaque black mask.
   function modelDocumentId(item) {
     var value = item && item.model_document_id;
     if (!value) {
       var traits = item && item.attributes && item.attributes.collectible_traits;
       var model = traits && traits.model;
       value = model && typeof model === "object" ? model.document_id : "";
-    }
-    if (value === null || value === undefined || value === "" || value === 0 || value === "0") {
-      return "";
-    }
-    return String(value).trim();
-  }
-
-  function patternDocumentId(item) {
-    var value = item && item.pattern_document_id;
-    if (!value) {
-      var traits = item && item.attributes && item.attributes.collectible_traits;
-      var pattern = traits && traits.pattern;
-      value = pattern && typeof pattern === "object" ? pattern.document_id : "";
     }
     if (value === null || value === undefined || value === "" || value === 0 || value === "0") {
       return "";
@@ -735,81 +715,6 @@
       observer.observe(node);
     } else {
       renderGiftModel(item, node, img, emojiNode);
-    }
-  }
-
-  function renderGiftPattern(item, node) {
-    var documentId = patternDocumentId(item);
-    var generation = modelRenderGeneration;
-    if (!documentId || !node) { return; }
-    function reveal() {
-      if (generation === modelRenderGeneration && document.documentElement.contains(node)) {
-        node.classList.add("active");
-      }
-    }
-    function fallback() {
-      if (generation !== modelRenderGeneration) { return; }
-      node.classList.remove("active");
-      node.innerHTML = "";
-    }
-    modelAsset(item, documentId).then(function (asset) {
-      if (generation !== modelRenderGeneration
-          || !document.documentElement.contains(node)) { return; }
-      node.innerHTML = "";
-      if (asset.type === "video") {
-        var video = document.createElement("video");
-        video.autoplay = true;
-        video.loop = true;
-        video.muted = true;
-        video.playsInline = true;
-        video.setAttribute("playsinline", "");
-        video.addEventListener("loadeddata", reveal);
-        video.addEventListener("error", fallback);
-        node.appendChild(video);
-        activeModelPlayers.push({ type: "video", player: video });
-        video.src = asset.url;
-        video.load();
-        var playback = video.play();
-        if (playback && typeof playback.catch === "function") {
-          playback.catch(function () { /* first frame can still be shown */ });
-        }
-        if (video.readyState >= 2) { reveal(); }
-      } else if (asset.type === "image") {
-        var image = document.createElement("img");
-        image.alt = "";
-        image.addEventListener("load", reveal);
-        image.addEventListener("error", fallback);
-        node.appendChild(image);
-        image.src = asset.url;
-      } else if (window.lottie && typeof window.lottie.loadAnimation === "function") {
-        var animation = window.lottie.loadAnimation({
-          container: node,
-          renderer: "svg",
-          loop: true,
-          autoplay: true,
-          animationData: JSON.parse(asset.text)
-        });
-        animation.addEventListener("DOMLoaded", reveal);
-        animation.addEventListener("data_failed", fallback);
-        activeModelPlayers.push({ type: "lottie", player: animation });
-      } else {
-        fallback();
-      }
-    }).catch(function () { fallback(); });
-  }
-
-  function requestPatternArtwork(item, node, eager) {
-    if (!patternDocumentId(item)) { return; }
-    if (!eager && window.IntersectionObserver) {
-      var observer = new IntersectionObserver(function (entries) {
-        if (!entries.some(function (entry) { return entry.isIntersecting; })) { return; }
-        observer.disconnect();
-        renderGiftPattern(item, node);
-      }, { rootMargin: "120px" });
-      activeModelObservers.push(observer);
-      observer.observe(node);
-    } else {
-      renderGiftPattern(item, node);
     }
   }
 
@@ -1209,8 +1114,7 @@
         + '<span class="art" style="background:' + colorFor(item) + '">'
         + (uniqueNumber > 0 ? '<span class="tile-number">#' + num(uniqueNumber) + '</span>' : "")
         + '<span class="emoji">' + esc(emoji) + "</span>"
-        + '<img alt="" hidden><span class="model-art" aria-hidden="true"></span>'
-        + '<span class="pattern-art" aria-hidden="true"></span></span>'
+        + '<img alt="" hidden><span class="model-art" aria-hidden="true"></span></span>'
         + '<span class="price"><span class="grow">' + esc(price) + "</span>"
         + '<span class="state ' + stateClass + '">' + esc(stateText) + "</span></span>"
         + "</button>";
@@ -1226,7 +1130,6 @@
       var emoji = tile.querySelector(".emoji");
       artwork(item.telegram_gift_id, img, emoji);
       requestModelArtwork(item, tile.querySelector(".model-art"), img, emoji, false);
-      requestPatternArtwork(item, tile.querySelector(".pattern-art"), false);
       tile.addEventListener("click", function () { openGift(item, owned); });
     });
     if (inventory) {
@@ -1252,8 +1155,7 @@
     html += '<div class="big-art" style="background:' + colorFor(item) + '">'
       + (Number(item.unique_num || 0) > 0 ? '<span class="tile-number">#' + num(item.unique_num) + '</span>' : "")
       + '<span class="emoji">' + esc(item.gift_emoji || "🎁") + "</span>"
-      + '<img alt="" hidden><div class="model-art" aria-hidden="true"></div>'
-      + '<div class="pattern-art" aria-hidden="true"></div></div>';
+      + '<img alt="" hidden><div class="model-art" aria-hidden="true"></div></div>';
 
     var traits = (item.attributes && item.attributes.collectible_traits) || null;
     var rows = "";
@@ -1305,7 +1207,6 @@
     var detailEmoji = detailArt.querySelector(".emoji");
     artwork(item.telegram_gift_id, detailImg, detailEmoji);
     requestModelArtwork(item, detailArt.querySelector(".model-art"), detailImg, detailEmoji, true);
-    requestPatternArtwork(item, detailArt.querySelector(".pattern-art"), true);
 
     if ($("buy-gift")) {
       $("buy-gift").addEventListener("click", function () {

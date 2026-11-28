@@ -97,13 +97,19 @@ class FragmentMiniAppChecks(unittest.TestCase):
         self.assertIn("/api/gift-market/catalog", self.page)
         self.assertNotIn("/api/me/ton", self.page)
         self.assertIn("requestModelArtwork", self.page)
-        self.assertIn("requestPatternArtwork", self.page)
         self.assertIn("model_document_id", self.page)
-        self.assertIn("pattern_document_id", self.page)
         self.assertIn("lottie.loadAnimation", self.page)
         # Никаких запросов к сторонним доменам: рендерер модели поставляется локально.
         self.assertNotIn("http://", self.page)
         self.assertNotIn("https://", self.page)
+
+    def test_pattern_is_not_overlaid_on_the_gift_model(self):
+        # Telegram uses the pattern as a tinted background texture, not as a foreground
+        # sticker. The page must keep its trait label without painting a black mask over art.
+        self.assertIn("tinted, tiled backdrop texture", self.page)
+        self.assertIn('trait(traits, "symbol") || trait(traits, "pattern")', self.page)
+        for marker in ("pattern-art", "requestPatternArtwork", "renderGiftPattern"):
+            self.assertNotIn(marker, self.page)
 
     # -------------------------------------------------------------- клиент
 
@@ -150,7 +156,10 @@ class FragmentMiniAppChecks(unittest.TestCase):
         self.assertIn("new TL_fragment.TL_collectibleInfo()", fragment)
         self.assertIn('/api/collectibles/" + path(name)', fragment)
         self.assertIn('info.purchase_date = card.optInt("purchase_date")', fragment)
-        self.assertIn('info.amount = card.optLong("price_stars")', fragment)
+        self.assertIn('card.optString("purchase_currency", "")', fragment)
+        self.assertIn('info.amount = card.optLong("purchase_price_stars")', fragment)
+        self.assertIn('info.crypto_amount = card.optLong("purchase_price_grams")', fragment)
+        self.assertIn('info.crypto_currency = "GRAM";', fragment)
 
     def test_collectible_username_card_formats_stars_without_a_learn_more_button(self):
         fragment = self.source("tgnet/WaysGramFragment.java")
@@ -221,13 +230,26 @@ class FragmentMiniAppChecks(unittest.TestCase):
         self.assertIn("message_fragment_star_transfers", api)
         self.assertIn("fragment_star_transfer_stars", api)
 
-    def test_fragment_transfers_map_to_native_telegram_service_actions(self):
+    def test_fragment_transfers_keep_native_stars_gift_card(self):
         mapper = self.source("tgnet/WaysGramMapper.java")
         message_object = self.source("messenger/MessageObject.java")
         self.assertIn('json.optLong("fragment_star_transfer_stars", 0L)', mapper)
         self.assertIn("new TLRPC.TL_messageActionGiftStars()", mapper)
-        self.assertIn("giftStarsAction.amount == 0", message_object)
+        self.assertIn("action.amount = 0;", mapper)
+        self.assertIn("action.stars = stars;", mapper)
+        self.assertIn("private static boolean isFragmentStarsTransfer(", message_object)
+        self.assertIn("action.amount == 0 && action.stars > 0", message_object)
+        self.assertIn("isFragmentStarsTransfer(giftStarsAction)", message_object)
+        self.assertNotIn("isFragmentStarsTransfer((TLRPC.TL_messageActionGiftStars) messageOwner.action)", message_object)
+        gift_branch = message_object.index(
+            "} else if (messageOwner.action instanceof TLRPC.TL_messageActionGiftStars ||"
+        )
+        next_branch = message_object.index("} else if", gift_branch + 1)
+        self.assertIn("type = TYPE_GIFT_STARS;", message_object[gift_branch:next_branch])
         self.assertIn("ActionFragmentStarsTransferInbound", message_object)
+        chat_action_cell = self.source("ui/Cells/ChatActionCell.java")
+        self.assertIn("formatPluralStringComma(\"ActionGiftStarsTitle\", (int) stars)", chat_action_cell)
+        self.assertIn("getString(R.string.ActionGiftStarsView)", chat_action_cell)
         for resource in ("values/strings.xml", "values-ru/strings.xml"):
             xml = self.resource(resource)
             self.assertIn('name="ActionFragmentStarsTransferInbound"', xml)
@@ -235,6 +257,13 @@ class FragmentMiniAppChecks(unittest.TestCase):
         gifts = self.source("messenger/waysgram/WaysGramGiftMessages.java")
         self.assertIn("toServiceMessage(account, m, selfId)", mapper)
         self.assertIn("TL_messageActionStarGiftUnique", gifts)
+
+    def test_report_submission_is_safe_when_message_ids_are_missing(self):
+        report = self.source("ui/ReportBottomSheet.java")
+        self.assertIn("private static boolean hasMessageIds(ArrayList<Integer> ids)", report)
+        self.assertIn("return ids != null && !ids.isEmpty();", report)
+        self.assertEqual(report.count("hasMessageIds(messageIds)"), 3)
+        self.assertNotIn("!messageIds.isEmpty()", report)
 
     def test_gift_serial_is_not_rendered_in_fragment(self):
         # Serial numbers stay internal for API operations; no raw number is shown to users.
