@@ -4,6 +4,10 @@
 а комментарии под постом не грузятся. Причина — сервер требовал членства в
 связанной группе обсуждений, хотя в неё никто никого не добавлял.
 """
+import time
+
+import aiosqlite
+
 from test_messenger_api import client_for, run
 from test_star_gifts import ADMIN, env, headers  # noqa: F401
 
@@ -148,6 +152,10 @@ def test_discussion_root_survives_pre_history_floor_for_explicit_ids(env) -> Non
             post = await client.post(f"/api/channels/{cid}/messages", headers=owner, json={"body": "old post"})
             assert post.status_code == 201, post.text
             pid = post.json()["id"]
+            # Обычное сообщение до вступления подписчика в группу: тоже ниже floor.
+            note = await client.post(f"/api/groups/{gid}/messages", headers=owner, json={"body": "old note"})
+            assert note.status_code == 201, note.text
+            note_id = note.json()["id"]
             assert (await client.put(f"/api/groups/{gid}/settings", headers=owner,
                                      json={"pre_history_hidden": True})).status_code == 200
 
@@ -156,6 +164,15 @@ def test_discussion_root_survives_pre_history_floor_for_explicit_ids(env) -> Non
             assert discussion.status_code == 200, discussion.text
             root = discussion.json()["root_message_id"]
             assert root > 0
+            # Вступление и публикация укладываются в одну секунду, а floor сравнивает
+            # created_at < joined_at: сдвигаем вступление, иначе предистория не скрыта
+            # и тест проходит, ничего не проверяя.
+            async with aiosqlite.connect(path) as db:
+                await db.execute(
+                    "UPDATE group_members SET joined_at=? WHERE group_id=? AND telegram_id=?",
+                    (int(time.time()) + 60, gid, 102),
+                )
+                await db.commit()
 
             replies = await client.get(f"/api/groups/{gid}/threads/{root}/replies?include_root=true",
                                        headers=subscriber)
@@ -165,6 +182,13 @@ def test_discussion_root_survives_pre_history_floor_for_explicit_ids(env) -> Non
             messages = await client.get(f"/api/groups/{gid}/messages?message_ids={root}", headers=subscriber)
             assert messages.status_code == 200, messages.text
             assert [item["id"] for item in messages.json()["messages"]] == [root]
+
+            # Floor фильтрует списки, а не точные ссылки: старое обычное сообщение
+            # открывается по id так же, как корень треда.
+            referenced = await client.get(f"/api/groups/{gid}/messages?message_ids={note_id}",
+                                          headers=subscriber)
+            assert referenced.status_code == 200, referenced.text
+            assert [item["id"] for item in referenced.json()["messages"]] == [note_id]
 
             # Обычная история по-прежнему скрывает старые сообщения от новичка.
             history = await client.get(f"/api/groups/{gid}/messages", headers=subscriber)

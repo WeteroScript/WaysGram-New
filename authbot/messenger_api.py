@@ -20957,16 +20957,14 @@ def build_messenger_router(
                         " AND NOT EXISTS (SELECT 1 FROM channel_post_discussions d "
                         "WHERE d.group_id=group_messages.group_id AND d.root_message_id=group_messages.id)"
                     )
-                    # The pre-history floor hides everything sent before a member joined.
-                    # Explicit ids are asked for by exact reference (quote, reply, thread
-                    # root), so the floor must not hide the referenced discussion root:
-                    # otherwise /messages?message_ids= answers with nothing while
-                    # /threads/{root}/replies returns the root, and the client reports the
-                    # post as deleted from the discussion group.
-                    floor_filter = "id>?" if selected_ids is None else (
-                        "(id>? OR EXISTS (SELECT 1 FROM channel_post_discussions cd "
-                        "WHERE cd.group_id=group_messages.group_id AND cd.root_message_id=group_messages.id))"
-                    )
+                    # The pre-history floor hides everything sent before a member joined —
+                    # but it filters *lists*, not exact references. The client resolves a
+                    # quote, a reply and the thread root by fetching ids it already knows
+                    # from /threads/{root}/replies; if any of them is filtered out the list
+                    # comes back empty and the client reports the post as deleted from the
+                    # discussion group. Explicit ids therefore bypass the floor entirely.
+                    floor_filter = "id>?" if selected_ids is None else "1=1"
+                    floor_args = (history_floor,) if selected_ids is None else ()
                     selected_limit = limit if selected_ids is None else len(selected_ids)
                     cur = await db.execute(
                         """SELECT id,group_id,CASE WHEN send_as_id IS NULL THEN sender_telegram_id ELSE 0 END AS sender_id,
@@ -20988,7 +20986,7 @@ def build_messenger_router(
                                   (SELECT d.channel_id FROM channel_post_discussions d WHERE d.group_id=group_messages.group_id AND d.root_message_id=group_messages.id) AS discussion_channel_id,
                                   (SELECT d.post_id FROM channel_post_discussions d WHERE d.group_id=group_messages.group_id AND d.root_message_id=group_messages.id) AS discussion_post_id
                            FROM group_messages WHERE group_id=? AND topic_id IS NULL AND (?=0 OR id<?) AND """ + floor_filter + discussion_filter + id_filter + " ORDER BY id DESC LIMIT ?",
-                        (group_id, before_id, before_id, history_floor) + tuple(selected_ids or ()) + (selected_limit,),
+                        (group_id, before_id, before_id) + floor_args + tuple(selected_ids or ()) + (selected_limit,),
                     )
                 rows = await cur.fetchall()
             if rows or time.monotonic() >= deadline:
