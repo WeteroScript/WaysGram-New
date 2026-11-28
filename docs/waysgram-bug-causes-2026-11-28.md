@@ -417,7 +417,7 @@ fallback-палитра `colorFor`, а именно непрозрачная к�
 | 3 | маска прав: `1=текст`, `2=фото`, `4=видео`, `8=аудио`, `16=стикеры/gif/игры/inline`, `32=документы`, `64=голосовые`, `128=кружки`; `send_media` — производное «все шесть медиа запрещены», а не алиас одного бита | `WaysGramChats.java` (`bannedRightsFor`/`sendRestrictionMask`), `ChatUsersActivity.java` (`updateSendMediaAggregate`, синхронизация `send_messages`/`send_plain`), `ChatObject.java` (`ACTION_SEND_MEDIA`) |
 | 4 | явно запрошенный `message_ids` больше не режется `group_history_floor`, если это корень `channel_post_discussions` | `messenger_api.py:20946-20960` |
 | 5 | однократный emoji-эффект не перезапускается сам: вместо `setCurrentFrame(0,true)+start()` объект уходит в `removing`; второй эффект не запускается поверх играющего (`isIdle()` + `checkPosition()` перед `consumeEmojiEffect`, иначе каждый проход отрисовки добавлял новый объект) | `EmojiAnimationsOverlay.java:412-430`, `ChatActivity.java:16376-16389` |
-| 6 | палитра backdrop выравнивается по пулу при ролле, а каталог-стикер не закрашивает уже показанную 3D-модель; градиент карточки — эллипс, а не круг | `gift_upgrades.py:348-372` (+ вызов в `roll_traits`), `fragment.html` (`reveal`/`fallback`/`artwork`, `colorFor`) |
+| 6 | палитра backdrop выравнивается по пулу при ролле, а каталог-стикер не закрашивает уже показанную 3D-модель; градиент карточки — эллипс, а не круг; **карточка Fragment красит фон и узор по имени трейта** из `/api/gift-backdrops` (таблица официальных палитр), поэтому цвета из чужой превью-строки больше не перекрашивают весь лот | `gift_upgrades.py:346-420` (`backdrop_palettes`), `messenger_api.py` (`GET /api/gift-backdrops`), `fragment.html` (`paletteFor`/`backdropColor`, `colorFor`, `patternColorFor`, `loadBackdropPalettes`) |
 
 Тесты, закрепляющие правки (все зелёные):
 
@@ -432,6 +432,24 @@ fallback-палитра `colorFor`, а именно непрозрачная к�
 
 Android-правки лежат и в мирроре `android-source/`, и в архиве: после каждой правки нужен
 `python3 scripts/repack_android_source.py <пути…>`, иначе сборка возьмёт старое.
+
+---
+
+### 6а. Почему «Black» рисовался маджентой (по скриншоту лота «Plush Pepe» #317)
+
+Карточка лота берёт фон из `colorFor(item)`, то есть из `backdrop.center_color`/`edge_color` записи.
+В присланном скриншоте пиксели поля — `#7c2a58`, `#771d50`, `#652548`, узор — `#711e4c`,
+а в трейте при этом написано «Black». Официальная палитра «Black» — `#363738`/`#0e0f0f`/`#6c6868`/`#8c8f91`,
+и **ни один** из 60 фонов в `gift_upgrade_pools.json` не содержит маджентовых значений, то есть
+цвета пришли не из каталога, а из чужой строки (живая превью-таблица Telegram / остаток старого ролла).
+
+Серверные выравнивания (`_align_backdrop_colors` при ролле и `_enrich_collectible_backdrop_colors`
+при чтении) спасают только те записи, где пул удалось найти по `telegram_gift_id`/названию.
+Поэтому источником правды для карточки стало **имя трейта**: `GET /api/gift-backdrops` отдаёт
+таблицу «нормализованное имя → официальные 4 цвета» (собранную из всех пулов, спорные имена
+отбрасываются), а страница грузит её до первой отрисовки и красит фон и узор через
+`paletteFor(backdrop)` / `backdropColor(backdrop, key)`. Запись без имени или с незнакомым именем
+по-прежнему рисуется своими цветами, так что регрессии для неизвестных фонов нет.
 
 ---
 
